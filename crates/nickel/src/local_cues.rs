@@ -11,10 +11,39 @@ use std::{
 const RATE: u32 = 16_000;
 const QUEUE_CAPACITY: usize = 8;
 const MAX_QUEUE_AGE: Duration = Duration::from_secs(2);
+const MIN_CUE_INTERVAL: Duration = Duration::from_secs(2);
+const SAME_CUE_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+struct QueuedCue {
+    cue: LifecycleCue,
+    queued: Instant,
+    urgent: bool,
+}
+
+#[derive(Default)]
+struct CueLimiter {
+    last_played: Option<(LifecycleCue, Instant)>,
+}
+
+impl CueLimiter {
+    fn allow(&mut self, cue: LifecycleCue, now: Instant, urgent: bool) -> bool {
+        if let Some((previous, played)) = self.last_played {
+            let elapsed = now.saturating_duration_since(played);
+            if (previous == cue && elapsed < SAME_CUE_INTERVAL)
+                || (!urgent && elapsed < MIN_CUE_INTERVAL)
+            {
+                return false;
+            }
+        }
+        self.last_played = Some((cue, now));
+        true
+    }
+}
 
 pub(crate) struct LocalCues {
     tracker: LifecycleCues,
-    sender: Option<mpsc::SyncSender<(LifecycleCue, Instant)>>,
+    sender: Option<mpsc::SyncSender<QueuedCue>>,
 }
 impl Default for LocalCues {
     fn default() -> Self {
@@ -23,23 +52,27 @@ impl Default for LocalCues {
         let sender = None;
         #[cfg(not(test))]
         let sender = {
-            let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+            let (sender, receiver) = mpsc::sync_channel::<QueuedCue>(QUEUE_CAPACITY);
             std::thread::Builder::new()
                 .name("nickel-local-cues".into())
                 .spawn(move || {
-                    while let Ok((cue, queued)) = receiver.recv() {
-                        if Instant::now().saturating_duration_since(queued) > MAX_QUEUE_AGE {
+                    let mut limiter = CueLimiter::default();
+                    while let Ok(queued) = receiver.recv() {
+                        let now = Instant::now();
+                        if now.saturating_duration_since(queued.queued) > MAX_QUEUE_AGE {
                             continue;
                         }
                         let enabled =
                             nickel_remote_control::RemoteAiControlSettings::load_default()
                                 .is_ok_and(|settings| settings.audible_indications);
                         if !enabled
-                            || Instant::now().saturating_duration_since(queued) > MAX_QUEUE_AGE
+                            || Instant::now().saturating_duration_since(queued.queued)
+                                > MAX_QUEUE_AGE
+                            || !limiter.allow(queued.cue, now, queued.urgent)
                         {
                             continue;
                         }
-                        if play(cue).is_err() {
+                        if play(queued.cue).is_err() {
                             // Fixed message only: no client identity, paths, or payloads.
                             tracing::debug!("Local lifecycle audio unavailable");
                         }
@@ -58,7 +91,11 @@ impl LocalCues {
     pub(crate) fn update(&mut self, leases: &LeaseAuthority, now: Instant) {
         for cue in self.tracker.collect(leases, now) {
             if let Some(sender) = &self.sender {
-                let _ = sender.try_send((cue, now));
+                let _ = sender.try_send(QueuedCue {
+                    cue,
+                    queued: now,
+                    urgent: false,
+                });
             }
         }
     }
@@ -70,8 +107,32 @@ impl LocalCues {
         // would observe, so one emergency produces one fixed acknowledgement.
         let _ = self.tracker.collect(leases, now);
         if let Some(sender) = &self.sender {
-            let _ = sender.try_send((LifecycleCue::Stop, now));
+            let _ = sender.try_send(QueuedCue {
+                cue: LifecycleCue::Stop,
+                queued: now,
+                urgent: true,
+            });
         }
+    }
+}
+
+#[cfg(test)]
+mod limiter_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_cues_are_rate_limited_and_duplicate_stops_are_coalesced() {
+        let start = Instant::now();
+        let mut limiter = CueLimiter::default();
+        assert!(limiter.allow(LifecycleCue::Start, start, false));
+        assert!(!limiter.allow(
+            LifecycleCue::Pause,
+            start + Duration::from_millis(350),
+            false
+        ));
+        assert!(limiter.allow(LifecycleCue::Stop, start + Duration::from_millis(350), true));
+        assert!(!limiter.allow(LifecycleCue::Stop, start + Duration::from_secs(2), true));
+        assert!(limiter.allow(LifecycleCue::Stop, start + Duration::from_secs(6), true));
     }
 }
 
@@ -253,7 +314,10 @@ mod tests {
         let mut cues = cues;
         cues.emergency_confirmation(&leases, now);
         cues.emergency_confirmation(&leases, now);
-        assert_eq!(receiver.try_recv(), Ok((LifecycleCue::Stop, now)));
+        let queued = receiver.try_recv().expect("one emergency cue");
+        assert_eq!(queued.cue, LifecycleCue::Stop);
+        assert_eq!(queued.queued, now);
+        assert!(queued.urgent);
         assert!(receiver.try_recv().is_err());
     }
     #[cfg(target_os = "linux")]

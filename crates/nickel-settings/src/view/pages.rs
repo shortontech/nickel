@@ -1513,23 +1513,32 @@ impl SettingsApp {
                 ))
             },
         );
-        Column::new()
-            .fill_width()
+        nickel_ui::VerticalScroll::new(SettingsMessage::OptionalFeaturesScroll, 0.0)
             .grow(1.0)
-            .gap(16.0)
-            .overflow_y(nickel_ui::Overflow::Scroll)
-            .child(keyboard.shrink(0.0))
-            .child(codex.shrink(0.0))
-            .child(remote.shrink(0.0))
-            .child(pairing)
-            .child(pending_clients)
-            .child(pending_leases)
-            .child(active_leases)
-            .child(granted_clients)
-            .child(audit_card.shrink(0.0))
-            .child(connection_card.shrink(0.0))
-            .child(trace_card.shrink(0.0))
-            .child(operation_card.shrink(0.0))
+            .theme(theme)
+            .child(
+                Column::new()
+                    .fill_width()
+                    .gap(16.0)
+                    .padding(Insets {
+                        top: 0.0,
+                        right: 12.0,
+                        bottom: 24.0,
+                        left: 0.0,
+                    })
+                    .child(keyboard.shrink(0.0))
+                    .child(codex.shrink(0.0))
+                    .child(remote.shrink(0.0))
+                    .child(pairing)
+                    .child(pending_clients)
+                    .child(pending_leases)
+                    .child(active_leases)
+                    .child(granted_clients)
+                    .child(audit_card.shrink(0.0))
+                    .child(connection_card.shrink(0.0))
+                    .child(trace_card.shrink(0.0))
+                    .child(operation_card.shrink(0.0)),
+            )
     }
 
     pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {

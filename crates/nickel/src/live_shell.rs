@@ -108,7 +108,7 @@ use nickel_ui::{
     TextAlign, TextField, UiEvent, UiHostViewport, ViewContext,
 };
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use crate::notification::{NotificationAction, NotificationRequest};
 
 use crate::{
@@ -591,8 +591,9 @@ pub struct LiveShell {
     tray_icons: Vec<Arc<image::RgbaImage>>,
     notification: Option<DesktopNotification>,
     notification_history_visible: bool,
-    #[cfg(target_os = "linux")]
     remote_lease_notifications: HashMap<u32, nickel_session_protocol::RemotePendingLease>,
+    #[cfg(target_os = "windows")]
+    remote_lease_decisions: Vec<(nickel_session_protocol::RemotePendingLease, bool)>,
     wallpaper_path: Option<std::path::PathBuf>,
     wallpaper_source_fingerprint: Option<WallpaperSourceFingerprint>,
     wallpaper_loaded_source_fingerprint: Option<WallpaperSourceFingerprint>,
@@ -1090,8 +1091,9 @@ impl LiveShell {
             tray_icons,
             notification: None,
             notification_history_visible: false,
-            #[cfg(target_os = "linux")]
             remote_lease_notifications: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            remote_lease_decisions: Vec::new(),
             wallpaper_path,
             wallpaper_source_fingerprint,
             wallpaper_loaded_source_fingerprint,
@@ -5507,7 +5509,17 @@ impl LiveShell {
                     } else {
                         self.notification_feed.invoke(notification_id, &key);
                     }
-                    #[cfg(not(target_os = "linux"))]
+                    #[cfg(target_os = "windows")]
+                    if let Some(pending) = self.remote_lease_notifications.remove(&notification_id)
+                    {
+                        let allow = key == "approve";
+                        if allow || key == "deny" {
+                            self.remote_lease_decisions.push((pending, allow));
+                        }
+                    } else {
+                        self.notification_feed.invoke(notification_id, &key);
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                     self.notification_feed.invoke(notification_id, &key);
                     self.dismiss_notification_transport(notification_id);
                 }
@@ -5536,9 +5548,15 @@ impl LiveShell {
         handled
     }
 
-    #[cfg(target_os = "linux")]
     fn sync_remote_lease_notifications(&mut self) {
         let pending = self.session_host.remote_pending_leases();
+        self.sync_remote_lease_notifications_from(pending);
+    }
+
+    pub(crate) fn sync_remote_lease_notifications_from(
+        &mut self,
+        pending: Vec<nickel_session_protocol::RemotePendingLease>,
+    ) {
         let stale = self
             .remote_lease_notifications
             .iter()
@@ -5561,17 +5579,27 @@ impl LiveShell {
             }) {
                 continue;
             }
-            let scope = match &request.request.scope {
-                nickel_session_protocol::RemoteResourceScope::FullSession => {
-                    "the full desktop".to_owned()
-                }
-                nickel_session_protocol::RemoteResourceScope::Application(_) => {
-                    "an application".to_owned()
-                }
-                nickel_session_protocol::RemoteResourceScope::Window(_) => "a window".to_owned(),
-                nickel_session_protocol::RemoteResourceScope::Surface(_) => "a surface".to_owned(),
-                nickel_session_protocol::RemoteResourceScope::Output(_) => "a display".to_owned(),
-            };
+            let scope =
+                request
+                    .resource_label
+                    .clone()
+                    .unwrap_or_else(|| match &request.request.scope {
+                        nickel_session_protocol::RemoteResourceScope::FullSession => {
+                            "the full desktop".to_owned()
+                        }
+                        nickel_session_protocol::RemoteResourceScope::Application(_) => {
+                            "an application".to_owned()
+                        }
+                        nickel_session_protocol::RemoteResourceScope::Window(_) => {
+                            "a window".to_owned()
+                        }
+                        nickel_session_protocol::RemoteResourceScope::Surface(_) => {
+                            "a surface".to_owned()
+                        }
+                        nickel_session_protocol::RemoteResourceScope::Output(_) => {
+                            "a display".to_owned()
+                        }
+                    });
             let duration = request
                 .request
                 .duration_seconds
@@ -5587,8 +5615,13 @@ impl LiveShell {
                 app_name: "Nickel".into(),
                 summary: "Remote control request".into(),
                 body: format!(
-                    "{} wants to control {scope}{duration}.",
-                    request.client_label
+                    "{} wants to control {scope}{duration}.{}",
+                    request.client_label,
+                    if request.request.full_debug {
+                        " This includes full Nickel debugging access."
+                    } else {
+                        ""
+                    }
                 ),
                 actions: vec![
                     NotificationAction {
@@ -5606,6 +5639,13 @@ impl LiveShell {
                 self.remote_lease_notifications.insert(id, request);
             }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn take_remote_lease_decisions(
+        &mut self,
+    ) -> Vec<(nickel_session_protocol::RemotePendingLease, bool)> {
+        std::mem::take(&mut self.remote_lease_decisions)
     }
 
     fn dismiss_notification_transport(&mut self, notification_id: u32) {

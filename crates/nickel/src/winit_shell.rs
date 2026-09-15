@@ -1983,6 +1983,11 @@ impl WinitShell {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
+            SurfaceRole::Notification => {
+                if !crate::platform::configure_notification_window(&window) {
+                    return Err("failed to configure trusted Windows notification".to_owned());
+                }
+            }
             SurfaceRole::WindowPreview => {
                 if !crate::platform::configure_preview_window(&window) {
                     tracing::warn!(?role, "failed to configure Windows shell window");

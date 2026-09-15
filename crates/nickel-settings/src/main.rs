@@ -564,6 +564,7 @@ enum SettingsMessage {
     SetWifiPower(bool),
     WifiNetwork(usize),
     NetworkScroll,
+    OptionalFeaturesScroll,
     DefaultAppsPageScroll,
     DefaultAppsScroll(u32),
     DefaultAppTargetChanged(String),
@@ -1987,6 +1988,7 @@ impl SettingsApp {
             SettingsMessage::DisplayScroll
             | SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
+            | SettingsMessage::OptionalFeaturesScroll
             | SettingsMessage::DefaultAppsPageScroll
             | SettingsMessage::AppearanceScroll => {}
             SettingsMessage::DefaultAppsScroll(offset) => {
@@ -3618,6 +3620,15 @@ mod tests {
                 .scroll_extent(&SettingsMessage::BluetoothScroll)
                 .is_some_and(|extent| extent.can_scroll()),
             "Bluetooth device rows must determine the scroll extent"
+        );
+
+        app.page = SettingsPage::OptionalFeatures;
+        let optional = app.build_ui(560.0, 360.0);
+        assert!(
+            optional
+                .scroll_extent(&SettingsMessage::OptionalFeaturesScroll)
+                .is_some_and(|extent| extent.can_scroll()),
+            "Optional Features management and approval controls must remain reachable"
         );
     }
 

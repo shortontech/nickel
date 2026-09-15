@@ -3163,6 +3163,36 @@ pub fn configure_launcher_window(window: &impl raw_window_handle::HasWindowHandl
     }
 }
 
+pub fn configure_notification_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    if prepare_trusted_control_window(window).is_err() {
+        return false;
+    }
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    // Approval is trusted local chrome: keep it above ordinary/fullscreen windows and out of
+    // task switching, but do not use NOACTIVATE because keyboard users must be able to focus it.
+    // Capture exclusion is installed above before the window can ever be shown.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            ((style | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0 & !WS_EX_NOACTIVATE.0) as isize,
+        );
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        .is_ok()
+    }
+}
+
 pub fn configure_preview_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
     use std::sync::atomic::Ordering;
 
@@ -3982,18 +4012,63 @@ impl TraySource for TrayFeed {
     }
 }
 
-pub struct NotificationFeed;
+pub struct NotificationFeed {
+    store: Arc<Mutex<crate::notification::NotificationStore>>,
+}
 impl NotificationFeed {
     pub fn new() -> Result<Self, String> {
-        Ok(Self)
+        Ok(Self {
+            store: Arc::new(Mutex::new(crate::notification::NotificationStore::default())),
+        })
+    }
+
+    pub(crate) fn notify_internal(
+        &self,
+        mut request: crate::notification::NotificationRequest,
+    ) -> u32 {
+        request
+            .actions
+            .truncate(crate::notification::MAX_NOTIFICATION_ACTIONS);
+        self.store
+            .lock()
+            .map(|mut store| store.notify(0, request, Instant::now()).0)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn close_internal(&self, id: u32) {
+        if let Ok(mut store) = self.store.lock() {
+            store.close(id, 2);
+        }
     }
 }
 impl NotificationSource for NotificationFeed {
     fn snapshot(&self) -> Option<crate::notification::DesktopNotification> {
-        None
+        self.store.lock().ok().and_then(|mut store| {
+            store.expire(Instant::now());
+            store.newest()
+        })
     }
-    fn dismiss(&self, _: u32) {}
-    fn invoke(&self, _: u32, _: &str) {}
+    fn history(&self) -> Vec<crate::notification::DesktopNotification> {
+        self.store
+            .lock()
+            .map(|mut store| {
+                store.expire(Instant::now());
+                store.history()
+            })
+            .unwrap_or_default()
+    }
+    fn dismiss(&self, id: u32) {
+        self.close_internal(id);
+    }
+    fn invoke(&self, id: u32, action_key: &str) {
+        if self
+            .store
+            .lock()
+            .is_ok_and(|store| store.has_action(id, action_key))
+        {
+            self.close_internal(id);
+        }
+    }
 }
 
 impl TrayFeed {
@@ -5006,6 +5081,7 @@ mod tests {
         geometry::LogicalRect,
         geometry_authority::{
             ControlMode, FieldOwner, NativeRequest, NativeRequestId, Settlement, SettlementLimits,
+            SettlementStatus,
         },
         window_operation::{CancellationReason, CompletionBinding, CompletionGesture, OperationId},
     };

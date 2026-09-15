@@ -2246,12 +2246,12 @@ pub fn run() -> Result<(), String> {
     shell.set_primary_output_name(platform::configured_primary_output())?;
     shell.create_shell_surfaces()?;
     #[cfg(target_os = "windows")]
-    let mut remote_control =
+    let (mut remote_control, mut remote_control_retry_at) =
         match windows_remote_control::WindowsRemoteControl::start(shell.remote_cleanup_wake()) {
-            Ok(owner) => Some(owner),
+            Ok(owner) => (Some(owner), None),
             Err(error) => {
-                tracing::warn!(%error, "Windows remote control remains unavailable");
-                None
+                tracing::warn!(%error, "Windows remote control startup deferred; retrying");
+                (None, Some(Instant::now() + Duration::from_secs(1)))
             }
         };
     #[cfg(target_os = "linux")]
@@ -2377,6 +2377,22 @@ pub fn run() -> Result<(), String> {
     let mut diagnostic_overdue_after_poll = Vec::new();
     let mut project_menu_changed_since_refresh = false;
     loop {
+        #[cfg(target_os = "windows")]
+        if remote_control.is_none()
+            && remote_control_retry_at.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            match windows_remote_control::WindowsRemoteControl::start(shell.remote_cleanup_wake()) {
+                Ok(owner) => {
+                    tracing::info!("Windows remote control startup retry succeeded");
+                    remote_control = Some(owner);
+                    remote_control_retry_at = None;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Windows remote control startup retry failed");
+                    remote_control_retry_at = Some(Instant::now() + Duration::from_secs(1));
+                }
+            }
+        }
         #[cfg(target_os = "windows")]
         if let Some(owner) = &mut remote_control {
             owner.poll(&mut shell, &mut state, &mut codex, &mut feature_settings);

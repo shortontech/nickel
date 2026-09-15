@@ -561,12 +561,24 @@ enum OwnerRequest {
         reply: SyncSender<Result<(), String>>,
     },
     OutputCapture {
+        admission: crate::platform::remote_observation::Admission,
         permit: DesktopPermit,
         prepared: Box<crate::platform::remote_observation::Prepared>,
         id: String,
         generation: u64,
         submitted_at_us: u64,
         deadline: Instant,
+        reply: SyncSender<Result<nickel_remote_control::capture::CapturedWindow, String>>,
+    },
+    FinishOutputCapture {
+        admission: crate::platform::remote_observation::Admission,
+        permit: DesktopPermit,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        id: String,
+        generation: u64,
+        submitted_at_us: u64,
+        deadline: Instant,
+        capture: Result<image::RgbaImage, String>,
         reply: SyncSender<Result<nickel_remote_control::capture::CapturedWindow, String>>,
     },
     PrepareNativeAccessibility {
@@ -2768,7 +2780,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     ) -> Result<nickel_remote_control::capture::CapturedWindow, String> {
         let submitted_at_us = self.started.elapsed().as_micros().min(u64::MAX as u128) as u64;
         let deadline = Instant::now() + Duration::from_secs(2);
-        let _admission = crate::platform::remote_observation::Admission::acquire()?;
+        let admission = crate::platform::remote_observation::Admission::acquire()?;
         let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
             &permit,
         )?);
@@ -2779,6 +2791,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let (reply, receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(OwnerRequest::OutputCapture {
+                admission,
                 permit,
                 prepared,
                 id: id.into(),
@@ -3481,6 +3494,19 @@ impl WindowsRemoteControl {
             &mut nickel_core::optional_features::OptionalFeatureSettings,
         )>,
     ) {
+        if let Some((_, state)) = shell.as_mut() {
+            for (pending, allow) in state.take_remote_lease_decisions() {
+                let reply = self.handle(Request::Command(Command::DecideRemoteLease {
+                    pending_generation: pending.pending_generation,
+                    client_id: pending.client_id,
+                    request: pending.request,
+                    allow,
+                }));
+                if matches!(reply, ServerMessage::Error { .. }) {
+                    tracing::warn!(?reply, "remote lease notification decision was rejected");
+                }
+            }
+        }
         self.reconcile_desktop_authority();
         self.reconcile_local_input();
         self.reconcile_keyboard_hold();
@@ -3564,6 +3590,7 @@ impl WindowsRemoteControl {
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::OutputCapture {
+                    admission,
                     permit,
                     mut prepared,
                     id,
@@ -3572,10 +3599,69 @@ impl WindowsRemoteControl {
                     deadline,
                     reply,
                 } => {
+                    let output = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.prepare_output_capture_owner(
+                                shell,
+                                state,
+                                &permit,
+                                &mut prepared,
+                                &id,
+                                generation,
+                                deadline,
+                            )
+                        },
+                    );
+                    match output {
+                        Err(error) => {
+                            let _ = reply.try_send(Err(error));
+                        }
+                        Ok(output) => {
+                            let sender = self.authority.sender.clone();
+                            std::thread::spawn(move || {
+                                let check = || {
+                                    permit.check_live()?;
+                                    if Instant::now() >= deadline {
+                                        return Err("Windows output capture timed out".into());
+                                    }
+                                    Ok(())
+                                };
+                                let capture =
+                                    crate::platform::remote_observation::capture_output_pixels(
+                                        &output, &prepared, check,
+                                    );
+                                let _ = sender.try_send(OwnerRequest::FinishOutputCapture {
+                                    admission,
+                                    permit,
+                                    prepared,
+                                    id,
+                                    generation,
+                                    submitted_at_us,
+                                    deadline,
+                                    capture,
+                                    reply,
+                                });
+                            });
+                        }
+                    }
+                }
+                OwnerRequest::FinishOutputCapture {
+                    admission,
+                    permit,
+                    mut prepared,
+                    id,
+                    generation,
+                    submitted_at_us,
+                    deadline,
+                    capture,
+                    reply,
+                } => {
+                    let _admission = admission;
                     let result = shell.as_mut().map_or_else(
                         || Err("Windows presentation owner is unavailable".into()),
                         |(shell, state)| {
-                            self.perform_output_capture(
+                            self.finish_output_capture_owner(
                                 shell,
                                 state,
                                 &permit,
@@ -3584,6 +3670,7 @@ impl WindowsRemoteControl {
                                 generation,
                                 submitted_at_us,
                                 deadline,
+                                capture,
                             )
                         },
                     );
@@ -4407,6 +4494,53 @@ impl WindowsRemoteControl {
             self.local_cues.update(control.leases(), Instant::now());
         }
         self.sync_input_ownership_event();
+        if let Some((_, state)) = shell.as_mut() {
+            let protected = !self.desktop_unlocked
+                || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+            let pending = if protected {
+                Vec::new()
+            } else {
+                self.remote_pending_leases()
+            };
+            state.sync_remote_lease_notifications_from(pending);
+        }
+    }
+
+    fn remote_pending_leases(&self) -> Vec<nickel_session_protocol::RemotePendingLease> {
+        let control_plane = self.remote_control.control();
+        let control = control_plane.lock().unwrap();
+        control
+            .lease_requests()
+            .pending()
+            .map(
+                |(client_id, request)| nickel_session_protocol::RemotePendingLease {
+                    pending_generation: control
+                        .lease_requests()
+                        .pending_generation(client_id)
+                        .expect("pending request has an incarnation"),
+                    client_id: client_id.to_owned(),
+                    client_label: {
+                        let label = control
+                            .granted_clients()
+                            .find(|client| client.id == client_id)
+                            .map(|client| client.label)
+                            .unwrap_or_else(|| "Connected client".into());
+                        control
+                            .client_origin(client_id)
+                            .map_or(label.clone(), |origin| {
+                                format!(
+                                    "{label} from {} over {}",
+                                    origin.address,
+                                    if origin.tls { "TLS" } else { "local HTTP" }
+                                )
+                            })
+                    },
+                    request: request.into(),
+                    resource_label: Some(resource_label(&request.scope)),
+                    changes: control.lease_requests().pending_changes(client_id),
+                },
+            )
+            .collect()
     }
 
     fn read_application_scale(
@@ -5449,7 +5583,7 @@ impl WindowsRemoteControl {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn perform_output_capture(
+    fn prepare_output_capture_owner(
         &mut self,
         shell: &WinitShell,
         state: &crate::live_shell::LiveShell,
@@ -5457,10 +5591,9 @@ impl WindowsRemoteControl {
         prepared: &mut crate::platform::remote_observation::Prepared,
         id: &str,
         generation: u64,
-        submitted_at_us: u64,
         deadline: Instant,
-    ) -> Result<nickel_remote_control::capture::CapturedWindow, String> {
-        let check = || {
+    ) -> Result<crate::windows_resource_owner::Output, String> {
+        let check = || -> Result<(), String> {
             permit.check_live()?;
             if Instant::now() >= deadline {
                 return Err("Windows output capture timed out".into());
@@ -5476,10 +5609,36 @@ impl WindowsRemoteControl {
             .output_capture_resource(&scope, id, generation)
             .ok_or("Windows output resource is unavailable")?;
         let output = output.clone();
-        let image = permit.with_resource(&evidence, || {
-            crate::platform::remote_observation::capture_output_pixels(&output, prepared, check)
-        })?;
+        // Authorize the exact owner resource while the control plane is locked, then release
+        // authority before dispatching the potentially blocking native GDI read to a worker.
+        permit.with_resource(&evidence, || Ok(()))?;
+        prepared.revalidate()?;
         check()?;
+        Ok(output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_output_capture_owner(
+        &mut self,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        prepared: &mut crate::platform::remote_observation::Prepared,
+        id: &str,
+        generation: u64,
+        submitted_at_us: u64,
+        deadline: Instant,
+        capture: Result<image::RgbaImage, String>,
+    ) -> Result<nickel_remote_control::capture::CapturedWindow, String> {
+        let check = || -> Result<(), String> {
+            permit.check_live()?;
+            if Instant::now() >= deadline {
+                return Err("Windows output capture timed out".into());
+            }
+            Ok(())
+        };
+        check()?;
+        let image = capture?;
         // GDI success confirms copied bytes only. Recheck the requested owner
         // incarnation and protected-shell state before reporting the capture.
         self.validate_output_capture_owner(shell, state, permit, prepared, id, generation)?;

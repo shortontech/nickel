@@ -4,7 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(target_os = "linux")]
 use crate::platform::NotificationSource;
 use image::{Rgba, RgbaImage};
 use nickel_input::KeyCode;
@@ -119,7 +118,6 @@ fn rejected_launcher_focus_request_does_not_project_internal_focus() {
     assert!(shell.launcher_host.inspect().keyboard_focus.is_none());
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn pending_remote_lease_becomes_persistent_shell_notification() {
     use nickel_session_protocol::{
@@ -129,6 +127,7 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
 
     struct PendingLeaseHost {
         pending: Mutex<Vec<RemotePendingLease>>,
+        #[cfg(target_os = "linux")]
         decisions: Mutex<Vec<bool>>,
     }
     impl crate::session_host::SessionHost for PendingLeaseHost {
@@ -146,7 +145,10 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
             _: &RemotePendingLease,
             allow: bool,
         ) -> Result<(), crate::platform::SessionRequestError> {
+            #[cfg(target_os = "linux")]
             self.decisions.lock().unwrap().push(allow);
+            #[cfg(not(target_os = "linux"))]
+            let _ = allow;
             Ok(())
         }
     }
@@ -166,18 +168,19 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
         changes: RemoteLeaseRequestChanges::default(),
     };
     let host = Arc::new(PendingLeaseHost {
-        pending: Mutex::new(vec![pending]),
+        pending: Mutex::new(vec![pending.clone()]),
+        #[cfg(target_os = "linux")]
         decisions: Mutex::new(Vec::new()),
     });
     let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
 
-    shell.sync_remote_lease_notifications();
+    shell.sync_remote_lease_notifications_from(host.pending.lock().unwrap().clone());
 
     let notification = shell.notification_feed.snapshot().unwrap();
     assert_eq!(notification.summary, "Remote control request");
     assert_eq!(
         notification.body,
-        "Codex wants to control the full desktop for 20 minutes."
+        "Codex wants to control the full desktop for 20 minutes. This includes full Nickel debugging access."
     );
     assert_eq!(notification.actions[0].key, "deny");
     assert_eq!(notification.actions[1].key, "approve");
@@ -207,10 +210,16 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
     };
     shell.notification_host_input(event(nickel_input::KeyEdge::Pressed), 420, 180);
     shell.notification_host_input(event(nickel_input::KeyEdge::Released), 420, 180);
+    #[cfg(target_os = "linux")]
     assert_eq!(*host.decisions.lock().unwrap(), vec![true]);
+    #[cfg(target_os = "windows")]
+    assert_eq!(
+        shell.take_remote_lease_decisions(),
+        vec![(pending.clone(), true)]
+    );
 
     host.pending.lock().unwrap().clear();
-    shell.sync_remote_lease_notifications();
+    shell.sync_remote_lease_notifications_from(Vec::new());
     assert!(shell.remote_lease_notifications.is_empty());
     assert!(shell.notification_feed.snapshot().is_none());
 }
