@@ -604,11 +604,9 @@ impl XdgDecorationHandler for NickelSession {
             surface = ?toplevel.wl_surface().id(),
             "diagnostic: xdg decoration mode unset"
         );
-        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-        // A client can unset its server-decoration preference at runtime when
-        // switching back to its own titlebar. Keeping ServerSide here leaves
-        // both the compositor frame and the new client-side frame visible.
-        self.configure_decoration(toplevel, Mode::ClientSide);
+        // Unset means that the client has no preference, not that it requests
+        // client-side decorations. Retain Nickel's server-side default.
+        self.prefer_server_decoration(toplevel);
     }
 }
 
