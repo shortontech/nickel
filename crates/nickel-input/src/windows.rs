@@ -126,6 +126,28 @@ impl<A: Clone> WindowsInputAdapter<A> {
         Some(gesture)
     }
 
+    /// Recognize a physical Super+pointer gesture even when the independent
+    /// keyboard hook has not delivered Super-down yet. This deliberately does
+    /// not invent a sided modifier press: doing so can strand Super in the
+    /// shortcut engine when the eventual native release names the other side.
+    pub fn begin_physical_super_pointer_gesture(
+        &mut self,
+        button: PointerButton,
+        super_physically_held: bool,
+    ) -> Option<SuperPointerGesture> {
+        if !super_physically_held {
+            return None;
+        }
+        if self.modifier_held(crate::AggregateModifier::Super) {
+            return self.begin_pointer_gesture(button);
+        }
+        match button {
+            PointerButton::Primary => Some(SuperPointerGesture::Move),
+            PointerButton::Secondary => Some(SuperPointerGesture::Resize),
+            _ => None,
+        }
+    }
+
     pub fn modifier_held(&self, modifier: crate::AggregateModifier) -> bool {
         self.engine.modifiers().aggregate(modifier)
     }
@@ -885,6 +907,27 @@ mod tests {
         adapter.handle_key_code(KeyCode::AltRight, KeyEdge::Pressed);
         adapter.reset();
         assert!(!adapter.modifier_held(AggregateModifier::Alt));
+    }
+
+    #[test]
+    fn physical_super_pointer_race_does_not_invent_a_sided_modifier() {
+        let mut adapter = WindowsInputAdapter::<()>::new([]);
+
+        assert_eq!(
+            adapter.begin_physical_super_pointer_gesture(PointerButton::Primary, true),
+            Some(SuperPointerGesture::Move)
+        );
+        assert!(!adapter.modifier_held(AggregateModifier::Super));
+        assert!(!adapter.key_held(KeyCode::SuperLeft));
+        assert!(!adapter.key_held(KeyCode::SuperRight));
+        assert_eq!(
+            adapter.begin_physical_super_pointer_gesture(PointerButton::Secondary, true),
+            Some(SuperPointerGesture::Resize)
+        );
+        assert_eq!(
+            adapter.begin_physical_super_pointer_gesture(PointerButton::Primary, false),
+            None
+        );
     }
 
     #[test]
