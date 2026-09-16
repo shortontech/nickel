@@ -4593,7 +4593,12 @@ impl LiveShell {
             application_name: "Open windows".into(),
             windows,
         });
-        self.preview_frame = None;
+        // Keep the host alive across switch steps. Recreating it resets its
+        // HostChangeToken, which can equal the token of the frame already
+        // presented by Winit. In that case present_host_frame correctly
+        // deduplicates the token but leaves the old selection on screen.
+        // window_preview_scene synchronizes the retained host with this group
+        // and advances its token for the new selection.
     }
 
     /// Pointer ownership retained by any coordinator-owned host or parked viewport.

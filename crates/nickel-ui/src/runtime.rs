@@ -789,16 +789,75 @@ fn file_uri_list(paths: &[std::path::PathBuf]) -> Vec<u8> {
 }
 
 #[cfg(target_os = "windows")]
+#[windows::core::implement(windows::Win32::System::Ole::IDropSource)]
+struct WindowsFileDropSource;
+
+#[cfg(target_os = "windows")]
+impl windows::Win32::System::Ole::IDropSource_Impl for WindowsFileDropSource_Impl {
+    fn QueryContinueDrag(
+        &self,
+        escape_pressed: windows::core::BOOL,
+        key_state: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+    ) -> windows::core::HRESULT {
+        use windows::Win32::{
+            Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, S_OK},
+            System::SystemServices::MK_LBUTTON,
+        };
+        if escape_pressed.as_bool() {
+            DRAGDROP_S_CANCEL
+        } else if !key_state.contains(MK_LBUTTON) {
+            DRAGDROP_S_DROP
+        } else {
+            S_OK
+        }
+    }
+
+    fn GiveFeedback(
+        &self,
+        _effect: windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows::core::HRESULT {
+        windows::Win32::Foundation::DRAGDROP_S_USEDEFAULTCURSORS
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn start_windows_file_drag(paths: &[std::path::PathBuf]) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::{
         System::{
             Com::IDataObject,
-            Ole::{DROPEFFECT_COPY, DROPEFFECT_MOVE, IDropSource},
+            Ole::{DROPEFFECT_COPY, DROPEFFECT_MOVE, IDropSource, OleInitialize, OleUninitialize},
         },
-        UI::Shell::{ILCreateFromPathW, ILFree, SHCreateDataObject, SHDoDragDrop},
+        UI::Shell::{ILCreateFromPathW, ILFindLastID, ILFree, SHCreateDataObject, SHDoDragDrop},
     };
-    use windows::core::PCWSTR;
+    use windows::core::{ComObject, PCWSTR};
+    // Shell drag/drop is an OLE operation and the Winit UI thread is otherwise not initialized
+    // as an OLE apartment. Every successful S_OK/S_FALSE initialization requires a matching
+    // uninitialize on this same thread.
+    unsafe { OleInitialize(None) }.map_err(|error| error.to_string())?;
+    struct OleApartment;
+    impl Drop for OleApartment {
+        fn drop(&mut self) {
+            unsafe { OleUninitialize() };
+        }
+    }
+    let _ole_apartment = OleApartment;
+    let parent = paths
+        .first()
+        .and_then(|path| path.parent())
+        .ok_or("file drag has no parent directory")?;
+    if paths.iter().any(|path| path.parent() != Some(parent)) {
+        return Err("file drag sources do not share a parent directory".into());
+    }
+    let parent_wide = parent
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let parent_pidl = unsafe { ILCreateFromPathW(PCWSTR(parent_wide.as_ptr())) };
+    if parent_pidl.is_null() {
+        return Err("could not create shell drag parent".into());
+    }
     let wide = paths
         .iter()
         .map(|path| {
@@ -813,19 +872,28 @@ fn start_windows_file_drag(paths: &[std::path::PathBuf]) -> Result<(), String> {
         .map(|path| unsafe { ILCreateFromPathW(PCWSTR(path.as_ptr())) })
         .collect::<Vec<_>>();
     if pidls.iter().any(|pidl| pidl.is_null()) {
+        unsafe { ILFree(Some(parent_pidl.cast())) };
+        for pidl in pidls.into_iter().filter(|pidl| !pidl.is_null()) {
+            unsafe { ILFree(Some(pidl.cast())) };
+        }
         return Err("could not create shell drag items".into());
     }
     let pointers = pidls
         .iter()
-        .map(|pidl| *pidl as *const _)
+        .map(|pidl| unsafe { ILFindLastID(*pidl) as *const _ })
         .collect::<Vec<_>>();
     let result = unsafe {
-        let data: IDataObject = SHCreateDataObject(None, Some(&pointers), None::<&IDataObject>)
-            .map_err(|error| error.to_string())?;
+        let data: IDataObject = SHCreateDataObject(
+            Some(parent_pidl as *const _),
+            Some(&pointers),
+            None::<&IDataObject>,
+        )
+        .map_err(|error| error.to_string())?;
+        let source: IDropSource = ComObject::new(WindowsFileDropSource).into_interface();
         SHDoDragDrop(
             None,
             &data,
-            None::<&IDropSource>,
+            &source,
             DROPEFFECT_COPY | DROPEFFECT_MOVE,
         )
         .map(|_| ())
@@ -834,6 +902,7 @@ fn start_windows_file_drag(paths: &[std::path::PathBuf]) -> Result<(), String> {
     for pidl in pidls {
         unsafe { ILFree(Some(pidl.cast())) }
     }
+    unsafe { ILFree(Some(parent_pidl.cast())) };
     result
 }
 

@@ -16,6 +16,13 @@ use crate::{
     components, icons,
 };
 
+fn selection_surface_drag_message(
+    _seed: FileMessage,
+    gesture: nickel_ui::DragGesture,
+) -> FileMessage {
+    FileMessage::SelectionSurfaceDrag(gesture)
+}
+
 pub(crate) fn build_view(
     app: &FileApp,
     _width: f32,
@@ -100,6 +107,7 @@ pub(crate) fn build_view(
         ui! {
             <Container id={"file-content"} grow={1.0} padding={Insets::all(28.0)}
                 on_press={FileMessage::SelectionSurface} context_message={FileMessage::ContextBackground}
+                on_drag={(FileMessage::SelectionSurface, selection_surface_drag_message)}
                 focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                 accessibility_label={"Files"}>
                 <Text color={palette.muted} wrap={true} max_lines={3}>{empty_message}</Text>
@@ -196,10 +204,13 @@ pub(crate) fn build_view(
             <Column grow={1.0} padding={Insets {
                 top: 14.0, right: 16.0, bottom: 14.0, left: 16.0,
             }}>
-                {scroll}
-                <Container id={"file-content"} height={1.0} on_press={FileMessage::SelectionSurface}
+                <Container id={"file-content"} height={viewport_height}
+                    on_press={FileMessage::SelectionSurface}
+                    on_drag={(FileMessage::SelectionSurface, selection_surface_drag_message)}
                     context_message={FileMessage::ContextBackground} focus_background_tint={palette.accent}
-                    controller_focus_background_tint={palette.complement} accessibility_label={"Files background"} />
+                    controller_focus_background_tint={palette.complement} accessibility_label={"Files background"}>
+                    {scroll}
+                </Container>
             </Column>
         }
     };

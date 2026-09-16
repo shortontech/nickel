@@ -1,5 +1,5 @@
-//! Suspended one-shot Windows launch broker. The child receives no path or
-//! command: it derives its sole target from an inherited pinned shortcut.
+//! Suspended one-shot Windows launch broker. The child receives only the
+//! owner-validated launch spelling bound to inherited pinned shortcut handles.
 
 use crate::windows_application_registry::native::LaunchCapture;
 use nickel_remote_control::{DesktopPermit, leases::ResourceEvidence};
@@ -14,7 +14,7 @@ use windows::{
             DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, WAIT_OBJECT_0,
         },
         Security::SECURITY_ATTRIBUTES,
-        Storage::FileSystem::{GetFinalPathNameByHandleW, ReadFile, VOLUME_NAME_GUID, WriteFile},
+        Storage::FileSystem::{ReadFile, WriteFile},
         System::{Pipes::CreatePipe, Threading::*},
         UI::{
             Shell::{
@@ -29,9 +29,9 @@ use windows::{
 const COMMIT_TTL: Duration = Duration::from_secs(2);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const MAGIC: u32 = 0x4e4c_4231;
-const VERSION: u32 = 1;
-// LaunchCapture admits at most 256 ancestors plus the shortcut itself.
-const MAX_PINS: usize = 257;
+const VERSION: u32 = 2;
+const MAX_PINS: usize = 513;
+const MAX_TARGET_UNITS: usize = 4096;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -40,8 +40,11 @@ struct Request {
     version: u32,
     nonce: u64,
     count: u32,
+    target_len: u32,
     reserved: u32,
+    reserved_padding: u32,
     pins: [u64; MAX_PINS],
+    target: [u16; MAX_TARGET_UNITS],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -226,6 +229,10 @@ impl StagedLaunch {
             return Err("Windows launch target has no pinned shortcut".into());
         }
         let nonce = nonce();
+        let target = capture.target().encode_utf16().collect::<Vec<_>>();
+        if target.is_empty() || target.len() >= MAX_TARGET_UNITS || target.contains(&0) {
+            return Err("Windows launch target is invalid or too long".into());
+        }
         let deadline_tick = tick_deadline(deadline);
         let inherited: Vec<_> = pins
             .iter()
@@ -285,12 +292,16 @@ impl StagedLaunch {
             version: VERSION,
             nonce,
             count: pins.len() as u32,
+            target_len: target.len() as u32,
             reserved: 0,
+            reserved_padding: 0,
             pins: [0; MAX_PINS],
+            target: [0; MAX_TARGET_UNITS],
         };
         for (slot, pin) in request.pins.iter_mut().zip(&pins) {
             *slot = pin.raw().0 as usize as u64;
         }
+        request.target[..target.len()].copy_from_slice(&target);
         if let Err(e) = write_record(request_write.raw(), &request) {
             unsafe {
                 let _ = TerminateProcess(process.raw(), 71);
@@ -479,8 +490,11 @@ pub(crate) fn run_broker_child() -> Result<(), String> {
         || record.version != VERSION
         || record.nonce != expected
         || record.reserved != 0
+        || record.reserved_padding != 0
         || record.count == 0
         || record.count as usize > MAX_PINS
+        || record.target_len == 0
+        || record.target_len as usize >= MAX_TARGET_UNITS
     {
         return Err("invalid Windows launch broker authorization".into());
     }
@@ -488,13 +502,11 @@ pub(crate) fn run_broker_child() -> Result<(), String> {
     for raw in record.pins.iter().take(record.count as usize) {
         pins.push(unsafe { Handle::new(HANDLE(*raw as usize as *mut _))? });
     }
-    let mut target = vec![0u16; 32_768];
-    let length =
-        unsafe { GetFinalPathNameByHandleW(pins[0].raw(), &mut target, VOLUME_NAME_GUID) } as usize;
-    if length == 0 || length >= target.len() {
+    let length = record.target_len as usize;
+    if record.target[..length].contains(&0) {
         return Err("pinned launch target unavailable".into());
     }
-    target.truncate(length);
+    let mut target = record.target[..length].to_vec();
     target.push(0);
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     unsafe {
@@ -705,10 +717,11 @@ mod tests {
     use super::*;
     #[test]
     fn protocol_is_fixed_and_bounded() {
-        assert_eq!(size_of::<Request>(), 2_080);
+        assert_eq!(size_of::<Request>(), 12_328);
         assert_eq!(size_of::<Response>(), 32);
         assert_eq!(COMMIT_TTL, Duration::from_secs(2));
-        assert_eq!(MAX_PINS, 257);
+        assert_eq!(MAX_PINS, 513);
+        assert_eq!(MAX_TARGET_UNITS, 4096);
     }
 
     #[test]

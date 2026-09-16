@@ -521,6 +521,22 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
             .is_empty()
     );
     assert!(shell.global_shortcut(crate::platform::GlobalShortcut::SwitchNext));
+    let preview_role = crate::winit_shell::SurfaceRole::WindowPreview;
+    let _ = shell.scene(preview_role, 640, 240);
+    let first_preview_token = shell
+        .scene_change_token(preview_role)
+        .expect("task switcher preview token");
+    assert!(shell.global_shortcut(crate::platform::GlobalShortcut::SwitchNext));
+    assert!(
+        shell.preview_frame.is_some(),
+        "consecutive switch steps must retain the preview host so its presentation token advances"
+    );
+    let _ = shell.scene(preview_role, 640, 240);
+    assert_ne!(
+        shell.scene_change_token(preview_role),
+        Some(first_preview_token),
+        "each visible task-switch selection must receive a distinct presentation token"
+    );
     assert!(shell.global_shortcut(crate::platform::GlobalShortcut::CommitSwitch));
     assert!(session.0.lock().unwrap().iter().any(|command| matches!(
         command,

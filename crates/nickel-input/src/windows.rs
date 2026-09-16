@@ -126,6 +126,28 @@ impl<A: Clone> WindowsInputAdapter<A> {
         Some(gesture)
     }
 
+    /// Recognize a physical Super+pointer gesture even when the independent
+    /// keyboard hook has not delivered Super-down yet. This deliberately does
+    /// not invent a sided modifier press: doing so can strand Super in the
+    /// shortcut engine when the eventual native release names the other side.
+    pub fn begin_physical_super_pointer_gesture(
+        &mut self,
+        button: PointerButton,
+        super_physically_held: bool,
+    ) -> Option<SuperPointerGesture> {
+        if !super_physically_held {
+            return None;
+        }
+        if self.modifier_held(crate::AggregateModifier::Super) {
+            return self.begin_pointer_gesture(button);
+        }
+        match button {
+            PointerButton::Primary => Some(SuperPointerGesture::Move),
+            PointerButton::Secondary => Some(SuperPointerGesture::Resize),
+            _ => None,
+        }
+    }
+
     pub fn modifier_held(&self, modifier: crate::AggregateModifier) -> bool {
         self.engine.modifiers().aggregate(modifier)
     }
@@ -452,6 +474,21 @@ fn native_modifier_release(virtual_key: u32) -> Option<NativeModifierRelease> {
     }
 }
 
+fn observed_super_sides(current: u8, virtual_key: u32, edge: KeyEdge, injected: bool) -> u8 {
+    if injected {
+        return current;
+    }
+    let side = match virtual_key {
+        0x5b => 1,
+        0x5c => 2,
+        _ => return current,
+    };
+    match edge {
+        KeyEdge::Pressed => current | side,
+        KeyEdge::Released => current & !side,
+    }
+}
+
 #[cfg(any(test, target_os = "windows"))]
 fn registered_hotkey_owns_key(registered_id: usize, virtual_key: u32, super_held: bool) -> bool {
     registered_id != 0 && virtual_key == 0x52 && super_held
@@ -461,7 +498,7 @@ fn registered_hotkey_owns_key(registered_id: usize, virtual_key: u32, super_held
 mod native_runtime {
     use std::sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     };
 
     use windows::Win32::{
@@ -537,6 +574,7 @@ mod native_runtime {
 
     static CALLBACKS: OnceLock<Mutex<Option<NativeHookCallbacks>>> = OnceLock::new();
     static REGISTERED_HOTKEY_ID: AtomicUsize = AtomicUsize::new(0);
+    static PHYSICAL_SUPER_SIDES: AtomicU8 = AtomicU8::new(0);
     static ALT_RELEASE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
     static POINTER_RECONCILE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
     const ALT_RELEASE_TIMER: usize = 0x4e05;
@@ -599,13 +637,17 @@ mod native_runtime {
             edge,
             injected: native.flags.0 & 0x10 != 0,
         };
+        let _ = PHYSICAL_SUPER_SIDES.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(super::observed_super_sides(
+                current,
+                native.vkCode,
+                edge,
+                event.injected,
+            ))
+        });
         // SAFETY: these are read-only queries used to reconcile independent native delivery paths.
-        let (alt_physically_held, super_physically_held) = unsafe {
-            (
-                GetAsyncKeyState(0x12) < 0,
-                GetAsyncKeyState(0x5b) < 0 || GetAsyncKeyState(0x5c) < 0,
-            )
-        };
+        let alt_physically_held = unsafe { GetAsyncKeyState(0x12) < 0 };
+        let super_physically_held = PHYSICAL_SUPER_SIDES.load(Ordering::Acquire) != 0;
         let registered = registered_hotkey_owns_key(
             REGISTERED_HOTKEY_ID.load(Ordering::Acquire),
             native.vkCode,
@@ -635,8 +677,7 @@ mod native_runtime {
         // SAFETY: WH_MOUSE_LL supplies an MSLLHOOKSTRUCT pointer for the synchronous callback.
         let native = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
         // SAFETY: GetAsyncKeyState is a read-only query for the current desktop input state.
-        let super_physically_held =
-            unsafe { GetAsyncKeyState(0x5b) < 0 || GetAsyncKeyState(0x5c) < 0 };
+        let super_physically_held = PHYSICAL_SUPER_SIDES.load(Ordering::Acquire) != 0;
         let event = NativePointerEvent {
             kind,
             x: native.pt.x,
@@ -741,6 +782,7 @@ mod native_runtime {
             }
         }
         REGISTERED_HOTKEY_ID.store(0, Ordering::Release);
+        PHYSICAL_SUPER_SIDES.store(0, Ordering::Release);
         // SAFETY: these handles were returned to this thread and have not been unhooked.
         unsafe {
             if pointer_reconcile_timer != 0 {
@@ -885,6 +927,45 @@ mod tests {
         adapter.handle_key_code(KeyCode::AltRight, KeyEdge::Pressed);
         adapter.reset();
         assert!(!adapter.modifier_held(AggregateModifier::Alt));
+    }
+
+    #[test]
+    fn physical_super_sides_follow_real_edges_without_injected_state() {
+        let sides = observed_super_sides(0, 0x5b, KeyEdge::Pressed, false);
+        assert_eq!(sides, 1);
+        let sides = observed_super_sides(sides, 0x5c, KeyEdge::Pressed, false);
+        assert_eq!(sides, 3);
+        let sides = observed_super_sides(sides, 0x5b, KeyEdge::Released, false);
+        assert_eq!(sides, 2);
+        assert_eq!(
+            observed_super_sides(sides, 0x5c, KeyEdge::Released, true),
+            2
+        );
+        assert_eq!(
+            observed_super_sides(sides, 0x5c, KeyEdge::Released, false),
+            0
+        );
+    }
+
+    #[test]
+    fn physical_super_pointer_race_does_not_invent_a_sided_modifier() {
+        let mut adapter = WindowsInputAdapter::<()>::new([]);
+
+        assert_eq!(
+            adapter.begin_physical_super_pointer_gesture(PointerButton::Primary, true),
+            Some(SuperPointerGesture::Move)
+        );
+        assert!(!adapter.modifier_held(AggregateModifier::Super));
+        assert!(!adapter.key_held(KeyCode::SuperLeft));
+        assert!(!adapter.key_held(KeyCode::SuperRight));
+        assert_eq!(
+            adapter.begin_physical_super_pointer_gesture(PointerButton::Secondary, true),
+            Some(SuperPointerGesture::Resize)
+        );
+        assert_eq!(
+            adapter.begin_physical_super_pointer_gesture(PointerButton::Primary, false),
+            None
+        );
     }
 
     #[test]

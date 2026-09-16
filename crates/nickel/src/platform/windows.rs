@@ -83,18 +83,18 @@ use windows::{
                 HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON, IsIconic,
                 IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
                 NID_INTEGRATED_TOUCH, NID_READY, PostMessageW, RegisterClassW,
-                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON, SM_CYICON,
-                SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE,
-                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_CONTEXTMENU,
-                WM_COPYDATA, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
-                WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
+                RegisterShellHookWindow, RegisterWindowMessageW, SC_MOVE, SC_SIZE, SM_CXICON,
+                SM_CYICON, SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE,
+                SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+                SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SendNotifyMessageW, SetForegroundWindow,
+                SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+                WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
+                WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
+                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -1301,6 +1301,13 @@ static LAUNCHER_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static LAUNCHER_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
+static SUPER_HOOK_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static NICKEL_WINDOW_SUPER_SIDES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static NICKEL_WINDOW_SUPER_CHORDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static NICKEL_WINDOW_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 static PREVIEW_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static CONTEXT_MENU_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
@@ -1329,6 +1336,19 @@ static RESTORE_LAUNCHER_FOCUS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static WINDOW_DRAG: LazyLock<Mutex<WindowDragCoordinator>> =
     LazyLock::new(|| Mutex::new(WindowDragCoordinator::default()));
+#[derive(Clone, Copy)]
+struct NativeSystemDrag {
+    fingerprint: NativeWindowFingerprint,
+    button: u16,
+    active: bool,
+    released: bool,
+    released_at: u64,
+    invalidated: bool,
+    completion_posted: bool,
+}
+static NATIVE_SYSTEM_DRAG: Mutex<Option<NativeSystemDrag>> = Mutex::new(None);
+static NATIVE_SYSTEM_DRAG_TOMBSTONES: LazyLock<Mutex<HashMap<isize, NativeSystemDrag>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -1400,6 +1420,18 @@ unsafe extern "system" fn native_window_destroyed(
     if window.is_invalid() || object_id != 0 || child_id != 0 {
         return;
     }
+    if let Ok(mut tombstones) = NATIVE_SYSTEM_DRAG_TOMBSTONES.lock() {
+        tombstones.remove(&(window.0 as isize));
+    }
+    if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock()
+        && let Some(drag) = delegated.as_mut()
+        && drag.fingerprint.window == window.0 as isize
+    {
+        drag.invalidated = true;
+        if drag.released {
+            delegated.take();
+        }
+    }
     if let Ok(mut coordinator) = WINDOW_DRAG.lock() {
         coordinator.window_destroyed(window.0 as isize);
     }
@@ -1420,6 +1452,44 @@ unsafe extern "system" fn native_move_size_event(
     let started = event == EVENT_SYSTEM_MOVESIZESTART;
     if !started && event != EVENT_SYSTEM_MOVESIZEEND {
         return;
+    }
+    let tombstoned = NATIVE_SYSTEM_DRAG_TOMBSTONES
+        .lock()
+        .is_ok_and(|mut tombstones| {
+            let key = window.0 as isize;
+            let Some(drag) = tombstones.get_mut(&key) else {
+                return false;
+            };
+            if started {
+                drag.active = true;
+                drag.completion_posted = false;
+            } else {
+                tombstones.remove(&key);
+            }
+            true
+        });
+    if tombstoned {
+        return;
+    }
+    let mut retry_completion = false;
+    if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock()
+        && let Some(drag) = delegated.as_mut()
+        && drag.fingerprint.window == window.0 as isize
+    {
+        if started {
+            drag.active = true;
+            if drag.released {
+                retry_completion = true;
+            }
+        } else {
+            drag.invalidated = true;
+            if drag.released {
+                delegated.take();
+            }
+        }
+    }
+    if retry_completion {
+        retry_native_system_drag_completion();
     }
     if let Ok(mut coordinator) = WINDOW_DRAG.lock() {
         coordinator.native_move_size(window.0 as isize, started, unsafe { GetTickCount64() });
@@ -2354,6 +2424,13 @@ fn handle_native_keyboard_hook(
             } else {
                 Vec::new()
             };
+            // A pointer-hook startup race must never leave a stale synthetic
+            // Super side affecting later ordinary keys. Reconcile aggregate
+            // state against Windows before interpreting a non-Super key.
+            if !super_edge && unsafe { GetAsyncKeyState(0x5b) >= 0 && GetAsyncKeyState(0x5c) >= 0 }
+            {
+                outcomes.extend(adapter.reconcile_modifier_release(AggregateModifier::Super));
+            }
             outcomes.extend(
                 adapter
                     .handle_native(event)
@@ -2363,10 +2440,21 @@ fn handle_native_keyboard_hook(
             outcomes
         })
         .unwrap_or_default();
-    // The shared modifier-release binding deliberately dispatches only on the
-    // release edge. Ownership still covers the preceding Super press so the
-    // native Start menu cannot open alongside Nickel's launcher.
-    let suppress = super_edge || outcomes.iter().any(|outcome| outcome.suppress);
+    // Own Super-down so the native Start menu cannot begin alongside Nickel's
+    // launcher, but always forward the real Super-up after recording it. A
+    // suppressed release can strand Windows' native key state and make every
+    // later key look like a Super chord even after Nickel restarts.
+    let suppress = if super_edge && event.edge == KeyEdge::Released {
+        false
+    } else {
+        super_edge || outcomes.iter().any(|outcome| outcome.suppress)
+    };
+    if outcomes
+        .iter()
+        .any(|outcome| outcome.action == HotkeyAction::ToggleLauncher)
+    {
+        SUPER_HOOK_TOGGLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
     send_hotkey_outcomes(outcomes);
     if suppress {
         HookDisposition::Suppress
@@ -2490,31 +2578,132 @@ fn send_hotkey_outcomes(outcomes: Vec<nickel_input::ShortcutOutcome<HotkeyAction
     }
 }
 
+fn complete_native_system_drag(button: u16) -> bool {
+    let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock() else {
+        return false;
+    };
+    let Some(drag) = *delegated else {
+        return false;
+    };
+    if drag.button != button {
+        return false;
+    }
+    let drag = delegated.as_mut().expect("delegated drag");
+    if drag.released {
+        return false;
+    }
+    drag.released = true;
+    drag.released_at = unsafe { GetTickCount64() };
+    if drag.invalidated {
+        delegated.take();
+        return true;
+    }
+    drop(delegated);
+    retry_native_system_drag_completion();
+    true
+}
+
+fn retry_native_system_drag_completion() {
+    let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock() else {
+        return;
+    };
+    let Some(drag) = delegated.as_mut() else {
+        return;
+    };
+    if !drag.released || !drag.active || drag.invalidated || drag.completion_posted {
+        return;
+    }
+    if native_window_fingerprint(drag.fingerprint.window) != Some(drag.fingerprint) {
+        delegated.take();
+        return;
+    }
+    let target = HWND(drag.fingerprint.window as *mut c_void);
+    if unsafe { PostMessageW(Some(target), WM_LBUTTONUP, WPARAM(0), LPARAM(0)) }.is_ok() {
+        drag.completion_posted = true;
+    }
+}
+
+struct ForeignWindowAtPoint {
+    point: POINT,
+    nickel_process: u32,
+    found: HWND,
+}
+
+unsafe extern "system" fn find_foreign_window_at_point(window: HWND, state: LPARAM) -> BOOL {
+    let state = unsafe { &mut *(state.0 as *mut ForeignWindowAtPoint) };
+    if !unsafe { IsWindowVisible(window).as_bool() }
+        || unsafe { GetAncestor(window, GA_ROOT) } != window
+    {
+        return BOOL(1);
+    }
+    let mut process_id = 0;
+    unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
+    if process_id == 0 || process_id == state.nickel_process {
+        return BOOL(1);
+    }
+    let mut rectangle = RECT::default();
+    if unsafe { GetWindowRect(window, &mut rectangle) }.is_err()
+        || state.point.x < rectangle.left
+        || state.point.x >= rectangle.right
+        || state.point.y < rectangle.top
+        || state.point.y >= rectangle.bottom
+    {
+        return BOOL(1);
+    }
+    state.found = window;
+    BOOL(0)
+}
+
+fn foreign_window_at_point(point: POINT) -> Option<HWND> {
+    let nickel_process = unsafe { GetCurrentProcessId() };
+    let direct = unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) };
+    if !direct.is_invalid() {
+        let mut process_id = 0;
+        unsafe { GetWindowThreadProcessId(direct, Some(&mut process_id)) };
+        if process_id != 0 && process_id != nickel_process {
+            return Some(direct);
+        }
+    }
+    let mut state = ForeignWindowAtPoint {
+        point,
+        nickel_process,
+        found: HWND::default(),
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(find_foreign_window_at_point),
+            LPARAM(std::ptr::from_mut(&mut state) as isize),
+        );
+    }
+    (!state.found.is_invalid()).then_some(state.found)
+}
+
 fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     crate::windows_remote_control::observe_physical_pointer(event);
+    if matches!(
+        event.kind,
+        NativePointerKind::PrimaryPressed | NativePointerKind::SecondaryPressed
+    ) && NICKEL_WINDOW_SUPER_SIDES.load(std::sync::atomic::Ordering::Acquire) != 0
+    {
+        NICKEL_WINDOW_SUPER_CHORDED.store(true, std::sync::atomic::Ordering::Release);
+    }
     // Injected hook traffic is not the physical Windows pointer source and may
     // neither start, update, nor complete its operation binding.
     if event.injected {
-        return HookDisposition::Forward;
-    }
-    if !permits_contested_workflow(NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE.load(Ordering::Acquire)) {
-        if let Ok(mut coordinator) = WINDOW_DRAG.lock() {
-            coordinator.cancel(CancellationReason::AuthorityUnknown);
-            let consumed_release = match event.kind {
-                NativePointerKind::PrimaryReleased => coordinator.consume_release(1),
-                NativePointerKind::SecondaryReleased => coordinator.consume_release(2),
-                _ => false,
-            };
-            if consumed_release {
-                return HookDisposition::Suppress;
-            }
-        }
         return HookDisposition::Forward;
     }
     let point = POINT {
         x: event.x,
         y: event.y,
     };
+    let released_button = match event.kind {
+        NativePointerKind::PrimaryReleased => Some(1),
+        NativePointerKind::SecondaryReleased => Some(2),
+        _ => None,
+    };
+    if released_button.is_some_and(complete_native_system_drag) {
+        return HookDisposition::Suppress;
+    }
     let now = unsafe { GetTickCount64() };
     if let Ok(mut coordinator) = WINDOW_DRAG.lock()
         && let Some(operation) = coordinator.active.clone()
@@ -2570,11 +2759,6 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             return HookDisposition::Forward;
         }
     }
-    let released_button = match event.kind {
-        NativePointerKind::PrimaryReleased => Some(1),
-        NativePointerKind::SecondaryReleased => Some(2),
-        _ => None,
-    };
     if released_button.is_some_and(|button| {
         WINDOW_DRAG
             .lock()
@@ -2592,25 +2776,27 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         return HookDisposition::Forward;
     }
     let physical_super = event.super_physically_held;
-    let (super_held, gesture) = windows_input_adapter()
+    let (super_held, gesture, reconciled) = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
-            // Mouse and keyboard low-level hooks are delivered independently. A mouse-down can
-            // win the startup/event-order race before Nickel observes Super-down, so reconcile
-            // from Windows' physical state at the gesture boundary.
-            if physical_super && !adapter.modifier_held(AggregateModifier::Super) {
-                adapter.observe_key_code(KeyCode::SuperLeft, KeyEdge::Pressed);
-            }
+            let reconciled = if !physical_super {
+                adapter.reconcile_modifier_release(AggregateModifier::Super)
+            } else {
+                Vec::new()
+            };
             let super_held = adapter.modifier_held(AggregateModifier::Super);
-            let gesture =
-                adapter.begin_pointer_gesture(if event.kind == NativePointerKind::PrimaryPressed {
+            let gesture = adapter.begin_physical_super_pointer_gesture(
+                if event.kind == NativePointerKind::PrimaryPressed {
                     PointerButton::Primary
                 } else {
                     PointerButton::Secondary
-                });
-            (super_held, gesture)
+                },
+                physical_super,
+            );
+            (super_held, gesture, reconciled)
         })
         .unwrap_or_default();
+    send_hotkey_outcomes(reconciled);
     let chord_started = gesture.is_some();
     tracing::debug!(
         super_held,
@@ -2626,12 +2812,14 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     if !chord_started {
         return HookDisposition::Forward;
     }
-    let gesture = gesture.expect("a started pointer chord has a typed gesture");
-
-    let target = unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) };
-    if target.0.is_null() {
+    if !NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE.load(Ordering::Acquire) {
         return HookDisposition::Forward;
     }
+    let gesture = gesture.expect("a started pointer chord has a typed gesture");
+
+    let Some(target) = foreign_window_at_point(point) else {
+        return HookDisposition::Forward;
+    };
     let mut process_id = 0;
     unsafe {
         GetWindowThreadProcessId(target, Some(&mut process_id));
@@ -2640,48 +2828,184 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         return HookDisposition::Forward;
     }
 
-    let mut rectangle = RECT::default();
-    if unsafe { GetWindowRect(target, &mut rectangle) }.is_err() {
+    let Some(fingerprint) = native_window_fingerprint(target.0 as isize) else {
+        return HookDisposition::Forward;
+    };
+    if NATIVE_SYSTEM_DRAG_TOMBSTONES
+        .lock()
+        .map_or(true, |tombstones| {
+            tombstones.contains_key(&(target.0 as isize))
+        })
+    {
+        return HookDisposition::Forward;
+    }
+    if NATIVE_SYSTEM_DRAG
+        .lock()
+        .map_or(true, |delegated| delegated.is_some())
+    {
         return HookDisposition::Forward;
     }
     let resize_edge =
         (gesture == SuperPointerGesture::Resize).then(|| resize_hit_test(target, point));
-    let initiating_button = if event.kind == NativePointerKind::PrimaryPressed {
+    if native_window_fingerprint(target.0 as isize) != Some(fingerprint) {
+        return HookDisposition::Forward;
+    }
+    let hit = native_system_drag_hit(gesture, resize_edge);
+    let screen_point =
+        LPARAM((((point.y as u32 & 0xffff) << 16) | (point.x as u32 & 0xffff)) as isize);
+    let button = if gesture == SuperPointerGesture::Move {
         1
     } else {
         2
     };
-    let admitted = WINDOW_DRAG.lock().is_ok_and(|mut coordinator| {
-        let Some(fingerprint) = native_window_fingerprint(target.0 as isize) else {
-            return false;
-        };
-        coordinator.admit(WindowDragAdmission {
+    if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock() {
+        *delegated = Some(NativeSystemDrag {
             fingerprint,
-            start: point,
-            rectangle,
-            resize_edge,
-            initiating_button,
-            time: now,
-        })
-    });
-    if !admitted {
+            button,
+            active: false,
+            released: false,
+            released_at: 0,
+            invalidated: false,
+            completion_posted: false,
+        });
+    } else {
         return HookDisposition::Forward;
     }
     unsafe {
+        let _ = ReleaseCapture();
         let _ = SetForegroundWindow(target);
+    }
+    let target_value = target.0 as isize;
+    let system_command = if gesture == SuperPointerGesture::Move {
+        SC_MOVE | 2
+    } else {
+        SC_SIZE | native_resize_command_edge(hit)
+    };
+    if std::thread::Builder::new()
+        .name("nickel-native-move-size".into())
+        .spawn(move || unsafe {
+            // Run the foreign window's native modal move/size loop away from the low-level hook
+            // thread. The WinEvent hook remains the authority for start/end observations, while
+            // the pointer hook provides bounded release and cancellation handling.
+            let _ = SendMessageW(
+                HWND(target_value as *mut c_void),
+                WM_SYSCOMMAND,
+                Some(WPARAM(system_command as usize)),
+                Some(screen_point),
+            );
+        })
+        .is_err()
+    {
+        if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock() {
+            delegated.take();
+        }
+        return HookDisposition::Forward;
     }
     HookDisposition::Suppress
 }
 
-const fn permits_contested_workflow(native_ownership_observation: bool) -> bool {
-    native_ownership_observation
+fn native_resize_command_edge(hit: u32) -> u32 {
+    match hit {
+        HTLEFT => 1,
+        HTRIGHT => 2,
+        HTTOP => 3,
+        HTTOPLEFT => 4,
+        HTTOPRIGHT => 5,
+        HTBOTTOM => 6,
+        HTBOTTOMLEFT => 7,
+        HTBOTTOMRIGHT => 8,
+        _ => 8,
+    }
+}
+
+fn native_system_drag_hit(gesture: SuperPointerGesture, resize_edge: Option<u32>) -> u32 {
+    if gesture == SuperPointerGesture::Move {
+        return 2;
+    }
+    resize_edge.unwrap_or(HTBOTTOMRIGHT)
+}
+
+const fn permits_contested_workflow(_native_ownership_observation: bool) -> bool {
+    // Win32 exposes no bounded SetWindowPos completion carrying request
+    // identity. ASYNCWINDOWPOS is bounded but tokenless; synchronous
+    // SetWindowPos can block forever in a hung foreign UI thread. Neither is
+    // the synchronously enforceable capability required for foreign geometry
+    // authority, so this adapter must fail closed.
+    false
 }
 
 fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
+    if let Ok(delegated) = NATIVE_SYSTEM_DRAG.lock()
+        && delegated.is_some_and(|drag| match drag.button {
+            1 => !primary_held,
+            2 => !secondary_held,
+            _ => true,
+        })
+    {
+        let button = delegated.expect("released delegated drag").button;
+        drop(delegated);
+        let _ = complete_native_system_drag(button);
+    }
+    retry_native_system_drag_completion();
+    let now = unsafe { GetTickCount64() };
+    if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock()
+        && let Some(drag) = *delegated
+        && drag.released
+        && !drag.active
+        && now.saturating_sub(drag.released_at) >= 500
+    {
+        if drag.invalidated
+            || native_window_fingerprint(drag.fingerprint.window) != Some(drag.fingerprint)
+        {
+            delegated.take();
+        } else if !drag.completion_posted
+            && unsafe {
+                PostMessageW(
+                    Some(HWND(drag.fingerprint.window as *mut c_void)),
+                    WM_CANCELMODE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            }
+            .is_ok()
+        {
+            delegated
+                .as_mut()
+                .expect("pending delegated drag")
+                .completion_posted = true;
+        }
+    }
+    if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock()
+        && let Some(drag) = *delegated
+        && drag.released
+        && now.saturating_sub(drag.released_at) >= 2_000
+    {
+        if let Ok(mut tombstones) = NATIVE_SYSTEM_DRAG_TOMBSTONES.lock() {
+            tombstones.insert(drag.fingerprint.window, drag);
+            delegated.take();
+        }
+    }
+    if let Ok(mut tombstones) = NATIVE_SYSTEM_DRAG_TOMBSTONES.lock() {
+        tombstones.retain(|window, drag| {
+            if native_window_fingerprint(*window) != Some(drag.fingerprint) {
+                return false;
+            }
+            let target = Some(HWND(*window as *mut c_void));
+            if drag.active && !drag.completion_posted {
+                if unsafe { PostMessageW(target, WM_LBUTTONUP, WPARAM(0), LPARAM(0)) }.is_ok() {
+                    drag.completion_posted = true;
+                }
+            } else if !drag.active && !drag.completion_posted {
+                if unsafe { PostMessageW(target, WM_CANCELMODE, WPARAM(0), LPARAM(0)) }.is_ok() {
+                    drag.completion_posted = true;
+                }
+            }
+            true
+        });
+    }
     let Ok(mut coordinator) = WINDOW_DRAG.lock() else {
         return;
     };
-    let now = unsafe { GetTickCount64() };
     coordinator.drain_native_write_completions();
     if coordinator.expire_unknown_suspension(now) {
         return;
@@ -3311,6 +3635,41 @@ pub fn configure_launcher_window(window: &impl raw_window_handle::HasWindowHandl
     }
 }
 
+pub fn observe_nickel_window_key(super_side: Option<u8>, pressed: bool) {
+    use std::sync::atomic::Ordering;
+
+    if pressed {
+        if let Some(side) = super_side {
+            let previous = NICKEL_WINDOW_SUPER_SIDES.fetch_or(side, Ordering::AcqRel);
+            if previous == 0 {
+                NICKEL_WINDOW_SUPER_CHORDED.store(false, Ordering::Release);
+                NICKEL_WINDOW_TOGGLE_GENERATION.store(
+                    SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+            }
+        } else if NICKEL_WINDOW_SUPER_SIDES.load(Ordering::Acquire) != 0 {
+            NICKEL_WINDOW_SUPER_CHORDED.store(true, Ordering::Release);
+        }
+        return;
+    }
+    let Some(side) = super_side else {
+        return;
+    };
+    let previous = NICKEL_WINDOW_SUPER_SIDES.fetch_and(!side, Ordering::AcqRel);
+    if previous & side == 0 || previous & !side != 0 {
+        return;
+    }
+    let chorded = NICKEL_WINDOW_SUPER_CHORDED.swap(false, Ordering::AcqRel);
+    let hook_dispatched = SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire)
+        != NICKEL_WINDOW_TOGGLE_GENERATION.load(Ordering::Acquire);
+    if !chorded && !hook_dispatched {
+        if let Some(sender) = SHORTCUT_SENDER.get() {
+            let _ = sender.send(GlobalShortcut::ToggleLauncher);
+        }
+    }
+}
+
 pub fn configure_notification_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
     if prepare_trusted_control_window(window).is_err() {
         return false;
@@ -3365,6 +3724,32 @@ pub fn configure_preview_window(window: &impl raw_window_handle::HasWindowHandle
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
         .is_ok()
+    }
+}
+
+pub fn show_preview_window_without_activation(window: &impl raw_window_handle::HasWindowHandle) {
+    let Some(hwnd) = window_hwnd(window) else {
+        return;
+    };
+    // Showing a WS_EX_NOACTIVATE window through the ordinary Winit visibility path can still use
+    // an activating ShowWindow command. Select the native no-activate command explicitly so the
+    // application being switched remains the foreground keyboard target throughout Alt+Tab.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+pub fn hide_preview_window(window: &impl raw_window_handle::HasWindowHandle) {
+    // DWM thumbnails outlive the UI frame that requested them. Pair every
+    // native preview show with explicit thumbnail teardown and an HWND hide;
+    // Winit's visibility bookkeeping cannot observe ShowWindow calls made by
+    // the overlay placement path.
+    clear_dwm_thumbnails();
+    let Some(hwnd) = window_hwnd(window) else {
+        return;
+    };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
     }
 }
 
@@ -4328,11 +4713,13 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             if hwnd == 0 {
                 return false;
             }
+            let hwnd = HWND(hwnd as *mut c_void);
             // SAFETY: The handle belongs to Nickel's live launcher window.
             unsafe {
-                let _ = ShowWindow(HWND(hwnd as *mut c_void), SW_HIDE);
+                let _ = ShowWindow(hwnd, SW_HIDE);
             }
-            return true;
+            let visible_after = unsafe { IsWindowVisible(hwnd).as_bool() };
+            return !visible_after;
         }
         ShellCommand::ShowContextMenu {
             x,
@@ -5243,9 +5630,9 @@ mod tests {
         classify_window_drag_observation, contain_rect, contested_authority,
         contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
         is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
-        parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
-        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
-        should_observe_tokenless_geometry, should_restore_on_activation,
+        native_system_drag_hit, parse_windows_command, permits_contested_workflow,
+        project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
+        restore_legacy_icon_alpha, should_observe_tokenless_geometry, should_restore_on_activation,
         unknown_suspension_within_bound, windows_pid_descends_from,
     };
 
@@ -5632,7 +6019,51 @@ mod tests {
     #[test]
     fn contested_workflow_fails_closed_without_native_ownership_hook() {
         assert!(!permits_contested_workflow(false));
-        assert!(permits_contested_workflow(true));
+        assert!(!permits_contested_workflow(true));
+    }
+
+    #[test]
+    fn native_system_drag_hits_delegate_move_and_resize_edges() {
+        assert_eq!(
+            native_system_drag_hit(super::SuperPointerGesture::Move, None),
+            2
+        );
+        assert_eq!(
+            native_system_drag_hit(super::SuperPointerGesture::Resize, Some(super::HTLEFT)),
+            super::HTLEFT
+        );
+        assert_eq!(
+            native_system_drag_hit(
+                super::SuperPointerGesture::Resize,
+                Some(super::HTBOTTOMRIGHT)
+            ),
+            super::HTBOTTOMRIGHT
+        );
+    }
+
+    #[test]
+    fn unavailable_foreign_geometry_never_admits_or_mutates_reused_hwnd() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let rectangle = RECT {
+            left: 10,
+            top: 20,
+            right: 310,
+            bottom: 220,
+        };
+        let reused = fingerprint(7, 99);
+
+        if permits_contested_workflow(true) {
+            let _ = coordinator.admit(WindowDragAdmission {
+                fingerprint: reused,
+                start: POINT::default(),
+                rectangle,
+                resize_edge: None,
+                initiating_button: 1,
+                time: 10,
+            });
+        }
+        assert!(coordinator.active.is_none());
+        assert!(!coordinator.current_lifetimes.contains_key(&reused.window));
     }
 
     #[test]

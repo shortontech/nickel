@@ -104,7 +104,8 @@ impl LaunchCapture {
             application,
             windows::Win32::Storage::FileSystem::FILE_SHARE_READ.0,
         )?;
-        let (_, ancestors) = pin_launch_path(&shortcut)?;
+        let (_, mut ancestors) = pin_launch_path(&shortcut)?;
+        ancestors.extend(pin_launch_alias(&launch_target, &shortcut)?);
         Some(Self {
             descriptor,
             target: launch_target,
@@ -309,6 +310,103 @@ fn pin_launch_path(file: &File) -> Option<(String, Vec<File>)> {
         return None;
     }
     Some((path, ancestors))
+}
+
+/// Pin the namespace that ShellExecuteEx will actually resolve. The canonical
+/// volume path proves which file was discovered, but invoking a drive-letter
+/// alias is safe only while every alias ancestor is retained and contains no
+/// reparse point. Reopening after the chain is pinned binds the launch spelling
+/// to the same file identity held by `file`.
+fn pin_launch_alias(path: &str, file: &File) -> Option<Vec<File>> {
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_ID_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo,
+            GetFileInformationByHandleEx,
+        },
+    };
+
+    let path = std::path::Path::new(path);
+    if !path.is_absolute() || path.components().count() > 256 {
+        return None;
+    }
+    // Restrict guarded shortcut launches to the protected Windows system-drive
+    // namespace. Retaining filesystem handles does not retain mutable
+    // DOS-device/SUBST mappings. Start Menu or redirected-profile shortcuts on
+    // another drive remain available through the ordinary unguarded launcher
+    // path, but cannot receive guarded launch attribution.
+    let system_drive = std::env::var_os("SystemDrive")?;
+    let alias_drive = path.components().next()?.as_os_str();
+    if !alias_drive
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&system_drive.to_string_lossy())
+    {
+        return None;
+    }
+    let mut ancestor_paths = path.ancestors().skip(1).collect::<Vec<_>>();
+    ancestor_paths.reverse();
+    if ancestor_paths.is_empty() {
+        return None;
+    }
+    let mut ancestors = Vec::with_capacity(ancestor_paths.len());
+    for directory_path in ancestor_paths {
+        let directory = OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(directory_path)
+            .ok()?;
+        let metadata = directory.metadata().ok()?;
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return None;
+        }
+        ancestors.push(directory);
+    }
+
+    let alias = OpenOptions::new()
+        .read(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()?;
+    let alias_metadata = alias.metadata().ok()?;
+    if !alias_metadata.is_file()
+        || alias_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+    {
+        return None;
+    }
+    let query = |candidate: &File| -> Option<FILE_ID_INFO> {
+        let mut info = FILE_ID_INFO::default();
+        // SAFETY: Exact FILE_ID_INFO buffer and retained read-only file handle.
+        unsafe {
+            GetFileInformationByHandleEx(
+                HANDLE(candidate.as_raw_handle()),
+                FileIdInfo,
+                std::ptr::from_mut(&mut info).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        }
+        .ok()?;
+        if info.VolumeSerialNumber == 0 || info.FileId.Identifier == [0; 16] {
+            return None;
+        }
+        Some(info)
+    };
+    let original = query(file)?;
+    let current = query(&alias)?;
+    if original.VolumeSerialNumber != current.VolumeSerialNumber
+        || original.FileId.Identifier != current.FileId.Identifier
+    {
+        return None;
+    }
+    for directory in &ancestors {
+        if directory.metadata().ok()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return None;
+        }
+    }
+    ancestors.push(alias);
+    Some(ancestors)
 }
 
 struct CatalogData {
@@ -826,7 +924,7 @@ mod tests {
             "App".into(),
             None,
             None,
-            Some(vec![path]),
+            Some(vec![path.clone()]),
         );
         let capture = LaunchCapture::prepare(&application).unwrap();
         assert_eq!(capture.target(), path);
