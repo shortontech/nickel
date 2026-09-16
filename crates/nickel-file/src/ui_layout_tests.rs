@@ -2218,6 +2218,43 @@ fn drag_selection_uses_semantic_grid_membership_and_fails_closed() {
 }
 
 #[test]
+fn populated_file_view_exposes_full_height_background_selection_surface() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("alpha.txt"), b"x").unwrap();
+    let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+    host.poll();
+
+    let background = host
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id.as_str().ends_with("/file-content"))
+        .expect("populated file view must expose its selection surface");
+    assert!(
+        background.bounds.size.height > 100.0,
+        "selection surface must cover the file viewport, not a one-pixel strip"
+    );
+}
+
+#[test]
+fn background_selection_drag_finishes_on_pointer_release() {
+    let (_directory, mut app) = selection_app(3);
+    let bounds = Rect::new(10.0, 20.0, 400.0, 300.0);
+    app.update_message(FileMessage::SelectionSurfaceDrag(nickel_ui::DragGesture {
+        phase: nickel_ui::DragPhase::Started,
+        position: Point { x: 40.0, y: 60.0 },
+        bounds,
+    }));
+    assert_eq!(app.selection_drag, Some(Point { x: 40.0, y: 60.0 }));
+
+    app.update_message(FileMessage::SelectionSurfaceDrag(nickel_ui::DragGesture {
+        phase: nickel_ui::DragPhase::Ended,
+        position: Point { x: 180.0, y: 220.0 },
+        bounds,
+    }));
+    assert!(app.selection_drag.is_none());
+}
+
+#[test]
 fn context_menu_is_one_semantic_controller_and_accessibility_surface() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("report.txt"), b"x").unwrap();

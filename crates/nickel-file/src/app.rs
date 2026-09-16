@@ -162,6 +162,7 @@ pub enum FileMessage {
     OpenFolder(PathBuf),
     Entry(usize),
     SelectionSurface,
+    SelectionSurfaceDrag(nickel_ui::DragGesture),
     FileScroll(f32),
 }
 
@@ -2396,9 +2397,22 @@ impl FileApp {
                 }
             }
             FileMessage::SelectionSurface => {
-                self.selection_drag = Some(self.cursor);
                 if !self.control_down && !self.shift_down {
                     self.clear_selection();
+                }
+            }
+            FileMessage::SelectionSurfaceDrag(gesture) => {
+                use nickel_ui::DragPhase;
+                match gesture.phase {
+                    DragPhase::Started => {
+                        self.selection_drag = Some(gesture.position);
+                        self.cursor = gesture.position;
+                        if !self.control_down && !self.shift_down {
+                            self.clear_selection();
+                        }
+                    }
+                    DragPhase::Moved => self.cursor = gesture.position,
+                    DragPhase::Ended | DragPhase::Cancelled => self.selection_drag = None,
                 }
             }
             FileMessage::FileScroll(offset) => self.file_scroll_offset = offset.max(0.0),
