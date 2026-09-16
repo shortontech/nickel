@@ -3356,6 +3356,7 @@ dependencies = [
  "ui-declarative-macros",
  "unicode-segmentation",
  "windows",
+ "windows-core",
  "winit 0.30.13",
 ]
 
