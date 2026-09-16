@@ -19,7 +19,7 @@ use windows::{
             CoUninitialize, IPersistFile, STGM_READ,
         },
         UI::{
-            Shell::{ExtractIconExW, IShellLinkW, SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW},
+            Shell::{IShellLinkW, SHDefExtractIconW, SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW},
             WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIconEx, HICON},
         },
     },
@@ -135,6 +135,14 @@ pub fn path_icon_at_size(path: &Path, physical_size: u32) -> Option<RgbaImage> {
         (shortcut, "shortcut")
     } else if let Some(internet_shortcut) = internet_shortcut_icon(path, physical_size) {
         (Some(internet_shortcut), "internet-shortcut")
+    } else if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        (
+            extract_icon(path, 0, physical_size).or_else(|| shell_path_icon(path, physical_size)),
+            "executable",
+        )
     } else {
         (shell_path_icon(path, physical_size), "shell-path")
     };
@@ -247,9 +255,20 @@ fn shortcut_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
 fn extract_icon(path: &Path, index: i32, physical_size: u32) -> Option<RgbaImage> {
     let wide = terminated(path);
     let mut icon = HICON::default();
-    let count =
-        unsafe { ExtractIconExW(PCWSTR(wide.as_ptr()), index, Some(&raw mut icon), None, 1) };
-    if count == 0 || icon.0.is_null() {
+    // Ask the shell extractor for the requested large-icon dimensions so PE resources with
+    // multiple variants select their best source instead of scaling ExtractIconExW's fixed
+    // small/large result.
+    let result = unsafe {
+        SHDefExtractIconW(
+            PCWSTR(wide.as_ptr()),
+            index,
+            0,
+            Some(&raw mut icon),
+            None,
+            physical_size.clamp(16, 512),
+        )
+    };
+    if result.is_err() || icon.0.is_null() {
         return None;
     }
     let image = render_icon(icon, physical_size);

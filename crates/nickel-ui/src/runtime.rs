@@ -794,11 +794,22 @@ fn start_windows_file_drag(paths: &[std::path::PathBuf]) -> Result<(), String> {
     use windows::Win32::{
         System::{
             Com::IDataObject,
-            Ole::{DROPEFFECT_COPY, DROPEFFECT_MOVE, IDropSource},
+            Ole::{DROPEFFECT_COPY, DROPEFFECT_MOVE, IDropSource, OleInitialize, OleUninitialize},
         },
         UI::Shell::{ILCreateFromPathW, ILFree, SHCreateDataObject, SHDoDragDrop},
     };
     use windows::core::PCWSTR;
+    // Shell drag/drop is an OLE operation and the Winit UI thread is otherwise not initialized
+    // as an OLE apartment. Every successful S_OK/S_FALSE initialization requires a matching
+    // uninitialize on this same thread.
+    unsafe { OleInitialize(None) }.map_err(|error| error.to_string())?;
+    struct OleApartment;
+    impl Drop for OleApartment {
+        fn drop(&mut self) {
+            unsafe { OleUninitialize() };
+        }
+    }
+    let _ole_apartment = OleApartment;
     let wide = paths
         .iter()
         .map(|path| {
