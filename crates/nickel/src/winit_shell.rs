@@ -474,6 +474,15 @@ impl ShellSurface {
     }
 }
 
+fn show_surface_native(surface: &ShellSurface) {
+    #[cfg(target_os = "windows")]
+    if surface.role == SurfaceRole::WindowPreview {
+        let _ = crate::platform::show_preview_window_without_activation(&surface.window);
+        return;
+    }
+    surface.window.set_visible(true);
+}
+
 pub struct WinitShell {
     // Presenters borrow native window handles and must drop before the event loop.
     surfaces: Vec<ShellSurface>,
@@ -1558,13 +1567,13 @@ impl WinitShell {
                 // Platform adapters may have changed native visibility directly while acquiring
                 // foreground focus. Reassert the requested state even when our bookkeeping is
                 // already current so native and shell visibility cannot diverge.
-                surface.window.set_visible(true);
+                show_surface_native(surface);
                 return false;
             }
             surface.visible = true;
             surface.initial_exposed = false;
             surface.last_host_change_token = None;
-            surface.window.set_visible(true);
+            show_surface_native(surface);
             surface.window.request_redraw();
             true
         });
@@ -1594,6 +1603,13 @@ impl WinitShell {
                 // Windows launcher focus acquisition uses direct Win32 visibility calls. A
                 // subsequent focus-loss dismissal can therefore arrive while this flag still
                 // says hidden; enforce the native state instead of treating that as a no-op.
+                #[cfg(target_os = "windows")]
+                if surface.role == SurfaceRole::WindowPreview {
+                    crate::platform::hide_preview_window(&surface.window);
+                } else {
+                    surface.window.set_visible(false);
+                }
+                #[cfg(not(target_os = "windows"))]
                 surface.window.set_visible(false);
                 return false;
             }
@@ -1604,6 +1620,13 @@ impl WinitShell {
             // Drop native presentation borrows before winit tears down the
             // Wayland surface so the null-buffer unmap can complete.
             surface.presenter = None;
+            #[cfg(target_os = "windows")]
+            if surface.role == SurfaceRole::WindowPreview {
+                crate::platform::hide_preview_window(&surface.window);
+            } else {
+                surface.window.set_visible(false);
+            }
+            #[cfg(not(target_os = "windows"))]
             surface.window.set_visible(false);
             true
         };

@@ -3540,6 +3540,32 @@ pub fn configure_preview_window(window: &impl raw_window_handle::HasWindowHandle
     }
 }
 
+pub fn show_preview_window_without_activation(window: &impl raw_window_handle::HasWindowHandle) {
+    let Some(hwnd) = window_hwnd(window) else {
+        return;
+    };
+    // Showing a WS_EX_NOACTIVATE window through the ordinary Winit visibility path can still use
+    // an activating ShowWindow command. Select the native no-activate command explicitly so the
+    // application being switched remains the foreground keyboard target throughout Alt+Tab.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+pub fn hide_preview_window(window: &impl raw_window_handle::HasWindowHandle) {
+    // DWM thumbnails outlive the UI frame that requested them. Pair every
+    // native preview show with explicit thumbnail teardown and an HWND hide;
+    // Winit's visibility bookkeeping cannot observe ShowWindow calls made by
+    // the overlay placement path.
+    clear_dwm_thumbnails();
+    let Some(hwnd) = window_hwnd(window) else {
+        return;
+    };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
 pub fn configure_context_menu_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
     use std::sync::atomic::Ordering;
 
