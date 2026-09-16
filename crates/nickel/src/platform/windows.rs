@@ -91,10 +91,10 @@ use windows::{
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
                 TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE,
                 WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CANCELMODE, WM_CLOSE,
-                WM_CONTEXTMENU, WM_COPYDATA, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
-                WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
-                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
+                WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
+                WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -1301,6 +1301,13 @@ static LAUNCHER_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static LAUNCHER_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
+static SUPER_HOOK_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static NICKEL_WINDOW_SUPER_SIDES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static NICKEL_WINDOW_SUPER_CHORDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static NICKEL_WINDOW_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 static PREVIEW_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static CONTEXT_MENU_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
@@ -2340,6 +2347,12 @@ fn handle_native_keyboard_hook(
     } else {
         super_edge || outcomes.iter().any(|outcome| outcome.suppress)
     };
+    if outcomes
+        .iter()
+        .any(|outcome| outcome.action == HotkeyAction::ToggleLauncher)
+    {
+        SUPER_HOOK_TOGGLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
     send_hotkey_outcomes(outcomes);
     if suppress {
         HookDisposition::Suppress
@@ -2565,6 +2578,13 @@ fn foreign_window_at_point(point: POINT) -> Option<HWND> {
 
 fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     crate::windows_remote_control::observe_physical_pointer(event);
+    if matches!(
+        event.kind,
+        NativePointerKind::PrimaryPressed | NativePointerKind::SecondaryPressed
+    ) && NICKEL_WINDOW_SUPER_SIDES.load(std::sync::atomic::Ordering::Acquire) != 0
+    {
+        NICKEL_WINDOW_SUPER_CHORDED.store(true, std::sync::atomic::Ordering::Release);
+    }
     // Injected hook traffic is not the physical Windows pointer source and may
     // neither start, update, nor complete its operation binding.
     if event.injected {
@@ -2739,13 +2759,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     unsafe {
         let _ = ReleaseCapture();
         let _ = SetForegroundWindow(target);
-        if PostMessageW(
-            Some(target),
-            WM_NCLBUTTONDOWN,
-            WPARAM(hit as usize),
-            screen_point,
-        )
-        .is_err()
+        if SendNotifyMessageW(target, WM_NCLBUTTONDOWN, WPARAM(hit as usize), screen_point).is_err()
         {
             return HookDisposition::Forward;
         }
@@ -3431,6 +3445,41 @@ pub fn configure_launcher_window(window: &impl raw_window_handle::HasWindowHandl
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
         .is_ok()
+    }
+}
+
+pub fn observe_nickel_window_key(super_side: Option<u8>, pressed: bool) {
+    use std::sync::atomic::Ordering;
+
+    if pressed {
+        if let Some(side) = super_side {
+            let previous = NICKEL_WINDOW_SUPER_SIDES.fetch_or(side, Ordering::AcqRel);
+            if previous == 0 {
+                NICKEL_WINDOW_SUPER_CHORDED.store(false, Ordering::Release);
+                NICKEL_WINDOW_TOGGLE_GENERATION.store(
+                    SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+            }
+        } else if NICKEL_WINDOW_SUPER_SIDES.load(Ordering::Acquire) != 0 {
+            NICKEL_WINDOW_SUPER_CHORDED.store(true, Ordering::Release);
+        }
+        return;
+    }
+    let Some(side) = super_side else {
+        return;
+    };
+    let previous = NICKEL_WINDOW_SUPER_SIDES.fetch_and(!side, Ordering::AcqRel);
+    if previous & side == 0 || previous & !side != 0 {
+        return;
+    }
+    let chorded = NICKEL_WINDOW_SUPER_CHORDED.swap(false, Ordering::AcqRel);
+    let hook_dispatched = SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire)
+        != NICKEL_WINDOW_TOGGLE_GENERATION.load(Ordering::Acquire);
+    if !chorded && !hook_dispatched {
+        if let Some(sender) = SHORTCUT_SENDER.get() {
+            let _ = sender.send(GlobalShortcut::ToggleLauncher);
+        }
     }
 }
 
@@ -4451,11 +4500,13 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             if hwnd == 0 {
                 return false;
             }
+            let hwnd = HWND(hwnd as *mut c_void);
             // SAFETY: The handle belongs to Nickel's live launcher window.
             unsafe {
-                let _ = ShowWindow(HWND(hwnd as *mut c_void), SW_HIDE);
+                let _ = ShowWindow(hwnd, SW_HIDE);
             }
-            return true;
+            let visible_after = unsafe { IsWindowVisible(hwnd).as_bool() };
+            return !visible_after;
         }
         ShellCommand::ShowContextMenu {
             x,

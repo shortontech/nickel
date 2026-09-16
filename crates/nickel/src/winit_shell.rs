@@ -1840,6 +1840,22 @@ impl WinitShell {
                         return;
                     };
                     let surface = surfaces[index].id;
+                    #[cfg(target_os = "windows")]
+                    if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+                        let super_side = match key.physical_key {
+                            winit::keyboard::PhysicalKey::Code(
+                                winit::keyboard::KeyCode::SuperLeft,
+                            ) => Some(1),
+                            winit::keyboard::PhysicalKey::Code(
+                                winit::keyboard::KeyCode::SuperRight,
+                            ) => Some(2),
+                            _ => None,
+                        };
+                        crate::platform::observe_nickel_window_key(
+                            super_side,
+                            key.state == winit::event::ElementState::Pressed,
+                        );
+                    }
                     let scale = surfaces[index].window.scale_factor();
                     let native_device = window_event_device(&event);
                     // Winit omits a device on lifecycle and IME events. Its documented dummy
