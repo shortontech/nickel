@@ -83,18 +83,18 @@ use windows::{
                 HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON, IsIconic,
                 IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
                 NID_INTEGRATED_TOUCH, NID_READY, PostMessageW, RegisterClassW,
-                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON, SM_CYICON,
-                SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE,
-                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CANCELMODE, WM_CLOSE,
-                WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
-                WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
+                RegisterShellHookWindow, RegisterWindowMessageW, SC_MOVE, SC_SIZE, SM_CXICON,
+                SM_CYICON, SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE,
+                SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+                SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SendNotifyMessageW, SetForegroundWindow,
+                SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+                WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
+                WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
+                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -2756,14 +2756,6 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     } else {
         2
     };
-    unsafe {
-        let _ = ReleaseCapture();
-        let _ = SetForegroundWindow(target);
-        if SendNotifyMessageW(target, WM_NCLBUTTONDOWN, WPARAM(hit as usize), screen_point).is_err()
-        {
-            return HookDisposition::Forward;
-        }
-    }
     if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock() {
         *delegated = Some(NativeSystemDrag {
             fingerprint,
@@ -2775,12 +2767,53 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             completion_posted: false,
         });
     } else {
-        unsafe {
-            let _ = PostMessageW(Some(target), WM_LBUTTONUP, WPARAM(0), LPARAM(0));
+        return HookDisposition::Forward;
+    }
+    unsafe {
+        let _ = ReleaseCapture();
+        let _ = SetForegroundWindow(target);
+    }
+    let target_value = target.0 as isize;
+    let system_command = if gesture == SuperPointerGesture::Move {
+        SC_MOVE | 2
+    } else {
+        SC_SIZE | native_resize_command_edge(hit)
+    };
+    if std::thread::Builder::new()
+        .name("nickel-native-move-size".into())
+        .spawn(move || unsafe {
+            // Run the foreign window's native modal move/size loop away from the low-level hook
+            // thread. The WinEvent hook remains the authority for start/end observations, while
+            // the pointer hook provides bounded release and cancellation handling.
+            let _ = SendMessageW(
+                HWND(target_value as *mut c_void),
+                WM_SYSCOMMAND,
+                Some(WPARAM(system_command as usize)),
+                Some(screen_point),
+            );
+        })
+        .is_err()
+    {
+        if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock() {
+            delegated.take();
         }
         return HookDisposition::Forward;
     }
     HookDisposition::Suppress
+}
+
+fn native_resize_command_edge(hit: u32) -> u32 {
+    match hit {
+        HTLEFT => 1,
+        HTRIGHT => 2,
+        HTTOP => 3,
+        HTTOPLEFT => 4,
+        HTTOPRIGHT => 5,
+        HTBOTTOM => 6,
+        HTBOTTOMLEFT => 7,
+        HTBOTTOMRIGHT => 8,
+        _ => 8,
+    }
 }
 
 fn native_system_drag_hit(gesture: SuperPointerGesture, resize_edge: Option<u32>) -> u32 {
