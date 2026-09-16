@@ -29,11 +29,11 @@ envelopes. The audio worker accepts no arbitrary files or speech. Sound is a
 best-effort accessibility companion to the trusted visual controls, never a
 condition for revocation or input cleanup.
 
-Linux uses libpulse's asynchronous API against the default PulseAudio or
-PipeWire-Pulse service, without autospawning a server. Each playback attempt has a
+Linux uses a direct PipeWire playback stream against the default PipeWire
+service, without autospawning a server. Each playback attempt has a
 two-second deadline. Default output routing, mute, and volume remain owned by the
 native audio service; the adapter never changes them or bypasses them through a
-hardware device. Linux builds require libpulse development files. Windows uses
+hardware device. Linux builds require PipeWire development files. Windows uses
 asynchronous `PlaySoundW` with generated process-lifetime WAV buffers and
 `SND_SYSTEM`, so
 playback uses the system-sounds session and the current native output controls.
@@ -46,12 +46,13 @@ all cue transitions, warning deduplication, and renewed deadlines. A recording
 queue verifies bounded nonblocking owner delivery; settings tests cover backward
 compatibility and changes without listener-authority changes. The ignored native
 `local_cues::tests::native_cues_use_owned_dummy_audio` test requires the explicit
-`NICKEL_TEST_AUDIO_SOCKET=unix:/tmp/nickel-cues-…` path of an owned dummy Pulse
-service. It must never be pointed at the user's audio service.
+`NICKEL_TEST_PIPEWIRE_REMOTE=nickel-cues-…` name of an owned dummy PipeWire
+server. It must never be pointed at the user's audio service.
 
-Native Linux acceptance used a private PipeWire-Pulse instance, a single null
-sink, and a policy-only WirePlumber instance with no hardware monitors. All five
-cues completed and their expected PCM reached that sink's monitor. Sink mute and
-volume remained unchanged by playback. This monitor captures pre-volume samples;
-it does not prove physical acoustic mute or gain. Native Windows audio and
-physical output verification remain platform acceptance work.
+Native Linux acceptance for direct PipeWire playback used a private PipeWire
+server, a null sink, and a policy-only WirePlumber instance with no hardware
+monitors. All five cues completed through the stream drain callback. Earlier
+PipeWire-Pulse acceptance also captured the expected PCM at the null sink's
+monitor and found sink mute and volume unchanged. The monitor captures
+pre-volume samples; it does not prove physical acoustic mute or gain. Native
+Windows audio and physical output verification remain platform acceptance work.

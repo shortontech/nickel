@@ -186,81 +186,106 @@ fn play(cue: LifecycleCue) -> Result<(), ()> {
 
 #[cfg(target_os = "linux")]
 fn play_linux(cue: LifecycleCue, server: Option<&str>) -> Result<(), ()> {
-    use libpulse_binding::{
-        context::{Context, FlagSet as ContextFlags, State as ContextState},
-        mainloop::standard::{IterateResult, Mainloop},
-        operation::State as OperationState,
-        sample::{Format, Spec},
-        stream::{FlagSet, SeekMode, State as StreamState, Stream},
-    };
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut mainloop = Mainloop::new().ok_or(())?;
-    let mut context = Context::new(&mainloop, "Nickel local indications").ok_or(())?;
-    context
-        .connect(server, ContextFlags::NOAUTOSPAWN, None)
-        .map_err(|_| ())?;
-    let pump = |mainloop: &mut Mainloop| {
-        if Instant::now() >= deadline {
-            return Err(());
-        }
-        if matches!(
-            mainloop.iterate(false),
-            IterateResult::Err(_) | IterateResult::Quit(_)
-        ) {
-            return Err(());
-        }
-        std::thread::sleep(Duration::from_millis(2));
-        Ok(())
-    };
-    while context.get_state() != ContextState::Ready {
-        if matches!(
-            context.get_state(),
-            ContextState::Failed | ContextState::Terminated
-        ) {
-            return Err(());
-        }
-        pump(&mut mainloop)?;
-    }
-    let spec = Spec {
-        format: Format::S16le,
-        channels: 1,
-        rate: RATE,
-    };
-    let mut stream = Stream::new(&mut context, "Local control state", &spec, None).ok_or(())?;
-    stream
-        .connect_playback(None, None, FlagSet::ADJUST_LATENCY, None, None)
-        .map_err(|_| ())?;
-    while stream.get_state() != StreamState::Ready {
-        if matches!(
-            stream.get_state(),
-            StreamState::Failed | StreamState::Terminated
-        ) {
-            return Err(());
-        }
-        pump(&mut mainloop)?;
-    }
+    use pipewire as pw;
+    use pw::{properties::properties, spa};
+    use spa::pod::Pod;
+    use std::{cell::Cell, io::Cursor, rc::Rc};
+
+    pw::init();
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|_| ())?;
+    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|_| ())?;
+    let remote = server.map(|name| properties! { *pw::keys::REMOTE_NAME => name });
+    let core = context.connect_rc(remote).map_err(|_| ())?;
+    let stream = pw::stream::StreamBox::new(
+        &core,
+        "Nickel local indications",
+        properties! {
+            *pw::keys::MEDIA_TYPE => "Audio",
+            *pw::keys::MEDIA_CATEGORY => "Playback",
+            *pw::keys::MEDIA_ROLE => "Notification",
+        },
+    )
+    .map_err(|_| ())?;
+
+    let done = Rc::new(Cell::new(false));
+    let failed = Rc::new(Cell::new(false));
     let pcm = samples(cue);
-    let mut offset = 0;
-    while offset < pcm.len() {
-        pump(&mut mainloop)?;
-        let bytes = stream.writable_size().ok_or(())?.min(pcm.len() - offset) & !1;
-        if bytes != 0 {
-            stream
-                .write_copy(&pcm[offset..offset + bytes], 0, SeekMode::Relative)
-                .map_err(|_| ())?;
-            offset += bytes;
+    let listener = stream
+        .add_local_listener_with_user_data((pcm, 0usize, false))
+        .process(|stream, data| {
+            let Some(mut buffer) = stream.dequeue_buffer() else {
+                return;
+            };
+            let Some(audio) = buffer.datas_mut().first_mut() else {
+                return;
+            };
+            let Some(bytes) = audio.data() else {
+                return;
+            };
+            let count = (bytes.len().min(data.0.len() - data.1)) & !1;
+            bytes[..count].copy_from_slice(&data.0[data.1..data.1 + count]);
+            data.1 += count;
+            let chunk = audio.chunk_mut();
+            *chunk.offset_mut() = 0;
+            *chunk.stride_mut() = 2;
+            *chunk.size_mut() = count as u32;
+            drop(buffer);
+            if data.1 == data.0.len() && !data.2 {
+                data.2 = true;
+                let _ = stream.flush(true);
+            }
+        })
+        .drained({
+            let done = done.clone();
+            move |_, _| done.set(true)
+        })
+        .state_changed({
+            let failed = failed.clone();
+            move |_, _, _, state| {
+                if matches!(state, pw::stream::StreamState::Error(_)) {
+                    failed.set(true);
+                }
+            }
+        })
+        .register()
+        .map_err(|_| ())?;
+
+    let mut info = spa::param::audio::AudioInfoRaw::new();
+    info.set_format(spa::param::audio::AudioFormat::S16LE);
+    info.set_rate(RATE);
+    info.set_channels(1);
+    let values = spa::pod::serialize::PodSerializer::serialize(
+        Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(spa::pod::Object {
+            type_: spa_sys::SPA_TYPE_OBJECT_Format,
+            id: spa_sys::SPA_PARAM_EnumFormat,
+            properties: info.into(),
+        }),
+    )
+    .map_err(|_| ())?
+    .0
+    .into_inner();
+    let mut params = [Pod::from_bytes(&values).ok_or(())?];
+    stream
+        .connect(
+            spa::utils::Direction::Output,
+            None,
+            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+            &mut params,
+        )
+        .map_err(|_| ())?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !done.get() && !failed.get() && Instant::now() < deadline {
+        if mainloop
+            .loop_()
+            .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(20)))
+            < 0
+        {
+            break;
         }
     }
-    let drain = stream.drain(None);
-    while drain.get_state() == OperationState::Running {
-        pump(&mut mainloop)?;
-    }
-    let success = drain.get_state() == OperationState::Done;
-    drop(drain);
-    let _ = stream.disconnect();
-    drop(stream);
-    context.disconnect();
-    if success { Ok(()) } else { Err(()) }
+    drop(listener);
+    if done.get() { Ok(()) } else { Err(()) }
 }
 
 #[cfg(all(target_os = "windows", not(test)))]
@@ -322,11 +347,11 @@ mod tests {
     }
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "requires an explicitly owned dummy PulseAudio socket"]
+    #[ignore = "requires an explicitly owned dummy PipeWire server"]
     fn native_cues_use_owned_dummy_audio() {
-        let socket =
-            std::env::var("NICKEL_TEST_AUDIO_SOCKET").expect("explicit owned socket required");
-        assert!(socket.starts_with("unix:/tmp/nickel-cues-"));
+        let remote =
+            std::env::var("NICKEL_TEST_PIPEWIRE_REMOTE").expect("explicit owned remote required");
+        assert!(remote.starts_with("nickel-cues-"));
         for cue in [
             LifecycleCue::Start,
             LifecycleCue::Pause,
@@ -334,7 +359,7 @@ mod tests {
             LifecycleCue::Expired,
             LifecycleCue::Stop,
         ] {
-            assert_eq!(play_linux(cue, Some(&socket)), Ok(()));
+            assert_eq!(play_linux(cue, Some(&remote)), Ok(()));
         }
     }
     #[test]
