@@ -423,7 +423,7 @@ impl FileApp {
         self.resizing_details_column.is_some()
     }
 
-    pub(crate) fn navigation_pending(&self) -> bool {
+    pub fn navigation_pending(&self) -> bool {
         self.navigation_rx.is_some() || self.fixture_navigation_busy()
     }
 

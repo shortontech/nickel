@@ -6523,7 +6523,11 @@ impl NickelSession {
             .internal_codex
             .as_ref()
             .and_then(|host| host.next_deadline(&self.internal_ui));
-        let deadline = shell_deadline.into_iter().chain(codex_deadline).min();
+        let deadline = shell_deadline
+            .into_iter()
+            .chain(codex_deadline)
+            .chain(self.internal_ui.next_deadline())
+            .min();
         self.arm_internal_shell_timer(deadline);
     }
 
@@ -6695,6 +6699,9 @@ impl NickelSession {
     }
 
     pub(crate) fn poll_internal_shell(&mut self, now: Instant) {
+        if !self.internal_ui.poll_due(now).is_empty() {
+            self.schedule_internal_ui_frame();
+        }
         if self.internal_ui.take_surface_retirement() {
             self.schedule_remote_resource_retirement();
         }
@@ -7063,6 +7070,20 @@ impl NickelSession {
             .snapshot()
             .last()
             .is_some_and(|window| self.internal_surface_for_window(window.id).is_some())
+    }
+
+    pub(crate) fn foremost_internal_application_covers(
+        &self,
+        position: Point<f64, Logical>,
+    ) -> bool {
+        if !self.internal_applications_are_foremost() {
+            return false;
+        }
+        let point = (position.x, position.y);
+        self.internal_ui
+            .application_surface_at(point)
+            .is_some_and(|(id, _)| self.internal_ui.is_visible(id))
+            || self.internal_ui.internal_frame_target(point).is_some()
     }
 
     fn apply_internal_file_action(&mut self, action: nickel_file::FileWindowAction) {
@@ -18853,6 +18874,25 @@ mod protocol_tests {
         let window = session.internal_window_for_surface(surface).unwrap();
         assert!(session.internal_applications_are_foremost());
         assert_eq!(session.internal_ui.focused(), Some(surface));
+        let application_deadline = session.internal_ui.surface_deadline(surface).unwrap();
+        assert!(
+            session.internal_shell_timer.deadline <= Some(application_deadline),
+            "the shell timer must wake compositor-hosted file applications"
+        );
+        let (x, y, width, height) = session.internal_ui.placement(surface).unwrap().geometry;
+        assert!(
+            session
+                .foremost_internal_application_covers((f64::from(x + 1), f64::from(y + 1)).into())
+        );
+        assert!(
+            !session.foremost_internal_application_covers(
+                (
+                    f64::from(x + i32::try_from(width).unwrap() + 10),
+                    f64::from(y + i32::try_from(height).unwrap() + 10)
+                )
+                    .into()
+            )
+        );
         assert!(
             session
                 .protocol_windows()
@@ -18878,6 +18918,38 @@ mod protocol_tests {
             .file_windows_mut()
             .handle(request);
         assert!(matches!(action, nickel_file::FileWindowAction::Opened(_)));
+    }
+
+    #[test]
+    fn integrated_file_initial_location_completes_on_shell_timer() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        let directory = tempfile::tempdir().unwrap();
+        let action = session
+            .internal_shell
+            .as_mut()
+            .unwrap()
+            .file_windows_mut()
+            .handle(nickel_file::FileWindowRequest::OpenOrFocus(
+                nickel_file::FileLaunch::Browse(directory.path().into()),
+            ));
+        session.apply_internal_file_action(action);
+        let surface = *session.internal_file_surfaces.values().next().unwrap();
+        let loading = |session: &super::NickelSession| {
+            session
+                .internal_ui
+                .application::<nickel_file::FileApp>(surface)
+                .unwrap()
+                .navigation_pending()
+        };
+        assert!(loading(&session));
+        let timeout = Instant::now() + Duration::from_secs(2);
+        while loading(&session) && Instant::now() < timeout {
+            event_loop
+                .dispatch(Duration::from_millis(25), &mut session)
+                .unwrap();
+        }
+        assert!(!loading(&session), "file navigation did not finish");
     }
 
     impl nickel_ui::Application for InternalWindowTestApp {

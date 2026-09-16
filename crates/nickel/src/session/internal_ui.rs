@@ -2555,7 +2555,9 @@ impl InternalUiRuntime {
     ) -> Option<(InternalSurfaceId, UiPoint)> {
         self.presentation
             .iter()
-            .filter(|(_, surface)| surface.placement.role == InternalSurfaceRole::Application)
+            .filter(|(_, surface)| {
+                surface.visible && surface.placement.role == InternalSurfaceRole::Application
+            })
             .filter_map(|(id, surface)| {
                 let (x, y, width, height) = surface.placement.geometry;
                 (point.0 >= f64::from(x)

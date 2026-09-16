@@ -486,8 +486,8 @@ impl NickelSession {
         position: smithay::utils::Point<f64, Logical>,
         device: &str,
     ) -> bool {
-        let client_present =
-            self.client_scene_under(position) && !self.internal_applications_are_foremost();
+        let client_present = self.client_scene_under(position)
+            && !self.foremost_internal_application_covers(position);
         let modifiers = desktop_modifiers(&self.seat.get_keyboard().unwrap().modifier_state());
         let handled = self.internal_ui.desktop_pointer_input(
             device,
@@ -1252,8 +1252,8 @@ impl NickelSession {
                 let button_state = event.state();
 
                 let location = pointer.current_location();
-                let client_present =
-                    self.client_scene_under(location) && !self.internal_applications_are_foremost();
+                let client_present = self.client_scene_under(location)
+                    && !self.foremost_internal_application_covers(location);
                 let suppress_secondary_release = event.button() == Some(MouseButton::Right)
                     && button_state == ButtonState::Released
                     && self.suppress_secondary_button_release;
@@ -1995,8 +1995,8 @@ impl NickelSession {
                     axis_amount(event.amount(Axis::Vertical), vertical_amount_discrete);
 
                 let location = pointer.current_location();
-                let client_present =
-                    self.client_scene_under(location) && !self.internal_applications_are_foremost();
+                let client_present = self.client_scene_under(location)
+                    && !self.foremost_internal_application_covers(location);
                 let modifiers =
                     desktop_modifiers(&self.seat.get_keyboard().unwrap().modifier_state());
                 if self.internal_ui.desktop_pointer_input(
@@ -2051,8 +2051,8 @@ impl NickelSession {
                     .or_else(|| self.space.outputs().next().map(|output| output.name()));
                 let geometry = self.touch_output_geometry(output_name)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                let client_present =
-                    self.client_scene_under(location) && !self.internal_applications_are_foremost();
+                let client_present = self.client_scene_under(location)
+                    && !self.foremost_internal_application_covers(location);
                 let normalized = self.internal_ui.normalized_touch_input(
                     &event.device().id(),
                     i32::from(event.slot()) as u64,
