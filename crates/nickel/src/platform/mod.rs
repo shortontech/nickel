@@ -501,6 +501,8 @@ fn spawn_deferred_terminal(arguments: &[String]) -> Result<std::process::Child, 
         .env_remove("NICKEL_SESSION_CONTROL")
         .env_remove("NICKEL_SESSION_TOKEN")
         .env_remove("NICKEL_SHELL_TEST_CONTROL");
+    #[cfg(target_os = "linux")]
+    command.env_remove("__EGL_VENDOR_LIBRARY_FILENAMES");
     command.stdin(std::process::Stdio::piped());
     command
         .spawn()

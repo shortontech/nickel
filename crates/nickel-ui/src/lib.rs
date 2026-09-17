@@ -109,7 +109,8 @@ pub use ui::{
     Slider, SliderField, SourceLocation, Spacer, StartMenuNarrowPane, StartMenuShell, StyledText,
     StyledTextSpan, Surface, SurfaceRole, Switch, SwitchState, TabList, Text, TextAlign, TextField,
     TextMeasureCacheMode, TextUnderlineStyle, Tone, UiEvent, UiFrame, VerticalScroll,
-    VirtualColumn, VirtualWindow, search_settings, with_text_measure_cache_mode,
+    VirtualColumn, VirtualWindow, intrinsic_text_width, search_settings,
+    with_text_measure_cache_mode,
 };
 pub use ui_declarative_macros::{component, id, ui};
 

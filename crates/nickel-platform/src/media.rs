@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use image::{GenericImageView, ImageFormat, ImageReader, RgbaImage};
+use image::{DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader, RgbaImage};
 
 const MAX_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 16_384;
@@ -91,7 +91,7 @@ pub fn decode_image_preview(path: &Path) -> Result<DecodedPreview, PreviewDecode
         .map_err(|error| PreviewDecodeError::Corrupt(error.to_string()))?;
     admit_dimensions(width, height)?;
 
-    let decoded = ImageReader::open(path)
+    let mut decoder = ImageReader::open(path)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 PreviewDecodeError::Missing(path.to_owned())
@@ -101,9 +101,16 @@ pub fn decode_image_preview(path: &Path) -> Result<DecodedPreview, PreviewDecode
         })?
         .with_guessed_format()
         .map_err(|error| PreviewDecodeError::Corrupt(error.to_string()))?
-        .decode()
+        .into_decoder()
         .map_err(|error| PreviewDecodeError::Corrupt(error.to_string()))?;
-    let preview = if width > MAX_PREVIEW_EDGE || height > MAX_PREVIEW_EDGE {
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut decoded = DynamicImage::from_decoder(decoder)
+        .map_err(|error| PreviewDecodeError::Corrupt(error.to_string()))?;
+    decoded.apply_orientation(orientation);
+    let (source_width, source_height) = decoded.dimensions();
+    let preview = if source_width > MAX_PREVIEW_EDGE || source_height > MAX_PREVIEW_EDGE {
         decoded.thumbnail(MAX_PREVIEW_EDGE, MAX_PREVIEW_EDGE)
     } else {
         decoded
@@ -112,8 +119,8 @@ pub fn decode_image_preview(path: &Path) -> Result<DecodedPreview, PreviewDecode
     debug_assert!(preview_width <= MAX_PREVIEW_EDGE && preview_height <= MAX_PREVIEW_EDGE);
     Ok(DecodedPreview {
         image: Arc::new(preview.to_rgba8()),
-        source_width: width,
-        source_height: height,
+        source_width,
+        source_height,
     })
 }
 
@@ -134,6 +141,31 @@ fn admit_dimensions(width: u32, height: u32) -> Result<(), PreviewDecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jpeg_exif_orientation_is_applied_to_preview_and_dimensions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rotated.jpg");
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::new(2, 3))
+            .write_to(&mut jpeg, ImageFormat::Jpeg)
+            .unwrap();
+        let jpeg = jpeg.into_inner();
+        // EXIF orientation 6 rotates the stored 2x3 image 90° clockwise.
+        let exif = [
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'I', b'I', 0x2a, 0, 8, 0, 0, 0,
+            1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0,
+        ];
+        let mut oriented = Vec::with_capacity(jpeg.len() + exif.len());
+        oriented.extend_from_slice(&jpeg[..2]);
+        oriented.extend_from_slice(&exif);
+        oriented.extend_from_slice(&jpeg[2..]);
+        std::fs::write(&path, oriented).unwrap();
+
+        let decoded = decode_image_preview(&path).unwrap();
+        assert_eq!((decoded.source_width, decoded.source_height), (3, 2));
+        assert_eq!(decoded.image.dimensions(), (3, 2));
+    }
 
     #[test]
     fn dimensions_are_admitted_before_large_allocation() {

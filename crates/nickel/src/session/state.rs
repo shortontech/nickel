@@ -4032,6 +4032,8 @@ pub struct NickelSession {
         HashMap<nickel_ui::InternalSurfaceId, RemoteIndicatorAccessibility>,
     remote_indicator_accessibility_wake: smithay::reexports::calloop::channel::Sender<()>,
     internal_file_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+    internal_file_context_popup:
+        Option<(nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId)>,
     /// Latest motion is reduced immediately; scene work is bounded by frames.
     pending_desktop_scenes: HashSet<nickel_ui::InternalSurfaceId>,
     internal_shell_timer: InternalShellTimer,
@@ -6812,6 +6814,7 @@ impl NickelSession {
                 self.schedule_internal_ui_frame();
             }
         }
+        self.reconcile_internal_file_context_popup();
         let closing = self
             .internal_file_surfaces
             .iter()
@@ -6899,6 +6902,14 @@ impl NickelSession {
             .internal_ui
             .application::<nickel_file::FileApp>(surface)
             .is_some();
+        let application_id = if is_file {
+            "nickel-file".to_owned()
+        } else {
+            self.internal_codex
+                .as_ref()
+                .and_then(|codex| codex.project_application_id(surface))
+                .unwrap_or_else(|| "nickel-codex".to_owned())
+        };
         let title = self
             .internal_ui
             .title(surface)
@@ -6912,14 +6923,7 @@ impl NickelSession {
             id,
             WindowMetadataSource::Internal,
             Some(title),
-            Some(
-                if is_file {
-                    "nickel-file"
-                } else {
-                    "nickel-codex"
-                }
-                .to_owned(),
-            ),
+            Some(application_id),
         );
         self.internal_surface_windows.insert(surface, id);
         self.internal_window_surfaces.insert(id, surface);
@@ -7127,11 +7131,129 @@ impl NickelSession {
             }
             FileWindowAction::Closed(id) => {
                 if let Some(runtime) = self.internal_file_surfaces.remove(&id) {
+                    if self
+                        .internal_file_context_popup
+                        .is_some_and(|(_, parent)| parent == runtime)
+                    {
+                        self.close_internal_file_context_popup(None);
+                    }
                     self.unregister_internal_application(runtime);
                     self.internal_ui.remove(runtime);
                 }
             }
             FileWindowAction::NotFound(_) => {}
+        }
+    }
+
+    fn close_internal_file_context_popup(&mut self, action: Option<nickel_file::FileMessage>) {
+        let Some((popup, parent)) = self.internal_file_context_popup.take() else {
+            return;
+        };
+        self.internal_ui.remove(popup);
+        if let Some(app) = self
+            .internal_ui
+            .application_mut::<nickel_file::FileApp>(parent)
+        {
+            if let Some(action) = action.clone() {
+                app.apply_context_popup_action(action);
+            } else {
+                app.close_context_popup();
+            }
+            self.internal_ui.step(
+                parent,
+                nickel_ui::HostBatch {
+                    application_changed: true,
+                    ..Default::default()
+                },
+            );
+        }
+        if action.is_some() {
+            self.focus_internal_surface(parent);
+        }
+        self.schedule_internal_ui_frame();
+    }
+
+    fn reconcile_internal_file_context_popup(&mut self) {
+        if let Some((popup, parent)) = self.internal_file_context_popup {
+            let action = self
+                .internal_ui
+                .application_mut::<nickel_file::context_popup::FileContextPopup>(popup)
+                .and_then(nickel_file::context_popup::FileContextPopup::take_action);
+            let dismissed = self.internal_ui.open_overlay(popup).is_none()
+                || self.internal_ui.focused() != Some(popup)
+                || !self
+                    .internal_file_surfaces
+                    .values()
+                    .any(|surface| *surface == parent);
+            if action.is_some() || dismissed {
+                self.close_internal_file_context_popup(action);
+            }
+        }
+        if self.internal_file_context_popup.is_some() {
+            return;
+        }
+        let requests = self
+            .internal_file_surfaces
+            .values()
+            .filter_map(|parent| {
+                let placement = self.internal_ui.placement(*parent)?.clone();
+                let app = self
+                    .internal_ui
+                    .application_mut::<nickel_file::FileApp>(*parent)?;
+                let spec =
+                    app.take_context_popup_request(placement.geometry.2, placement.geometry.3)?;
+                Some((*parent, placement, spec))
+            })
+            .collect::<Vec<_>>();
+        for (parent, placement, spec) in requests {
+            let Some((output, output_x, output_y)) = self
+                .internal_outputs()
+                .into_iter()
+                .find(|(output, _, _)| Some(output.name.as_str()) == placement.output.as_deref())
+            else {
+                if let Some(app) = self
+                    .internal_ui
+                    .application_mut::<nickel_file::FileApp>(parent)
+                {
+                    app.close_context_popup();
+                }
+                continue;
+            };
+            let anchor = spec.anchor;
+            let host = nickel_file::context_popup::FileContextPopup::host(spec);
+            let (width, height) = nickel_ui::InternalUiSurface::logical_size(&host);
+            let max_x = output_x + (output.width as i32 - width as i32).max(0);
+            let max_y = output_y + (output.height as i32 - height as i32).max(0);
+            let x = (placement.geometry.0 + anchor.x.round() as i32).clamp(output_x, max_x);
+            let y = (placement.geometry.1 + anchor.y.round() as i32).clamp(output_y, max_y);
+            let popup = self.internal_ui.insert_boxed(
+                Box::new(host),
+                crate::session::InternalSurfacePlacement {
+                    role: crate::session::InternalSurfaceRole::Overlay,
+                    geometry: (x, y, width, height),
+                    output: Some(output.name),
+                },
+                output.scale,
+            );
+            self.internal_ui.step(
+                popup,
+                nickel_ui::HostBatch {
+                    scale_factor: Some(output.scale),
+                    ..Default::default()
+                },
+            );
+            self.internal_file_context_popup = Some((popup, parent));
+            self.internal_ui.step(
+                parent,
+                nickel_ui::HostBatch {
+                    application_changed: true,
+                    ..Default::default()
+                },
+            );
+            if !self.focus_internal_surface(popup) {
+                self.close_internal_file_context_popup(None);
+            }
+            break;
         }
     }
 
@@ -8353,6 +8475,102 @@ impl NickelSession {
         self.internal_ui.relocate(surface, placement)
     }
 
+    pub(crate) fn internal_resize_constraints(
+        &self,
+        surface: nickel_ui::InternalSurfaceId,
+    ) -> nickel_core::geometry_authority::GeometryConstraints {
+        let file = self
+            .internal_ui
+            .application::<nickel_file::FileApp>(surface)
+            .is_some();
+        nickel_core::geometry_authority::GeometryConstraints {
+            min_width: if file { 560 } else { 200 },
+            min_height: if file { 360 } else { 120 },
+            max_width: None,
+            max_height: None,
+        }
+    }
+
+    pub(crate) fn apply_internal_resize(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+        placement: crate::session::InternalSurfacePlacement,
+    ) -> bool {
+        let Some(id) = self.internal_surface_windows.get(&surface).copied() else {
+            return false;
+        };
+        let Some(current) = self.internal_ui.placement(surface) else {
+            return false;
+        };
+        let initial = internal_placement_geometry(current);
+        let desired = internal_placement_geometry(&placement);
+        self.geometry_authorities.entry(id).or_insert_with(|| {
+            nickel_core::geometry_authority::GeometryAuthority::new(
+                initial,
+                nickel_core::geometry_authority::Presentation::Normal,
+            )
+        });
+        let constraints = self.internal_resize_constraints(surface);
+        let baseline = self
+            .internal_move_baselines
+            .entry(surface)
+            .or_insert_with(|| self.geometry_authorities[&id].baseline());
+        let write = self
+            .geometry_authorities
+            .get_mut(&id)
+            .unwrap()
+            .authorize_placement(desired, constraints);
+        baseline.note_owned(
+            nickel_core::geometry_authority::GeometryField::Placement,
+            write.revision,
+        );
+        let scale = self.internal_ui.scale_factor(surface).unwrap_or(1.0);
+        self.internal_ui
+            .configure_surface(surface, placement, scale)
+    }
+
+    pub(crate) fn finish_internal_resize(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+        compensate: bool,
+    ) -> bool {
+        let Some(baseline) = self.internal_move_baselines.remove(&surface) else {
+            return false;
+        };
+        if !compensate {
+            return false;
+        }
+        let Some(id) = self.internal_surface_windows.get(&surface).copied() else {
+            return false;
+        };
+        let constraints = self.internal_resize_constraints(surface);
+        let report = self
+            .geometry_authorities
+            .get_mut(&id)
+            .unwrap()
+            .compensate(baseline, constraints);
+        if !matches!(
+            report.placement,
+            nickel_core::geometry_authority::CompensationResult::Exact
+                | nickel_core::geometry_authority::CompensationResult::Adjusted
+        ) {
+            return false;
+        }
+        let Some(mut placement) = self.internal_ui.placement(surface).cloned() else {
+            return false;
+        };
+        let desired = self.geometry_authorities[&id].base_placement.value;
+        placement.geometry = (
+            desired.x,
+            desired.y,
+            desired.width as u32,
+            desired.height as u32,
+        );
+        let scale = self.internal_ui.scale_factor(surface).unwrap_or(1.0);
+        self.internal_ui
+            .configure_surface(surface, placement, scale)
+    }
+
     pub fn step_internal_surface(
         &mut self,
         id: nickel_ui::InternalSurfaceId,
@@ -8867,6 +9085,7 @@ impl NickelSession {
     pub(crate) fn advertise_dmabuf_formats(
         &mut self,
         formats: impl IntoIterator<Item = smithay::backend::allocator::Format>,
+        main_device: Option<libc::dev_t>,
     ) {
         if self.dmabuf_global.is_some() {
             return;
@@ -8876,11 +9095,32 @@ impl NickelSession {
             tracing::warn!("renderer exposes no importable DMA-BUF formats");
             return;
         }
-        let global = self
-            .dmabuf_state
-            .create_global::<Self>(&self.display_handle, formats.iter().copied());
+        let global = if let Some(main_device) = main_device {
+            let feedback = match smithay::wayland::dmabuf::DmabufFeedbackBuilder::new(
+                main_device,
+                formats.iter().copied(),
+            )
+            .build()
+            {
+                Ok(feedback) => feedback,
+                Err(error) => {
+                    tracing::warn!(%error, "could not build DMA-BUF device feedback; using version 3");
+                    let global = self
+                        .dmabuf_state
+                        .create_global::<Self>(&self.display_handle, formats.iter().copied());
+                    self.dmabuf_global = Some(global);
+                    return;
+                }
+            };
+            self.dmabuf_state
+                .create_global_with_default_feedback::<Self>(&self.display_handle, &feedback)
+        } else {
+            self.dmabuf_state
+                .create_global::<Self>(&self.display_handle, formats.iter().copied())
+        };
         tracing::info!(
             formats = formats.len(),
+            version = if main_device.is_some() { 4 } else { 3 },
             "advertised renderer DMA-BUF formats"
         );
         self.dmabuf_global = Some(global);
@@ -9149,6 +9389,7 @@ impl NickelSession {
             remote_indicator_accessibility_wake,
             pending_desktop_scenes: HashSet::new(),
             internal_file_surfaces: HashMap::new(),
+            internal_file_context_popup: None,
             internal_shell_timer: InternalShellTimer::default(),
             internal_system_status_source: None,
             loop_signal,
@@ -17359,6 +17600,44 @@ mod protocol_tests {
     }
 
     #[test]
+    fn internal_resize_updates_placement_and_compensates_owned_geometry() {
+        #[derive(Default)]
+        struct App;
+        impl nickel_ui::Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("resizable")
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.insert_internal_surface(
+            App,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (10, 20, 300, 200),
+                output: Some("resize-test".into()),
+            },
+            1.0,
+        );
+        session.register_internal_application(surface).unwrap();
+        let mut resized = session.internal_ui.placement(surface).unwrap().clone();
+        resized.geometry = (10, 20, 420, 280);
+        assert!(session.apply_internal_resize(surface, resized));
+        assert_eq!(
+            session.internal_ui.placement(surface).unwrap().geometry,
+            (10, 20, 420, 280)
+        );
+        assert!(session.finish_internal_resize(surface, true));
+        assert_eq!(
+            session.internal_ui.placement(surface).unwrap().geometry,
+            (10, 20, 300, 200)
+        );
+    }
+
+    #[test]
     fn desired_geometry_record_does_not_reclaim_external_or_unknown_owner() {
         use crate::session::window_registry::WindowId;
         use nickel_core::geometry_authority::FieldOwner;
@@ -18918,6 +19197,119 @@ mod protocol_tests {
             .file_windows_mut()
             .handle(request);
         assert!(matches!(action, nickel_file::FileWindowAction::Opened(_)));
+    }
+
+    #[test]
+    fn integrated_file_context_menu_is_a_detached_clickable_overlay() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("rename-me.txt"), b"test").unwrap();
+        let action = session
+            .internal_shell
+            .as_mut()
+            .unwrap()
+            .file_windows_mut()
+            .handle(nickel_file::FileWindowRequest::OpenOrFocus(
+                nickel_file::FileLaunch::Browse(directory.path().into()),
+            ));
+        session.apply_internal_file_action(action);
+        let parent = *session.internal_file_surfaces.values().next().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while session
+            .internal_ui
+            .application::<nickel_file::FileApp>(parent)
+            .unwrap()
+            .navigation_pending()
+            && Instant::now() < deadline
+        {
+            event_loop
+                .dispatch(Duration::from_millis(25), &mut session)
+                .unwrap();
+        }
+        let entry = session
+            .internal_ui
+            .semantic_nodes(parent)
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("rename-me.txt"))
+            .expect("file entry");
+        let parent_geometry = session.internal_ui.placement(parent).unwrap().geometry;
+        session.internal_ui.step(
+            parent,
+            nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Normalized {
+                    input: nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+                        device: nickel_input::DeviceId(1),
+                        order: nickel_input::EventOrder(1),
+                        position: nickel_input::Point { x: 850.0, y: 610.0 },
+                        delta: None,
+                    }),
+                    clipboard_text: None,
+                }],
+                ..Default::default()
+            },
+        );
+        session.internal_ui.step(
+            parent,
+            nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Semantic {
+                    target: entry.id,
+                    action: nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::ContextMenu),
+                }],
+                ..Default::default()
+            },
+        );
+        session.reconcile_internal_file_context_popup();
+        let (popup, owner) = session.internal_file_context_popup.expect("detached popup");
+        assert_eq!(owner, parent);
+        let popup_geometry = session.internal_ui.placement(popup).unwrap().geometry;
+        assert!(
+            popup_geometry.0 + popup_geometry.2 as i32
+                > parent_geometry.0 + parent_geometry.2 as i32
+        );
+        assert_eq!(
+            session.internal_ui.placement(popup).unwrap().role,
+            crate::session::InternalSurfaceRole::Overlay
+        );
+        assert!(session.internal_ui.open_overlay(popup).is_some());
+        assert!(session.internal_ui.open_overlay(parent).is_none());
+        let rename = session
+            .internal_ui
+            .semantic_nodes(popup)
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("Rename"))
+            .expect("rename menu item");
+        let geometry = session.internal_ui.placement(popup).unwrap().geometry;
+        let point = (
+            f64::from(geometry.0)
+                + f64::from(rename.bounds.origin.x + rename.bounds.size.width / 2.0),
+            f64::from(geometry.1)
+                + f64::from(rename.bounds.origin.y + rename.bounds.size.height / 2.0),
+        );
+        for edge in [
+            nickel_input::KeyEdge::Pressed,
+            nickel_input::KeyEdge::Released,
+        ] {
+            assert!(session.internal_ui.desktop_pointer_input(
+                "test-context-menu",
+                point,
+                crate::session::internal_ui::DesktopPointerAction::Button {
+                    button: nickel_input::PointerButton::Primary,
+                    edge,
+                },
+                Default::default(),
+                false,
+            ));
+        }
+        session.reconcile_internal_file_context_popup();
+        assert!(session.internal_file_context_popup.is_none());
+        assert!(
+            session
+                .internal_ui
+                .application::<nickel_file::FileApp>(parent)
+                .unwrap()
+                .rename_in_progress()
+        );
     }
 
     #[test]

@@ -382,6 +382,12 @@ impl Launcher {
         self.applications.iter()
     }
 
+    pub fn place_applications(&self) -> impl Iterator<Item = &Application> {
+        self.applications
+            .iter()
+            .filter(|application| self.place_ids.contains(application.id()))
+    }
+
     pub(crate) fn discovered_applications(&self) -> impl Iterator<Item = &Application> {
         self.applications
             .iter()

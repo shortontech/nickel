@@ -10,6 +10,47 @@ use sha2::{Digest, Sha256};
 const MINIMUM_SELECTION_TEXT_CONTRAST: f32 = 4.5;
 
 #[test]
+fn window_title_tracks_the_active_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let pictures = directory.path().join("Pictures");
+    let documents = directory.path().join("Documents");
+    std::fs::create_dir(&pictures).unwrap();
+    std::fs::create_dir(&documents).unwrap();
+    let mut app = FileApp::new(pictures);
+    assert_eq!(Application::title(&app), "Pictures");
+    app.navigate_to(documents);
+    settle_navigation(&mut app);
+    assert_eq!(Application::title(&app), "Documents");
+}
+
+#[test]
+fn one_photo_does_not_queue_every_entry_in_a_large_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..128 {
+        std::fs::write(directory.path().join(format!("file-{index}.txt")), b"text").unwrap();
+    }
+    let photo = directory.path().join("photo.jpg");
+    std::fs::write(&photo, b"invalid image is still a thumbnail candidate").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
+
+    for entry in app.browser.entries() {
+        if entry.path != photo {
+            assert!(app.icons.get(&entry.path).is_some());
+        }
+    }
+    let receiver = app.icon_rx.take().expect("photo should queue a worker");
+    let (_, queued_path, _, _) = receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("photo worker should publish");
+    assert_eq!(queued_path, photo);
+    assert!(
+        receiver.try_recv().is_err(),
+        "generic files must not be queued"
+    );
+}
+
+#[test]
 fn first_press_drag_uses_shared_file_plane_capture_without_a_prior_click() {
     let (_directory, app) = selection_app(2);
     let expected = app.browser.entries()[0].path.clone();
@@ -448,6 +489,41 @@ fn pending_icon_work_uses_bounded_backoff() {
         app.poll_icons();
     }
     assert_eq!(app.icon_poll_delay, std::time::Duration::from_millis(250));
+}
+
+#[test]
+fn refreshing_before_photo_worker_publishes_does_not_strand_placeholder() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("photo.png");
+    image::RgbaImage::from_pixel(16, 8, image::Rgba([210, 20, 30, 255]))
+        .save(&path)
+        .unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
+    let request = icons::ArtworkRequest {
+        path: &path,
+        kind: icons::SemanticIconKind::ImageFile,
+        logical_size: 96,
+        scale_milli: app.artwork_scale_milli,
+        appearance: icons::ArtworkAppearance::Dark,
+    };
+    let key = icons::cache_key(FileIconPreference::Nickel, &request);
+    assert!(!app.icons.matches(&key), "placeholder is still pending");
+    app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !app.icons.matches(&key) && std::time::Instant::now() < deadline {
+        app.poll_icons();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(app.icons.matches(&key), "thumbnail worker did not publish");
+    assert!(
+        app.icons
+            .get(&path)
+            .unwrap()
+            .1
+            .pixels()
+            .any(|pixel| pixel.0 == [210, 20, 30, 255])
+    );
 }
 
 #[test]
@@ -1031,6 +1107,11 @@ fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
     assert!(name.size.width >= 120.0);
     assert!(name.origin.y >= first.origin.y);
     assert!(name.origin.y + name.size.height <= first.origin.y + first.size.height);
+    assert!(
+        (name.origin.y + name.size.height / 2.0 - first.origin.y - first.size.height / 2.0).abs()
+            <= 1.0,
+        "name={name:?} row={first:?}"
+    );
     assert!(first.origin.y + first.size.height <= second.origin.y);
 }
 
@@ -2450,6 +2531,99 @@ fn context_invocation_captures_anchor_and_target_identity() {
         menu.anchor,
         nickel_ui::OverlayAnchor::Point { point, .. } if point == anchor
     ));
+}
+
+#[test]
+fn integrated_f2_begins_rename_for_the_selected_file() {
+    let (_directory, mut app) = selection_app(1);
+    let identity = app.identity_at(0).unwrap();
+    app.selected = Some(identity);
+    app.selected_entries.insert(identity);
+    let mut host = UiHost::new(app, 860, 620);
+    assert!(host.shortcut(nickel_ui::Shortcut::Rename));
+    assert!(host.application().rename_editor.is_some());
+}
+
+#[test]
+fn unclaimed_context_menu_anchor_does_not_follow_pointer_motion() {
+    let (_directory, mut app) = selection_app(1);
+    app.cursor = Point { x: 10.0, y: 20.0 };
+    let first = Application::frame_overlays(
+        &app,
+        nickel_ui::ViewContext::new(
+            Rect::new(0.0, 0.0, 860.0, 620.0),
+            nickel_ui::InputModality::Pointer,
+        ),
+    );
+    app.cursor = Point { x: 400.0, y: 500.0 };
+    let second = Application::frame_overlays(
+        &app,
+        nickel_ui::ViewContext::new(
+            Rect::new(0.0, 0.0, 860.0, 620.0),
+            nickel_ui::InputModality::Pointer,
+        ),
+    );
+    let anchors = |overlays: Vec<nickel_ui::FrameOverlay<FileMessage>>| {
+        overlays
+            .into_iter()
+            .filter_map(|overlay| match overlay {
+                nickel_ui::FrameOverlay::Menu(menu) => Some(menu.anchor),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(anchors(first), anchors(second));
+}
+
+#[test]
+fn pointer_context_menu_stays_put_and_rename_item_activates() {
+    let (_directory, app) = selection_app(1);
+    let mut scenario = Scenario::new(app, 860, 620);
+    let entry = entry_selector(&scenario, "/file-entry-0");
+    scenario.pointer_context(&entry).unwrap();
+    assert!(scenario.host().application().context_target.is_some());
+    let rename = Selector::role_name(SemanticRole::MenuItem, "Rename");
+    let before = scenario
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.name.as_deref() == Some("Rename"))
+        .expect("rename menu item")
+        .bounds;
+    scenario.pointer_move(&rename).unwrap();
+    let after = scenario
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.name.as_deref() == Some("Rename"))
+        .expect("rename menu item after pointer motion")
+        .bounds;
+    assert_eq!(before, after);
+    scenario.pointer_activate(&rename).unwrap();
+    assert!(scenario.host().application().rename_editor.is_some());
+}
+
+#[test]
+fn overflowing_places_sidebar_scrolls_independently_of_files() {
+    let mut app = FileApp::fixture();
+    app.location_groups = vec![crate::platform::LocationGroup {
+        id: "many-places",
+        title: "Many places",
+        entries: (0..40)
+            .map(|index| {
+                (
+                    format!("Place {index}"),
+                    PathBuf::from(format!("/place-{index}")),
+                )
+            })
+            .collect(),
+    }];
+    let mut host = UiHost::new(app, 860, 360);
+    let result = host.handle_event(nickel_ui::UiEvent::Scroll {
+        point: Point { x: 90.0, y: 200.0 },
+        delta_y: 240.0,
+    });
+    assert!(result.changed);
+    assert!(host.application().sidebar_scroll_offset > 0.0);
+    assert_eq!(host.application().file_scroll_offset, 0.0);
 }
 
 #[test]

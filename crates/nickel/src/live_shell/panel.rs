@@ -101,6 +101,7 @@ pub struct PanelApplication {
     pub(super) panel_icon: Arc<image::RgbaImage>,
     pub(super) codex_icon: Arc<image::RgbaImage>,
     pub(super) task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>>,
+    pub(super) pet_frame: u8,
     pub(super) palette: ThemePalette,
     pub(super) panel_hover: Option<PanelHover>,
     pub(super) launcher_visible: bool,
@@ -224,16 +225,32 @@ impl nickel_ui::Application for PanelApplication {
 
     fn poll(&mut self) -> bool {
         let (clock, date) = panel_clock_text();
-        if self.clock == clock && self.date == date {
-            return false;
-        }
+        let clock_changed = self.clock != clock || self.date != date;
         self.clock = clock;
         self.date = date;
-        true
+        let pets_visible = self.groups.iter().take(12).any(|group| {
+            group
+                .application_id
+                .as_ref()
+                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+        });
+        if pets_visible {
+            self.pet_frame = (self.pet_frame + 1) % 4;
+        }
+        clock_changed || pets_visible
     }
 
     fn poll_interval(&self) -> Option<Duration> {
-        Some(duration_until_next_minute())
+        if self.groups.iter().take(12).any(|group| {
+            group
+                .application_id
+                .as_ref()
+                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+        }) {
+            Some(Duration::from_millis(360))
+        } else {
+            Some(duration_until_next_minute())
+        }
     }
 }
 
@@ -257,6 +274,7 @@ impl PanelApplication {
             panel_icon: Arc::clone(&icon),
             codex_icon: icon,
             task_icons: Vec::new(),
+            pet_frame: 0,
             palette,
             panel_hover: None,
             launcher_visible: false,
@@ -369,9 +387,14 @@ impl PanelApplication {
         let groups = &self.groups;
         for (index, group) in groups.iter().take(12).enumerate() {
             let hovered = self.panel_hover == Some(PanelHover::Task(index));
+            let is_codex_pet = group
+                .application_id
+                .as_ref()
+                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."));
             let icon = self.task_icons.get(index).cloned().flatten();
             let visual = if let Some((id, image)) = icon {
-                AnyView::new(Image::new(id, image).width(32.0).height(32.0))
+                let size = if is_codex_pet { 40.0 } else { 32.0 };
+                AnyView::new(Image::new(id, image).width(size).height(size))
             } else {
                 let initial = group
                     .application_name
@@ -416,11 +439,20 @@ impl PanelApplication {
                     .on_drag((PanelAction::Task(index), map_task_drag))
                     .width(PANEL_ITEM_WIDTH)
                     .height(height)
-                    .padding(Insets {
-                        top: 7.0,
-                        right: 10.0,
-                        bottom: 3.0,
-                        left: 10.0,
+                    .padding(if is_codex_pet {
+                        Insets {
+                            top: 3.0,
+                            right: 6.0,
+                            bottom: 2.0,
+                            left: 6.0,
+                        }
+                    } else {
+                        Insets {
+                            top: 7.0,
+                            right: 10.0,
+                            bottom: 3.0,
+                            left: 10.0,
+                        }
                     })
                     .background(
                         if self.task_drag.is_some_and(|(dragged, _)| dragged == index) {

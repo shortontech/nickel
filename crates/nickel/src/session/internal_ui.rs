@@ -2472,6 +2472,10 @@ impl InternalUiRuntime {
         self.focused
     }
 
+    pub(crate) fn open_overlay(&self, id: InternalSurfaceId) -> Option<nickel_ui::OverlayId> {
+        self.surfaces.get(id)?.inspect().open_overlay
+    }
+
     pub(crate) fn focused_field_lease(
         &self,
         id: InternalSurfaceId,

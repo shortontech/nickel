@@ -394,6 +394,9 @@ impl Default for ShortcutState {
 pub struct StartMenuShell<Message = String> {
     theme: SemanticTheme,
     available_width: f32,
+    viewport_width: f32,
+    preferred_height: Option<f32>,
+    primary_width: f32,
     header: Option<AnyView<Message>>,
     primary: AnyView<Message>,
     detail: AnyView<Message>,
@@ -414,6 +417,9 @@ impl<Message> StartMenuShell<Message> {
         Self {
             theme,
             available_width,
+            viewport_width: available_width,
+            preferred_height: None,
+            primary_width: 280.0,
             header: None,
             primary: AnyView::new(primary),
             detail: AnyView::new(detail),
@@ -427,6 +433,21 @@ impl<Message> StartMenuShell<Message> {
 
     pub fn header(mut self, header: impl Component<Message>) -> Self {
         self.header = Some(AnyView::new(header));
+        self
+    }
+
+    pub fn primary_width(mut self, width: f32) -> Self {
+        self.primary_width = width;
+        self
+    }
+
+    pub fn viewport_width(mut self, width: f32) -> Self {
+        self.viewport_width = width;
+        self
+    }
+
+    pub fn preferred_height(mut self, height: f32) -> Self {
+        self.preferred_height = Some(height.max(1.0));
         self
     }
 
@@ -462,6 +483,9 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
         let Self {
             theme,
             available_width,
+            viewport_width,
+            preferred_height,
+            primary_width,
             header,
             primary,
             detail,
@@ -478,7 +502,7 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
             }
             pane
         };
-        let narrow = available_width < START_MENU_SINGLE_PANE_BREAKPOINT;
+        let narrow = viewport_width < START_MENU_SINGLE_PANE_BREAKPOINT;
         let content = if narrow {
             let (content, footer) = match narrow_pane {
                 StartMenuNarrowPane::Primary => (primary, primary_footer),
@@ -514,7 +538,7 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
                 .child(
                     Container::new()
                         .id("start-menu-primary-pane")
-                        .width(280.0)
+                        .width(primary_width)
                         .navigation_scope(crate::NavigationScope::pane(false))
                         .controller_scope_background(crate::focused_surface(
                             theme.surfaces.card,
@@ -559,15 +583,19 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
         if let Some(legend) = legend {
             root = root.child(legend);
         }
-        Container::new()
-            .fill_width()
-            .fill_height()
+        let mut shell = Container::new()
+            .width(available_width)
             .padding(Insets::all(shell_padding))
             .background(theme.surfaces.window)
             .border(theme.borders.ordinary, theme.sizing.border)
             .radius(theme.radii.card)
-            .child(root)
-            .into_element()
+            .child(root);
+        shell = if let Some(height) = preferred_height {
+            shell.height(height)
+        } else {
+            shell.fill_height()
+        };
+        shell.into_element()
     }
 }
 
@@ -686,12 +714,12 @@ impl<Message> ShortcutRow<Message> {
         }
         let content = Row::new()
             .fill_width()
-            .gap(theme.spacing.content)
+            .gap(theme.spacing.control)
             .align_items(Align::Center)
             .child(
                 Container::new()
-                    .width(36.0)
-                    .min_height(36.0)
+                    .width(32.0)
+                    .min_height(32.0)
                     .shrink(0.0)
                     .align_items(Align::Center)
                     .justify_content(Justify::Center)
@@ -742,8 +770,8 @@ impl<Message> ShortcutRow<Message> {
         });
         let mut row = Container::new()
             .fill_width()
-            .min_height(52.0)
-            .padding(Insets::all(theme.spacing.control))
+            .min_height(44.0)
+            .padding(Insets::symmetric(4.0, theme.spacing.control))
             .radius(theme.radii.control)
             .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
             .accessibility_label(label)

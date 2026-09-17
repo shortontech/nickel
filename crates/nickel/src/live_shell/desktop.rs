@@ -813,6 +813,8 @@ impl DesktopApplication {
                     "nickel-settings"
                 });
                 let mut command = std::process::Command::new(exe);
+                #[cfg(target_os = "linux")]
+                command.env_remove("__EGL_VENDOR_LIBRARY_FILENAMES");
                 command.args(destination.arguments());
                 #[cfg(target_os = "linux")]
                 crate::model::authorize_trusted_session_client(&mut command);

@@ -24,6 +24,8 @@ impl FileWindowHost for ExternalFileWindowHost {
                 "nickel-file"
             });
         let mut command = std::process::Command::new(executable);
+        #[cfg(target_os = "linux")]
+        command.env_remove("__EGL_VENDOR_LIBRARY_FILENAMES");
         match launch {
             FileLaunch::Browse(path) => command.arg(path),
             FileLaunch::Properties(path) => command.arg("--properties").arg(path),

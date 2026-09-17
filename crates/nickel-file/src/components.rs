@@ -611,10 +611,8 @@ pub(crate) fn places_sidebar(
 ) -> AnyView<FileMessage> {
     AnyView::new(ui! {
         <Sidebar width={width} background={palette.panel} padding={Insets {
-            top: 14.0, right: 10.0, bottom: 12.0, left: 10.0,
+            top: 8.0, right: 10.0, bottom: 12.0, left: 10.0,
         }} gap={3.0}>
-            <Text height={34.0} scale={1.55} color={palette.text}>{"Nickel File"}</Text>
-            <HorizontalRule color={palette.muted} spacing_pair={(5.0, 8.0)} />
             <Column gap={4.0} children={groups} />
         </Sidebar>
     })
@@ -629,17 +627,17 @@ pub(crate) fn location_group(
 ) -> AnyView<FileMessage> {
     let group_id = id.to_owned();
     AnyView::new(ui! {
-        <Column id={format!("location-group-{id}")} gap={2.0}>
-            <Container height={28.0} on_press={FileMessage::ToggleLocationGroup(group_id)}
+        <Column id={format!("location-group-{id}")} gap={1.0}>
+            <Container height={25.0} on_press={FileMessage::ToggleLocationGroup(group_id)}
                 focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                 accessibility_label={format!("{} {title}", if collapsed { "Expand" } else { "Collapse" })}
-                padding={Insets { top: 6.0, right: 4.0, bottom: 4.0, left: 4.0 }}>
+                padding={Insets { top: 4.0, right: 4.0, bottom: 3.0, left: 4.0 }}>
                 <Row gap={7.0}>
                     <Text width={12.0} color={palette.muted}>{if collapsed { "›" } else { "⌄" }}</Text>
                     <Text color={palette.muted}>{title}</Text>
                 </Row>
             </Container>
-            {if collapsed { ui! { <></> } } else { ui! { <Column gap={2.0} children={rows} /> } }}
+            {if collapsed { ui! { <></> } } else { ui! { <Column gap={1.0} children={rows} /> } }}
         </Column>
     })
 }
@@ -771,17 +769,17 @@ pub(crate) fn details_row(
         )
     };
     ui! {
-        <Container id={format!("file-entry-{index}")} height={58.0}
+        <Container id={format!("file-entry-{index}")} height={40.0}
             background={if selected { palette.accent_soft } else { palette.background }}
             hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
-            padding={Insets { top: 7.0, right: 10.0, bottom: 7.0, left: 10.0 }}
+            padding={Insets { top: 6.0, right: 10.0, bottom: 6.0, left: 10.0 }}
             on_press={FileMessage::Entry(index)} context_message={FileMessage::ContextEntry(index)}
             on_drag={(FileMessage::Entry(index), file_entry_drag_message)}
             semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()}
             focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}>
-            <Row gap={12.0}>
+            <Row gap={12.0} align_items={nickel_ui::Align::Center}>
                 <Image asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)} fit={ImageFit::Contain} width={28.0} height={28.0} />
-                <Container id={format!("details-name-{index}")} grow={1.0} min_width={120.0} height={44.0}>
+                <Container id={format!("details-name-{index}")} grow={1.0} min_width={120.0} height={28.0}>
                     <Text color={palette.text} wrap={true} max_lines={2} ellipsis={true} line_height={18.0}>{entry.display_name()}</Text>
                 </Container>
                 <Text id={format!("details-type-{index}")} width={widths.type_width} color={palette.muted}>{kind}</Text>

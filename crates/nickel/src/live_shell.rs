@@ -114,10 +114,10 @@ use crate::notification::{NotificationAction, NotificationRequest};
 use crate::{
     control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
     file_window_host::{FileWindowHost, default_file_window_host},
-    launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher},
+    launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherView},
     launcher_view::{
-        LauncherAction, LauncherApplication, LauncherIconCache, LauncherShellEffect,
-        LauncherViewState, reduce_launcher_action,
+        DashboardNarrowPage, LauncherAction, LauncherApplication, LauncherIconCache,
+        LauncherShellEffect, LauncherViewState, reduce_launcher_action,
     },
     model::{Application, OpenWindow, TrayItem, WindowGroup},
     notification::DesktopNotification,
@@ -1053,6 +1053,7 @@ impl LiveShell {
                 panel_icon: Arc::clone(&panel_icon),
                 codex_icon: Arc::clone(&codex_icon),
                 task_icons: Vec::new(),
+                pet_frame: 0,
                 palette,
                 panel_hover: None,
                 launcher_visible: false,
@@ -4854,6 +4855,9 @@ impl LiveShell {
         } else {
             self.run_visible = false;
             self.launcher.clear();
+            self.launcher.set_view(LauncherView::Favorites);
+            self.launcher_view.dashboard_selected = 0;
+            self.launcher_view.dashboard_narrow_page = DashboardNarrowPage::Primary;
         }
     }
 
@@ -5842,10 +5846,29 @@ impl LiveShell {
     }
 
     fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        let had_project_pet = self.panel_host.application().groups.iter().take(12).any(|group| {
+            group
+                .application_id
+                .as_ref()
+                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+        });
         let application_changed = self.sync_panel_host();
+        let has_project_pet = self.panel_host.application().groups.iter().take(12).any(|group| {
+            group
+                .application_id
+                .as_ref()
+                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+        });
         let outcome = self.panel_host.step(HostBatch {
             application_changed,
             surface_size: Some((width, height)),
+            // A previously minute-based clock deadline must be replaced with the
+            // animation cadence as soon as the first Codex project appears.
+            events: if has_project_pet && !had_project_pet {
+                vec![HostEvent::Poll]
+            } else {
+                Vec::new()
+            },
             ..HostBatch::default()
         });
         self.panel_change_token = outcome.change_token;
@@ -5914,10 +5937,20 @@ impl LiveShell {
     fn sync_panel_host(&mut self) -> bool {
         let groups = self.panel_groups();
         let tasks_changed = !Arc::ptr_eq(&groups, &self.panel_host.application().groups);
+        let pet_frame = self.panel_host.application().pet_frame;
         let task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>> = groups
             .iter()
             .take(12)
             .map(|group| {
+                // Project identity takes precedence over the generic Codex icon and
+                // is shared by every window in the same project group.
+                if let Some(pet) = group
+                    .application_id
+                    .as_ref()
+                    .and_then(|id| crate::icons::codex_pet(id.as_str(), pet_frame))
+                {
+                    return Some(pet);
+                }
                 group
                     .application_id
                     .as_ref()
@@ -5929,6 +5962,12 @@ impl LiveShell {
                             .as_ref()
                             .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
                             .then(|| (0x3002, Arc::clone(&self.codex_icon)))
+                    })
+                    .or_else(|| {
+                        group
+                            .application_id
+                            .as_ref()
+                            .and_then(|id| crate::icons::nickel_application(id.as_str()))
                     })
                     .or_else(|| crate::icons::nickel_application(&group.application_name))
                     .or_else(|| {

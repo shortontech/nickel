@@ -161,6 +161,18 @@ impl InternalCodexHost {
             .chain(self.chats.iter().map(|chat| chat.id))
     }
 
+    pub fn project_application_id(&self, surface: InternalSurfaceId) -> Option<String> {
+        self.chats
+            .iter()
+            .find(|chat| chat.id == surface)
+            .map(|chat| {
+                crate::codex_project_application_id(
+                    Some(&chat.project_id),
+                    std::path::Path::new(""),
+                )
+            })
+    }
+
     pub fn active_chat_count(&self) -> u32 {
         self.chats.len().min(u32::MAX as usize) as u32
     }
@@ -485,6 +497,25 @@ mod tests {
             geometry: (10, 20, 640, 480),
             output: Some("test".into()),
         }
+    }
+
+    #[test]
+    fn chat_project_identity_matches_native_codex_windows() {
+        let mut runtime = InternalUiRuntime::default();
+        let first = runtime.insert(TestApp, placement(InternalSurfaceRole::Application), 1.0);
+        let second = runtime.insert(TestApp, placement(InternalSurfaceRole::Application), 1.0);
+        let mut host = host();
+        for id in [first, second] {
+            host.chats.push(ChatSurface {
+                id,
+                project_id: "project-1".into(),
+                thread_id: None,
+            });
+        }
+        let expected =
+            crate::codex_project_application_id(Some("project-1"), std::path::Path::new(""));
+        assert_eq!(host.project_application_id(first), Some(expected.clone()));
+        assert_eq!(host.project_application_id(second), Some(expected));
     }
 
     #[test]

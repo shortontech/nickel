@@ -339,6 +339,72 @@
     }
 
     #[test]
+    fn codex_windows_share_one_animated_project_face_in_the_panel() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(Vec::new());
+        shell.windows = [
+            (1, "io.nickel.codex.project.alpha"),
+            (2, "io.nickel.codex.project.alpha"),
+            (3, "io.nickel.codex.project.beta"),
+        ]
+        .into_iter()
+        .map(|(id, application_id)| OpenWindow {
+            id: WindowId(id),
+            application_id: Some(ApplicationId::new(application_id)),
+            active: id == 1,
+            title: format!("Codex {id}"),
+            state: Default::default(),
+        })
+        .collect();
+
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        assert!(shell
+            .panel_deadline
+            .is_some_and(|deadline| deadline <= Instant::now() + Duration::from_millis(400)));
+        let groups = &shell.panel_host.application().groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.windows.len())
+                .sum::<usize>(),
+            3
+        );
+        let initial = shell.panel_host.application().task_icons[0]
+            .as_ref()
+            .unwrap()
+            .0;
+        let now = Instant::now();
+        shell.panel_deadline = Some(now);
+        assert!(shell.poll_host_deadlines(now).contains(&SurfaceRole::Panel));
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let animated = shell.panel_host.application().task_icons[0]
+            .as_ref()
+            .unwrap()
+            .0;
+        assert_ne!(initial, animated);
+        assert_eq!((initial - 0x3100) / 4, (animated - 0x3100) / 4);
+    }
+
+    #[test]
+    fn internal_file_window_keeps_its_icon_when_titled_after_a_folder() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(Vec::new());
+        shell.windows = vec![OpenWindow {
+            id: WindowId(1),
+            application_id: Some(ApplicationId::new("nickel-file")),
+            active: true,
+            title: "Music".into(),
+            state: Default::default(),
+        }];
+
+        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+
+        assert_eq!(shell.panel_host.application().groups[0].application_name, "Music");
+        assert_eq!(shell.panel_host.application().task_icons[0].as_ref().unwrap().0, 0x3001);
+    }
+
+    #[test]
     fn taskbar_drag_reorders_a_pin_without_emitting_activation() {
         let mut launcher = crate::launcher::Launcher::new(vec![
             crate::model::Application::new(

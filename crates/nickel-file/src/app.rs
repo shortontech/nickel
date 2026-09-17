@@ -67,6 +67,11 @@ fn entry_context_menu_id(path: &std::path::Path) -> String {
     format!("file-entry-context-{:016x}", hasher.finish())
 }
 
+pub struct FileContextPopupSpec {
+    pub anchor: Point,
+    pub menu: OverlayMenu<FileMessage>,
+}
+
 pub(crate) fn drop_target_id(prefix: &str, path: &std::path::Path) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
@@ -164,6 +169,7 @@ pub enum FileMessage {
     SelectionSurface,
     SelectionSurfaceDrag(nickel_ui::DragGesture),
     FileScroll(f32),
+    SidebarScroll(f32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,6 +243,8 @@ pub struct FileApp {
     pub(crate) context_anchor: Option<Point>,
     pub(crate) context_target: Option<PathBuf>,
     pub(crate) context_selection: Vec<PathBuf>,
+    context_popup_requested: bool,
+    context_popup_detached: bool,
     pub(crate) properties: Option<crate::properties::EntryProperties>,
     pub(crate) properties_association: Option<nickel_platform::AssociationSnapshot>,
     properties_association_rx:
@@ -293,6 +301,7 @@ pub struct FileApp {
     pub(crate) address_text: String,
     pub(crate) tile_width: f32,
     pub(crate) file_scroll_offset: f32,
+    pub(crate) sidebar_scroll_offset: f32,
     pub(crate) view_mode: FileViewMode,
     pub(crate) sort_key: EntrySortKey,
     pub(crate) sort_direction: SortDirection,
@@ -384,6 +393,50 @@ pub(crate) struct FileTab {
 }
 
 impl FileApp {
+    pub fn take_context_popup_request(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Option<FileContextPopupSpec> {
+        if !std::mem::take(&mut self.context_popup_requested) {
+            return None;
+        }
+        let expected = self
+            .context_target
+            .as_ref()
+            .map(|path| entry_context_menu_id(path))
+            .unwrap_or_else(|| "file-background-context".into());
+        let menu = self
+            .frame_overlays(ViewContext::new(
+                nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
+                nickel_ui::InputModality::Pointer,
+            ))
+            .into_iter()
+            .find_map(|overlay| match overlay {
+                FrameOverlay::Menu(menu) if menu.id.as_ui_id().as_str() == expected => Some(menu),
+                _ => None,
+            })?;
+        self.context_popup_detached = true;
+        Some(FileContextPopupSpec {
+            anchor: self.context_anchor.unwrap_or(self.cursor),
+            menu,
+        })
+    }
+
+    pub fn close_context_popup(&mut self) {
+        self.context_popup_detached = false;
+        self.context_anchor = None;
+    }
+
+    pub fn apply_context_popup_action(&mut self, action: FileMessage) {
+        self.close_context_popup();
+        self.update_message(action);
+    }
+
+    pub fn rename_in_progress(&self) -> bool {
+        self.rename_editor.is_some()
+    }
+
     /// Returns whether the containing window should be closed.
     pub fn close_requested(&self) -> bool {
         self.exit_requested
@@ -601,6 +654,8 @@ impl FileApp {
             context_anchor: None,
             context_target: None,
             context_selection: Vec::new(),
+            context_popup_requested: false,
+            context_popup_detached: false,
             properties: None,
             properties_association: None,
             properties_association_rx: None,
@@ -658,6 +713,7 @@ impl FileApp {
             address_text: String::new(),
             tile_width: DEFAULT_TILE_WIDTH,
             file_scroll_offset: 0.0,
+            sidebar_scroll_offset: 0.0,
             view_mode: FileViewMode::Grid,
             sort_key: EntrySortKey::Name,
             sort_direction: SortDirection::Ascending,
@@ -1532,8 +1588,11 @@ impl FileApp {
                 entries.push((path, true, key));
             }
         }
-        self.icons
-            .retain(|path| entries.iter().any(|(entry, _, _)| entry == path));
+        let retained_paths = entries
+            .iter()
+            .map(|(path, _, _)| path.clone())
+            .collect::<HashSet<_>>();
+        self.icons.retain(|path| retained_paths.contains(path));
         let mut paths = entries
             .into_iter()
             .filter(|(_, _, key)| !self.icons.matches(key))
@@ -1549,6 +1608,12 @@ impl FileApp {
         let current_key =
             icons::cache_key_with_theme(preference, self.icon_theme.as_deref(), &current_request);
         paths.push((current, true, current_key));
+
+        let needs_async = |path: &std::path::Path, is_directory: bool| {
+            preference != FileIconPreference::Nickel
+                || (!is_directory
+                    && icons::supports_photo_thumbnail(path, icons::semantic_kind(path, false)))
+        };
 
         // Nickel artwork is the guaranteed first frame. A selected system
         // provider may replace it asynchronously, but native lookup must never
@@ -1567,10 +1632,16 @@ impl FileApp {
             let id = self.next_icon_id;
             self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
             self.assign_tab_icon(path, (id, artwork.pixels.clone()));
-            self.icons
-                .insert_resolved(key.clone(), (id, artwork.pixels));
+            if needs_async(path, *is_directory) {
+                self.icons
+                    .insert_pending(path.clone(), (id, artwork.pixels));
+            } else {
+                self.icons
+                    .insert_resolved(key.clone(), (id, artwork.pixels));
+            }
         }
-        if preference == FileIconPreference::Nickel {
+        paths.retain(|(path, is_directory, _)| needs_async(path, *is_directory));
+        if paths.is_empty() {
             self.icon_rx = None;
             return;
         }
@@ -1593,17 +1664,20 @@ impl FileApp {
                 for (path, is_directory, key) in paths {
                     #[cfg(debug_assertions)]
                     let profile_started = Instant::now();
-                    let artwork = icons::resolve_artwork_with_theme(
-                        preference,
-                        icon_theme.as_deref(),
-                        &icons::ArtworkRequest {
-                            path: &path,
-                            kind: icons::semantic_kind(&path, is_directory),
-                            logical_size: 96,
-                            scale_milli: artwork_scale_milli,
-                            appearance: artwork_appearance,
-                        },
-                    );
+                    let request = icons::ArtworkRequest {
+                        path: &path,
+                        kind: icons::semantic_kind(&path, is_directory),
+                        logical_size: 96,
+                        scale_milli: artwork_scale_milli,
+                        appearance: artwork_appearance,
+                    };
+                    let artwork = icons::resolve_photo_thumbnail(&request).unwrap_or_else(|| {
+                        icons::resolve_artwork_with_theme(
+                            preference,
+                            icon_theme.as_deref(),
+                            &request,
+                        )
+                    });
                     #[cfg(debug_assertions)]
                     if std::env::var_os("NICKEL_FILE_PROFILE_ICONS").is_some() {
                         let dimensions =
@@ -1911,6 +1985,7 @@ impl FileApp {
             FileMessage::Paste => self.paste_file_clipboard(),
             FileMessage::ContextEntry(index) => {
                 self.context_anchor = Some(self.cursor);
+                self.context_popup_requested = true;
                 self.context_target = self
                     .browser
                     .entries()
@@ -1930,6 +2005,7 @@ impl FileApp {
             }
             FileMessage::ContextBackground => {
                 self.context_anchor = Some(self.cursor);
+                self.context_popup_requested = true;
                 self.context_target = None;
                 self.context_selection.clear();
                 self.selection_drag = None;
@@ -2416,6 +2492,7 @@ impl FileApp {
                 }
             }
             FileMessage::FileScroll(offset) => self.file_scroll_offset = offset.max(0.0),
+            FileMessage::SidebarScroll(offset) => self.sidebar_scroll_offset = offset.max(0.0),
         }
     }
 
@@ -2887,10 +2964,13 @@ impl Application for FileApp {
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
         let palette = ThemePalette::from_appearance(appearance);
         let invocation_anchor = |target: UiId| match context.modality {
-            nickel_ui::InputModality::Pointer => OverlayAnchor::Point {
-                invocation_target: target,
-                point: self.context_anchor.unwrap_or(self.cursor),
-            },
+            nickel_ui::InputModality::Pointer if self.context_anchor.is_some() => {
+                OverlayAnchor::Point {
+                    invocation_target: target,
+                    point: self.context_anchor.unwrap(),
+                }
+            }
+            nickel_ui::InputModality::Pointer => OverlayAnchor::InvocationTargetCenter(target),
             nickel_ui::InputModality::Keyboard
             | nickel_ui::InputModality::Controller
             | nickel_ui::InputModality::Accessibility => {
@@ -2898,13 +2978,13 @@ impl Application for FileApp {
             }
         };
         let configure = |mut menu: OverlayMenu<FileMessage>| {
-            menu.width = 250.0;
-            menu.row_height = 34.0;
-            menu.padding = Insets::all(4.0);
-            menu.radius = 7.0;
+            menu.width = 220.0;
+            menu.row_height = 28.0;
+            menu.padding = Insets::all(2.0);
+            menu.radius = 6.0;
             menu.background = palette.surface;
             menu.foreground = palette.text;
-            menu.text_scale = 1.2;
+            menu.text_scale = 1.1;
             menu.item_hover = Some(palette.surface_hover);
             menu.item_pressed = Some(palette.accent_soft);
             menu.item_selected = Some(palette.accent_soft);
@@ -3141,6 +3221,9 @@ impl Application for FileApp {
                 crate::components::properties_dialog(self, properties, palette),
             ));
         }
+        if self.context_popup_detached {
+            overlays.retain(|overlay| !matches!(overlay, FrameOverlay::Menu(_)));
+        }
         overlays
     }
 
@@ -3263,6 +3346,15 @@ impl Application for FileApp {
         .min()
     }
 
+    fn shortcut_outcome(&mut self, shortcut: nickel_ui::Shortcut) -> nickel_ui::ShortcutOutcome {
+        if shortcut == nickel_ui::Shortcut::Rename {
+            let available = self.selected_entries.len() == 1;
+            self.update_message(FileMessage::BeginRename);
+            return nickel_ui::ShortcutOutcome::handled(available);
+        }
+        nickel_ui::ShortcutOutcome::from_changed(false)
+    }
+
     fn scale_factor_changed(&mut self, scale_factor: f32) -> bool {
         let scale_milli = (scale_factor.clamp(0.25, 8.0) * 1_000.0).round() as u16;
         if scale_milli == self.artwork_scale_milli {
@@ -3276,7 +3368,12 @@ impl Application for FileApp {
     }
 
     fn title(&self) -> &str {
-        "Nickel File"
+        self.browser
+            .current()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .or_else(|| self.browser.current().to_str())
+            .unwrap_or("Nickel File")
     }
 
     fn initial_size(&self) -> (u32, u32) {

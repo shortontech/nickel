@@ -32,7 +32,8 @@ use smithay::{
 
 use crate::session::{
     grabs::{
-        MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab,
+        MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeInternalSurfaceGrab,
+        ResizeSurfaceGrab,
         move_grab::WindowPointerOperation,
         move_internal_grab::operation_window,
         resize_grab::{operation_geometry_constraints, operation_resize_edges},
@@ -477,6 +478,42 @@ impl NickelSession {
                     max_width: None,
                     max_height: None,
                 },
+            },
+        )
+    }
+
+    fn begin_internal_surface_resize(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+        edges: ResizeEdge,
+        button: u32,
+        serial: smithay::utils::Serial,
+    ) -> Option<WindowPointerOperation> {
+        let identity = surface.snapshot_token();
+        let placement = self.internal_ui.placement(surface)?;
+        let constraints = self.internal_resize_constraints(surface);
+        WindowPointerOperation::begin_with_geometry(
+            &mut self.window_operations,
+            BeginRequest {
+                seat: SeatId::new(1),
+                subject: WindowMapping {
+                    window: operation_window(surface),
+                    native_lifetime: NativeLifetimeId::new(identity),
+                    generation: MappingGeneration::new(identity),
+                },
+                kind: OperationKind::Resize(operation_resize_edges(edges)?),
+                control: ControlMode::Enforced,
+                origin: Self::compositor_pointer_binding(button, serial)?,
+                optional_update_sources: Vec::new(),
+            },
+            GeometrySeed {
+                anchor: LogicalRect {
+                    x: placement.geometry.0,
+                    y: placement.geometry.1,
+                    width: i32::try_from(placement.geometry.2).ok()?,
+                    height: i32::try_from(placement.geometry.3).ok()?,
+                },
+                constraints,
             },
         )
     }
@@ -1393,9 +1430,6 @@ impl NickelSession {
                                 },
                             );
                         }
-                        // Internal application resizing is not exposed until the host can
-                        // negotiate live content sizes. Consume the frame border instead of
-                        // leaking the click into the hosted app or a client below it.
                         FramePart::ResizeNorth
                         | FramePart::ResizeNorthEast
                         | FramePart::ResizeEast
@@ -1404,7 +1438,45 @@ impl NickelSession {
                         | FramePart::ResizeSouthWest
                         | FramePart::ResizeWest
                         | FramePart::ResizeNorthWest => {
-                            self.suppress_left_button_release = true;
+                            let edges = match part {
+                                FramePart::ResizeNorth => ResizeEdge::TOP,
+                                FramePart::ResizeNorthEast => ResizeEdge::TOP | ResizeEdge::RIGHT,
+                                FramePart::ResizeEast => ResizeEdge::RIGHT,
+                                FramePart::ResizeSouthEast => {
+                                    ResizeEdge::BOTTOM | ResizeEdge::RIGHT
+                                }
+                                FramePart::ResizeSouth => ResizeEdge::BOTTOM,
+                                FramePart::ResizeSouthWest => ResizeEdge::BOTTOM | ResizeEdge::LEFT,
+                                FramePart::ResizeWest => ResizeEdge::LEFT,
+                                FramePart::ResizeNorthWest => ResizeEdge::TOP | ResizeEdge::LEFT,
+                                _ => unreachable!(),
+                            };
+                            let operation =
+                                self.begin_internal_surface_resize(surface, edges, button, serial)?;
+                            let start_data = GrabStartData {
+                                focus: None,
+                                button,
+                                location,
+                            };
+                            pointer.set_grab(
+                                self,
+                                ResizeInternalSurfaceGrab {
+                                    start_data,
+                                    surface,
+                                    operation,
+                                },
+                                serial,
+                                Focus::Clear,
+                            );
+                            pointer.button(
+                                self,
+                                &ButtonEvent {
+                                    button,
+                                    state: button_state,
+                                    serial,
+                                    time: event.time(),
+                                },
+                            );
                         }
                     }
                     self.request_output_redraw();

@@ -895,47 +895,7 @@ impl SettingsApp {
             "Type with touch, a controller, or a mouse",
         )
         .child(mode)
-        .child(SettingsRow::new(theme, "Current state", status))
-        .child(Text::new("Keyboard test · text is not saved").color(theme.text.secondary))
-        .child(
-            Container::new()
-                .fill_width()
-                .height(48.0)
-                .padding(Insets::all(4.0))
-                .background(theme.surfaces.raised)
-                .border(theme.borders.subtle, 1.0)
-                .radius(theme.radii.control)
-                .child(
-                    TextField::on_change_with_placeholder(
-                        &self.keyboard_preview,
-                        "Try typing here — this text is not saved",
-                        SettingsMessage::KeyboardPreviewChanged,
-                    )
-                    .id("on-screen-keyboard-preview")
-                    .accessibility_label("Keyboard test")
-                    .color(theme.text.primary)
-                    .background(theme.surfaces.raised)
-                    .focus_background_tint(theme.borders.focus)
-                    .controller_focus_background_tint(theme.borders.controller_focus)
-                    .height(40.0),
-                ),
-        )
-        .child(
-            Button::semantic(
-                theme,
-                SettingsMessage::TryOnScreenKeyboard,
-                "Try keyboard",
-                ButtonPresentation::Secondary,
-            )
-            .id("on-screen-keyboard-try")
-            .height(44.0)
-            .width(160.0)
-            .enabled(
-                self.keyboard_runtime
-                    .as_ref()
-                    .is_some_and(|runtime| runtime.enabled),
-            ),
-        );
+        .child(SettingsRow::new(theme, "Current state", status));
         let remote_effective = self.remote_control_runtime.effective;
         let remote_exposure = remote_exposure_presentation(&self.remote_control_runtime);
         let remote_switch = match remote_effective {

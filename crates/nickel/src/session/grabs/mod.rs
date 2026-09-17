@@ -154,5 +154,8 @@ pub use move_grab::MoveSurfaceGrab;
 pub mod move_internal_grab;
 pub use move_internal_grab::MoveInternalSurfaceGrab;
 
+pub mod resize_internal_grab;
+pub use resize_internal_grab::ResizeInternalSurfaceGrab;
+
 pub mod resize_grab;
 pub use resize_grab::{ResizeEdge, ResizeSurfaceGrab};

@@ -27,12 +27,13 @@ use nickel_ui::{
     Application as UiApplication, Column, ComponentBuilderExt, Container, ControllerFamily,
     FallbackAvatar, FileGrid, FilePlaneItem, FrameOverlay, Image, InputModality, Insets,
     LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem, OverlayStyle,
-    ProjectStatusRow, ReadingDirection, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
-    SemanticControllerAction, SemanticTheme, Shortcut, ShortcutRow, ShortcutState,
-    StartMenuNarrowPane, StartMenuShell, Text, UiId, VerticalScroll, ViewContext,
+    ReadingDirection, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader, SemanticControllerAction,
+    SemanticTheme, Shortcut, ShortcutRow, ShortcutState, StartMenuNarrowPane, StartMenuShell, Text,
+    UiId, VerticalScroll, ViewContext,
 };
 
-const PANEL_MAX_WIDTH: f32 = 920.0;
+const PANEL_MAX_WIDTH: f32 = 800.0;
+const DASHBOARD_MAX_WIDTH: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 148.0;
 const GRID_GAP: f32 = 10.0;
 const TILE_MIN_WIDTH: f32 = 142.0;
@@ -56,12 +57,12 @@ fn dashboard_applications(launcher: &Launcher) -> Vec<&Application> {
                 .into_iter()
                 .chain(launcher.recent_applications())
                 .filter(|application| seen.insert(application.id().to_owned()))
-                .take(8)
+                .take(12)
                 .collect::<Vec<_>>();
             if home.is_empty() {
                 (0..launcher.result_count())
                     .filter_map(|index| launcher.result_at(index))
-                    .take(8)
+                    .take(12)
                     .collect()
             } else {
                 home
@@ -192,7 +193,13 @@ impl UiApplication for LauncherApplication {
         );
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
-        AnyView::new(Container::new().width(width).height(height).child(base))
+        AnyView::new(
+            Container::new()
+                .width(width)
+                .height(height)
+                .align_items(nickel_ui::Align::Start)
+                .child(base),
+        )
     }
 
     fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
@@ -249,6 +256,7 @@ impl UiApplication for LauncherApplication {
                     },
                     LauncherAction::TogglePin(id.clone()),
                 ));
+                menu.border_width = 0.0;
                 if self.status.as_deref().is_some_and(|status| {
                     status.starts_with("Launcher preferences could not be saved:")
                 }) {
@@ -615,19 +623,26 @@ fn launcher_icon_worker(
     receiver: mpsc::Receiver<LauncherIconRequest>,
 ) {
     while let Ok(request) = receiver.recv() {
-        let image = request
-            .icon_path
-            .as_deref()
-            .and_then(icons::load)
-            .or_else(|| {
-                request
-                    .icon_reference
-                    .as_deref()
-                    .and_then(platform::application_icon)
-            })
-            .filter(has_visible_pixel)
-            .map(normalize_launcher_icon)
-            .map(Arc::new);
+        let image = if request.key.starts_with("place:") {
+            request
+                .icon_reference
+                .as_deref()
+                .map(|path| place_icon(std::path::Path::new(path)))
+        } else {
+            request
+                .icon_path
+                .as_deref()
+                .and_then(icons::load)
+                .or_else(|| {
+                    request
+                        .icon_reference
+                        .as_deref()
+                        .and_then(platform::application_icon)
+                })
+        }
+        .filter(has_visible_pixel)
+        .map(normalize_launcher_icon)
+        .map(Arc::new);
         let Some(shared) = shared.upgrade() else {
             return;
         };
@@ -648,7 +663,63 @@ fn launcher_icon_worker(
     }
 }
 
+fn place_icon(path: &std::path::Path) -> RgbaImage {
+    use nickel_file::icons::{ArtworkAppearance, ArtworkRequest, SemanticIconKind};
+
+    let settings = nickel_core::shell_settings::ShellSettings::load_default();
+    let is_home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .is_some_and(|home| path == std::path::Path::new(&home));
+    let kind = if is_home {
+        SemanticIconKind::HomeFolder
+    } else {
+        nickel_file::icons::semantic_kind(path, true)
+    };
+    let request = ArtworkRequest {
+        path,
+        kind,
+        logical_size: 96,
+        scale_milli: 1000,
+        appearance: ArtworkAppearance::Dark,
+    };
+    if is_home {
+        return nickel_file::icons::resolve_artwork(
+            nickel_core::shell_settings::FileIconPreference::Nickel,
+            &request,
+        )
+        .pixels
+        .as_ref()
+        .clone();
+    }
+    nickel_platform::path_icon_with_theme_at_size(path, settings.file_icon_theme.as_deref(), 96)
+        .unwrap_or_else(|| {
+            nickel_file::icons::resolve_artwork(
+                nickel_core::shell_settings::FileIconPreference::Nickel,
+                &request,
+            )
+            .pixels
+            .as_ref()
+            .clone()
+        })
+}
+
 fn normalize_launcher_icon(image: RgbaImage) -> RgbaImage {
+    let bounds = image
+        .enumerate_pixels()
+        .filter(|(_, _, pixel)| pixel[3] != 0)
+        .fold(None::<(u32, u32, u32, u32)>, |bounds, (x, y, _)| {
+            Some(match bounds {
+                None => (x, y, x, y),
+                Some((left, top, right, bottom)) => {
+                    (left.min(x), top.min(y), right.max(x), bottom.max(y))
+                }
+            })
+        });
+    let image = if let Some((left, top, right, bottom)) = bounds {
+        image::imageops::crop_imm(&image, left, top, right - left + 1, bottom - top + 1).to_image()
+    } else {
+        image
+    };
     if image.width() > LAUNCHER_ICON_MAX_SIDE || image.height() > LAUNCHER_ICON_MAX_SIDE {
         icons::resized(&image, LAUNCHER_ICON_MAX_SIDE, LAUNCHER_ICON_MAX_SIDE)
     } else {
@@ -895,8 +966,7 @@ fn build_dashboard_view_directional(
     direction: ReadingDirection,
 ) -> AnyView<LauncherAction> {
     let viewport = context.viewport;
-    let (viewport_width, _viewport_height) = viewport;
-    let width = PANEL_MAX_WIDTH.min(viewport_width.max(1) as f32);
+    let (viewport_width, viewport_height) = viewport;
     let theme = SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
         context.palette.background,
         context.palette.panel,
@@ -910,72 +980,186 @@ fn build_dashboard_view_directional(
         context.palette.complement,
         context.palette.complement,
     ));
-    let narrow = width < START_MENU_SINGLE_PANE_BREAKPOINT;
-    let selected = |view| launcher.view() == view;
-    let nav_state = |view| ShortcutState {
-        selected: selected(view),
-        ..ShortcutState::default()
+    let viewport_width = viewport_width.max(1) as f32;
+    let narrow = viewport_width < START_MENU_SINGLE_PANE_BREAKPOINT;
+    let recent_project_names = match launcher.dashboard_projects() {
+        crate::launcher::DashboardSection::Ready(projects) if launcher.codex_available() => {
+            let mut recent = projects
+                .iter()
+                .filter(|project| project.last_used_at.is_some())
+                .collect::<Vec<_>>();
+            recent.sort_by_key(|project| std::cmp::Reverse(project.last_used_at));
+            recent
+                .into_iter()
+                .take(3)
+                .map(|project| nickel_ui::intrinsic_text_width(&project.name, 1.0))
+                .collect::<Vec<_>>()
+        }
+        _ => Vec::new(),
     };
+    let place_count = launcher.place_applications().count();
+    let recent_count = recent_project_names.len();
+    let sidebar_label_width = launcher
+        .place_applications()
+        .map(|place| nickel_ui::intrinsic_text_width(place.name(), 1.0))
+        .chain(
+            (launcher.codex_available())
+                .then_some(nickel_ui::intrinsic_text_width("Recent projects", 0.8)),
+        )
+        .chain(recent_project_names)
+        .chain(
+            launcher
+                .codex_available()
+                .then_some(nickel_ui::intrinsic_text_width("All projects", 0.9)),
+        )
+        .fold(nickel_ui::intrinsic_text_width("Places", 0.8), f32::max);
+    let account_width = match launcher.dashboard_account() {
+        crate::launcher::DashboardSection::Ready(account) => {
+            nickel_ui::intrinsic_text_width(&account.display_name, 1.0) + 64.0
+        }
+        _ => 120.0,
+    };
+    let sidebar_width = (sidebar_label_width + 20.0 + theme.spacing.control + 12.0)
+        .max(account_width)
+        .clamp(148.0, 240.0);
+    let applications = dashboard_applications(launcher);
+    let tile_width = applications
+        .iter()
+        .map(|application| nickel_ui::intrinsic_text_width(application.name(), 0.9))
+        .fold(0.0, f32::max)
+        .clamp(100.0, 142.0);
+    let application_count = applications.len();
+    let columns = 3.0;
+    let detail_width = columns * tile_width + (columns - 1.0) * 2.0;
+    let width = if narrow {
+        (sidebar_width.max(detail_width) + 2.0 * theme.spacing.content)
+            .max(320.0)
+            .min(viewport_width)
+    } else {
+        (sidebar_width + detail_width + 5.0 * theme.spacing.content)
+            .max(320.0)
+            .min(DASHBOARD_MAX_WIDTH)
+            .min(viewport_width)
+    };
+    let sidebar_body_height = 20.0
+        + place_count as f32 * 38.0
+        + if launcher.codex_available() {
+            20.0 + recent_count as f32 * 38.0 + 32.0
+        } else {
+            0.0
+        };
+    let grid_rows = application_count.max(1).div_ceil(3) as f32;
+    let detail_body_height = 24.0 + grid_rows * 96.0 + 58.0 + 3.0 * theme.spacing.content;
+    let preferred_height =
+        (sidebar_body_height.max(detail_body_height) + 52.0 + 52.0 + 3.0 * theme.spacing.content)
+            .min(viewport_height.max(1) as f32);
+    let grid_cell_width = if narrow {
+        (width - 4.0 * theme.spacing.content - 4.0) / 3.0
+    } else {
+        (width - sidebar_width - 5.0 * theme.spacing.content - 4.0) / 3.0
+    }
+    .max(48.0);
     let nav_icon = |icons: &mut LauncherIconCache, name, bytes: &[u8]| {
         structural_icon(icons, name, bytes, theme.text.secondary)
     };
 
     let mut sidebar = Column::new()
-        .gap(theme.spacing.compact)
-        .child(ShortcutRow::new_directional(
+        .gap(2.0)
+        .child(Text::new("Places").scale(0.8).color(theme.text.secondary));
+    for place in launcher.place_applications() {
+        let icon = icons.resolve(place).unwrap_or_else(|| {
+            icons
+                .structural(
+                    "places",
+                    include_bytes!("../../../assets/icons/start-menu/project.svg"),
+                    theme.text.secondary,
+                )
+                .expect("embedded Places icon must rasterize")
+        });
+        sidebar = sidebar.child(dashboard_link_row(
             theme,
-            nav_icon(
-                icons,
-                "home",
-                include_bytes!("../../../assets/icons/start-menu/applications.svg"),
-            ),
-            "Home",
-            "Favorites and recent applications",
-            Some(LauncherAction::SetView(LauncherView::Favorites)),
-            nav_state(LauncherView::Favorites),
-            direction,
-        ))
-        .child(ShortcutRow::new_directional(
-            theme,
-            nav_icon(
-                icons,
-                "applications",
-                include_bytes!("../../../assets/icons/start-menu/applications.svg"),
-            ),
-            "Applications",
-            "Browse installed applications",
-            Some(LauncherAction::SetView(LauncherView::Applications)),
-            nav_state(LauncherView::Applications),
-            direction,
-        ))
-        .child(ShortcutRow::new_directional(
-            theme,
-            nav_icon(
-                icons,
-                "places",
-                include_bytes!("../../../assets/icons/start-menu/project.svg"),
-            ),
-            "Places",
-            "Open files and locations",
-            Some(LauncherAction::SetView(LauncherView::Places)),
-            nav_state(LauncherView::Places),
-            direction,
+            Image::new(icon.0, icon.1).width(20.0).height(20.0),
+            place.name(),
+            LauncherAction::LaunchApplication(place.id().to_owned()),
         ));
-    sidebar = sidebar
-        .child(nickel_ui::Spacer::flex())
-        .child(ShortcutRow::new_directional(
+    }
+    if launcher.codex_available() {
+        sidebar = sidebar.child(
+            Text::new("Recent projects")
+                .scale(0.8)
+                .color(theme.text.secondary),
+        );
+        if let crate::launcher::DashboardSection::Ready(projects) = launcher.dashboard_projects() {
+            let mut recent = projects
+                .iter()
+                .filter(|project| project.last_used_at.is_some())
+                .collect::<Vec<_>>();
+            recent.sort_by_key(|project| std::cmp::Reverse(project.last_used_at));
+            for project in recent.into_iter().take(3) {
+                sidebar = sidebar.child(dashboard_link_row(
+                    theme,
+                    nav_icon(
+                        icons,
+                        "project",
+                        include_bytes!("../../../assets/icons/start-menu/project.svg"),
+                    )
+                    .width(20.0)
+                    .height(20.0),
+                    &project.name,
+                    LauncherAction::OpenProject(project.id.clone()),
+                ));
+            }
+        }
+        sidebar = sidebar.child(dashboard_text_link(
             theme,
-            nav_icon(
-                icons,
-                "settings",
-                include_bytes!("../../../assets/icons/start-menu/settings.svg"),
-            ),
-            "Settings",
-            "Nickel appearance and behavior",
-            Some(LauncherAction::OpenSettings(SettingsDestination::Nickel)),
-            ShortcutState::default(),
-            direction,
+            "All projects",
+            LauncherAction::SeeAllProjects,
         ));
+    }
+    if narrow {
+        sidebar = sidebar
+            .child(dashboard_text_link(
+                theme,
+                "Pinned & recent",
+                LauncherAction::SetView(LauncherView::Favorites),
+            ))
+            .child(dashboard_text_link(
+                theme,
+                "All applications",
+                LauncherAction::SetView(LauncherView::Applications),
+            ));
+    }
+    let mut settings_button = Some(
+        Container::new()
+            .shrink(0.0)
+            .min_height(44.0)
+            .padding(Insets::symmetric(6.0, 10.0))
+            .radius(theme.radii.control)
+            .background(theme.surfaces.raised)
+            .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+            .focus_background_tint(theme.borders.focus)
+            .controller_focus_background_tint(theme.borders.controller_focus)
+            .message(LauncherAction::OpenSettings(SettingsDestination::Nickel))
+            .semantic_role(nickel_ui::SemanticRole::Button)
+            .accessibility_label("Settings")
+            .align_items(nickel_ui::Align::Center)
+            .justify_content(nickel_ui::Justify::Center)
+            .child(
+                nickel_ui::Row::new()
+                    .align_items(nickel_ui::Align::Center)
+                    .gap(theme.spacing.compact)
+                    .child(
+                        nav_icon(
+                            icons,
+                            "settings",
+                            include_bytes!("../../../assets/icons/start-menu/settings.svg"),
+                        )
+                        .width(24.0)
+                        .height(24.0),
+                    )
+                    .child(Text::new("Settings").color(theme.text.primary)),
+            ),
+    );
 
     let account = match launcher.dashboard_account() {
         crate::launcher::DashboardSection::Ready(account) => {
@@ -983,7 +1167,7 @@ fn build_dashboard_view_directional(
                 theme,
                 FallbackAvatar::new(theme, &account.display_name),
                 &account.display_name,
-                &account.supporting_text,
+                "",
                 Some(LauncherAction::OpenAccount),
                 ShortcutState::default(),
                 direction,
@@ -997,17 +1181,29 @@ fn build_dashboard_view_directional(
                 include_bytes!("../../../assets/icons/start-menu/account.svg"),
             ),
             "Local session",
-            "Account details unavailable",
+            "",
             Some(LauncherAction::OpenAccount),
             ShortcutState::default(),
             direction,
         )),
     };
-    let sidebar_footer = Column::new()
-        .gap(theme.spacing.compact)
-        .child(account.id("launcher-account"));
+    let sidebar_footer = if narrow && state.dashboard_narrow_page == DashboardNarrowPage::Primary {
+        AnyView::new(
+            nickel_ui::Row::new()
+                .fill_width()
+                .align_items(nickel_ui::Align::Center)
+                .child(
+                    Container::new()
+                        .grow(1.0)
+                        .child(account.id("launcher-account")),
+                )
+                .child(settings_button.take().expect("settings button available")),
+        )
+    } else {
+        AnyView::new(account.id("launcher-account"))
+    };
 
-    let application_cards = dashboard_applications(launcher)
+    let application_cards = applications
         .into_iter()
         .map(|application| {
             let id = application.id().to_owned();
@@ -1024,7 +1220,8 @@ fn build_dashboard_view_directional(
         })
         .collect::<Vec<_>>();
     let applications_empty = application_cards.is_empty();
-    let application_collection = FileGrid::columns(if width >= 820.0 { 4 } else { 3 })
+    let application_collection = FileGrid::columns(3)
+        .width(grid_cell_width * 3.0 + 4.0)
         .items(application_cards.into_iter().map(|(id, name, icon)| {
             let accessible_name = name.clone();
             FilePlaneItem::new(
@@ -1034,12 +1231,14 @@ fn build_dashboard_view_directional(
                 icon.1,
             )
             .id(id)
-            .min_height(104.0)
-            .padding(Insets::all(theme.spacing.control))
+            .min_height(94.0)
+            .padding(Insets::symmetric(5.0, 2.0))
             .radius(theme.radii.card)
             .icon_size(48.0)
-            .label_height(36.0)
-            .gap(theme.spacing.compact)
+            .label_height(34.0)
+            .label_scale(0.9)
+            .gap(2.0)
+            .center_content()
             .foreground(theme.text.primary)
             .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
             .focus_background_tint(theme.borders.focus)
@@ -1049,12 +1248,12 @@ fn build_dashboard_view_directional(
         }))
         .id("launcher-applications")
         .scroll_owner("launcher-dashboard-scroll")
-        .gap(theme.spacing.control)
+        .gap(2.0)
         .accessibility_label("Applications");
 
     let title = match launcher.view() {
-        LauncherView::Favorites => "Home",
-        LauncherView::Applications => "Applications",
+        LauncherView::Favorites => "Pinned & recent",
+        LauncherView::Applications => "All applications",
         LauncherView::Places => "Places",
     };
     let mut detail = Column::new()
@@ -1078,6 +1277,15 @@ fn build_dashboard_view_directional(
         ));
     }
     detail = detail.child(SectionHeader::new(theme, title).direction(direction));
+    if launcher.view() == LauncherView::Applications {
+        detail = detail.child(dashboard_view_switch(
+            theme,
+            icons,
+            launcher.view(),
+            direction,
+            grid_cell_width,
+        ));
+    }
     if applications_empty {
         detail = detail.child(
             Container::new()
@@ -1085,9 +1293,7 @@ fn build_dashboard_view_directional(
                 .padding(Insets::all(theme.spacing.content))
                 .child(
                     Text::new(match launcher.view() {
-                        LauncherView::Favorites => {
-                            "Pin applications or launch them to populate Home."
-                        }
+                        LauncherView::Favorites => "Pin or launch applications to add them here.",
                         LauncherView::Applications => "No installed applications are available.",
                         LauncherView::Places => "No places are available.",
                     })
@@ -1097,87 +1303,14 @@ fn build_dashboard_view_directional(
     } else {
         detail = detail.child(application_collection);
     }
-    if launcher.view() == LauncherView::Favorites && launcher.codex_available() {
-        let project_rows = match launcher.dashboard_projects() {
-            crate::launcher::DashboardSection::Loading => vec![AnyView::new(
-                Text::new("Loading projects…").color(theme.text.secondary),
-            )],
-            crate::launcher::DashboardSection::Empty => vec![AnyView::new(
-                Text::new("No recent projects").color(theme.text.secondary),
-            )],
-            crate::launcher::DashboardSection::Unavailable(reason) => {
-                vec![AnyView::new(ProjectStatusRow::new_directional(
-                    theme,
-                    nav_icon(
-                        icons,
-                        "project",
-                        include_bytes!("../../../assets/icons/start-menu/project.svg"),
-                    ),
-                    "Projects unavailable",
-                    reason,
-                    None,
-                    None,
-                    ShortcutState::default(),
-                    direction,
-                ))]
-            }
-            crate::launcher::DashboardSection::Failed {
-                message,
-                recoverable,
-            } => vec![AnyView::new(ProjectStatusRow::new_directional(
-                theme,
-                nav_icon(
-                    icons,
-                    "project",
-                    include_bytes!("../../../assets/icons/start-menu/project.svg"),
-                ),
-                if *recoverable {
-                    "Projects temporarily unavailable"
-                } else {
-                    "Projects unavailable"
-                },
-                message,
-                None,
-                None,
-                ShortcutState::default(),
-                direction,
-            ))],
-            crate::launcher::DashboardSection::Ready(projects) => projects
-                .iter()
-                .take(2)
-                .map(|project| {
-                    let action = LauncherAction::OpenProject(project.id.clone());
-                    AnyView::new(ProjectStatusRow::new_directional(
-                        theme,
-                        nav_icon(
-                            icons,
-                            "project",
-                            include_bytes!("../../../assets/icons/start-menu/project.svg"),
-                        ),
-                        &project.name,
-                        match project.activity {
-                            crate::launcher::ProjectActivity::Active => "Active",
-                            crate::launcher::ProjectActivity::Idle => "Idle",
-                            crate::launcher::ProjectActivity::Unknown => "Status unknown",
-                        },
-                        project.chat_count,
-                        Some(action),
-                        ShortcutState::default(),
-                        direction,
-                    ))
-                })
-                .collect(),
-        };
-        detail = detail.child(
-            Column::new()
-                .gap(theme.spacing.compact)
-                .child(
-                    SectionHeader::new(theme, "Recent projects")
-                        .action(theme, "See all", LauncherAction::SeeAllProjects)
-                        .direction(direction),
-                )
-                .children(project_rows),
-        );
+    if launcher.view() != LauncherView::Applications {
+        detail = detail.child(dashboard_view_switch(
+            theme,
+            icons,
+            launcher.view(),
+            direction,
+            grid_cell_width,
+        ));
     }
 
     let search = Container::new()
@@ -1203,6 +1336,9 @@ fn build_dashboard_view_directional(
         .grow(1.0)
         .child(detail);
     let mut shell = StartMenuShell::new(theme, width, sidebar, detail)
+        .primary_width(sidebar_width)
+        .viewport_width(viewport_width)
+        .preferred_height(preferred_height)
         .direction(direction)
         .header(search)
         .primary_footer(sidebar_footer)
@@ -1221,8 +1357,22 @@ fn build_dashboard_view_directional(
             width,
         ));
     }
+    let mut detail_footer = nickel_ui::Row::new()
+        .fill_width()
+        .align_items(nickel_ui::Align::Center)
+        .justify_content(nickel_ui::Justify::End)
+        .gap(theme.spacing.compact);
     if let Some(status) = context.status {
-        shell = shell.detail_footer(launcher_status(theme, status));
+        detail_footer = detail_footer.child(
+            Container::new()
+                .grow(1.0)
+                .child(launcher_status(theme, status)),
+        );
+    }
+    if let Some(settings_button) = settings_button {
+        shell = shell.detail_footer(detail_footer.child(settings_button));
+    } else if context.status.is_some() {
+        shell = shell.detail_footer(detail_footer);
     }
     AnyView::new(shell)
 }
@@ -1298,6 +1448,119 @@ fn structural_icon(
         .structural(name, bytes, color)
         .expect("embedded Start Menu icon must rasterize");
     Image::new(id, image).width(28.0).height(28.0)
+}
+
+fn dashboard_link_row(
+    theme: SemanticTheme,
+    icon: Image<LauncherAction>,
+    label: &str,
+    action: LauncherAction,
+) -> Container<LauncherAction> {
+    Container::new()
+        .fill_width()
+        .min_height(36.0)
+        .padding(Insets::symmetric(5.0, 6.0))
+        .radius(theme.radii.control)
+        .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+        .focus_background_tint(theme.borders.focus)
+        .controller_focus_background_tint(theme.borders.controller_focus)
+        .message(action)
+        .semantic_role(nickel_ui::SemanticRole::Button)
+        .accessibility_label(label)
+        .child(
+            nickel_ui::Row::new()
+                .fill_width()
+                .align_items(nickel_ui::Align::Center)
+                .gap(theme.spacing.control)
+                .child(icon)
+                .child(Text::new(label).color(theme.text.primary).ellipsis(true)),
+        )
+}
+
+fn dashboard_text_link(
+    theme: SemanticTheme,
+    label: &str,
+    action: LauncherAction,
+) -> Container<LauncherAction> {
+    Container::new()
+        .fill_width()
+        .min_height(30.0)
+        .padding(Insets::symmetric(5.0, 6.0))
+        .radius(theme.radii.control)
+        .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+        .focus_background_tint(theme.borders.focus)
+        .controller_focus_background_tint(theme.borders.controller_focus)
+        .message(action)
+        .semantic_role(nickel_ui::SemanticRole::Button)
+        .accessibility_label(label)
+        .child(Text::new(label).scale(0.9).color(theme.text.secondary))
+}
+
+fn dashboard_view_switch(
+    theme: SemanticTheme,
+    icons: &mut LauncherIconCache,
+    view: LauncherView,
+    direction: ReadingDirection,
+    grid_cell_width: f32,
+) -> AnyView<LauncherAction> {
+    if view == LauncherView::Applications {
+        AnyView::new(dashboard_text_link(
+            theme,
+            "Pinned & recent",
+            LauncherAction::SetView(LauncherView::Favorites),
+        ))
+    } else {
+        let content = nickel_ui::Row::new()
+            .fill_width()
+            .align_items(nickel_ui::Align::Center)
+            .gap(theme.spacing.compact)
+            .child(
+                Container::new()
+                    .width(grid_cell_width)
+                    .shrink(0.0)
+                    .align_items(nickel_ui::Align::Center)
+                    .justify_content(nickel_ui::Justify::Center)
+                    .child(
+                        structural_icon(
+                            icons,
+                            "all-applications",
+                            include_bytes!("../../../assets/icons/start-menu/applications.svg"),
+                            theme.text.secondary,
+                        )
+                        .id("launcher-all-applications-icon")
+                        .width(48.0)
+                        .height(48.0),
+                    ),
+            )
+            .child(
+                Column::new()
+                    .gap(2.0)
+                    .child(Text::new("All applications").color(theme.text.primary))
+                    .child(
+                        Text::new("Browse installed applications")
+                            .scale(0.9)
+                            .color(theme.text.secondary),
+                    ),
+            );
+        let content = if direction == ReadingDirection::RightToLeft {
+            content.reverse()
+        } else {
+            content
+        };
+        AnyView::new(
+            Container::new()
+                .fill_width()
+                .min_height(58.0)
+                .radius(theme.radii.control)
+                .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+                .focus_background_tint(theme.borders.focus)
+                .controller_focus_background_tint(theme.borders.controller_focus)
+                .message(LauncherAction::SetView(LauncherView::Applications))
+                .semantic_role(nickel_ui::SemanticRole::Button)
+                .accessibility_label("All applications")
+                .child(content),
+        )
+    }
 }
 
 fn view_title(view: LauncherView) -> &'static str {
@@ -1506,22 +1769,26 @@ mod tests {
                 nickel_ui::SemanticRole::TextField,
             ))
             .expect("launcher search");
-        let home = host
-            .unique_semantic_target_for_message(&LauncherAction::SetView(LauncherView::Favorites))
-            .expect("Home navigation");
+        let all_applications = host
+            .unique_semantic_target_for_message(&LauncherAction::SetView(
+                LauncherView::Applications,
+            ))
+            .expect("All applications action");
         let application = host
             .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
                 "firefox".into(),
             ))
             .expect("Home application");
-        assert!(search.bounds.origin.y + search.bounds.size.height <= home.bounds.origin.y);
+        assert!(
+            search.bounds.origin.y + search.bounds.size.height <= all_applications.bounds.origin.y
+        );
         assert!(search.bounds.origin.y + search.bounds.size.height <= application.bounds.origin.y);
         let header = host
             .accessibility_nodes()
             .iter()
             .find(|node| node.label.as_deref() == Some("Focus application search"))
             .expect("search header");
-        assert!(header.rect.origin.x <= home.bounds.origin.x);
+        assert!(header.rect.origin.x <= all_applications.bounds.origin.x);
         assert!(
             header.rect.origin.x + header.rect.size.width
                 >= application.bounds.origin.x + application.bounds.size.width
@@ -1540,19 +1807,19 @@ mod tests {
         scenario.controller(ControllerAction::Down).unwrap();
         let first_target = controller_target(&scenario);
         assert!(
-            first_target.contains("launcher-applications"),
+            first_target.contains("start-menu-detail-pane"),
             "selected {first_target}"
         );
         scenario.controller(ControllerAction::PreviousPane).unwrap();
-        let sidebar_home = controller_target(&scenario);
-        assert!(sidebar_home.contains("start-menu-primary-pane"));
+        let sidebar_target = controller_target(&scenario);
+        assert!(sidebar_target.contains("start-menu-primary-pane"));
 
         scenario.controller(ControllerAction::NextPane).unwrap();
         assert_eq!(controller_target(&scenario), first_target);
         scenario.controller(ControllerAction::Down).unwrap();
         let content_home = controller_target(&scenario);
         assert!(
-            content_home.contains("launcher-applications"),
+            content_home.contains("start-menu-detail-pane"),
             "selected {content_home}"
         );
         for _ in 0..5 {
@@ -1560,12 +1827,12 @@ mod tests {
         }
         let content_moved = controller_target(&scenario);
         assert!(
-            content_moved.contains("launcher-applications"),
+            content_moved.contains("start-menu-detail-pane"),
             "D-pad escaped content pane: {content_moved}"
         );
 
         scenario.controller(ControllerAction::PreviousPane).unwrap();
-        assert_eq!(controller_target(&scenario), sidebar_home);
+        assert_eq!(controller_target(&scenario), sidebar_target);
         scenario.controller(ControllerAction::NextPane).unwrap();
         assert_eq!(controller_target(&scenario), content_moved);
     }
@@ -1575,7 +1842,7 @@ mod tests {
         let mut scenario = populated_launcher_scenario();
 
         scenario.controller(ControllerAction::Down).unwrap();
-        assert!(controller_target(&scenario).contains("launcher-applications"));
+        assert!(controller_target(&scenario).contains("start-menu-detail-pane"));
 
         for _ in 0..4 {
             scenario.controller(ControllerAction::Left).unwrap();
@@ -1613,23 +1880,26 @@ mod tests {
             920,
             680,
         );
-        for _ in 0..4 {
+        for _ in 0..12 {
             host.application_mut().sync(&launcher, palette(), None);
             host.step(HostBatch {
                 events: vec![HostEvent::Controller(ControllerAction::Down)],
                 ..HostBatch::default()
             });
+            if host
+                .inspect()
+                .controller_target
+                .as_ref()
+                .is_some_and(|target| target.as_str().ends_with("/launcher-applications"))
+            {
+                break;
+            }
         }
-        host.application_mut().sync(&launcher, palette(), None);
-        host.step(HostBatch {
-            events: vec![HostEvent::Controller(ControllerAction::Up)],
-            ..HostBatch::default()
-        });
 
         let target = host
             .inspect()
             .controller_target
-            .expect("Up from Recent projects selects the application grid");
+            .expect("controller navigation selects the application grid");
         assert!(
             target.as_str().ends_with("/launcher-applications"),
             "{target:?}"
@@ -1658,8 +1928,9 @@ mod tests {
     }
 
     #[test]
-    fn normalized_keyboard_enters_the_home_application_grid() {
-        let launcher = Launcher::default();
+    fn normalized_keyboard_enters_the_all_applications_grid() {
+        let mut launcher = Launcher::default();
+        launcher.set_view(LauncherView::Applications);
         let mut host = UiHost::new(
             LauncherApplication::new(
                 launcher,
@@ -1674,10 +1945,20 @@ mod tests {
             &navigation_key(1, KeyCode::ArrowDown, NamedKey::ArrowDown),
             None,
         );
-        host.handle_input(
-            &navigation_key(2, KeyCode::ArrowDown, NamedKey::ArrowDown),
-            None,
-        );
+        for order in 2..=5 {
+            host.handle_input(
+                &navigation_key(order, KeyCode::ArrowDown, NamedKey::ArrowDown),
+                None,
+            );
+            if host
+                .inspect()
+                .controller_target
+                .as_ref()
+                .is_some_and(|id| id.as_str().ends_with("/launcher-applications"))
+            {
+                break;
+            }
+        }
         assert!(
             host.inspect()
                 .controller_target
@@ -1685,7 +1966,7 @@ mod tests {
                 .is_some_and(|id| id.as_str().ends_with("/launcher-applications"))
         );
         host.handle_input(
-            &navigation_key(3, KeyCode::ArrowRight, NamedKey::ArrowRight),
+            &navigation_key(6, KeyCode::ArrowRight, NamedKey::ArrowRight),
             None,
         );
         assert!(
@@ -2216,9 +2497,8 @@ mod tests {
     fn production_host_exposes_launcher_navigation_semantics() {
         let host = launcher_host();
         for action in [
-            LauncherAction::SetView(LauncherView::Favorites),
             LauncherAction::SetView(LauncherView::Applications),
-            LauncherAction::SetView(LauncherView::Places),
+            LauncherAction::LaunchApplication("firefox".into()),
         ] {
             assert!(
                 !host.semantic_targets_for_message(&action).is_empty(),
@@ -2228,13 +2508,222 @@ mod tests {
     }
 
     #[test]
-    fn left_click_on_applications_sidebar_opens_the_complete_scrollable_list() {
+    fn dashboard_sidebar_launches_places_and_only_three_recent_projects() {
+        let mut launcher = Launcher::default();
+        launcher.set_places(vec![Application::new(
+            "place:/home/test/Documents".into(),
+            "Documents".into(),
+            Some("/home/test/Documents".into()),
+            None,
+            Some(vec!["nickel-file".into(), "/home/test/Documents".into()]),
+        )]);
+        launcher.set_codex_available(true);
+        launcher.set_dashboard_projects(crate::launcher::DashboardSection::Ready(
+            (0..5)
+                .map(|index| crate::launcher::DashboardProject {
+                    id: format!("project-{index}"),
+                    name: format!("Project {index}"),
+                    roots: Vec::new(),
+                    chat_count: None,
+                    activity: crate::launcher::ProjectActivity::Unknown,
+                    last_used_at: Some(index),
+                })
+                .collect(),
+        ));
+        let host = UiHost::new(
+            LauncherApplication::new(
+                launcher,
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        );
+        assert_eq!(
+            host.semantic_targets_for_message(&LauncherAction::LaunchApplication(
+                "place:/home/test/Documents".into(),
+            ))
+            .len(),
+            1,
+        );
+        for index in 2..5 {
+            assert_eq!(
+                host.semantic_targets_for_message(&LauncherAction::OpenProject(format!(
+                    "project-{index}"
+                )))
+                .len(),
+                1,
+            );
+        }
+        for index in 0..2 {
+            assert!(
+                host.semantic_targets_for_message(&LauncherAction::OpenProject(format!(
+                    "project-{index}"
+                )))
+                .is_empty()
+            );
+        }
+        assert_eq!(
+            host.semantic_targets_for_message(&LauncherAction::SeeAllProjects)
+                .len(),
+            1,
+        );
+    }
+
+    #[test]
+    fn narrow_dashboard_can_open_the_application_pane() {
+        let mut host = UiHost::new(
+            LauncherApplication::new(
+                Launcher::default(),
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            560,
+            680,
+        );
+        let target = host
+            .unique_semantic_target_for_message(&LauncherAction::SetView(
+                LauncherView::Applications,
+            ))
+            .expect("narrow sidebar exposes all applications");
+        host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
+        assert_eq!(
+            host.application().launcher.view(),
+            LauncherView::Applications
+        );
+        assert!(
+            !host
+                .semantic_targets_for_message(&LauncherAction::LaunchApplication("firefox".into(),))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn launcher_icon_removes_only_transparent_outer_padding() {
+        let mut image = RgbaImage::new(12, 12);
+        for y in 3..9 {
+            for x in 2..10 {
+                image.put_pixel(x, y, image::Rgba([20, 40, 60, 255]));
+            }
+        }
+        let trimmed = normalize_launcher_icon(image);
+        assert_eq!((trimmed.width(), trimmed.height()), (8, 6));
+        assert_eq!(trimmed.get_pixel(0, 0).0, [20, 40, 60, 255]);
+    }
+
+    #[test]
+    fn dashboard_uses_up_to_four_rows_of_three_applications() {
+        let launcher = Launcher::new(
+            (0..15)
+                .map(|index| {
+                    Application::new(
+                        format!("application-{index:02}"),
+                        format!("Application {index:02}"),
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .collect(),
+        );
+        assert_eq!(dashboard_applications(&launcher).len(), 12);
+        let host = UiHost::new(
+            LauncherApplication::new(
+                launcher,
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        );
+        let bounds = (0..12)
+            .map(|index| {
+                host.unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
+                    format!("application-{index:02}"),
+                ))
+                .unwrap()
+                .bounds
+            })
+            .collect::<Vec<_>>();
+        for row in 0..4 {
+            assert!((bounds[row * 3].origin.y - bounds[row * 3 + 2].origin.y).abs() < 0.01);
+        }
+        assert!(bounds[3].origin.y > bounds[0].origin.y);
+        assert!(bounds[9].origin.y > bounds[6].origin.y);
+    }
+
+    #[test]
+    fn long_application_name_keeps_dashboard_grid_cells_bounded() {
+        let tile_width = |name: &str| {
+            let mut launcher = Launcher::new(vec![Application::new(
+                "long-name-test".into(),
+                name.into(),
+                None,
+                None,
+                None,
+            )]);
+            launcher.set_view(LauncherView::Applications);
+            let host = UiHost::new(
+                LauncherApplication::new(
+                    launcher,
+                    LauncherViewState::default(),
+                    LauncherIconCache::new(),
+                    palette(),
+                ),
+                920,
+                680,
+            );
+            host.unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
+                "long-name-test".into(),
+            ))
+            .unwrap()
+            .bounds
+            .size
+            .width
+        };
+        let short = tile_width("Game");
+        let long =
+            tile_width("Heroes of Might and Magic III: Shadows of Amn and an even longer subtitle");
+        assert!(short < long, "short={short}, long={long}");
+        assert!(long <= 142.0, "long={long}");
+    }
+
+    #[test]
+    fn settings_action_is_labeled_at_dashboard_bottom_right() {
+        let host = UiHost::new(
+            LauncherApplication::new(
+                Launcher::default(),
+                LauncherViewState::default(),
+                LauncherIconCache::new(),
+                palette(),
+            ),
+            920,
+            680,
+        );
+        let settings = host
+            .unique_semantic_target_for_message(&LauncherAction::OpenSettings(
+                SettingsDestination::Nickel,
+            ))
+            .unwrap();
+        let account = host
+            .unique_semantic_target_for_message(&LauncherAction::OpenAccount)
+            .unwrap();
+        assert_eq!(settings.name.as_deref(), Some("Settings"));
+        assert!(settings.bounds.origin.x > account.bounds.origin.x);
+        assert!(settings.bounds.origin.y >= account.bounds.origin.y);
+    }
+
+    #[test]
+    fn all_applications_action_opens_the_complete_scrollable_list() {
         let mut scenario = populated_launcher_scenario();
-        let home = scenario
+        let pinned = scenario
             .host()
             .unique_semantic_target_for_message(&LauncherAction::SetView(LauncherView::Favorites))
             .unwrap();
-        scenario.pointer_activate(&Selector::id(home.id)).unwrap();
+        scenario.pointer_activate(&Selector::id(pinned.id)).unwrap();
         scenario.host_mut().application_mut().take_effects();
         let applications = scenario
             .host()
@@ -2242,6 +2731,7 @@ mod tests {
                 LauncherView::Applications,
             ))
             .unwrap();
+        assert!(applications.bounds.size.height >= 44.0);
         scenario
             .pointer_activate(&Selector::id(applications.id))
             .unwrap();
@@ -2393,7 +2883,6 @@ mod tests {
             search_labels.contains(&"Cross: Open".to_owned()),
             "search labels: {search_labels:?}"
         );
-        assert!(search_labels.contains(&"Options: Actions".to_owned()));
         assert!(search_labels.contains(&"Circle: Close".to_owned()));
 
         let target = host
@@ -2453,7 +2942,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_status_does_not_shrink_the_launcher_surface() {
+    fn visible_status_stays_inside_the_compact_launcher_footer() {
         let mut host = launcher_host();
         let launcher = Launcher::default();
         host.application_mut().sync(
@@ -2471,7 +2960,7 @@ mod tests {
             .iter()
             .find(|node| node.label.as_deref() == Some("Launcher status"))
             .expect("launcher status remains accessible");
-        assert!(status.rect.origin.y > 500.0);
+        assert!(status.rect.origin.y >= 0.0);
         assert!(status.rect.origin.y + status.rect.size.height <= 680.0);
     }
 

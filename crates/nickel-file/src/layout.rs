@@ -5,8 +5,8 @@ use std::{
 
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
-    AnyView, Collection, CollectionPresentation, CollectionState, Insets, LinearGradient,
-    NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, SidebarFolder,
+    AnyView, Collection, CollectionPresentation, CollectionState, Insets,
+    LinearGradient, NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, SidebarFolder,
     VerticalScroll, VirtualWindow, ui,
 };
 
@@ -75,7 +75,20 @@ pub(crate) fn build_view(
         })
         .collect();
     let resolved_sidebar_width = if narrow { _width } else { app.sidebar_width };
-    let sidebar = components::places_sidebar(resolved_sidebar_width, location_groups, palette);
+    let sidebar = VerticalScroll::new(
+        FileMessage::SidebarScroll(app.sidebar_scroll_offset),
+        app.sidebar_scroll_offset,
+    )
+    .theme(palette.into())
+    .on_scroll(FileMessage::SidebarScroll)
+    .controlled(true)
+    .height(content_height)
+    .id("file-sidebar-scroll")
+    .child(components::places_sidebar(
+        resolved_sidebar_width,
+        location_groups,
+        palette,
+    ));
     let icon_size = (app.tile_width * 0.42).clamp(42.0, 96.0);
     let tile_rows = app
         .browser
@@ -169,10 +182,10 @@ pub(crate) fn build_view(
                 .navigation_scope(NavigationScope::group().direction(app.reading_direction))
                 .direction(app.reading_direction)
                 .presentation(CollectionPresentation::VirtualList {
-                    item_height: 58.0,
+                    item_height: 40.0,
                     offset: app.file_scroll_offset,
                     viewport_height,
-                    overscan: 116.0,
+                    overscan: 80.0,
                 }),
             ),
         };
@@ -205,6 +218,7 @@ pub(crate) fn build_view(
                 top: 14.0, right: 16.0, bottom: 14.0, left: 16.0,
             }}>
                 <Container id={"file-content"} height={viewport_height}
+                    navigation_scope={NavigationScope::group().direction(app.reading_direction)}
                     on_press={FileMessage::SelectionSurface}
                     on_drag={(FileMessage::SelectionSurface, selection_surface_drag_message)}
                     context_message={FileMessage::ContextBackground} focus_background_tint={palette.accent}
@@ -400,6 +414,7 @@ pub(crate) fn sidebar_folder_elements(
             },
         )
         .open_id(crate::app::drop_target_id("sidebar", &path))
+        .row_height(28.0)
         .accessibility_labels((format!("Toggle {label}"), format!("Open {label}")))
         .focus_background_tints((palette.accent, palette.complement))
         .indent(depth)

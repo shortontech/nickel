@@ -1132,7 +1132,7 @@ pub fn init_udev(
             .copied()
             .collect::<Vec<_>>()
     };
-    data.advertise_dmabuf_formats(dmabuf_formats);
+    data.advertise_dmabuf_formats(dmabuf_formats, Some(primary_gpu.dev_id()));
     let usable_outputs = data
         .native
         .as_ref()

@@ -416,6 +416,8 @@ impl Application {
         {
             command.current_dir(home);
         }
+        #[cfg(target_os = "linux")]
+        command.env_remove("__EGL_VENDOR_LIBRARY_FILENAMES");
         Ok(command)
     }
 
@@ -562,6 +564,8 @@ mod tests {
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_CONTROL")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_TOKEN")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SHELL_TEST_CONTROL")));
+        #[cfg(target_os = "linux")]
+        assert!(removals.contains(&std::ffi::OsStr::new("__EGL_VENDOR_LIBRARY_FILENAMES")));
     }
 
     #[test]
@@ -657,6 +661,7 @@ mod tests {
         )));
         assert!(environment.contains(&("NICKEL_SESSION_TOKEN".into(), Some("secret".into()))));
         assert!(environment.contains(&("NICKEL_SHELL_TEST_CONTROL".into(), None)));
+        assert!(environment.contains(&("__EGL_VENDOR_LIBRARY_FILENAMES".into(), None)));
         clear_trusted_session_capability(std::ffi::OsStr::new(
             "/run/user/1000/nickel-settings.sock",
         ));

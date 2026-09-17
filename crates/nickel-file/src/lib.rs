@@ -12,6 +12,7 @@ extern crate self as nickel_file;
 #[allow(dead_code)]
 pub(crate) mod app;
 pub(crate) mod components;
+pub mod context_popup;
 pub mod desktop;
 pub(crate) mod host;
 pub mod icons;

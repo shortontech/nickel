@@ -291,6 +291,12 @@ impl FocusedInputDispatcher {
                 let command =
                     command_modifier && !event.modifiers.aggregate(AggregateModifier::Alt);
                 let command = match (&event.logical, &event.physical) {
+                    (_, PhysicalKey::Code(KeyCode::F2)) if !event.repeat => {
+                        InputCommand::Application {
+                            shortcut: Shortcut::Rename,
+                            fallback: None,
+                        }
+                    }
                     (LogicalKey::Named(NamedKey::ContextMenu), _)
                     | (_, PhysicalKey::Code(KeyCode::ContextMenu))
                         if !event.repeat =>
@@ -1149,6 +1155,21 @@ mod tests {
             }]
         ));
         assert!(dispatch.dispatch(&commit(1, 42, "r")).is_empty());
+    }
+
+    #[test]
+    fn f2_dispatches_application_rename() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        assert_eq!(
+            dispatch.dispatch_with_context(
+                &key_at(43, LogicalKey::Named(NamedKey::F2), KeyCode::F2, &[]),
+                InputContext::default(),
+            ),
+            [InputCommand::Application {
+                shortcut: Shortcut::Rename,
+                fallback: None,
+            }]
+        );
     }
 
     #[test]

@@ -266,6 +266,7 @@ impl NickelSession {
         if !changed.is_empty() {
             self.sync_internal_shell_changes(Some(&changed));
         }
+        self.sync_internal_window_decorations();
         self.notify_shell_settings_changed();
         self.schedule_internal_shell_deadline();
         authorization?;

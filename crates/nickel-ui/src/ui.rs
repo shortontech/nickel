@@ -1636,7 +1636,7 @@ thread_local! {
     static TEXT_MEASURER: RefCell<TextMeasurer> = RefCell::new(TextMeasurer::default());
 }
 
-fn measure_text(
+pub(crate) fn measure_text(
     text: &str,
     scale: f32,
     bold: bool,
@@ -1700,6 +1700,11 @@ fn measure_text(
         }
         measured
     })
+}
+
+/// Intrinsic width of a single line using the same font metrics as UI layout.
+pub fn intrinsic_text_width(text: &str, scale: f32) -> f32 {
+    measure_text(text, scale, false, false, None, Some(1), f32::INFINITY).width
 }
 
 fn styled_attrs(span: Option<&StyledTextSpan>) -> Attrs<'_> {

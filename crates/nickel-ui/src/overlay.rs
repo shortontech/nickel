@@ -404,6 +404,49 @@ pub struct OverlayMenu<Message> {
 }
 
 impl<Message> OverlayMenu<Message> {
+    /// Size a compact menu to its widest label and shortcut, capped by the
+    /// available presentation width. Rows retain their full hit regions.
+    pub fn fit_width_to_content(mut self, max_width: f32) -> Self {
+        self.width = self.content_width_for(&self.items, max_width);
+        self
+    }
+
+    pub(crate) fn content_width_for(
+        &self,
+        items: &[OverlayMenuItem<Message>],
+        max_width: f32,
+    ) -> f32 {
+        let widest = items
+            .iter()
+            .map(|item| {
+                let label = crate::ui::measure_text(
+                    &item.label,
+                    self.text_scale,
+                    false,
+                    false,
+                    None,
+                    Some(1),
+                    f32::INFINITY,
+                )
+                .width;
+                let shortcut = item.shortcut.as_deref().map_or(0.0, |shortcut| {
+                    crate::ui::measure_text(
+                        shortcut,
+                        self.text_scale * 0.85,
+                        false,
+                        false,
+                        None,
+                        Some(1),
+                        f32::INFINITY,
+                    )
+                    .width
+                        + 12.0
+                });
+                label + shortcut + 16.0 + self.padding.left + self.padding.right
+            })
+            .fold(0.0_f32, f32::max);
+        widest.max(96.0).min(max_width.max(96.0))
+    }
     pub fn new(id: impl Into<UiId>, anchor: OverlayAnchor) -> Self {
         Self {
             id: OverlayId::new(id),
@@ -413,21 +456,21 @@ impl<Message> OverlayMenu<Message> {
             collision: CollisionPolicy::FlipThenClamp,
             focus: OverlayFocusPolicy::FirstItem,
             width: 200.0,
-            row_height: 34.0,
+            row_height: 28.0,
             row_gap: 0.0,
-            padding: Insets::all(0.0),
-            radius: 0.0,
+            padding: Insets::all(2.0),
+            radius: 6.0,
             items: Vec::new(),
             background: 0x202630,
             border: 0x5a6472,
             border_width: 1.0,
             foreground: 0xe8edf4,
-            text_scale: 2.0,
+            text_scale: 1.1,
             text_align: TextAlign::Start,
             item_hover: None,
             item_pressed: None,
             item_selected: None,
-            item_radius: 0.0,
+            item_radius: 4.0,
             initial_controller_item: None,
             direction: ReadingDirection::LeftToRight,
         }
@@ -615,6 +658,23 @@ mod tests {
                 [OverlayMenuItem::action("choose", "Choose", Message::Choose)],
             ),
         )
+    }
+
+    #[test]
+    fn context_menu_width_fits_its_widest_child_and_shortcut() {
+        let short = OverlayMenu::new("short", OverlayAnchor::Node(UiId::from("anchor")))
+            .item(OverlayMenuItem::action("one", "One", Message::Choose))
+            .fit_width_to_content(400.0);
+        let long = OverlayMenu::new("long", OverlayAnchor::Node(UiId::from("anchor")))
+            .item(OverlayMenuItem::action("one", "One", Message::Choose))
+            .item(
+                OverlayMenuItem::action("two", "A much longer command", Message::Choose)
+                    .shortcut("Ctrl+Shift+R"),
+            )
+            .fit_width_to_content(400.0);
+        assert!(long.width > short.width);
+        assert_eq!(long.row_height, 28.0);
+        assert_eq!(long.padding, Insets::all(2.0));
     }
 
     #[test]

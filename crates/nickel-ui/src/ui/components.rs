@@ -516,6 +516,11 @@ impl<Message> FileGrid<Message> {
         self
     }
 
+    pub fn width(mut self, width: f32) -> Self {
+        self.grid = self.grid.width(width);
+        self
+    }
+
     pub fn height(mut self, height: f32) -> Self {
         self.grid = self.grid.height(height);
         self
@@ -699,6 +704,14 @@ impl<Message> FilePlaneItem<Message> {
     pub fn gap(mut self, gap: f32) -> Self {
         if let Some(content) = self.content_mut() {
             content.style.gap = gap.max(0.0);
+        }
+        self
+    }
+
+    pub fn center_content(mut self) -> Self {
+        if let Some(content) = self.content_mut() {
+            content.style.height = Length::Fill;
+            content.style.justify_content = Justify::Center;
         }
         self
     }
@@ -2027,6 +2040,18 @@ impl<Message> SidebarFolder<Message> {
         self
     }
 
+    pub fn row_height(mut self, height: f32) -> Self {
+        self.0.0.style.height = Length::Px(height);
+        if let Some(row) = self.0.0.children.first_mut() {
+            for action in &mut row.children {
+                action.style.height = Length::Px(height);
+                action.style.padding.top = 4.0;
+                action.style.padding.bottom = 3.0;
+            }
+        }
+        self
+    }
+
     /// Assigns a stable semantic identity to the folder-opening action. This
     /// lets native drag adapters resolve a drop destination without coupling
     /// provider paths to painted row geometry.
@@ -2555,7 +2580,7 @@ impl<Message> Component<Message> for RadioOption<Message> {
             (true, false) => "unselected",
         };
         let mut option = Container::new()
-            .min_height(if self.compact { 44.0 } else { 58.0 })
+            .min_height(if self.compact { 40.0 } else { 48.0 })
             .fill_width()
             .padding(if self.compact {
                 Insets {
@@ -2565,7 +2590,12 @@ impl<Message> Component<Message> for RadioOption<Message> {
                     left: 12.0,
                 }
             } else {
-                Insets::all(self.theme.spacing.content)
+                Insets {
+                    top: 6.0,
+                    right: self.theme.spacing.content,
+                    bottom: 6.0,
+                    left: self.theme.spacing.content,
+                }
             })
             .radius(self.theme.radii.control)
             .background(self.theme.surfaces.card)
@@ -2604,7 +2634,7 @@ impl<Message> RadioGroup<Message> {
                 .fill_width()
                 .semantic_role(SemanticRole::RadioGroup)
                 .navigation_scope(crate::NavigationScope::group())
-                .child(Column::new().fill_width().gap(10.0).children(options)),
+                .child(Column::new().fill_width().gap(6.0).children(options)),
         )
     }
 

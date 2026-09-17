@@ -45,7 +45,6 @@ pub(super) struct SettingsApp {
     pub(super) optional_features: OptionalFeatureSettings,
     pub(super) keyboard_runtime: Option<nickel_session_protocol::OnScreenKeyboardSnapshot>,
     pub(super) keyboard_error: Option<String>,
-    pub(super) keyboard_preview: String,
     pub(super) optional_feature_runtime: OptionalFeatureRuntime,
     pub(super) codex_feature: FeatureState,
     pub(super) codex_probe_rx:
@@ -284,7 +283,6 @@ impl Default for SettingsApp {
             optional_features,
             keyboard_runtime: None,
             keyboard_error: None,
-            keyboard_preview: String::new(),
             optional_feature_runtime,
             codex_feature,
             codex_probe_rx: None,

@@ -810,6 +810,17 @@ impl<Message: Clone> UiFrame<Message> {
                 bold: false,
                 wrap: false,
             });
+            if let Some(shortcut) = item.shortcut.as_ref() {
+                self.commands.push(PaintCommand::Text {
+                    bounds: text_bounds,
+                    text: shortcut.clone(),
+                    scale: menu.text_scale * 0.85,
+                    color: menu.foreground,
+                    align: TextAlign::End,
+                    bold: false,
+                    wrap: false,
+                });
+            }
             if !item.children.is_empty() {
                 self.commands.push(PaintCommand::Text {
                     bounds: text_bounds,
@@ -927,7 +938,7 @@ impl<Message: Clone> UiFrame<Message> {
         let submenu_rect = crate::place_transient(
             anchor,
             Size {
-                width: menu.width,
+                width: menu.content_width_for(children, self.viewport.size.width - 4.0),
                 height,
             },
             self.viewport,
@@ -1034,6 +1045,7 @@ impl<Message: Clone> UiFrame<Message> {
         state: &mut UiStateStore,
         mut menu: crate::OverlayMenu<Message>,
     ) -> Result<(), SemanticActionError> {
+        menu = menu.fit_width_to_content(self.viewport.size.width - 4.0);
         let requested = menu.anchor.id().clone();
         let suffix = format!("/{}", requested.as_str());
         let mut matches = self
@@ -1773,6 +1785,11 @@ impl<Message: Clone> UiFrame<Message> {
                         .cloned()
                 {
                     EventOutcome {
+                        messages: self
+                            .context_message_for_id(&target)
+                            .cloned()
+                            .into_iter()
+                            .collect(),
                         invalidation: state.open_overlay(overlay, invocation_target),
                         ..EventOutcome::default()
                     }
@@ -2789,6 +2806,9 @@ impl<Message: Clone> UiFrame<Message> {
                     })
                     .cloned()
                 {
+                    if let Some(message) = self.context_message_for_id(&target).cloned() {
+                        outcome.messages.push(message);
+                    }
                     return EventOutcome {
                         invalidation: state.open_overlay(overlay, target),
                         ..outcome
@@ -3386,6 +3406,13 @@ impl<Message: Clone> UiFrame<Message> {
                         .iter()
                         .find(|(target, _)| target == id)
                 }) {
+                    if let Some(message) = target
+                        .as_ref()
+                        .and_then(|id| self.context_message_for_id(id))
+                        .cloned()
+                    {
+                        outcome.messages.push(message);
+                    }
                     return EventOutcome {
                         invalidation: state.open_overlay(overlay.clone(), target.unwrap()),
                         ..outcome
@@ -3475,6 +3502,9 @@ impl<Message: Clone> UiFrame<Message> {
                     .find(|(target, _)| target == &id)
                     .cloned()
                 {
+                    if let Some(message) = self.context_message_for_id(&target).cloned() {
+                        outcome.messages.push(message);
+                    }
                     return EventOutcome {
                         invalidation: state.open_overlay(overlay, target),
                         ..outcome

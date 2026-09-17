@@ -241,10 +241,10 @@ impl SettingsApp {
                     &optional_features_label,
                     "On-screen keyboard",
                     "Screen keyboard · touch keyboard · virtual keyboard",
-                    "on-screen-keyboard-preview",
+                    "on-screen-keyboard-mode",
                     SettingsMessage::NavigateTarget(
                         SettingsPage::OptionalFeatures,
-                        "on-screen-keyboard-preview".into(),
+                        "on-screen-keyboard-mode".into(),
                     ),
                 ),
             ];

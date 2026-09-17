@@ -58,6 +58,8 @@ impl<Message> Component<Message> for PageHeader<Message> {
 /// One Settings destination with a selected surface and accent rail.
 pub struct NavigationItem<Message = String>(super::Element<Message>);
 
+const NAVIGATION_ITEM_HEIGHT: f32 = 32.0;
+
 impl<Message> NavigationItem<Message> {
     pub fn unavailable(
         theme: SemanticTheme,
@@ -68,7 +70,7 @@ impl<Message> NavigationItem<Message> {
         Self(
             Container::new()
                 .fill_width()
-                .min_height(40.0)
+                .min_height(NAVIGATION_ITEM_HEIGHT)
                 .padding(Insets::symmetric(
                     theme.spacing.control,
                     theme.spacing.content,
@@ -150,7 +152,7 @@ impl<Message> NavigationItem<Message> {
         }
         let rail = Container::new()
             .width(3.0)
-            .height(40.0)
+            .height(NAVIGATION_ITEM_HEIGHT)
             .background(if selected {
                 theme.accent.ordinary
             } else {
@@ -192,7 +194,7 @@ impl<Message> NavigationItem<Message> {
         Self(
             Container::new()
                 .fill_width()
-                .min_height(40.0)
+                .min_height(NAVIGATION_ITEM_HEIGHT)
                 .shrink(0.0)
                 .radius(theme.radii.control)
                 .background(if selected {
@@ -422,12 +424,17 @@ impl<Message> SettingsNavigation<Message> {
     }
 
     fn build(theme: SemanticTheme, width: f32, owns_pane: bool) -> Self {
+        let padding = if owns_pane {
+            theme.spacing.content
+        } else {
+            0.0
+        };
         let mut navigation = Container::new()
             .id("settings-navigation-pane")
             .width(width)
             .min_width(width)
-            .padding(Insets::all(theme.spacing.content))
-            .gap(theme.spacing.compact)
+            .padding(Insets::all(padding))
+            .gap(theme.spacing.compact / 2.0)
             .background(theme.surfaces.sidebar);
         if owns_pane {
             navigation = navigation
@@ -2249,6 +2256,39 @@ mod tests {
             .iter()
             .find(|node| node.id.as_str().ends_with(suffix))
             .unwrap()
+    }
+
+    #[test]
+    fn settings_navigation_rows_are_compact_and_keep_their_hit_region() {
+        let theme = theme();
+        let tree = UiFrame::layout(
+            SettingsNavigation::new(theme, 220.0)
+                .item(
+                    NavigationItem::new(theme, Message::Navigate(0), "Display", false)
+                        .id("display"),
+                )
+                .item(
+                    NavigationItem::new(theme, Message::Navigate(1), "Appearance", true)
+                        .id("appearance"),
+                ),
+            Rect::new(0.0, 0.0, 220.0, 200.0),
+        );
+        let display = node_ending(&tree, "/display");
+        let appearance = node_ending(&tree, "/appearance");
+        assert_eq!(display.allocated.size.height, NAVIGATION_ITEM_HEIGHT);
+        assert_eq!(appearance.allocated.size.height, NAVIGATION_ITEM_HEIGHT);
+        assert_eq!(
+            appearance.allocated.origin.y - display.allocated.origin.y,
+            NAVIGATION_ITEM_HEIGHT + theme.spacing.compact / 2.0,
+        );
+        let mut state = UiStateStore::default();
+        let point = Point {
+            x: appearance.allocated.origin.x + appearance.allocated.size.width / 2.0,
+            y: appearance.allocated.origin.y + appearance.allocated.size.height / 2.0,
+        };
+        tree.handle_event(&mut state, UiEvent::PointerPressed(point));
+        let outcome = tree.handle_event(&mut state, UiEvent::PointerReleased(point));
+        assert_eq!(outcome.messages, vec![Message::Navigate(1)]);
     }
 
     #[test]

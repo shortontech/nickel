@@ -579,8 +579,6 @@ enum SettingsMessage {
     },
     SetCodexEnabled(bool),
     SetOnScreenKeyboard(nickel_core::on_screen_keyboard::KeyboardPreference),
-    KeyboardPreviewChanged(String),
-    TryOnScreenKeyboard,
     ConfirmDisableCodex,
     CancelDisableCodex,
     ToggleCodexSourceSelect,
@@ -1304,9 +1302,6 @@ impl SettingsApp {
     fn handle_settings_message(&mut self, message: SettingsMessage) {
         match message {
             SettingsMessage::Navigate(page) => {
-                if page != SettingsPage::OptionalFeatures {
-                    self.keyboard_preview.clear();
-                }
                 self.page = page;
                 self.active_destination = Some(page);
                 match page {
@@ -1324,9 +1319,6 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::NavigateTarget(page, target) => {
-                if page != SettingsPage::OptionalFeatures {
-                    self.keyboard_preview.clear();
-                }
                 self.page = page;
                 self.active_destination = Some(page);
                 self.sidebar_query.clear();
@@ -1417,19 +1409,6 @@ impl SettingsApp {
                         .optional_features
                         .on_screen_keyboard_generation
                         .saturating_add(1);
-                }
-            }
-            SettingsMessage::KeyboardPreviewChanged(text) => self.keyboard_preview = text,
-            SettingsMessage::TryOnScreenKeyboard => {
-                self.pending_effects.push(SettingsEffect::FocusControl(
-                    "on-screen-keyboard-preview".into(),
-                ));
-                if self.persistence_enabled
-                    && let Err(error) = session_request(SessionRequest::Command(
-                        SessionCommand::RequestOnScreenKeyboard,
-                    ))
-                {
-                    self.keyboard_error = Some(format!("Could not open the keyboard: {error}"));
                 }
             }
             SettingsMessage::ConfirmDisableCodex => self.request_codex_enabled(false, true),
@@ -5241,7 +5220,7 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_override_preserves_saved_mode_and_preview_is_disposable() {
+    fn keyboard_override_preserves_saved_mode() {
         use nickel_core::on_screen_keyboard::KeyboardPreference;
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         app.persistence_enabled = false;
@@ -5255,9 +5234,6 @@ mod tests {
             KeyboardPreference::Disabled,
         ));
         assert_eq!(app.optional_features, before);
-        app.handle_settings_message(SettingsMessage::KeyboardPreviewChanged("temporary".into()));
-        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Appearance));
-        assert!(app.keyboard_preview.is_empty());
     }
 
     #[test]

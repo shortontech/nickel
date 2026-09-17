@@ -513,6 +513,7 @@ pub(crate) fn spawn_launcher(launcher: &Path) -> Result<std::process::Child, Ope
         return Err(OpenPathError::TargetMissing);
     }
     std::process::Command::new("gio")
+        .env_remove("__EGL_VENDOR_LIBRARY_FILENAMES")
         .args([std::ffi::OsStr::new("launch"), launcher.as_os_str()])
         .spawn()
         .map_err(spawn_open_error)
@@ -524,6 +525,7 @@ pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), O
         return Err(OpenPathError::TargetMissing);
     }
     std::process::Command::new("gio")
+        .env_remove("__EGL_VENDOR_LIBRARY_FILENAMES")
         .args([
             std::ffi::OsStr::new("launch"),
             launcher.as_os_str(),

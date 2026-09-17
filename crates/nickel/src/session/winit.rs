@@ -106,6 +106,7 @@ pub fn init_winit(
                 .with_surface_size(smithay::reexports::winit::dpi::LogicalSize::new(
                     width, height,
                 ))
+                .with_decorations(true)
                 .with_title(title)
                 .with_visible(true),
         )?
@@ -120,7 +121,7 @@ pub fn init_winit(
         backend.window().focus_window();
     }
     state.set_winit_redraw_window(backend.window());
-    state.advertise_dmabuf_formats(backend.renderer().dmabuf_formats().iter().copied());
+    state.advertise_dmabuf_formats(backend.renderer().dmabuf_formats().iter().copied(), None);
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
     let mode = Mode {

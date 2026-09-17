@@ -1,4 +1,24 @@
     #[test]
+    fn reopening_launcher_restores_default_dashboard_view() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.apply_session_launcher_visibility(true);
+        shell.apply_launcher_action(crate::launcher_view::LauncherAction::SetView(
+            crate::launcher::LauncherView::Applications,
+        ));
+        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Applications);
+
+        shell.apply_session_launcher_visibility(false);
+        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Favorites);
+        assert_eq!(
+            shell.launcher_view.dashboard_narrow_page,
+            crate::launcher_view::DashboardNarrowPage::Primary
+        );
+
+        shell.apply_session_launcher_visibility(true);
+        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Favorites);
+    }
+
+    #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
         use nickel_input::global::{ShortcutCapability, UnavailableReason};
 

@@ -38,6 +38,81 @@ mod tests {
     use super::*;
     use crate::session::internal_ui::InternalSurfacePlacement;
 
+    struct PointerProbe {
+        buttons: usize,
+        axes: usize,
+    }
+
+    impl nickel_ui::Application for PointerProbe {
+        type Message = ();
+
+        fn update(&mut self, (): ()) {}
+
+        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
+            nickel_ui::Text::new("pointer probe")
+        }
+
+        fn adapt_input(
+            host: &mut nickel_ui::UiHost<Self>,
+            input: &InputEvent,
+        ) -> nickel_ui::AdapterOutcome {
+            match input {
+                InputEvent::Pointer(PointerEvent::Button { .. }) => {
+                    host.application_mut().buttons += 1;
+                }
+                InputEvent::Pointer(PointerEvent::Axis { .. }) => {
+                    host.application_mut().axes += 1;
+                }
+                _ => return nickel_ui::AdapterOutcome::default(),
+            }
+            nickel_ui::AdapterOutcome {
+                changed: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[test]
+    fn hosted_application_receives_normalized_buttons_and_wheel() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert(
+            PointerProbe {
+                buttons: 0,
+                axes: 0,
+            },
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Application,
+                geometry: (100, 50, 400, 300),
+                output: None,
+            },
+            1.0,
+        );
+        let point = (150.0, 100.0);
+        assert!(runtime.desktop_pointer_input(
+            "mouse",
+            point,
+            DesktopPointerAction::Button {
+                button: PointerButton::Primary,
+                edge: KeyEdge::Pressed,
+            },
+            ModifierState::default(),
+            false,
+        ));
+        assert!(runtime.desktop_pointer_input(
+            "mouse",
+            point,
+            DesktopPointerAction::Axis {
+                delta: nickel_input::Vector { x: 0.0, y: 1.0 },
+                discrete: Some((0, 1)),
+            },
+            ModifierState::default(),
+            false,
+        ));
+        let app = runtime.application::<PointerProbe>(id).unwrap();
+        assert_eq!((app.buttons, app.axes), (1, 1));
+        assert!(runtime.drain_routed_events().is_empty());
+    }
+
     fn desktop(runtime: &mut InternalUiRuntime) -> InternalSurfaceId {
         runtime.insert_scene(
             Vec::new(),
@@ -1304,7 +1379,11 @@ impl InternalUiRuntime {
             .get(&id)
             .filter(|surface| {
                 surface.visible
-                    && surface.external_scene.is_some()
+                    && (surface.external_scene.is_some()
+                        || matches!(
+                            surface.placement.role,
+                            InternalSurfaceRole::Application | InternalSurfaceRole::Overlay
+                        ))
                     // The panel coordinator consumes UiEvent pointer actions. Keep
                     // its events on the generic route until it supports normalized input.
                     && !matches!(
@@ -1397,14 +1476,22 @@ impl InternalUiRuntime {
         // Snapshot modifiers with the event: reading them later during queue drain
         // could apply a newer key state to an earlier Ctrl/Shift-click.
         let event = self.desktop_normalized_ingress(id, source, device, InputEvent::Pointer(event));
-        self.routed_events.push((
-            id,
-            HostBatch {
-                events: vec![event],
-                ..Default::default()
-            },
-            Some(modifiers),
-        ));
+        let batch = HostBatch {
+            events: vec![event],
+            ..Default::default()
+        };
+        if matches!(
+            placement.role,
+            InternalSurfaceRole::Application | InternalSurfaceRole::Overlay
+        ) && self
+            .presentation
+            .get(&id)
+            .is_some_and(|surface| surface.external_scene.is_none())
+        {
+            self.step(id, batch);
+        } else {
+            self.routed_events.push((id, batch, Some(modifiers)));
+        }
         true
     }
 }

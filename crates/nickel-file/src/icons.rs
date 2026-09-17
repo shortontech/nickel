@@ -38,6 +38,7 @@ pub struct ArtworkRequest<'a> {
 pub enum ArtworkSource {
     Nickel,
     System,
+    Thumbnail,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -164,13 +165,22 @@ impl ArtworkCache {
         self.insert_keyed(key.entry.clone(), value, Some(key));
     }
 
+    pub(crate) fn insert_pending(&mut self, path: PathBuf, value: (u16, Arc<RgbaImage>)) {
+        // Visible first-frame artwork must not satisfy a cache lookup for the
+        // asynchronous result. A refresh can retire its worker before it
+        // publishes, and must then schedule the path again.
+        self.insert_keyed(path, value, None);
+    }
+
     fn insert_keyed(
         &mut self,
         path: PathBuf,
         value: (u16, Arc<RgbaImage>),
         key: Option<ArtworkCacheKey>,
     ) {
-        self.remove(&path);
+        if self.entries.contains_key(&path) {
+            self.remove(&path);
+        }
         let bytes = value.1.as_raw().len();
         if bytes > self.byte_capacity {
             return;
@@ -346,6 +356,16 @@ pub fn cache_key_with_theme(
     theme: Option<&str>,
     request: &ArtworkRequest<'_>,
 ) -> ArtworkCacheKey {
+    if supports_photo_thumbnail(request.path, request.kind) {
+        let mut revision = DefaultHasher::new();
+        // A directory refresh must invalidate a changed photo even when its
+        // path and the selected icon provider are unchanged.
+        if let Ok(metadata) = std::fs::metadata(request.path) {
+            metadata.len().hash(&mut revision);
+            metadata.modified().ok().hash(&mut revision);
+        }
+        return ArtworkCacheKey::new(ArtworkSource::Thumbnail, revision.finish(), request);
+    }
     match effective_preference(preference, request.path) {
         FileIconPreference::Nickel => ArtworkCacheKey::new(
             ArtworkSource::Nickel,
@@ -358,6 +378,33 @@ pub fn cache_key_with_theme(
             request,
         ),
     }
+}
+
+pub fn supports_photo_thumbnail(path: &Path, kind: SemanticIconKind) -> bool {
+    kind == SemanticIconKind::ImageFile
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "webp" | "bmp"
+                )
+            })
+}
+
+pub fn resolve_photo_thumbnail(request: &ArtworkRequest<'_>) -> Option<ResolvedArtwork> {
+    if !supports_photo_thumbnail(request.path, request.kind) {
+        return None;
+    }
+    let decoded = nickel_platform::decode_image_preview(request.path).ok()?;
+    let pixels = contain(&decoded.image, physical_size(request));
+    Some(ResolvedArtwork {
+        pixels: Arc::new(pixels),
+        source: ArtworkSource::Thumbnail,
+        provider_revision: 0,
+        fallback_reason: None,
+    })
 }
 
 /// Launcher files are references to applications rather than ordinary documents. Their artwork
@@ -507,6 +554,61 @@ fn has_visible_pixels(image: &RgbaImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photo_thumbnail_uses_image_pixels_and_invalidates_when_file_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("photo.png");
+        RgbaImage::from_pixel(16, 8, Rgba([210, 20, 30, 255]))
+            .save(&path)
+            .unwrap();
+        let request = ArtworkRequest {
+            path: &path,
+            kind: SemanticIconKind::ImageFile,
+            logical_size: 48,
+            scale_milli: 1_000,
+            appearance: ArtworkAppearance::Dark,
+        };
+        let first_key = cache_key(FileIconPreference::Nickel, &request);
+        let thumbnail = resolve_photo_thumbnail(&request).unwrap();
+        assert_eq!(thumbnail.source, ArtworkSource::Thumbnail);
+        assert!(
+            thumbnail
+                .pixels
+                .pixels()
+                .any(|pixel| pixel.0 == [210, 20, 30, 255])
+        );
+        RgbaImage::from_pixel(32, 8, Rgba([10, 130, 40, 255]))
+            .save(&path)
+            .unwrap();
+        assert_ne!(first_key, cache_key(FileIconPreference::Nickel, &request));
+        assert!(
+            resolve_photo_thumbnail(&request)
+                .unwrap()
+                .pixels
+                .pixels()
+                .any(|pixel| pixel.0 == [10, 130, 40, 255])
+        );
+    }
+
+    #[test]
+    fn unsupported_and_corrupt_photos_keep_the_icon_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broken.jpg");
+        std::fs::write(&path, b"not a photo").unwrap();
+        let request = ArtworkRequest {
+            path: &path,
+            kind: SemanticIconKind::ImageFile,
+            logical_size: 48,
+            scale_milli: 1_000,
+            appearance: ArtworkAppearance::Dark,
+        };
+        assert!(resolve_photo_thumbnail(&request).is_none());
+        assert!(!supports_photo_thumbnail(
+            Path::new("animation.gif"),
+            SemanticIconKind::ImageFile
+        ));
+    }
 
     enum FakeResult {
         Visible,

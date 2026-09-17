@@ -2394,6 +2394,7 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
         .applications()
         .find(|application| application.matches_native_id(native_app_id))
         .map(|application| application.application_id().clone())
+        .or_else(|| (native_app_id == "nickel-file").then(|| ApplicationId::new(native_app_id)))
 }
 
 #[cfg(test)]
@@ -2964,6 +2965,15 @@ mod tests {
             resolve_application_id("io.nickel.codex.project.0123", &launcher)
                 .map(|id| id.as_str().to_owned()),
             Some("io.nickel.codex.project.0123".into())
+        );
+    }
+
+    #[test]
+    fn built_in_file_identity_survives_without_a_desktop_entry() {
+        let launcher = Launcher::new(Vec::new());
+        assert_eq!(
+            resolve_application_id("nickel-file", &launcher).map(|id| id.as_str().to_owned()),
+            Some("nickel-file".into())
         );
     }
 

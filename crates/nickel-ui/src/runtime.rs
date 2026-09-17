@@ -890,14 +890,9 @@ fn start_windows_file_drag(paths: &[std::path::PathBuf]) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
         let source: IDropSource = ComObject::new(WindowsFileDropSource).into_interface();
-        SHDoDragDrop(
-            None,
-            &data,
-            &source,
-            DROPEFFECT_COPY | DROPEFFECT_MOVE,
-        )
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        SHDoDragDrop(None, &data, &source, DROPEFFECT_COPY | DROPEFFECT_MOVE)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     };
     for pidl in pidls {
         unsafe { ILFree(Some(pidl.cast())) }
@@ -951,6 +946,7 @@ impl ControllerPollSchedule {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shortcut {
     Submit,
+    Rename,
     Newline,
     Escape,
     Reload,
