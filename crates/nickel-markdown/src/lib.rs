@@ -879,6 +879,15 @@ where
     AnyView::new(
         Column::new()
             .fill_width()
+            // Cosmic glyphs such as g, p and q may rasterize a couple of pixels
+            // below the nominal final line box. Keep those pixels inside this
+            // block so the following card/background cannot paint over them.
+            .padding(Insets {
+                top: 0.0,
+                right: 0.0,
+                bottom: 3.0,
+                left: 0.0,
+            })
             .gap(6.0)
             .child(styled)
             .children(controls),

@@ -182,7 +182,8 @@
                 roots: Vec::new(),
                 chat_count: Some(1),
                 activity: crate::launcher::ProjectActivity::Idle,
-                last_used_at: None,
+                // Recent-project navigation only exposes projects with activity.
+                last_used_at: Some(1),
             },
         ]));
         shell.apply_session_launcher_visibility(true);
@@ -191,13 +192,11 @@
             .launcher_host
             .unique_semantic_target_for_message(&LauncherAction::OpenProject("nickel".into()))
             .expect("Nickel project row");
-        for event in [
-            UiEvent::KeyboardNavigateDown,
-            UiEvent::KeyboardNavigateDown,
-            UiEvent::KeyboardNavigateDown,
-            UiEvent::KeyboardNavigateDown,
-        ] {
+        for event in [UiEvent::KeyboardNavigateDown, UiEvent::KeyboardNavigateLeft] {
             shell.launcher_host_ui(event, 920, 680);
+        }
+        for _ in 0..7 {
+            shell.launcher_host_ui(UiEvent::KeyboardNavigateDown, 920, 680);
         }
         assert_eq!(shell.launcher_host.inspect().controller_target, Some(target.id));
         assert!(shell.take_requested_codex_project().is_none());
@@ -224,7 +223,6 @@
             ))
             .expect("Konsole application row");
         for event in [
-            UiEvent::KeyboardNavigateDown,
             UiEvent::KeyboardNavigateDown,
             UiEvent::KeyboardNavigateRight,
         ] {
@@ -1194,22 +1192,17 @@
     #[test]
     fn notification_host_effects_stay_at_the_transport_boundary() {
         let mut shell = LiveShell::new().unwrap();
-        let mut store = NotificationStore::default();
-        store.notify(
-            0,
-            NotificationRequest {
-                app_name: "Test".into(),
-                summary: "Ready".into(),
-                body: "Choose".into(),
-                actions: vec![NotificationAction {
-                    key: "open".into(),
-                    label: "Open".into(),
-                }],
-                expire_timeout_ms: 0,
-            },
-            Instant::now(),
-        );
-        shell.notification = store.newest();
+        shell.notification_feed.notify_internal(NotificationRequest {
+            app_name: "Test".into(),
+            summary: "Ready".into(),
+            body: "Choose".into(),
+            actions: vec![NotificationAction {
+                key: "open".into(),
+                label: "Open".into(),
+            }],
+            expire_timeout_ms: 0,
+        });
+        shell.notification = shell.notification_feed.snapshot();
         let _ = shell.scene(SurfaceRole::Notification, 420, 180);
         let target = shell
             .notification_host
@@ -1268,22 +1261,17 @@
     #[test]
     fn compositor_owned_notification_ui_uses_production_effect_reducer() {
         let mut shell = LiveShell::new().unwrap();
-        let mut store = NotificationStore::default();
-        store.notify(
-            0,
-            NotificationRequest {
-                app_name: "Test".into(),
-                summary: "Ready".into(),
-                body: "Choose".into(),
-                actions: vec![NotificationAction {
-                    key: "open".into(),
-                    label: "Open".into(),
-                }],
-                expire_timeout_ms: 0,
-            },
-            Instant::now(),
-        );
-        shell.notification = store.newest();
+        shell.notification_feed.notify_internal(NotificationRequest {
+            app_name: "Test".into(),
+            summary: "Ready".into(),
+            body: "Choose".into(),
+            actions: vec![NotificationAction {
+                key: "open".into(),
+                label: "Open".into(),
+            }],
+            expire_timeout_ms: 0,
+        });
+        shell.notification = shell.notification_feed.snapshot();
         let _ = shell.scene(SurfaceRole::Notification, 420, 180);
         let target = shell
             .notification_host

@@ -254,10 +254,8 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         else {
             return;
         };
-        if data
-            .apply_authorized_interactive_resize(&self.window, token, true)
-            .is_some()
-        {
+        let applied = data.apply_authorized_interactive_resize(&self.window, token, true);
+        if applied.is_some() {
             self.last_authorization = Some(token);
         }
     }

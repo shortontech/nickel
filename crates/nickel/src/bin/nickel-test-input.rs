@@ -29,6 +29,7 @@ Usage:
   nickel-test-input touch frame
   nickel-test-input output-connect NAME WIDTH HEIGHT SCALE_120 normal|90|180|270
   nickel-test-input output-disconnect NAME
+  nickel-test-input capture-output PATH [OUTPUT]
   nickel-test-input workspace-create
   nickel-test-input workspace-switch ID
   nickel-test-input workspace-remove ID
@@ -56,7 +57,7 @@ Usage:
   nickel-test-input wheel HORIZONTAL_V120 VERTICAL_V120
   nickel-test-input button left|right pressed|released
   nickel-test-input emergency-control synthetic|physical-fixture left|right pressed|released
-  nickel-test-input key a|c|p|v|x|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
+  nickel-test-input key a|c|e|p|s|t|u|v|x|slash|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
 ";
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -82,6 +83,10 @@ enum Parsed {
         transform: nickel_session_protocol::OutputTransform,
     },
     OutputDisconnect(String),
+    CaptureOutput {
+        path: String,
+        output: Option<String>,
+    },
     WorkspaceCreate,
     WorkspaceSwitch(u64),
     WorkspaceRemove(u64),
@@ -142,6 +147,14 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         [command, name] if command == "output-disconnect" => {
             Ok(Parsed::OutputDisconnect(name.clone()))
         }
+        [command, path] if command == "capture-output" => Ok(Parsed::CaptureOutput {
+            path: path.clone(),
+            output: None,
+        }),
+        [command, path, output] if command == "capture-output" => Ok(Parsed::CaptureOutput {
+            path: path.clone(),
+            output: Some(output.clone()),
+        }),
         [command, name, width, height, scale_120, transform] if command == "output-connect" => {
             Ok(Parsed::OutputConnect {
                 name: name.clone(),
@@ -416,9 +429,14 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
             key: match key.as_str() {
                 "a" => TestKey::A,
                 "c" => TestKey::C,
+                "e" => TestKey::E,
                 "p" => TestKey::P,
+                "s" => TestKey::S,
+                "t" => TestKey::T,
+                "u" => TestKey::U,
                 "v" => TestKey::V,
                 "x" => TestKey::X,
+                "slash" => TestKey::Slash,
                 "enter" => TestKey::Enter,
                 "escape" => TestKey::Escape,
                 "tab" => TestKey::Tab,
@@ -720,6 +738,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let parsed = parse(env::args_os().skip(1))?;
     let shell_runtime_query = matches!(&parsed, Parsed::RuntimeDiagnostics);
+    let capture_path = match &parsed {
+        Parsed::CaptureOutput { path, .. } => Some(path.clone()),
+        _ => None,
+    };
     let output_set = match &parsed {
         Parsed::OutputSet { name, enabled } => Some((name.clone(), *enabled)),
         _ => None,
@@ -791,6 +813,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(Request::Command(Command::TestOutput {
                 output: nickel_session_protocol::TestOutput::Disconnect { name },
             })),
+            None,
+        ),
+        Parsed::CaptureOutput { path, output } => (
+            Some(Request::Command(Command::CaptureOutput { path, output })),
             None,
         ),
         Parsed::WorkspaceCreate => (Some(Request::Command(Command::CreateWorkspace)), None),
@@ -985,9 +1011,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("test input response has the wrong request ID".into());
         }
     }
-    let _ = fs::remove_file(&reply_path);
+    if capture_path.is_none() {
+        let _ = fs::remove_file(&reply_path);
+    }
     let response = response_envelope;
     match response.message {
+        ServerMessage::Ack if capture_path.is_some() => {
+            let mut completion_frame = vec![0_u8; nickel_session_protocol::MAX_FRAME_BYTES];
+            let received = socket.recv(&mut completion_frame);
+            let _ = fs::remove_file(&reply_path);
+            let length = received?;
+            let completed = decode::<ServerEnvelope>(&completion_frame[..length])?;
+            match completed.message {
+                ServerMessage::Event(nickel_session_protocol::Event::OutputCaptureCompleted {
+                    path,
+                    result: nickel_session_protocol::CaptureResult::Saved { backend },
+                }) if Some(path.as_str()) == capture_path.as_deref() => {
+                    println!("saved {path} ({backend:?})");
+                    Ok(())
+                }
+                ServerMessage::Event(nickel_session_protocol::Event::OutputCaptureCompleted {
+                    path,
+                    result: nickel_session_protocol::CaptureResult::Failed { message },
+                }) if Some(path.as_str()) == capture_path.as_deref() => Err(message.into()),
+                _ => Err("unexpected output capture completion".into()),
+            }
+        }
         ServerMessage::Ack => Ok(()),
         ServerMessage::OnScreenKeyboard(snapshot) => {
             println!("{}", serde_json::to_string(&snapshot)?);
@@ -1144,6 +1193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::Readiness
         | Parsed::OutputConnect { .. }
         | Parsed::OutputDisconnect(_)
+        | Parsed::CaptureOutput { .. }
         | Parsed::WorkspaceCreate
         | Parsed::WorkspaceSwitch(_)
         | Parsed::WorkspaceRemove(_)
@@ -1168,6 +1218,13 @@ mod tests {
     #[test]
     fn parses_each_input_family() {
         assert!(matches!(
+            parse(["key".into(), "e".into(), "pressed".into()]),
+            Ok(Parsed::Input(TestInput::Key {
+                key: TestKey::E,
+                state: InputState::Pressed,
+            }))
+        ));
+        assert!(matches!(
             parse(["idle-inhibition".into()]),
             Ok(Parsed::IdleInhibition)
         ));
@@ -1189,6 +1246,17 @@ mod tests {
             Ok(Parsed::RuntimeDiagnostics)
         ));
         assert!(matches!(parse(["readiness".into()]), Ok(Parsed::Readiness)));
+        assert!(matches!(
+            parse([
+                "capture-output".into(),
+                "/tmp/nested-capture.png".into(),
+                "winit".into(),
+            ]),
+            Ok(Parsed::CaptureOutput {
+                path,
+                output: Some(output),
+            }) if path == "/tmp/nested-capture.png" && output == "winit"
+        ));
         assert!(matches!(
             parse(["output-set".into(), "DVI-I-1".into(), "disabled".into()]),
             Ok(Parsed::OutputSet {

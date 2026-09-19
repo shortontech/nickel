@@ -754,6 +754,92 @@ where
     Ok(render_elements)
 }
 
+/// Render a single space without flattening its ordinary elements together.
+///
+/// The three groups remain front-to-back: upper layer-shell surfaces, each
+/// space element, then lower layer-shell surfaces. Compositors with additional
+/// in-process application windows can interleave those windows between the
+/// per-element groups while retaining Smithay's shell-layer boundaries.
+pub fn space_render_element_groups<
+    'a,
+    #[cfg(feature = "wayland_frontend")] R: Renderer + ImportAll,
+    #[cfg(not(feature = "wayland_frontend"))] R: Renderer,
+    E: SpaceElement + PartialEq + AsRenderElements<R> + 'a,
+>(
+    renderer: &mut R,
+    space: &'a Space<E>,
+    output: &Output,
+    alpha: f32,
+) -> Result<
+    (
+        Vec<SpaceRenderElements<R, <E as AsRenderElements<R>>::RenderElement>>,
+        Vec<(
+            &'a E,
+            Vec<SpaceRenderElements<R, <E as AsRenderElements<R>>::RenderElement>>,
+        )>,
+        Vec<SpaceRenderElements<R, <E as AsRenderElements<R>>::RenderElement>>,
+    ),
+    OutputNoMode,
+>
+where
+    R::TextureId: Clone + Texture + 'static,
+    <E as AsRenderElements<R>>::RenderElement: 'a,
+    SpaceRenderElements<R, <E as AsRenderElements<R>>::RenderElement>:
+        From<Wrap<<E as AsRenderElements<R>>::RenderElement>>,
+{
+    let output_scale = output.current_scale().fractional_scale();
+    #[cfg(feature = "wayland_frontend")]
+    let (upper_elements, lower_elements) = {
+        let layer_map = layer_map_for_output(output);
+        let (lower, upper): (Vec<&LayerSurface>, Vec<&LayerSurface>) = layer_map
+            .layers()
+            .rev()
+            .partition(|surface| matches!(surface.layer(), Layer::Background | Layer::Bottom));
+        let render_layers = |surfaces: Vec<&LayerSurface>, renderer: &mut R| {
+            surfaces
+                .into_iter()
+                .filter_map(|surface| layer_map.layer_geometry(surface).map(|geo| (geo.loc, surface)))
+                .flat_map(|(loc, surface)| {
+                    AsRenderElements::<R>::render_elements::<WaylandSurfaceRenderElement<R>>(
+                        surface,
+                        renderer,
+                        loc.to_physical_precise_round(output_scale),
+                        Scale::from(output_scale),
+                        alpha,
+                    )
+                    .into_iter()
+                    .map(SpaceRenderElements::Surface)
+                })
+                .collect::<Vec<_>>()
+        };
+        (render_layers(upper, renderer), render_layers(lower, renderer))
+    };
+    #[cfg(not(feature = "wayland_frontend"))]
+    let (upper_elements, lower_elements) = (Vec::new(), Vec::new());
+
+    let mut groups = Vec::new();
+    if let Some(region) = space.output_geometry(output) {
+        let _guard = space.span.enter();
+        let scale = Scale::from(output_scale);
+        for element in space.elements.iter().rev().filter(|element| region.overlaps(element.bbox())) {
+            let location = element.render_location() - region.loc;
+            let rendered = element
+                .element
+                .render_elements::<<E as AsRenderElements<R>>::RenderElement>(
+                    renderer,
+                    location.to_physical_precise_round(scale),
+                    scale,
+                    alpha,
+                )
+                .into_iter()
+                .map(|element| SpaceRenderElements::Element(Wrap::from(element)))
+                .collect();
+            groups.push((&element.element, rendered));
+        }
+    }
+    Ok((upper_elements, groups, lower_elements))
+}
+
 /// Render a output
 ///
 /// If multiple spaces are given their elements will be stacked

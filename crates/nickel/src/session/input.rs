@@ -19,7 +19,6 @@ use smithay::{
         InputTime, KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
         PointerMotionEvent, TouchEvent,
     },
-    desktop::WindowSurfaceType,
     input::{
         keyboard::{FilterResult, Keysym, keysyms},
         pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, RelativeMotionEvent},
@@ -38,8 +37,8 @@ use crate::session::{
         move_internal_grab::operation_window,
         resize_grab::{operation_geometry_constraints, operation_resize_edges},
     },
-    state::NickelSession,
-    window_frame::{self, FramePart},
+    state::{NickelSession, OrdinarySceneWindow},
+    window_frame::FramePart,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -415,6 +414,20 @@ impl NickelSession {
         );
         let location = self.space.element_location(window)?;
         let size = window.geometry().size;
+        let geometry = LogicalRect {
+            x: location.x,
+            y: location.y,
+            width: size.w,
+            height: size.h,
+        };
+        if window.x11_surface().is_some() {
+            // Native X11 notifications are observations, not desired state,
+            // and can leave the placement externally owned. Pressing a
+            // compositor-owned frame is the explicit managed-admission
+            // boundary at which Nickel adopts the visible canonical rectangle
+            // before issuing move/resize requests.
+            self.admit_managed_window_placement(registry_id, geometry);
+        }
         WindowPointerOperation::begin_with_geometry(
             &mut self.window_operations,
             BeginRequest {
@@ -430,12 +443,7 @@ impl NickelSession {
                 optional_update_sources: Vec::new(),
             },
             GeometrySeed {
-                anchor: LogicalRect {
-                    x: location.x,
-                    y: location.y,
-                    width: size.w,
-                    height: size.h,
-                },
+                anchor: geometry,
                 constraints: operation_geometry_constraints(window),
             },
         )
@@ -523,8 +531,7 @@ impl NickelSession {
         position: smithay::utils::Point<f64, Logical>,
         device: &str,
     ) -> bool {
-        let client_present = self.client_scene_under(position)
-            && !self.foremost_internal_application_covers(position);
+        let client_present = self.client_scene_foremost_at(position);
         let modifiers = desktop_modifiers(&self.seat.get_keyboard().unwrap().modifier_state());
         let handled = self.internal_ui.desktop_pointer_input(
             device,
@@ -669,35 +676,19 @@ impl NickelSession {
             self.frame_cursor = Default::default();
             return;
         }
-        self.frame_cursor =
-            window_frame::topmost_frame_target(self.space.elements().rev().filter_map(|window| {
-                let surface_accepts_input =
-                    self.space.element_location(window).is_some_and(|loc| {
-                        window
-                            .surface_under(position - loc.to_f64(), WindowSurfaceType::ALL)
-                            .is_some()
-                    });
-                let bounds = self.space.element_geometry(window)?;
-                let geometry = crate::session::shell_layout::Geometry {
-                    x: bounds.loc.x,
-                    y: bounds.loc.y,
-                    width: bounds.size.w,
-                    height: bounds.size.h,
-                };
-                let frame_part = (!self.shell_windows().any(|shell| shell == window)
-                    && !self.is_fullscreen_window(window)
-                    && self.is_server_decorated(window))
-                .then(|| {
-                    window_frame::hit_test(
-                        geometry,
-                        position.x.round() as i32,
-                        position.y.round() as i32,
-                    )
-                })
-                .flatten();
-                Some(((), surface_accepts_input, frame_part))
-            }))
-            .map(|(_, part)| part.cursor())
+        // An admitted move/resize grab owns its cursor until the release or
+        // cancellation that retires it. Hovering another frame mid-operation
+        // must not replace the operation's directional affordance.
+        if self
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed())
+        {
+            return;
+        }
+        self.frame_cursor = self
+            .effective_frame_part_at(position)
+            .map(FramePart::cursor)
             .unwrap_or_default();
     }
 
@@ -734,6 +725,53 @@ impl NickelSession {
             },
         );
         pointer.frame(self);
+    }
+
+    /// Reproject a retained absolute-device position after output geometry or
+    /// scale changes, then reconcile focus and frame-cursor authority without
+    /// waiting for another physical motion sample.
+    pub(crate) fn reconcile_stationary_pointer_after_topology_change(&mut self) {
+        let pointer = self.seat.get_pointer().unwrap();
+        if pointer.is_grabbed() {
+            return;
+        }
+        let projected = self
+            .last_absolute_pointer_anchor
+            .as_ref()
+            .and_then(|anchor| {
+                let geometry = self.output_geometry_named(&anchor.output_name)?;
+                Some(
+                    (
+                        f64::from(geometry.x)
+                            + (anchor.normalized_x * f64::from(geometry.width.max(1)))
+                                .clamp(0.0, f64::from(geometry.width.saturating_sub(1).max(0))),
+                        f64::from(geometry.y)
+                            + (anchor.normalized_y * f64::from(geometry.height.max(1)))
+                                .clamp(0.0, f64::from(geometry.height.saturating_sub(1).max(0))),
+                    )
+                        .into(),
+                )
+            });
+        if self.last_absolute_pointer_anchor.is_some() && projected.is_none() {
+            self.last_absolute_pointer_anchor = None;
+        }
+        if let Some(location) = projected {
+            let focus = self.pointer_surface_under(location);
+            pointer.motion(
+                self,
+                focus,
+                &MotionEvent {
+                    location,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: InputTime::now(),
+                },
+            );
+            pointer.frame(self);
+            self.update_frame_cursor(location);
+        } else {
+            self.refresh_stationary_pointer_focus(InputTime::now());
+            self.update_frame_cursor(pointer.current_location());
+        }
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
@@ -807,10 +845,21 @@ impl NickelSession {
         if self.shell_recovery_visible() {
             match &event {
                 InputEvent::PointerMotionAbsolute { event, .. } => {
-                    let output = self.space.outputs().next()?;
-                    let geometry = self.space.output_geometry(output)?;
+                    let geometry = self.touch_output_geometry(output_name)?;
                     let position =
                         event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                    self.last_absolute_pointer_anchor = output_name
+                        .map(str::to_owned)
+                        .or_else(|| self.output_name_at(position))
+                        .map(|name| crate::session::state::AbsolutePointerAnchor {
+                            output_name: name,
+                            normalized_x: ((position.x - f64::from(geometry.loc.x))
+                                / f64::from(geometry.size.w.max(1)))
+                            .clamp(0.0, 1.0),
+                            normalized_y: ((position.y - f64::from(geometry.loc.y))
+                                / f64::from(geometry.size.h.max(1)))
+                            .clamp(0.0, 1.0),
+                        });
                     let pointer = self.seat.get_pointer().unwrap();
                     pointer.motion(
                         self,
@@ -825,6 +874,7 @@ impl NickelSession {
                     return None;
                 }
                 InputEvent::PointerMotion { event, .. } => {
+                    self.last_absolute_pointer_anchor = None;
                     let pointer = self.seat.get_pointer().unwrap();
                     let current = pointer.current_location();
                     let (max_x, max_y) = self
@@ -1150,6 +1200,7 @@ impl NickelSession {
                     .flatten();
             }
             InputEvent::PointerMotion { event, .. } => {
+                self.last_absolute_pointer_anchor = None;
                 let current = self.seat.get_pointer().unwrap().current_location();
                 let current = self.restore_released_pointer_lock_hint(current);
                 let max_x = self
@@ -1228,12 +1279,22 @@ impl NickelSession {
                 self.record_interaction_output(position);
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let output = self.space.outputs().next().unwrap();
-
-                let output_geo = self.space.output_geometry(output).unwrap();
+                let output_geo = self.touch_output_geometry(output_name)?;
 
                 let proposed =
                     event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+                self.last_absolute_pointer_anchor = output_name
+                    .map(str::to_owned)
+                    .or_else(|| self.output_name_at(proposed))
+                    .map(|name| crate::session::state::AbsolutePointerAnchor {
+                        output_name: name,
+                        normalized_x: ((proposed.x - f64::from(output_geo.loc.x))
+                            / f64::from(output_geo.size.w.max(1)))
+                        .clamp(0.0, 1.0),
+                        normalized_y: ((proposed.y - f64::from(output_geo.loc.y))
+                            / f64::from(output_geo.size.h.max(1)))
+                        .clamp(0.0, 1.0),
+                    });
                 let pointer = self.seat.get_pointer().unwrap();
                 let current = pointer.current_location();
                 let current_focus = self.pointer_surface_under(current);
@@ -1289,8 +1350,7 @@ impl NickelSession {
                 let button_state = event.state();
 
                 let location = pointer.current_location();
-                let client_present = self.client_scene_under(location)
-                    && !self.foremost_internal_application_covers(location);
+                let client_present = self.client_scene_foremost_at(location);
                 let suppress_secondary_release = event.button() == Some(MouseButton::Right)
                     && button_state == ButtonState::Released
                     && self.suppress_secondary_button_release;
@@ -1307,53 +1367,18 @@ impl NickelSession {
                             .internal_ui
                             .surface_at((location.x, location.y), true)
                             .is_none())
-                    .then(|| {
-                        self.internal_ui
-                            .internal_frame_target((location.x, location.y))
-                    })
+                    .then(|| self.internal_frame_target_at(location))
                     .flatten()
                     .filter(|(_, part)| *part == FramePart::Titlebar)
                     .and_then(|(surface, _)| self.internal_window_for_surface(surface));
                     let native_target = internal_target.or_else(|| {
-                        window_frame::topmost_frame_target(self.space.elements().rev().filter_map(
-                            |window| {
-                                let surface_accepts_input =
-                                    self.space.element_location(window).is_some_and(|loc| {
-                                        window
-                                            .surface_under(
-                                                location - loc.to_f64(),
-                                                WindowSurfaceType::ALL,
-                                            )
-                                            .is_some()
-                                    });
-                                let bounds = self.space.element_geometry(window)?;
-                                let geometry = crate::session::shell_layout::Geometry {
-                                    x: bounds.loc.x,
-                                    y: bounds.loc.y,
-                                    width: bounds.size.w,
-                                    height: bounds.size.h,
-                                };
-                                let frame_part =
-                                    (!self.shell_windows().any(|shell| shell == window)
-                                        && !self.is_fullscreen_window(window)
-                                        && self.is_server_decorated(window))
-                                    .then(|| {
-                                        window_frame::hit_test(
-                                            geometry,
-                                            location.x.round() as i32,
-                                            location.y.round() as i32,
-                                        )
-                                    })
-                                    .flatten();
-                                Some((window.clone(), surface_accepts_input, frame_part))
-                            },
-                        ))
-                        .filter(|(_, part)| *part == FramePart::Titlebar)
-                        .and_then(|(window, _)| {
-                            self.surface_windows
-                                .get(&window.wl_surface()?.id())
-                                .copied()
-                        })
+                        self.client_frame_target_at(location)
+                            .filter(|(_, part)| *part == FramePart::Titlebar)
+                            .and_then(|(window, _)| {
+                                self.surface_windows
+                                    .get(&window.wl_surface()?.id())
+                                    .copied()
+                            })
                     });
                     if let Some(id) = native_target {
                         self.activate_window(id);
@@ -1383,9 +1408,7 @@ impl NickelSession {
                         .internal_ui
                         .surface_at((location.x, location.y), true)
                         .is_none()
-                    && let Some((surface, part)) = self
-                        .internal_ui
-                        .internal_frame_target((location.x, location.y))
+                    && let Some((surface, part)) = self.internal_frame_target_at(location)
                     && let Some(id) = self.internal_window_for_surface(surface)
                 {
                     self.activate_window(id);
@@ -1550,6 +1573,20 @@ impl NickelSession {
                 self.flush_internal_shell_input();
                 if internally_handled {
                     if button_state == ButtonState::Pressed {
+                        if let Some((surface, _)) = self
+                            .internal_ui
+                            .application_surface_at((location.x, location.y))
+                            && self
+                                .internal_file_surfaces
+                                .values()
+                                .any(|runtime| *runtime == surface)
+                            && self
+                                .internal_ui
+                                .application::<nickel_file::FileApp>(surface)
+                                .is_some()
+                        {
+                            self.internal_file_drag_serial = Some((surface, serial));
+                        }
                         self.reconcile_internal_application_focus();
                     }
                     self.request_output_redraw();
@@ -1612,38 +1649,7 @@ impl NickelSession {
                     && !super_pressed
                 {
                     let location = pointer.current_location();
-                    let frame_target = window_frame::topmost_frame_target(
-                        self.space.elements().rev().filter_map(|window| {
-                            let surface_accepts_input =
-                                self.space.element_location(window).is_some_and(|loc| {
-                                    window
-                                        .surface_under(
-                                            location - loc.to_f64(),
-                                            WindowSurfaceType::ALL,
-                                        )
-                                        .is_some()
-                                });
-                            let bounds = self.space.element_geometry(window)?;
-                            let geometry = crate::session::shell_layout::Geometry {
-                                x: bounds.loc.x,
-                                y: bounds.loc.y,
-                                width: bounds.size.w,
-                                height: bounds.size.h,
-                            };
-                            let frame_part = (!self.shell_windows().any(|shell| shell == window)
-                                && !self.is_fullscreen_window(window)
-                                && self.is_server_decorated(window))
-                            .then(|| {
-                                window_frame::hit_test(
-                                    geometry,
-                                    location.x.round() as i32,
-                                    location.y.round() as i32,
-                                )
-                            })
-                            .flatten();
-                            Some((window.clone(), surface_accepts_input, frame_part))
-                        }),
-                    );
+                    let frame_target = self.client_frame_target_at(location);
 
                     if let Some((window, part)) = frame_target {
                         let surface = window.wl_surface().map(std::borrow::Cow::into_owned)?;
@@ -1845,11 +1851,14 @@ impl NickelSession {
                     && !launcher_focus_restored
                 {
                     let pointer_position = pointer.current_location();
-                    let ordinary_windows = self
-                        .space
-                        .elements()
+                    let target_window = match self.effective_scene_hit_at(pointer_position) {
+                        Some(OrdinarySceneWindow::Client(window)) => Some(window),
+                        _ => None,
+                    };
+                    let ordinary_windows = target_window
+                        .as_ref()
                         .filter(|window| !self.shell_windows().any(|shell| shell == *window))
-                        .filter_map(|window| {
+                        .and_then(|window| {
                             let id = self
                                 .surface_windows
                                 .get(&window.wl_surface()?.id())
@@ -1865,6 +1874,7 @@ impl NickelSession {
                                 },
                             })
                         })
+                        .into_iter()
                         .collect::<Vec<_>>();
                     let window_effects = reduce_pointer_press(hit_test(
                         &ordinary_windows,
@@ -1873,11 +1883,7 @@ impl NickelSession {
                             y: pointer_position.y,
                         },
                     ));
-                    if let Some((window, _loc)) = self
-                        .space
-                        .element_under(pointer_position)
-                        .map(|(w, l)| (w.clone(), l))
-                    {
+                    if let Some(window) = target_window {
                         let unmanaged_x11_popup = window
                             .x11_surface()
                             .is_some_and(|surface| surface.is_override_redirect());
@@ -1940,17 +1946,13 @@ impl NickelSession {
                     && button_state == ButtonState::Pressed
                     && super_pressed
                     && !pointer.is_grabbed()
-                    && let Some((window, _)) = self
-                        .space
-                        .element_under(pointer.current_location())
-                        .map(|(window, location)| (window.clone(), location))
-                        .filter(|(window, _)| {
-                            !self.is_shell_owned_window(window)
-                                && !self.desktop_windows.contains(window)
-                                && !self.is_panel_window(window)
-                                && self.launcher_window.as_ref() != Some(window)
-                                && self.context_menu_window.as_ref() != Some(window)
-                        })
+                    && let Some(OrdinarySceneWindow::Client(window)) =
+                        self.effective_scene_hit_at(pointer.current_location())
+                    && !self.is_shell_owned_window(&window)
+                    && !self.desktop_windows.contains(&window)
+                    && !self.is_panel_window(&window)
+                    && self.launcher_window.as_ref() != Some(&window)
+                    && self.context_menu_window.as_ref() != Some(&window)
                 {
                     self.hotkeys.begin_pointer_chord();
                     let location = pointer.current_location();
@@ -1991,17 +1993,13 @@ impl NickelSession {
                     && button_state == ButtonState::Pressed
                     && super_pressed
                     && !pointer.is_grabbed()
-                    && let Some((window, _)) = self
-                        .space
-                        .element_under(pointer.current_location())
-                        .map(|(window, location)| (window.clone(), location))
-                        .filter(|(window, _)| {
-                            !self.is_shell_owned_window(window)
-                                && !self.desktop_windows.contains(window)
-                                && !self.is_panel_window(window)
-                                && self.launcher_window.as_ref() != Some(window)
-                                && self.context_menu_window.as_ref() != Some(window)
-                        })
+                    && let Some(OrdinarySceneWindow::Client(window)) =
+                        self.effective_scene_hit_at(pointer.current_location())
+                    && !self.is_shell_owned_window(&window)
+                    && !self.desktop_windows.contains(&window)
+                    && !self.is_panel_window(&window)
+                    && self.launcher_window.as_ref() != Some(&window)
+                    && self.context_menu_window.as_ref() != Some(&window)
                 {
                     self.hotkeys.begin_pointer_chord();
                     let location = pointer.current_location();
@@ -2051,6 +2049,9 @@ impl NickelSession {
                         },
                     );
                 }
+                if button_state == ButtonState::Released {
+                    self.update_frame_cursor(location);
+                }
                 pointer.frame(self);
             }
             InputEvent::PointerAxis { event, .. } => {
@@ -2067,8 +2068,7 @@ impl NickelSession {
                     axis_amount(event.amount(Axis::Vertical), vertical_amount_discrete);
 
                 let location = pointer.current_location();
-                let client_present = self.client_scene_under(location)
-                    && !self.foremost_internal_application_covers(location);
+                let client_present = self.client_scene_foremost_at(location);
                 let modifiers =
                     desktop_modifiers(&self.seat.get_keyboard().unwrap().modifier_state());
                 if self.internal_ui.desktop_pointer_input(
@@ -2123,8 +2123,7 @@ impl NickelSession {
                     .or_else(|| self.space.outputs().next().map(|output| output.name()));
                 let geometry = self.touch_output_geometry(output_name)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                let client_present = self.client_scene_under(location)
-                    && !self.foremost_internal_application_covers(location);
+                let client_present = self.client_scene_foremost_at(location);
                 let normalized = self.internal_ui.normalized_touch_input(
                     &event.device().id(),
                     i32::from(event.slot()) as u64,
@@ -2148,10 +2147,8 @@ impl NickelSession {
                     self.request_output_redraw();
                     return None;
                 }
-                if let Some(window) = self
-                    .space
-                    .element_under(location)
-                    .map(|(window, _)| window.clone())
+                if let Some(OrdinarySceneWindow::Client(window)) =
+                    self.effective_scene_hit_at(location)
                     && !self.is_on_screen_keyboard_window(&window)
                     && !self.is_panel_window(&window)
                 {

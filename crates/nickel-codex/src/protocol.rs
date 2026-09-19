@@ -34,11 +34,82 @@ pub struct TurnId(pub String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerRequestId(pub String);
 
+/// Structured, bounded facts supplied by the app server for an approval.
+/// The JSON-RPC request id remains the response identity; item/approval ids are context only.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalContext {
+    pub item_id: Option<String>,
+    pub approval_id: Option<String>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub grant_root: Option<String>,
+    pub kind: Option<String>,
+    pub asks_network_access: bool,
+    pub proposes_session_rule: bool,
+    /// Explicit command decisions supplied by the app server. `None` means the
+    /// server did not specify a set; it must not be confused with an empty set.
+    #[serde(default)]
+    pub available_decisions: Option<Vec<CommandDecision>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilePatchChange {
+    pub path: String,
+    pub kind: String,
+    pub move_path: Option<String>,
+    pub diff: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSearchMatch {
+    pub root: String,
+    pub path: String,
+    pub file_name: String,
+    pub is_directory: bool,
+    pub score: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnPlanStep {
+    pub step: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedItem {
+    pub thread_id: ThreadId,
+    pub turn_id: TurnId,
+    pub completed_at_ms: Option<i64>,
+    pub item_type: String,
+    pub text: String,
+    pub status: Option<String>,
+    pub exit_code: Option<i32>,
+    pub duration_ms: Option<i64>,
+    pub changes: Vec<FilePatchChange>,
+    pub summary_parts: Vec<String>,
+    pub command_actions: Vec<CommandAction>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AccountState {
     pub authenticated: bool,
     pub account_type: Option<String>,
     pub email: Option<String>,
+}
+
+/// Account usage reported by `account/rateLimits/read`. These values are
+/// display-only; `ordinary_usage_allowed: None` is unknown, not permission.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimitsStatus {
+    pub ordinary_usage_allowed: Option<bool>,
+    pub buckets: Vec<RateLimitBucket>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimitBucket {
+    pub name: String,
+    pub primary_used_percent: Option<i32>,
+    pub secondary_used_percent: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,12 +247,18 @@ pub struct ThreadHistoryTurn {
     pub items: Vec<ThreadHistoryItem>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ThreadHistoryItem {
     pub id: String,
     pub item_type: String,
     pub text: String,
     pub command_actions: Vec<CommandAction>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +432,17 @@ pub enum ApprovalPolicy {
     Never,
 }
 
+/// Explicit app-server sandbox override. `None` in a start request preserves
+/// the backend's configured default; this must not be conflated with approval
+/// prompting, which is a separate authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SandboxPolicy {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
 #[derive(Clone, Debug)]
 pub struct StartThread {
     pub cwd: PathBuf,
@@ -362,6 +450,7 @@ pub struct StartThread {
     pub project_id: Option<String>,
     pub reasoning_effort: Option<String>,
     pub approval_policy: ApprovalPolicy,
+    pub sandbox_policy: Option<SandboxPolicy>,
 }
 
 #[derive(Clone, Debug)]
@@ -374,6 +463,17 @@ pub struct StartTurn {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub approval_policy: ApprovalPolicy,
+    pub sandbox_policy: Option<SandboxPolicy>,
+    /// Use the app-server's built-in Plan collaboration mode for this turn.
+    pub plan_mode: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSettings {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub approval_policy: ApprovalPolicy,
+    pub sandbox_policy: Option<SandboxPolicy>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,7 +498,7 @@ pub enum InteractionResponse {
     UserInput { answers: Vec<UserInputAnswer> },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CommandDecision {
     Accept,
@@ -422,13 +522,13 @@ pub enum FileChangeDecision {
     Cancel,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPolicyAmendment {
     pub host: String,
     pub action: NetworkPolicyAction,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPolicyAction {
     Allow,
@@ -439,6 +539,22 @@ pub enum NetworkPolicyAction {
 pub struct UserInputAnswer {
     pub question_id: String,
     pub answer: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserInputOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub options: Vec<UserInputOption>,
+    pub is_other: bool,
+    pub is_secret: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -475,6 +591,8 @@ pub enum EventKind {
     },
     ItemCompleted {
         item_id: String,
+        #[serde(default)]
+        completion: Option<CompletedItem>,
     },
     AgentMessageDelta {
         item_id: String,
@@ -488,9 +606,21 @@ pub enum EventKind {
         item_id: String,
         delta: String,
     },
+    FilePatchUpdated {
+        thread_id: ThreadId,
+        turn_id: TurnId,
+        item_id: String,
+        changes: Vec<FilePatchChange>,
+    },
     PlanDelta {
         item_id: String,
         delta: String,
+    },
+    TurnPlanUpdated {
+        thread_id: ThreadId,
+        turn_id: TurnId,
+        explanation: Option<String>,
+        steps: Vec<TurnPlanStep>,
     },
     ReasoningDelta {
         item_id: String,
@@ -498,12 +628,21 @@ pub enum EventKind {
     },
     ApprovalRequested {
         request_id: ServerRequestId,
+        thread_id: Option<ThreadId>,
         approval_type: String,
         summary: Option<String>,
+        #[serde(default)]
+        context: ApprovalContext,
     },
     UserInputRequested {
         request_id: ServerRequestId,
         question_ids: Vec<String>,
+        #[serde(default)]
+        questions: Vec<UserInputQuestion>,
+    },
+    ServerRequestResolved {
+        thread_id: ThreadId,
+        request_id: ServerRequestId,
     },
     AccountUpdated,
     AccountLoginCompleted {
@@ -515,6 +654,17 @@ pub enum EventKind {
     Error {
         message: String,
     },
+    TurnError {
+        thread_id: ThreadId,
+        turn_id: TurnId,
+        message: String,
+        will_retry: bool,
+    },
+    Warning {
+        thread_id: Option<ThreadId>,
+        message: String,
+        guardian: bool,
+    },
     UnsupportedEvent {
         method: String,
     },
@@ -525,6 +675,16 @@ pub enum EventKind {
 
 pub trait CodexBackend {
     fn account(&self) -> Result<AccountState, CodexError>;
+    fn rate_limits(&self) -> Result<RateLimitsStatus, CodexError> {
+        Err(CodexError::Unavailable(
+            "rate-limit status is not supported by this backend".into(),
+        ))
+    }
+    fn logout(&self) -> Result<(), CodexError> {
+        Err(CodexError::Unavailable(
+            "account logout is not supported by this backend".into(),
+        ))
+    }
     fn start_login(&self, _method: LoginMethod) -> Result<LoginChallenge, CodexError> {
         Err(CodexError::Unavailable(
             "account login is not supported by this backend".into(),
@@ -587,12 +747,51 @@ pub trait CodexBackend {
         ))
     }
     fn models(&self) -> Result<Vec<Model>, CodexError>;
+    fn search_files(
+        &self,
+        _query: String,
+        _roots: Vec<String>,
+    ) -> Result<Vec<FileSearchMatch>, CodexError> {
+        Err(CodexError::Unavailable(
+            "file search is not supported by this backend".into(),
+        ))
+    }
+    fn upload_feedback(
+        &self,
+        _classification: String,
+        _reason: Option<String>,
+        _thread_id: Option<ThreadId>,
+        _include_logs: bool,
+    ) -> Result<String, CodexError> {
+        Err(CodexError::Unavailable(
+            "feedback upload is not supported by this backend".into(),
+        ))
+    }
+    fn workspace_diff(&self, _cwd: PathBuf) -> Result<String, CodexError> {
+        Err(CodexError::Unavailable(
+            "workspace diff is not supported by this backend".into(),
+        ))
+    }
     fn list_projects(&self, page: ProjectPage) -> Result<ProjectPageResult, CodexError>;
     fn import_project(&self, project: ImportProject) -> Result<Project, CodexError>;
     fn list_threads(&self, page: ThreadPage) -> Result<ThreadPageResult, CodexError>;
     fn start_thread(&self, request: StartThread) -> Result<Thread, CodexError>;
     fn resume_thread(&self, id: ThreadId) -> Result<Thread, CodexError>;
     fn start_turn(&self, request: StartTurn) -> Result<Turn, CodexError>;
+    fn compact_thread(&self, _thread: ThreadId) -> Result<(), CodexError> {
+        Err(CodexError::Unavailable(
+            "thread compaction is not supported by this backend".into(),
+        ))
+    }
+    fn review_uncommitted(
+        &self,
+        _thread: ThreadId,
+        _settings: ReviewSettings,
+    ) -> Result<Turn, CodexError> {
+        Err(CodexError::Unavailable(
+            "code review is not supported by this backend".into(),
+        ))
+    }
     fn shell_command(&self, thread: ThreadId, command: String) -> Result<(), CodexError>;
     fn interrupt_turn(&self, thread: ThreadId, turn: TurnId) -> Result<(), CodexError>;
     fn respond(

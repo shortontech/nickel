@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     fmt,
     path::{Path, PathBuf},
+    sync::mpsc::{Receiver, TryRecvError, sync_channel},
 };
 
 #[cfg(target_os = "linux")]
@@ -40,9 +41,56 @@ fn paths_from_uri_list(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) enum FileClipboardPublisherEvent {
+    Ready { generation: u64 },
+    OwnerLost { generation: u64 },
+    Unavailable { generation: u64 },
+    Failed { generation: u64 },
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct FileClipboardPublication {
+    generation: u64,
+    receiver: Receiver<FileClipboardPublisherEvent>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl FileClipboardPublication {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn try_recv(&self) -> Result<FileClipboardPublisherEvent, TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        generation: u64,
+    ) -> (
+        Self,
+        std::sync::mpsc::SyncSender<FileClipboardPublisherEvent>,
+    ) {
+        let (sender, receiver) = sync_channel(2);
+        (
+            Self {
+                generation,
+                receiver,
+            },
+            sender,
+        )
+    }
+}
+
 #[cfg(target_os = "linux")]
-pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
-    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
+pub(crate) fn publish_file_clipboard(
+    paths: &[PathBuf],
+    cut: bool,
+    generation: u64,
+) -> Result<FileClipboardPublication, String> {
+    use wl_clipboard_rs::copy::{Error, MimeSource, MimeType, Options, Source};
     let mut payload = if cut {
         "cut\n".to_owned()
     } else {
@@ -50,26 +98,58 @@ pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(),
     };
     let uris = file_uri_list(paths)?;
     payload.push_str(&uris.replace("\r\n", "\n"));
-    Options::new()
-        .copy_multi(vec![
-            MimeSource {
-                source: Source::Bytes(payload.into_bytes().into()),
-                mime_type: MimeType::Specific("x-special/gnome-copied-files".into()),
-            },
-            MimeSource {
-                source: Source::Bytes(uris.into_bytes().into()),
-                mime_type: MimeType::Specific("text/uri-list".into()),
-            },
-            MimeSource {
-                source: Source::Bytes(if cut {
-                    b"1".to_vec().into()
-                } else {
-                    b"0".to_vec().into()
-                }),
-                mime_type: MimeType::Specific("application/x-kde-cutselection".into()),
-            },
-        ])
-        .map_err(|error| error.to_string())
+    let sources = vec![
+        MimeSource {
+            source: Source::Bytes(payload.into_bytes().into()),
+            mime_type: MimeType::Specific("x-special/gnome-copied-files".into()),
+        },
+        MimeSource {
+            source: Source::Bytes(uris.into_bytes().into()),
+            mime_type: MimeType::Specific("text/uri-list".into()),
+        },
+        MimeSource {
+            source: Source::Bytes(if cut {
+                b"1".to_vec().into()
+            } else {
+                b"0".to_vec().into()
+            }),
+            mime_type: MimeType::Specific("application/x-kde-cutselection".into()),
+        },
+    ];
+    let (sender, receiver) = sync_channel(2);
+    std::thread::Builder::new()
+        .name("nickel-file-clipboard".into())
+        .spawn(move || {
+            let mut options = Options::new();
+            options.foreground(true);
+            let event = match options.prepare_copy_multi(sources) {
+                Ok(prepared) => {
+                    if sender
+                        .send(FileClipboardPublisherEvent::Ready { generation })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if prepared.serve().is_ok() {
+                        FileClipboardPublisherEvent::OwnerLost { generation }
+                    } else {
+                        FileClipboardPublisherEvent::Failed { generation }
+                    }
+                }
+                Err(Error::MissingProtocol { .. }) => {
+                    FileClipboardPublisherEvent::Unavailable { generation }
+                }
+                Err(_) => FileClipboardPublisherEvent::Failed { generation },
+            };
+            // One terminal event is sufficient. The UI may have replaced this
+            // generation and dropped its receiver before the old owner exits.
+            let _ = sender.try_send(event);
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(FileClipboardPublication {
+        generation,
+        receiver,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -117,7 +197,11 @@ pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
+pub(crate) fn publish_file_clipboard(
+    paths: &[PathBuf],
+    cut: bool,
+    generation: u64,
+) -> Result<FileClipboardPublication, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::{
         Foundation::HANDLE,
@@ -180,7 +264,15 @@ pub(crate) fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(),
         SetClipboardData(effect_format, Some(HANDLE(effect_memory.0)))
             .map_err(|error| error.to_string())?;
     }
-    Ok(())
+    let (sender, receiver) = sync_channel(1);
+    // Windows owns the copied handles after SetClipboardData succeeds. Keep a
+    // generation handle for the shared app lifecycle without inventing an
+    // asynchronous owner-loss signal that Win32 does not provide here.
+    drop(sender);
+    Ok(FileClipboardPublication {
+        generation,
+        receiver,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -263,7 +355,11 @@ mod clipboard_contract_tests {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub(crate) fn publish_file_clipboard(_paths: &[PathBuf], _cut: bool) -> Result<(), String> {
+pub(crate) fn publish_file_clipboard(
+    _paths: &[PathBuf],
+    _cut: bool,
+    _generation: u64,
+) -> Result<FileClipboardPublication, String> {
     Err("native file clipboard adapter unavailable".into())
 }
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

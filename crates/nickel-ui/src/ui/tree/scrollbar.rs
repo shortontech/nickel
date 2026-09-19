@@ -19,10 +19,24 @@ pub(super) struct ScrollRegion<Message> {
     pub(super) id: UiId,
     pub(super) message: Option<Message>,
     pub(super) offset_mapper: Option<fn(f32) -> Message>,
+    pub(super) extent_mapper: Option<fn(ScrollExtent) -> Message>,
     pub(super) rect: Rect,
     pub(super) clip: Rect,
     pub(super) extent: ScrollExtent,
     pub(super) scrollbar: crate::ScrollbarPalette,
+}
+
+impl<Message> ScrollRegion<Message> {
+    pub(super) fn mapped_message(&self, offset: f32) -> Option<Message> {
+        self.extent_mapper
+            .map(|map| {
+                map(ScrollExtent {
+                    offset,
+                    ..self.extent
+                })
+            })
+            .or_else(|| self.offset_mapper.map(|map| map(offset)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

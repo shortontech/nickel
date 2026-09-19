@@ -23,7 +23,7 @@ use smithay::{
     },
     desktop::{
         Window,
-        space::{SpaceRenderElements, space_render_elements},
+        space::{SpaceElement, SpaceRenderElements, space_render_element_groups},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::EventLoop, wayland_server::Resource},
@@ -36,7 +36,10 @@ use nickel_core::{
     theme::{Appearance, ThemePalette},
 };
 
-use crate::session::{NickelSession, state::PreviewFrame};
+use crate::session::{
+    NickelSession,
+    state::{OrdinarySceneWindow, PreviewFrame},
+};
 
 const PREVIEW_CAPTURE_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -63,6 +66,8 @@ smithay::backend::renderer::element::render_elements! {
     WinitBaseElement<R, E> where R: ImportAll + ImportMem;
     Space=SpaceRenderElements<R, E>,
     Internal=crate::session::internal_ui::InternalUiRenderElement<R>,
+    Memory=MemoryRenderBufferRenderElement<R>,
+    Frame=WinitFrameElement<R>,
 }
 
 fn advance_output_capture(
@@ -73,10 +78,6 @@ fn advance_output_capture(
     let request_another_frame = requested.is_some();
     *pending = requested;
     (ready, request_another_frame)
-}
-
-fn flatten_frame_groups<E>(groups: Vec<Vec<E>>) -> Vec<E> {
-    groups.into_iter().flatten().collect()
 }
 
 pub fn init_winit(
@@ -140,11 +141,16 @@ pub fn init_winit(
         },
     );
     let _global = output.create_global::<NickelSession>(&display_handle);
-    let configured_scale = state.configured_output_scale(&output);
+    // Winit reports framebuffer dimensions in physical pixels. Its host scale
+    // is therefore the authoritative conversion to this nested output's
+    // logical coordinate space; using a persisted native-output preference
+    // here makes both shell placement and absolute pointer input drift when
+    // the nested window crosses a mixed-DPI host seam.
+    let host_scale = backend.scale_factor();
     output.change_current_state(
         Some(mode),
         Some(Transform::Flipped180),
-        Some(configured_scale),
+        Some(smithay::output::Scale::Fractional(host_scale)),
         Some((0, 0).into()),
     );
     output.set_preferred(mode);
@@ -173,17 +179,24 @@ pub fn init_winit(
             let state = data;
 
             match event {
-                WinitEvent::Resized { size, .. } => {
+                WinitEvent::Resized { size, scale_factor } => {
                     let mode = Mode {
                         size,
                         refresh: 60_000,
                     };
                     output.set_preferred(mode);
-                    output.change_current_state(Some(mode), None, None, None);
+                    output.change_current_state(
+                        Some(mode),
+                        None,
+                        Some(smithay::output::Scale::Fractional(scale_factor)),
+                        None,
+                    );
                     damage_tracker = OutputDamageTracker::from_output(&output);
                     state.space.refresh();
                     state.refresh_surface_scales();
                     state.relayout_shell_surfaces();
+                    state.reconcile_internal_shell_outputs();
+                    state.reconcile_stationary_pointer_after_topology_change();
                     let _ = display.flush_clients();
                     backend.window().request_redraw();
                     eprintln!("nickel: output resized to {}x{}", size.w, size.h);
@@ -257,8 +270,19 @@ pub fn init_winit(
                     if identification.is_none() {
                         identification_cache = None;
                     }
+                    let ordinary_scene = state.ordinary_scene_order();
                     let captured_frame = {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
+                        let frame_palette = ThemePalette::from_appearance(
+                            ShellSettings::load_default().resolve_appearance(Appearance::default()),
+                        );
+                        let mut frame_groups = window_frame_groups(
+                            state,
+                            renderer,
+                            &output,
+                            frame_icons.as_ref(),
+                            &frame_palette,
+                        );
                         let background_elements = state
                             .internal_ui
                             .render_elements_for_layer(
@@ -268,32 +292,60 @@ pub fn init_winit(
                                 Some(crate::session::InternalSurfaceLayer::Background),
                             )
                             .into_iter();
-                        let space_elements = space_render_elements::<
-                            _,
-                            Window,
-                            _,
-                        >(renderer, [&state.space], &output, 1.0)
+                        let (upper, groups, lower) = space_render_element_groups::<_, Window>(
+                            renderer,
+                            &state.space,
+                            &output,
+                            1.0,
+                        )
                         .unwrap();
-                        // Output render elements are front-to-back: the Space
-                        // client scene precedes compositor-owned desktops.
-                        let mut base_elements = space_elements
+                        let mut base_elements = upper
                             .into_iter()
                             .map(WinitBaseElement::from)
                             .collect::<Vec<_>>();
-                        if !state.internal_applications_are_foremost() {
-                            base_elements.extend(
-                            state
-                                .internal_ui
-                                .render_elements_for_layer(
-                                    renderer,
-                                    &output.name(),
-                                    (0, 0).into(),
-                                    Some(crate::session::InternalSurfaceLayer::Application),
-                                )
-                                .into_iter()
-                                .map(WinitBaseElement::from),
-                            );
+                        let mut clients = groups
+                            .into_iter()
+                            .map(|(window, elements)| (window.clone(), Some(elements)))
+                            .collect::<Vec<_>>();
+                        for (window, elements) in &mut clients {
+                            if window.z_index() > 30 {
+                                base_elements.extend(
+                                    elements.take().into_iter().flatten().map(WinitBaseElement::from),
+                                );
+                            }
                         }
+                        for window in ordinary_scene {
+                            match window {
+                                OrdinarySceneWindow::Internal(surface) => base_elements.extend(
+                                    state
+                                        .internal_ui
+                                        .render_application_elements(renderer, (0, 0).into(), surface)
+                                        .into_iter()
+                                        .map(WinitBaseElement::from),
+                                ),
+                                OrdinarySceneWindow::Client(window) => {
+                                    if let Some((_, elements)) = clients.iter_mut().find(|(candidate, _)| *candidate == window) {
+                                        if let Some(group) = frame_groups.iter_mut().find(|group| group.window == window) {
+                                            base_elements.extend(group.foreground.drain(..).map(WinitBaseElement::from));
+                                        }
+                                        base_elements.extend(elements.take().into_iter().flatten().map(WinitBaseElement::from));
+                                        if let Some(group) = frame_groups.iter_mut().find(|group| group.window == window) {
+                                            base_elements.extend(group.background.drain(..).map(WinitBaseElement::from));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        for (window, elements) in clients {
+                            if let Some(group) = frame_groups.iter_mut().find(|group| group.window == window) {
+                                base_elements.extend(group.foreground.drain(..).map(WinitBaseElement::from));
+                            }
+                            base_elements.extend(elements.into_iter().flatten().map(WinitBaseElement::from));
+                            if let Some(group) = frame_groups.iter_mut().find(|group| group.window == window) {
+                                base_elements.extend(group.background.drain(..).map(WinitBaseElement::from));
+                            }
+                        }
+                        base_elements.extend(lower.into_iter().map(WinitBaseElement::from));
                         base_elements.extend(background_elements.map(WinitBaseElement::from));
                         damage_tracker
                             .render_output(
@@ -305,16 +357,6 @@ pub fn init_winit(
                             )
                             .unwrap();
 
-                        let frame_palette = ThemePalette::from_appearance(
-                            ShellSettings::load_default().resolve_appearance(Appearance::default()),
-                        );
-                        let window_elements = window_frame_elements(
-                            state,
-                            renderer,
-                            &output,
-                            frame_icons.as_ref(),
-                            &frame_palette,
-                        );
                         let mut overlay_elements = Vec::new();
                         overlay_elements.extend(
                             state
@@ -328,20 +370,6 @@ pub fn init_winit(
                                 .into_iter()
                                 .map(WinitFrameElement::from),
                         );
-                        if state.internal_applications_are_foremost() {
-                            overlay_elements.extend(
-                                state
-                                    .internal_ui
-                                    .render_elements_for_layer(
-                                        renderer,
-                                        &output.name(),
-                                        (0, 0).into(),
-                                        Some(crate::session::InternalSurfaceLayer::Application),
-                                    )
-                                    .into_iter()
-                                    .map(WinitFrameElement::from),
-                            );
-                        }
                         if !state.locked
                             && let Some(window) = state.preview_highlight.and_then(|highlight| {
                                 state.space.elements().find(|window| {
@@ -420,7 +448,6 @@ pub fn init_winit(
                                 ),
                             ));
                         }
-                        overlay_elements.extend(window_elements);
                         if state.dimmed && !state.locked {
                             let dim =
                                 SolidColorBuffer::new(
@@ -543,21 +570,13 @@ pub fn init_winit(
                             }
                         }
                         capture_requested.then(|| {
-                            let space_elements =
-                                smithay::desktop::space::space_render_elements(
-                                    renderer,
-                                    [&state.space],
-                                    &output,
-                                    1.0,
-                                )
-                                .map_err(|error| error.to_string())?;
                             let mut frame = renderer
                                 .render(&mut framebuffer, size, output.current_transform())
                                 .map_err(|error| error.to_string())?;
                             frame
                                 .clear([0.1, 0.1, 0.1, 1.0].into(), &[damage])
                                 .map_err(|error| error.to_string())?;
-                            draw_render_elements(&mut frame, 1.0, &space_elements, &[damage])
+                            draw_render_elements(&mut frame, 1.0, &base_elements, &[damage])
                                 .map_err(|error| error.to_string())?;
                             draw_render_elements(&mut frame, 1.0, &overlay_elements, &[damage])
                                 .map_err(|error| error.to_string())?;
@@ -737,13 +756,19 @@ fn frame_cursor_icon(
     }
 }
 
-fn window_frame_elements(
+struct WinitWindowFrameGroup {
+    window: Window,
+    foreground: Vec<WinitFrameElement<GlesRenderer>>,
+    background: Vec<WinitFrameElement<GlesRenderer>>,
+}
+
+fn window_frame_groups(
     state: &NickelSession,
     renderer: &mut GlesRenderer,
     output: &Output,
     icons: Option<&crate::session::window_frame::FrameIcons>,
     palette: &ThemePalette,
-) -> Vec<WinitFrameElement<GlesRenderer>> {
+) -> Vec<WinitWindowFrameGroup> {
     crate::session::window_frame::retain_titlebars_for_windows(
         state.surface_windows.values().map(|id| id.0),
     );
@@ -778,18 +803,11 @@ fn window_frame_elements(
         if client_elements.is_empty() {
             continue;
         }
-        // Preserve shell stacking in the decoration pass too: screenshots and
-        // locks must cover both ordinary titlebars and the nonactivating keyboard.
-        if state.is_shell_owned_window(window) && !state.desktop_windows.contains(window) {
-            groups.push(
-                client_elements
-                    .into_iter()
-                    .map(WinitFrameElement::from)
-                    .collect(),
-            );
+        if state.is_shell_owned_window(window) {
             continue;
         }
         let mut frame = Vec::new();
+        let mut shadow_elements = Vec::new();
         let Some(surface) = window.wl_surface() else {
             continue;
         };
@@ -817,12 +835,13 @@ fn window_frame_elements(
                 height: frame_bounds.size.h,
             },
         );
-        if let Some(titlebar) = crate::session::window_frame::render_titlebar_for(
+        if let Some(titlebar) = crate::session::window_frame::render_titlebar_for_state(
             registry_id.map(|id| id.0),
             titlebar_geometry.width,
             title,
             palette.panel,
             foreground,
+            active,
         ) && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             (
@@ -835,13 +854,35 @@ fn window_frame_elements(
             Some((titlebar_geometry.width, titlebar_geometry.height).into()),
             Kind::Unspecified,
         ) {
-            frame.push(WinitFrameElement::from(element));
+            frame.push(element.into());
+        }
+        let border_color =
+            crate::session::window_frame::frame_border_color(palette.panel, foreground, active);
+        for border in crate::session::window_frame::content_border_layers(
+            frame_bounds.size.w,
+            frame_bounds.size.h,
+            border_color,
+        ) {
+            frame.push(
+                SolidColorRenderElement::from_buffer(
+                    &border.buffer,
+                    (
+                        frame_bounds.loc.x - output_geometry.loc.x + border.offset.0,
+                        frame_bounds.loc.y - output_geometry.loc.y + border.offset.1,
+                    ),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                )
+                .into(),
+            );
         }
         if let Some(icons) = icons {
-            let icon_y = frame_bounds.loc.y
-                - output_geometry.loc.y
-                - crate::session::window_frame::TITLEBAR_HEIGHT
-                + 8;
+            let icon_y = crate::session::window_frame::frame_icon_y(
+                frame_bounds.loc.y
+                    - output_geometry.loc.y
+                    - crate::session::window_frame::TITLEBAR_HEIGHT,
+            );
             let icon_x = frame_bounds.loc.x - output_geometry.loc.x + frame_bounds.size.w;
             let maximized = state.is_maximized_window(window);
             for (buffer, offset) in [
@@ -865,13 +906,46 @@ fn window_frame_elements(
                     None,
                     Kind::Unspecified,
                 ) {
-                    frame.insert(0, WinitFrameElement::from(icon));
+                    frame.insert(0, icon.into());
                 }
             }
         }
-        groups.push(frame);
+        if !state.is_maximized_window(window) {
+            let frame_height = frame_bounds.size.h + crate::session::window_frame::TITLEBAR_HEIGHT;
+            let shadows = crate::session::window_frame::shadow_layers(
+                frame_bounds.size.w,
+                frame_height,
+                active,
+            );
+            for shadow in shadows.images {
+                if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    (
+                        f64::from(frame_bounds.loc.x - output_geometry.loc.x + shadow.offset.0),
+                        f64::from(
+                            frame_bounds.loc.y
+                                - output_geometry.loc.y
+                                - crate::session::window_frame::TITLEBAR_HEIGHT
+                                + shadow.offset.1,
+                        ),
+                    ),
+                    &shadow.buffer,
+                    None,
+                    None,
+                    Some(shadow.size.into()),
+                    Kind::Unspecified,
+                ) {
+                    shadow_elements.push(element.into());
+                }
+            }
+        }
+        groups.push(WinitWindowFrameGroup {
+            window: window.clone(),
+            foreground: frame,
+            background: shadow_elements,
+        });
     }
-    flatten_frame_groups(groups)
+    groups
 }
 
 fn save_output_capture(
@@ -1036,9 +1110,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{
-        PREVIEW_CAPTURE_INTERVAL, advance_output_capture, flatten_frame_groups, preview_retry_delay,
-    };
+    use super::{PREVIEW_CAPTURE_INTERVAL, advance_output_capture, preview_retry_delay};
 
     #[test]
     fn explicit_nested_sizes_are_bounded_and_keep_720p_exact() {
@@ -1046,24 +1118,6 @@ mod tests {
         for invalid in ["1280", "0x720", "1280x0", "8193x720", "1280x999999999999"] {
             assert!(super::parse_nested_size(invalid).is_none());
         }
-    }
-
-    #[test]
-    fn window_frames_preserve_front_to_back_stacking_order() {
-        let elements = flatten_frame_groups(vec![
-            vec!["foreground-titlebar", "foreground-icons"],
-            vec!["background-titlebar", "background-icons"],
-        ]);
-
-        assert_eq!(
-            elements,
-            [
-                "foreground-titlebar",
-                "foreground-icons",
-                "background-titlebar",
-                "background-icons",
-            ]
-        );
     }
 
     #[test]

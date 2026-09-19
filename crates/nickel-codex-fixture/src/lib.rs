@@ -114,6 +114,11 @@ fn scan(value: &Value, path: &str) -> Result<(), FixtureError> {
         Value::Object(object) => {
             for (key, value) in object {
                 let lower = key.to_ascii_lowercase();
+                // The typed user-question schema requires this flag. A false
+                // value carries no secret; true remains forbidden in fixtures.
+                if lower == "is_secret" && value == &Value::Bool(false) {
+                    continue;
+                }
                 if ["token", "authorization", "cookie", "password", "secret"]
                     .iter()
                     .any(|part| lower.contains(part))
@@ -153,6 +158,11 @@ mod tests {
                 r#"{"name":"bad","models":[{"id":"/home/alice/private","display_name":"x"}]}"#
             ),
             Err(FixtureError::Secret(path)) if path == "$.models[0].id"
+        ));
+        assert!(validate_str(r#"{"name":"safe","is_secret":false}"#).is_ok());
+        assert!(matches!(
+            validate_str(r#"{"name":"bad","is_secret":true}"#),
+            Err(FixtureError::Secret(path)) if path == "$.is_secret"
         ));
     }
 

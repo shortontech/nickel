@@ -1131,6 +1131,7 @@ pub struct Element<Message = String> {
     message: Option<Message>,
     context_message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
+    scroll_extent_mapper: Option<fn(ScrollExtent) -> Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
     text_mapper: Option<fn(String) -> Message>,
     option_messages: Vec<Option<Message>>,
@@ -1150,6 +1151,7 @@ impl<Message> Element<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -1188,6 +1190,7 @@ impl<Message> Element<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -1388,6 +1391,11 @@ impl<Message> Element<Message> {
         self
     }
 
+    pub fn on_scroll_extent(mut self, map: fn(ScrollExtent) -> Message) -> Self {
+        self.scroll_extent_mapper = Some(map);
+        self
+    }
+
     /// Turns this element into a declarative pointer-drag target.
     ///
     /// The seed message supplies target-specific typed data. Nickel UI owns
@@ -1507,6 +1515,7 @@ impl<Message> Element<Message> {
             message: self.message.map(&mut *map),
             context_message: self.context_message.map(&mut *map),
             message_mapper: None,
+            scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: self
@@ -2200,6 +2209,11 @@ macro_rules! flex_component {
 
             pub fn on_scroll(mut self, map: fn(f32) -> Message) -> Self {
                 self.0 = self.0.on_scroll(map);
+                self
+            }
+
+            pub fn on_scroll_extent(mut self, map: fn(ScrollExtent) -> Message) -> Self {
+                self.0 = self.0.on_scroll_extent(map);
                 self
             }
         }

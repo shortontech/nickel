@@ -105,3 +105,5 @@ size-tebibytes = { $value } TiB
 file-selection-count = تم تحديد { $count }
 file-selection-summary = { $count } · { $size }
 file-selection-accessible-bytes = { $count } · { $bytes } بايت
+launcher-discovery-empty = لم يتم العثور على تطبيقات.
+launcher-discovery-partial = تعذّر اكتشاف بعض إدخالات التطبيقات.

@@ -30,6 +30,7 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::selection::data_device::{
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus,
 };
+use smithay::wayland::selection::ext_data_control::{DataControlHandler, DataControlState};
 use smithay::wayland::selection::primary_selection::set_primary_focus;
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::{
@@ -178,6 +179,12 @@ impl SelectionHandler for NickelSession {
 impl DataDeviceHandler for NickelSession {
     fn data_device_state(&mut self) -> &mut DataDeviceState {
         &mut self.data_device_state
+    }
+}
+
+impl DataControlHandler for NickelSession {
+    fn data_control_state(&mut self) -> &mut DataControlState {
+        &mut self.ext_data_control_state
     }
 }
 

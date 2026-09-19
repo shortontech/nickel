@@ -474,6 +474,7 @@ fn native_modifier_release(virtual_key: u32) -> Option<NativeModifierRelease> {
     }
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn observed_super_sides(current: u8, virtual_key: u32, edge: KeyEdge, injected: bool) -> u8 {
     if injected {
         return current;

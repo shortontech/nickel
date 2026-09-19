@@ -110,6 +110,24 @@ impl NotificationStore {
             return (replaces_id, None);
         }
 
+        let discarded = if self.notifications.len() >= MAX_NOTIFICATIONS {
+            let Some(index) = self
+                .notifications
+                .iter()
+                .position(|item| item.expires_at.is_some())
+            else {
+                // A bounded feed must not evict a persistent pending authority request.
+                return (0, None);
+            };
+            self.notifications
+                .remove(index)
+                .map(|notification| ClosedNotification {
+                    id: notification.id,
+                    reason: 4,
+                })
+        } else {
+            None
+        };
         let id = self.allocate_id();
         self.notifications.push_back(DesktopNotification {
             id,
@@ -119,13 +137,6 @@ impl NotificationStore {
             actions: request.actions,
             expires_at,
         });
-        let discarded = (self.notifications.len() > MAX_NOTIFICATIONS)
-            .then(|| self.notifications.pop_front())
-            .flatten()
-            .map(|notification| ClosedNotification {
-                id: notification.id,
-                reason: 4,
-            });
         (id, discarded)
     }
 
@@ -169,6 +180,19 @@ impl NotificationStore {
         self.notifications.iter().any(|notification| {
             notification.id == id && notification.actions.iter().any(|action| action.key == key)
         })
+    }
+
+    /// Submission is not authority acknowledgement. Retain the request in history,
+    /// but remove stale actions until its source resolves or reconnects.
+    pub fn mark_submitting(&mut self, id: u32) -> bool {
+        let Some(notification) = self.notifications.iter_mut().find(|item| item.id == id) else {
+            return false;
+        };
+        notification.actions.clear();
+        notification
+            .body
+            .push_str(" Decision attempt unconfirmed; awaiting source resolution.");
+        true
     }
 
     #[cfg(test)]
@@ -307,6 +331,36 @@ mod tests {
     }
 
     #[test]
+    fn persistent_requests_survive_transient_churn_and_full_persistent_feed_rejects_admission() {
+        let now = Instant::now();
+        let mut store = NotificationStore::default();
+        let persistent = NotificationRequest {
+            app_name: "Nickel".into(),
+            summary: "Approval".into(),
+            body: String::new(),
+            actions: vec![NotificationAction {
+                key: "deny".into(),
+                label: "Deny".into(),
+            }],
+            expire_timeout_ms: 0,
+        };
+        let id = store.notify(0, persistent.clone(), now).0;
+        for _ in 0..(super::MAX_NOTIFICATIONS + 20) {
+            notify(&mut store, 0, now);
+        }
+        assert!(store.history().iter().any(|item| item.id == id));
+        assert!(store.has_action(id, "deny"));
+        for item in store.history() {
+            store.close(item.id, 2);
+        }
+        for _ in 0..super::MAX_NOTIFICATIONS {
+            assert_ne!(store.notify(0, persistent.clone(), now).0, 0);
+        }
+        assert_eq!(store.notify(0, persistent, now).0, 0);
+        assert_eq!(store.len(), super::MAX_NOTIFICATIONS);
+    }
+
+    #[test]
     fn replacement_updates_bounded_action_identity_in_place() {
         let now = Instant::now();
         let mut store = NotificationStore::default();
@@ -348,5 +402,30 @@ mod tests {
         assert!(!store.has_action(id, "key-2"));
         assert!(store.has_action(id, "replacement"));
         assert_eq!(store.newest().unwrap().actions.len(), 1);
+    }
+
+    #[test]
+    fn submitted_persistent_request_remains_in_history_without_stale_actions() {
+        let now = Instant::now();
+        let mut store = NotificationStore::default();
+        let (id, _) = store.notify(
+            0,
+            NotificationRequest {
+                app_name: "Nickel".into(),
+                summary: "Approval".into(),
+                body: "Scope: Terminal".into(),
+                actions: vec![NotificationAction {
+                    key: "approve".into(),
+                    label: "Approve".into(),
+                }],
+                expire_timeout_ms: 0,
+            },
+            now,
+        );
+        assert!(store.mark_submitting(id));
+        assert!(!store.has_action(id, "approve"));
+        assert_eq!(store.history().len(), 1);
+        assert!(store.history()[0].body.contains("unconfirmed"));
+        assert!(store.expire(now + Duration::from_secs(86_400)).is_empty());
     }
 }

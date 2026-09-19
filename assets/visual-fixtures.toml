@@ -67,6 +67,21 @@ members = [
   "nickel-start.svg",
 ]
 
+[[icon_family]]
+id = "codex-project-pets"
+directory = "icons/codex-pets"
+format = "1254x1254 RGBA PNG"
+authorship = "Generated for the repository owner's requested Codex project icons and contributed in commit 3f9f112f."
+license = "Same license as Nickel"
+members = [
+  "cat.png",
+  "duck.png",
+  "elephant.png",
+  "giraffe.png",
+  "golden-retriever.png",
+  "tiger.png",
+]
+
 [[asset]]
 id = "nickel-chat-icon"
 path = "icons/nickel-chat.svg"

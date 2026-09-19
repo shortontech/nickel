@@ -8,7 +8,10 @@ use smithay::{
         ExportMem, ImportAll, ImportMem, element::surface::WaylandSurfaceRenderElement,
         gles::GlesRenderer,
     },
-    desktop::{Window, space::space_render_elements},
+    desktop::{
+        Window,
+        space::{SpaceElement, space_render_element_groups},
+    },
 };
 
 smithay::backend::renderer::element::render_elements! {
@@ -59,8 +62,26 @@ impl NickelSession {
             .ids_for_output(&output.name())
             .any(|surface| {
                 self.internal_ui.placement(surface).is_none_or(|placement| {
-                    placement.role != crate::session::InternalSurfaceRole::TrustedControl
-                        && self.internal_ui.remote_access_protected(surface)
+                    if placement.role == crate::session::InternalSurfaceRole::TrustedControl
+                        || !self.internal_ui.remote_access_protected(surface)
+                    {
+                        return false;
+                    }
+                    let Some(output_bounds) = self.space.output_geometry(output) else {
+                        return true;
+                    };
+                    let Some((x, y, width, height)) = self.internal_ui.painted_bounds(surface)
+                    else {
+                        return true;
+                    };
+                    let (output_x, output_y) = (
+                        i64::from(output_bounds.loc.x),
+                        i64::from(output_bounds.loc.y),
+                    );
+                    x < output_x + i64::from(output_bounds.size.w)
+                        && output_x < x + width
+                        && y < output_y + i64::from(output_bounds.size.h)
+                        && output_y < y + height
                 })
             });
         if protected_internal {
@@ -491,43 +512,66 @@ impl NickelSession {
                             .into_iter()
                             .map(OutputCaptureRenderElement::from)
                             .collect::<Vec<_>>();
-                        if self.internal_applications_are_foremost() {
-                            elements.extend(
-                                self.internal_ui
-                                    .render_elements_for_layer(
-                                        renderer,
-                                        &output.name(),
-                                        output_geometry.loc,
-                                        Some(crate::session::InternalSurfaceLayer::Application),
-                                    )
-                                    .into_iter()
-                                    .map(OutputCaptureRenderElement::from),
-                            );
-                        }
-                        elements.extend(
-                            space_render_elements::<GlesRenderer, Window, _>(
-                                renderer,
-                                [&self.space],
-                                &output,
-                                scale as f32,
-                            )
-                            .map_err(|_| "output scene capture is unavailable")?
+                        let (upper, groups, lower) = space_render_element_groups::<
+                            GlesRenderer,
+                            Window,
+                        >(
+                            renderer, &self.space, &output, scale as f32
+                        )
+                        .map_err(|_| "output scene capture is unavailable")?;
+                        elements.extend(upper.into_iter().map(OutputCaptureRenderElement::from));
+                        let mut clients = groups
                             .into_iter()
-                            .map(OutputCaptureRenderElement::from),
-                        );
-                        if !self.internal_applications_are_foremost() {
+                            .map(|(window, elements)| (window.clone(), Some(elements)))
+                            .collect::<Vec<_>>();
+                        for (window, group) in &mut clients {
+                            if window.z_index() > 30 {
+                                elements.extend(
+                                    group
+                                        .take()
+                                        .into_iter()
+                                        .flatten()
+                                        .map(OutputCaptureRenderElement::from),
+                                );
+                            }
+                        }
+                        for window in self.ordinary_scene_order() {
+                            match window {
+                                OrdinarySceneWindow::Internal(surface) => elements.extend(
+                                    self.internal_ui
+                                        .render_application_elements(
+                                            renderer,
+                                            output_geometry.loc,
+                                            surface,
+                                        )
+                                        .into_iter()
+                                        .map(OutputCaptureRenderElement::from),
+                                ),
+                                OrdinarySceneWindow::Client(window) => {
+                                    if let Some((_, group)) = clients
+                                        .iter_mut()
+                                        .find(|(candidate, _)| *candidate == window)
+                                    {
+                                        elements.extend(
+                                            group
+                                                .take()
+                                                .into_iter()
+                                                .flatten()
+                                                .map(OutputCaptureRenderElement::from),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        for (_, group) in clients {
                             elements.extend(
-                                self.internal_ui
-                                    .render_elements_for_layer(
-                                        renderer,
-                                        &output.name(),
-                                        output_geometry.loc,
-                                        Some(crate::session::InternalSurfaceLayer::Application),
-                                    )
+                                group
                                     .into_iter()
+                                    .flatten()
                                     .map(OutputCaptureRenderElement::from),
                             );
                         }
+                        elements.extend(lower.into_iter().map(OutputCaptureRenderElement::from));
                         elements.extend(
                             self.internal_ui
                                 .render_elements_for_layer(

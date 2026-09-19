@@ -5,8 +5,8 @@ use std::{
 
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
-    AnyView, Collection, CollectionPresentation, CollectionState, Insets,
-    LinearGradient, NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, SidebarFolder,
+    AnyView, Collection, CollectionPresentation, CollectionState, Insets, LinearGradient,
+    NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, SidebarFolder,
     VerticalScroll, VirtualWindow, ui,
 };
 

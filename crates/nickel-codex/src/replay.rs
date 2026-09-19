@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +19,8 @@ pub struct ReplayScenario {
     pub name: String,
     #[serde(default)]
     pub account: AccountState,
+    #[serde(default)]
+    pub rate_limits: crate::RateLimitsStatus,
     #[serde(default)]
     pub models: Vec<Model>,
     #[serde(default)]
@@ -35,6 +40,10 @@ pub struct ReplayBackend {
     scenario: Arc<ReplayScenario>,
     pending: Arc<Mutex<HashMap<String, String>>>,
     started_turns: Arc<Mutex<Vec<StartTurn>>>,
+    compacted_threads: Arc<Mutex<Vec<ThreadId>>>,
+    reviewed_threads: Arc<Mutex<Vec<ThreadId>>>,
+    logged_out: Arc<AtomicBool>,
+    rate_limit_reads: Arc<AtomicUsize>,
     resumed_threads: Arc<Mutex<Vec<ThreadId>>>,
 }
 
@@ -60,12 +69,32 @@ impl ReplayBackend {
             scenario: Arc::new(scenario),
             pending: Arc::new(Mutex::new(pending)),
             started_turns: Arc::new(Mutex::new(Vec::new())),
+            compacted_threads: Arc::new(Mutex::new(Vec::new())),
+            reviewed_threads: Arc::new(Mutex::new(Vec::new())),
+            logged_out: Arc::new(AtomicBool::new(false)),
+            rate_limit_reads: Arc::new(AtomicUsize::new(0)),
             resumed_threads: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
     pub fn started_turns(&self) -> Vec<StartTurn> {
         self.started_turns.lock().unwrap().clone()
+    }
+
+    pub fn compacted_threads(&self) -> Vec<ThreadId> {
+        self.compacted_threads.lock().unwrap().clone()
+    }
+
+    pub fn reviewed_threads(&self) -> Vec<ThreadId> {
+        self.reviewed_threads.lock().unwrap().clone()
+    }
+
+    pub fn was_logged_out(&self) -> bool {
+        self.logged_out.load(Ordering::Relaxed)
+    }
+
+    pub fn rate_limit_reads(&self) -> usize {
+        self.rate_limit_reads.load(Ordering::Relaxed)
     }
 
     pub fn resumed_threads(&self) -> Vec<ThreadId> {
@@ -75,7 +104,19 @@ impl ReplayBackend {
 
 impl CodexBackend for ReplayBackend {
     fn account(&self) -> Result<AccountState, CodexError> {
-        Ok(self.scenario.account.clone())
+        if self.was_logged_out() {
+            Ok(AccountState::default())
+        } else {
+            Ok(self.scenario.account.clone())
+        }
+    }
+    fn rate_limits(&self) -> Result<crate::RateLimitsStatus, CodexError> {
+        self.rate_limit_reads.fetch_add(1, Ordering::Relaxed);
+        Ok(self.scenario.rate_limits.clone())
+    }
+    fn logout(&self) -> Result<(), CodexError> {
+        self.logged_out.store(true, Ordering::Relaxed);
+        Ok(())
     }
     fn models(&self) -> Result<Vec<Model>, CodexError> {
         Ok(self.scenario.models.clone())
@@ -151,6 +192,22 @@ impl CodexBackend for ReplayBackend {
         Ok(Turn {
             id: TurnId("fixture-turn".into()),
             thread_id: request.thread_id,
+            status: "inProgress".into(),
+        })
+    }
+    fn compact_thread(&self, thread: ThreadId) -> Result<(), CodexError> {
+        self.compacted_threads.lock().unwrap().push(thread);
+        Ok(())
+    }
+    fn review_uncommitted(
+        &self,
+        thread: ThreadId,
+        _settings: crate::ReviewSettings,
+    ) -> Result<Turn, CodexError> {
+        self.reviewed_threads.lock().unwrap().push(thread.clone());
+        Ok(Turn {
+            id: TurnId("fixture-review-turn".into()),
+            thread_id: thread,
             status: "inProgress".into(),
         })
     }

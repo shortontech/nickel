@@ -25,6 +25,24 @@ use crate::protocol::*;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const OUTBOUND_BACKLOG: usize = 16;
 const MAX_OUTBOUND_BYTES: usize = 160 * 1024 * 1024;
+const MAX_HISTORY_ITEM_TEXT_BYTES: usize = 256 * 1024;
+const HISTORY_OMISSION_MARKER: &str =
+    "\n\n[Further history detail omitted from this local view; server history is unchanged.]";
+
+fn bound_history_item_text(mut text: String) -> String {
+    if text.len() > MAX_HISTORY_ITEM_TEXT_BYTES {
+        let mut end = MAX_HISTORY_ITEM_TEXT_BYTES - HISTORY_OMISSION_MARKER.len();
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(HISTORY_OMISSION_MARKER);
+    }
+    if text.capacity() > MAX_HISTORY_ITEM_TEXT_BYTES {
+        text.shrink_to_fit();
+    }
+    text
+}
 
 fn parse_command_action(value: &Value) -> CommandAction {
     let string = |name: &str| value.get(name).and_then(Value::as_str).map(str::to_owned);
@@ -41,6 +59,359 @@ fn parse_command_action(value: &Value) -> CommandAction {
             path: string("path"),
         },
         _ => CommandAction::Unknown,
+    }
+}
+
+fn parse_user_input_questions(params: &Value) -> Option<Vec<UserInputQuestion>> {
+    let raw = params.get("questions")?.as_array()?;
+    if raw.is_empty() || raw.len() > 32 {
+        return None;
+    }
+    let mut retained_bytes = 0usize;
+    let mut questions = Vec::with_capacity(raw.len());
+    for value in raw {
+        let id = value.get("id")?.as_str()?;
+        let header = value.get("header")?.as_str()?;
+        let question = value.get("question")?.as_str()?;
+        let raw_options = value.get("options").and_then(Value::as_array);
+        if raw_options.is_some_and(|options| options.len() > 16) {
+            return None;
+        }
+        let mut options = Vec::new();
+        for option in raw_options.into_iter().flatten() {
+            let label = option.get("label")?.as_str()?;
+            let description = option.get("description")?.as_str()?;
+            retained_bytes = retained_bytes.checked_add(label.len() + description.len())?;
+            options.push(UserInputOption {
+                label: label.into(),
+                description: description.into(),
+            });
+        }
+        retained_bytes = retained_bytes.checked_add(id.len() + header.len() + question.len())?;
+        if id.len() > 256 || retained_bytes > 32 * 1024 {
+            return None;
+        }
+        questions.push(UserInputQuestion {
+            id: id.into(),
+            header: header.into(),
+            question: question.into(),
+            options,
+            is_other: value
+                .get("isOther")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            is_secret: value
+                .get("isSecret")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    Some(questions)
+}
+
+fn parse_available_decisions(
+    params: &Value,
+) -> Result<Option<Vec<crate::CommandDecision>>, &'static str> {
+    let Some(raw) = params
+        .get("availableDecisions")
+        .filter(|raw| !raw.is_null())
+    else {
+        return Ok(None);
+    };
+    if raw.to_string().len() > 4096 {
+        return Err("Approval decision set exceeds local limit");
+    }
+    let decisions = serde_json::from_value::<Vec<crate::CommandDecision>>(raw.clone())
+        .map_err(|_| "Unsupported approval decision set")?;
+    if decisions.len() > 8 {
+        return Err("Approval decision set exceeds local limit");
+    }
+    Ok(Some(decisions))
+}
+
+fn parse_file_changes(value: &Value) -> Option<Vec<FilePatchChange>> {
+    let raw = value.as_array()?;
+    if raw.len() > 64 {
+        return None;
+    }
+    let mut retained_bytes = 0usize;
+    let mut changes = Vec::with_capacity(raw.len());
+    for change in raw {
+        let path = change.get("path")?.as_str()?;
+        let kind_value = change.get("kind")?;
+        let kind = kind_value.get("type")?.as_str()?;
+        let move_path = kind_value.get("move_path").and_then(Value::as_str);
+        let diff = change.get("diff")?.as_str()?;
+        retained_bytes = retained_bytes
+            .checked_add(path.len() + kind.len() + diff.len() + move_path.map_or(0, str::len))?;
+        if path.len() > 4096
+            || move_path.is_some_and(|path| path.len() > 4096)
+            || kind.len() > 256
+            || retained_bytes > 256 * 1024
+        {
+            return None;
+        }
+        changes.push(FilePatchChange {
+            path: path.into(),
+            kind: kind.into(),
+            move_path: move_path.map(str::to_owned),
+            diff: diff.into(),
+        });
+    }
+    Some(changes)
+}
+
+fn format_file_changes(changes: &[FilePatchChange]) -> String {
+    changes
+        .iter()
+        .map(|change| {
+            format!(
+                "{}: {}{}\n{}",
+                change.kind,
+                change.path,
+                change
+                    .move_path
+                    .as_ref()
+                    .map_or(String::new(), |target| format!(" → {target}")),
+                change.diff
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn parse_file_patch_updated(params: &Value) -> EventKind {
+    let parsed = (|| {
+        let thread_id = params.get("threadId")?.as_str()?;
+        let turn_id = params.get("turnId")?.as_str()?;
+        let item_id = params.get("itemId")?.as_str()?;
+        if [thread_id, turn_id, item_id]
+            .iter()
+            .any(|id| id.len() > 4096)
+        {
+            return None;
+        }
+        let changes = parse_file_changes(params.get("changes")?)?;
+        Some(EventKind::FilePatchUpdated {
+            thread_id: ThreadId(thread_id.into()),
+            turn_id: TurnId(turn_id.into()),
+            item_id: item_id.into(),
+            changes,
+        })
+    })();
+    parsed.unwrap_or_else(|| EventKind::Inconsistency {
+        message: "File patch update was malformed or exceeded the local detail budget".into(),
+    })
+}
+
+fn parse_turn_plan_updated(params: &Value) -> EventKind {
+    let parsed = (|| {
+        let thread_id = params.get("threadId")?.as_str()?;
+        let turn_id = params.get("turnId")?.as_str()?;
+        let raw = params.get("plan")?.as_array()?;
+        let explanation = params.get("explanation").and_then(Value::as_str);
+        if raw.len() > 128
+            || thread_id.len() > 4096
+            || turn_id.len() > 4096
+            || explanation.is_some_and(|text| text.len() > 4096)
+        {
+            return None;
+        }
+        let mut retained_bytes = explanation.map_or(0, str::len);
+        let mut steps = Vec::with_capacity(raw.len());
+        for entry in raw {
+            let step = entry.get("step")?.as_str()?;
+            let status = entry.get("status")?.as_str()?;
+            retained_bytes = retained_bytes.checked_add(step.len() + status.len())?;
+            if step.len() > 4096
+                || retained_bytes > 128 * 4096
+                || !matches!(status, "pending" | "inProgress" | "completed")
+            {
+                return None;
+            }
+            steps.push(TurnPlanStep {
+                step: step.into(),
+                status: status.into(),
+            });
+        }
+        Some(EventKind::TurnPlanUpdated {
+            thread_id: ThreadId(thread_id.into()),
+            turn_id: TurnId(turn_id.into()),
+            explanation: explanation.map(str::to_owned),
+            steps,
+        })
+    })();
+    parsed.unwrap_or_else(|| EventKind::Inconsistency {
+        message: "Turn plan update was malformed or exceeded the local detail budget".into(),
+    })
+}
+
+fn parse_item_completed(params: &Value) -> EventKind {
+    let parsed = (|| {
+        let thread_id = params.get("threadId")?.as_str()?;
+        let turn_id = params.get("turnId")?.as_str()?;
+        let completed_at_ms = params.get("completedAtMs")?.as_i64()?;
+        let item = params.get("item")?;
+        let item_id = item.get("id")?.as_str()?;
+        let item_type = item.get("type")?.as_str()?;
+        if [thread_id, turn_id, item_id]
+            .iter()
+            .any(|id| id.len() > 4096)
+            || item_type.len() > 256
+        {
+            return None;
+        }
+        let summary_parts = if item_type == "reasoning" {
+            let raw = item.get("summary")?.as_array()?;
+            if raw.len() > 64 {
+                return None;
+            }
+            raw.iter()
+                .map(|part| part.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+        if summary_parts.iter().map(String::len).sum::<usize>() > 256 * 1024 {
+            return None;
+        }
+        let changes = if item_type == "fileChange" {
+            parse_file_changes(item.get("changes")?)?
+        } else {
+            Vec::new()
+        };
+        // A completion is an authoritative snapshot, but it must still fit the local view budget.
+        let command_actions = match item.get("commandActions").and_then(Value::as_array) {
+            Some(raw) if raw.len() <= 32 && serde_json::to_string(raw).ok()?.len() <= 32 * 1024 => {
+                raw.iter().map(parse_command_action).collect()
+            }
+            Some(_) => return None,
+            None => Vec::new(),
+        };
+        let text = match item_type {
+            "reasoning" => summary_parts.join("\n"),
+            "fileChange" => format_file_changes(&changes),
+            _ => history_item_text(item_type, item),
+        };
+        if text.len() > 256 * 1024 {
+            return None;
+        }
+        let exit_code = item
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .map(i32::try_from)
+            .transpose()
+            .ok()?;
+        let status = item.get("status").and_then(Value::as_str);
+        if status.is_some_and(|status| status.len() > 256) {
+            return None;
+        }
+        Some(EventKind::ItemCompleted {
+            item_id: item_id.into(),
+            completion: Some(CompletedItem {
+                thread_id: ThreadId(thread_id.into()),
+                turn_id: TurnId(turn_id.into()),
+                completed_at_ms: Some(completed_at_ms),
+                item_type: item_type.into(),
+                text,
+                status: status.map(str::to_owned),
+                exit_code,
+                duration_ms: item.get("durationMs").and_then(Value::as_i64),
+                changes,
+                summary_parts,
+                command_actions,
+            }),
+        })
+    })();
+    parsed.unwrap_or_else(|| EventKind::Inconsistency {
+        message: "Completed item was malformed or exceeded the local detail budget".into(),
+    })
+}
+
+fn parse_turn_error(params: &Value) -> EventKind {
+    let parsed = (|| {
+        let thread_id = params.get("threadId")?.as_str()?;
+        let turn_id = params.get("turnId")?.as_str()?;
+        let message = params.get("error")?.get("message")?.as_str()?;
+        let will_retry = params.get("willRetry")?.as_bool()?;
+        if thread_id.len() > 4096 || turn_id.len() > 4096 || message.len() > 4096 {
+            return None;
+        }
+        Some(EventKind::TurnError {
+            thread_id: ThreadId(thread_id.into()),
+            turn_id: TurnId(turn_id.into()),
+            message: message.into(),
+            will_retry,
+        })
+    })();
+    parsed.unwrap_or_else(|| EventKind::Inconsistency {
+        message: "Turn error notification was malformed or exceeded the local detail budget".into(),
+    })
+}
+
+fn parse_warning(method: &str, params: &Value) -> EventKind {
+    let message = if method == "configWarning" {
+        params.get("summary")
+    } else {
+        params.get("message")
+    }
+    .and_then(Value::as_str);
+    let thread_id = params.get("threadId").and_then(Value::as_str);
+    match (message, thread_id) {
+        (Some(message), thread_id)
+            if message.len() <= 4096
+                && thread_id.is_none_or(|id| id.len() <= 4096)
+                && (method != "guardianWarning" || thread_id.is_some()) =>
+        {
+            EventKind::Warning {
+                thread_id: thread_id.map(|id| ThreadId(id.into())),
+                message: message.into(),
+                guardian: method == "guardianWarning",
+            }
+        }
+        _ => EventKind::Inconsistency {
+            message: "Warning notification was malformed or exceeded the local detail budget"
+                .into(),
+        },
+    }
+}
+
+fn initial_item_text(item: &Value) -> String {
+    let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+        return String::new();
+    };
+    let text = match item_type {
+        "commandExecution" => {
+            let Some(command) = item.get("command").and_then(Value::as_str) else {
+                return String::new();
+            };
+            if command.len() > 4096 {
+                return String::new();
+            }
+            if item.get("source").and_then(Value::as_str) == Some("userShell") {
+                format!("!{command}\n")
+            } else {
+                format!("$ {command}\n")
+            }
+        }
+        // These public item families supply useful identity before terminal detail arrives.
+        // Final item snapshots replace this provisional text rather than appending to it.
+        "mcpToolCall"
+        | "dynamicToolCall"
+        | "webSearch"
+        | "imageView"
+        | "imageGeneration"
+        | "collabAgentToolCall"
+        | "subAgentActivity"
+        | "enteredReviewMode"
+        | "exitedReviewMode"
+        | "contextCompaction" => history_item_text(item_type, item),
+        _ => String::new(),
+    };
+    if text.len() <= 4096 {
+        text
+    } else {
+        String::new()
     }
 }
 
@@ -201,6 +572,26 @@ impl CodexClient {
         request_timeout: Duration,
         codex_home: Option<&Path>,
     ) -> Result<Self, CodexError> {
+        Self::spawn_with_options(executable, cwd, request_timeout, codex_home, false)
+    }
+
+    /// Starts a secondary local client without competing for the profile's single
+    /// Codex phone connection. Remote-control RPCs must use the primary client.
+    pub fn spawn_without_remote_control(
+        executable: &Path,
+        cwd: &Path,
+        codex_home: Option<&Path>,
+    ) -> Result<Self, CodexError> {
+        Self::spawn_with_options(executable, cwd, Duration::from_secs(15), codex_home, true)
+    }
+
+    fn spawn_with_options(
+        executable: &Path,
+        cwd: &Path,
+        request_timeout: Duration,
+        codex_home: Option<&Path>,
+        remote_control_disabled: bool,
+    ) -> Result<Self, CodexError> {
         let mut child = command(executable);
         if let Some(codex_home) = codex_home {
             if !codex_home.is_absolute() {
@@ -209,6 +600,9 @@ impl CodexClient {
                 ));
             }
             child.env("CODEX_HOME", codex_home);
+        }
+        if remote_control_disabled {
+            child.env("CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED", "1");
         }
         let mut child = child
             .args(["app-server", "--listen", "stdio://"])
@@ -504,7 +898,12 @@ impl CodexClient {
             }
             pending.insert(key.clone(), tx);
         }
-        if let Err(error) = self.write(&json!({"id": id, "method": method, "params": params})) {
+        let message = if params.is_null() {
+            json!({"id": id, "method": method})
+        } else {
+            json!({"id": id, "method": method, "params": params})
+        };
+        if let Err(error) = self.write(&message) {
             self.inner.pending.lock().unwrap().remove(&key);
             return Err(error);
         }
@@ -588,18 +987,56 @@ impl CodexClient {
 
     fn handle_server_request(&self, id: String, value: &Value) {
         let method = value["method"].as_str().unwrap_or_default();
-        let question_ids: Vec<String> = value["params"]
-            .get("questions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|question| {
-                question
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
+        // A server request is a callback, not a notification. Unknown methods must receive a
+        // terminal protocol error immediately so Codex cannot wait forever on a UI card.
+        if !matches!(
+            method,
+            "item/commandExecution/requestApproval"
+                | "item/fileChange/requestApproval"
+                | "item/tool/requestUserInput"
+        ) {
+            let _ = self.write(&json!({"id": value["id"], "error": {
+                "code": -32601, "message": "Unsupported client request"
+            }}));
+            self.publish(EventKind::UnsupportedEvent {
+                method: method.into(),
+            });
+            return;
+        }
+        // Reject malformed questions before recording a pending callback; IDs alone are not
+        // enough to let a person answer safely.
+        let questions = if method == "item/tool/requestUserInput" {
+            match parse_user_input_questions(&value["params"]) {
+                Some(questions) => questions,
+                None => {
+                    let _ = self.write(&json!({"id": value["id"], "error": {
+                        "code": -32602, "message": "Unsupported or malformed user-input questions"
+                    }}));
+                    return;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let question_ids: Vec<String> = questions
+            .iter()
+            .map(|question| question.id.clone())
             .collect();
+        // The ordered decision set is consent authority, not presentation copy.
+        // Reject malformed or oversized sets before registering a pending callback.
+        let available_decisions = if method == "item/commandExecution/requestApproval" {
+            match parse_available_decisions(&value["params"]) {
+                Ok(decisions) => decisions,
+                Err(message) => {
+                    let _ = self.write(&json!({"id": value["id"], "error": {
+                        "code": -32602, "message": message
+                    }}));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let mut outstanding = self.inner.outstanding.lock().unwrap();
         if outstanding.len() >= 32
             || id.len() > 4096
@@ -627,22 +1064,58 @@ impl CodexClient {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                 self.publish(EventKind::ApprovalRequested {
                     request_id,
+                    thread_id: params
+                        .get("threadId")
+                        .and_then(Value::as_str)
+                        .map(|id| ThreadId(id.to_owned())),
                     approval_type: method.into(),
                     summary: params
                         .get("reason")
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned),
+                    context: crate::ApprovalContext {
+                        item_id: params
+                            .get("itemId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        approval_id: params
+                            .get("approvalId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        command: params
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
+                        grant_root: params
+                            .get("grantRoot")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        kind: params
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        asks_network_access: params
+                            .get("networkApprovalContext")
+                            .is_some_and(|value| !value.is_null()),
+                        proposes_session_rule: [
+                            "proposedExecpolicyAmendment",
+                            "proposedNetworkPolicyAmendments",
+                        ]
+                        .iter()
+                        .any(|key| params.get(*key).is_some_and(|value| !value.is_null())),
+                        available_decisions,
+                    },
                 });
             }
             "item/tool/requestUserInput" => {
                 self.publish(EventKind::UserInputRequested {
                     request_id,
                     question_ids,
+                    questions,
                 });
             }
-            _ => self.publish(EventKind::UnsupportedEvent {
-                method: method.into(),
-            }),
+            _ => unreachable!("request method validated above"),
         }
     }
 
@@ -697,15 +1170,10 @@ impl CodexClient {
                     .collect(),
                 initial_text: params
                     .get("item")
-                    .filter(|item| item.get("source").and_then(Value::as_str) == Some("userShell"))
-                    .and_then(|item| item.get("command"))
-                    .and_then(Value::as_str)
-                    .map(|command| format!("!{command}\n"))
+                    .map(initial_item_text)
                     .unwrap_or_default(),
             },
-            "item/completed" => EventKind::ItemCompleted {
-                item_id: nested("item", "id"),
-            },
+            "item/completed" => parse_item_completed(params),
             "item/agentMessage/delta" => EventKind::AgentMessageDelta {
                 item_id: string("itemId"),
                 delta: string("delta"),
@@ -714,30 +1182,16 @@ impl CodexClient {
                 item_id: string("itemId"),
                 delta: string("delta"),
             },
-            "item/fileChange/outputDelta" | "item/fileChange/patchUpdated" => {
-                EventKind::FileChangeDelta {
-                    item_id: string("itemId"),
-                    delta: params
-                        .get("delta")
-                        .or_else(|| params.get("patch"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .into(),
-                }
-            }
-            "item/plan/delta" | "turn/plan/updated" => EventKind::PlanDelta {
+            "item/fileChange/outputDelta" => EventKind::FileChangeDelta {
                 item_id: string("itemId"),
-                delta: params
-                    .get("delta")
-                    .or_else(|| params.get("plan"))
-                    .map(|value| {
-                        value
-                            .as_str()
-                            .map(ToOwned::to_owned)
-                            .unwrap_or_else(|| value.to_string())
-                    })
-                    .unwrap_or_default(),
+                delta: string("delta"),
             },
+            "item/fileChange/patchUpdated" => parse_file_patch_updated(params),
+            "item/plan/delta" => EventKind::PlanDelta {
+                item_id: string("itemId"),
+                delta: string("delta"),
+            },
+            "turn/plan/updated" => parse_turn_plan_updated(params),
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                 EventKind::ReasoningDelta {
                     item_id: string("itemId"),
@@ -745,6 +1199,18 @@ impl CodexClient {
                 }
             }
             "account/updated" | "account/rateLimits/updated" => EventKind::AccountUpdated,
+            "serverRequest/resolved" => match (
+                params.get("threadId").and_then(Value::as_str),
+                params.get("requestId").and_then(request_id),
+            ) {
+                (Some(thread_id), Some(request_id)) => EventKind::ServerRequestResolved {
+                    thread_id: ThreadId(thread_id.to_owned()),
+                    request_id: ServerRequestId(request_id),
+                },
+                _ => EventKind::Inconsistency {
+                    message: "serverRequest/resolved lacked thread or request identity".into(),
+                },
+            },
             "account/login/completed" => EventKind::AccountLoginCompleted {
                 completion: crate::LoginCompletion {
                     login_id: params
@@ -764,14 +1230,8 @@ impl CodexClient {
                     message: error.to_string(),
                 },
             },
-            "error" => EventKind::Error {
-                message: params
-                    .get("error")
-                    .and_then(|v| v.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("Codex error")
-                    .into(),
-            },
+            "error" => parse_turn_error(params),
+            "warning" | "guardianWarning" | "configWarning" => parse_warning(method, params),
             _ => EventKind::UnsupportedEvent {
                 method: method.into(),
             },
@@ -792,6 +1252,10 @@ impl CodexClient {
             EventKind::ItemStarted {
                 item_id, item_type, ..
             } => item_id.len() <= 4096 && item_type.len() <= 4096,
+            EventKind::ServerRequestResolved {
+                thread_id,
+                request_id,
+            } => thread_id.0.len() <= 4096 && request_id.0.len() <= 4096,
             EventKind::AgentMessageDelta { item_id, .. }
             | EventKind::CommandOutputDelta { item_id, .. }
             | EventKind::FileChangeDelta { item_id, .. }
@@ -869,9 +1333,22 @@ impl CodexClient {
                         ..ProjectedItem::default()
                     });
             }
-            EventKind::ItemCompleted { item_id } => {
+            EventKind::ItemCompleted {
+                item_id,
+                completion,
+            } => {
                 if let Some(item) = projection.items.get_mut(item_id) {
                     item.completed = true;
+                } else if let Some(completion) = completion {
+                    projection.items.insert(
+                        item_id.clone(),
+                        ProjectedItem {
+                            item_type: completion.item_type.clone(),
+                            // Delivery owns the bounded payload; projection retains metadata.
+                            text: String::new(),
+                            completed: true,
+                        },
+                    );
                 } else {
                     inconsistency = Some(format!("completion for unknown item {item_id}"));
                 }
@@ -900,6 +1377,13 @@ impl CodexClient {
                     end -= 1;
                 }
                 projection.terminal_error = Some(message[..end].to_owned());
+            }
+            EventKind::TurnError {
+                message,
+                will_retry,
+                ..
+            } if !will_retry => {
+                projection.terminal_error = Some(message.clone());
             }
             _ => {}
         }
@@ -1138,6 +1622,201 @@ fn parse_remote_client(value: &Value) -> Result<crate::RemoteControlClient, Code
     })
 }
 
+fn parse_rate_limits_status(value: &Value) -> Result<crate::RateLimitsStatus, CodexError> {
+    let mut entries = value
+        .get("rateLimitsByLimitId")
+        .and_then(Value::as_object)
+        .map(|buckets| {
+            let mut entries = buckets
+                .iter()
+                .map(|(id, bucket)| (id.clone(), bucket))
+                .collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries
+        })
+        .unwrap_or_default();
+    if entries.is_empty() {
+        let bucket = value
+            .get("rateLimits")
+            .ok_or_else(|| CodexError::Protocol("rate-limit response omitted rateLimits".into()))?;
+        entries.push(("codex".to_owned(), bucket));
+    }
+    let mut buckets = Vec::new();
+    for (id, bucket) in entries.into_iter().take(16) {
+        let name = bucket
+            .get("limitName")
+            .and_then(Value::as_str)
+            .filter(|name| name.len() <= 80 && !name.chars().any(char::is_control))
+            .unwrap_or(&id)
+            .to_owned();
+        let used = |key: &str| -> Result<Option<i32>, CodexError> {
+            let Some(window) = bucket.get(key).filter(|window| !window.is_null()) else {
+                return Ok(None);
+            };
+            let percent = window
+                .get("usedPercent")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CodexError::Protocol("invalid rate-limit percentage".into()))?;
+            i32::try_from(percent)
+                .map(Some)
+                .map_err(|_| CodexError::Protocol("rate-limit percentage is out of range".into()))
+        };
+        buckets.push(crate::RateLimitBucket {
+            name,
+            primary_used_percent: used("primary")?,
+            secondary_used_percent: used("secondary")?,
+        });
+    }
+    Ok(crate::RateLimitsStatus {
+        ordinary_usage_allowed: value.get("ordinaryUsageAllowed").and_then(Value::as_bool),
+        buckets,
+    })
+}
+
+fn parse_file_search_matches(value: &Value) -> Result<Vec<crate::FileSearchMatch>, CodexError> {
+    const MAX_MATCHES: usize = 200;
+    const MAX_FIELD_BYTES: usize = 4096;
+    let files = value
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CodexError::Protocol("invalid fuzzy-file-search response".into()))?;
+    if files.len() > MAX_MATCHES {
+        return Err(CodexError::Protocol(
+            "fuzzy-file-search response exceeds local capacity".into(),
+        ));
+    }
+    files
+        .iter()
+        .map(|file| {
+            let field = |name: &str, legacy_name: &str| -> Result<String, CodexError> {
+                file.get(name)
+                    .or_else(|| file.get(legacy_name))
+                    .and_then(Value::as_str)
+                    .filter(|value| value.len() <= MAX_FIELD_BYTES)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        CodexError::Protocol(format!(
+                            "invalid fuzzy-file-search response field {name}"
+                        ))
+                    })
+            };
+            let match_type = field("matchType", "match_type")?;
+            let is_directory = match match_type.as_str() {
+                "file" => false,
+                "directory" => true,
+                _ => {
+                    return Err(CodexError::Protocol(
+                        "invalid fuzzy-file-search match type".into(),
+                    ));
+                }
+            };
+            let score = file
+                .get("score")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| CodexError::Protocol("invalid fuzzy-file-search score".into()))?;
+            Ok(crate::FileSearchMatch {
+                root: field("root", "root")?,
+                path: field("path", "path")?,
+                file_name: field("fileName", "file_name")?,
+                is_directory,
+                score,
+            })
+        })
+        .collect()
+}
+
+const WORKSPACE_DIFF_BYTES: usize = 256 * 1024;
+const WORKSPACE_DIFF_FILE_LIMIT: usize = 128;
+const WORKSPACE_DIFF_OMISSION: &str = "\n[Further diff output omitted by Nickel.]\n";
+
+struct CommandExecOutput {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl CodexClient {
+    fn bounded_command_exec(
+        &self,
+        cwd: &std::path::Path,
+        command: Vec<String>,
+    ) -> Result<CommandExecOutput, CodexError> {
+        let value = self.request(
+            "command/exec",
+            json!({
+                "command": command,
+                "processId": null,
+                "tty": false,
+                "streamStdin": false,
+                "streamStdoutStderr": false,
+                "outputBytesCap": WORKSPACE_DIFF_BYTES,
+                "disableOutputCap": false,
+                "disableTimeout": false,
+                "timeoutMs": 30_000,
+                "cwd": cwd,
+                "env": null,
+                "size": null,
+                "sandboxPolicy": {"type":"readOnly"},
+                "permissionProfile": null
+            }),
+        )?;
+        let exit_code = value
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
+            .ok_or_else(|| CodexError::Protocol("invalid command/exec exit code".into()))?;
+        let output = |field: &str| -> Result<String, CodexError> {
+            value
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|text| text.len() <= WORKSPACE_DIFF_BYTES)
+                .map(str::to_owned)
+                .ok_or_else(|| CodexError::Protocol(format!("invalid command/exec {field} output")))
+        };
+        Ok(CommandExecOutput {
+            exit_code,
+            stdout: output("stdout")?,
+            stderr: output("stderr")?,
+        })
+    }
+}
+
+fn append_workspace_diff(destination: &mut String, source: &str) -> bool {
+    let remaining = WORKSPACE_DIFF_BYTES.saturating_sub(destination.len());
+    if source.len() <= remaining {
+        destination.push_str(source);
+        return true;
+    }
+    let content_limit = WORKSPACE_DIFF_BYTES.saturating_sub(WORKSPACE_DIFF_OMISSION.len());
+    if destination.len() > content_limit {
+        let mut end = content_limit;
+        while !destination.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        destination.truncate(end);
+    }
+    let marker_space = content_limit.saturating_sub(destination.len());
+    let mut end = marker_space.min(source.len());
+    while !source.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    destination.push_str(&source[..end]);
+    destination.push_str(WORKSPACE_DIFF_OMISSION);
+    false
+}
+
+fn safe_git_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('\\')
+        && path.as_bytes().get(1) != Some(&b':')
+        && !path
+            .split(['/', '\\'])
+            .any(|component| component.is_empty() || component == "..")
+        && !path.as_bytes().contains(&0)
+}
+
 impl CodexBackend for CodexClient {
     fn account(&self) -> Result<AccountState, CodexError> {
         let value = self.request("account/read", json!({"refreshToken": false}))?;
@@ -1147,6 +1826,170 @@ impl CodexBackend for CodexClient {
             account_type: account.get("type").and_then(Value::as_str).map(Into::into),
             email: account.get("email").and_then(Value::as_str).map(Into::into),
         })
+    }
+    fn rate_limits(&self) -> Result<crate::RateLimitsStatus, CodexError> {
+        let value = self.request("account/rateLimits/read", Value::Null)?;
+        parse_rate_limits_status(&value)
+    }
+    fn search_files(
+        &self,
+        query: String,
+        roots: Vec<String>,
+    ) -> Result<Vec<crate::FileSearchMatch>, CodexError> {
+        if query.len() > 4096
+            || roots.is_empty()
+            || roots.len() > 16
+            || roots
+                .iter()
+                .any(|root| root.is_empty() || root.len() > 4096)
+        {
+            return Err(CodexError::Protocol(
+                "invalid fuzzy-file-search request".into(),
+            ));
+        }
+        parse_file_search_matches(&self.request(
+            "fuzzyFileSearch",
+            json!({
+                "query": query,
+                "roots": roots,
+                "cancellationToken": "nickel-file-mention"
+            }),
+        )?)
+    }
+    fn upload_feedback(
+        &self,
+        classification: String,
+        reason: Option<String>,
+        thread_id: Option<ThreadId>,
+        include_logs: bool,
+    ) -> Result<String, CodexError> {
+        if !matches!(
+            classification.as_str(),
+            "bug" | "bad_result" | "good_result" | "safety_check" | "other"
+        ) || reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > 16 * 1024)
+            || thread_id
+                .as_ref()
+                .is_some_and(|thread| thread.0.len() > 4096)
+        {
+            return Err(CodexError::Protocol("invalid feedback request".into()));
+        }
+        let value = self.request(
+            "feedback/upload",
+            json!({
+                "classification": classification,
+                "reason": reason,
+                "threadId": thread_id.map(|thread| thread.0),
+                "includeLogs": include_logs,
+                "extraLogFiles": null,
+                "tags": null
+            }),
+        )?;
+        value
+            .get("threadId")
+            .and_then(Value::as_str)
+            .filter(|thread_id| !thread_id.is_empty() && thread_id.len() <= 4096)
+            .map(str::to_owned)
+            .ok_or_else(|| CodexError::Protocol("invalid feedback response".into()))
+    }
+    fn workspace_diff(&self, cwd: std::path::PathBuf) -> Result<String, CodexError> {
+        let git = |args: &[&str]| {
+            self.bounded_command_exec(
+                &cwd,
+                std::iter::once("git".to_owned())
+                    // These read-only commands never invoke hooks. Disable the
+                    // filesystem monitor without injecting a client-OS-specific
+                    // null path into an app-server that may run another OS.
+                    .chain(
+                        ["-c", "core.fsmonitor=false"]
+                            .into_iter()
+                            .map(str::to_owned),
+                    )
+                    .chain(args.iter().map(|argument| (*argument).to_owned()))
+                    .collect(),
+            )
+        };
+        let inside = git(&["rev-parse", "--is-inside-work-tree"])?;
+        if inside.exit_code != 0 || inside.stdout.trim() != "true" {
+            return Ok("`/diff` — _not inside a Git repository_".into());
+        }
+
+        let tracked = git(&[
+            "diff",
+            "--no-textconv",
+            "--no-ext-diff",
+            "--submodule=short",
+            "--ignore-submodules=dirty",
+            "--no-color",
+        ])?;
+        if !matches!(tracked.exit_code, 0 | 1) {
+            return Err(CodexError::Protocol(format!(
+                "git diff failed: {}",
+                tracked.stderr.lines().next().unwrap_or("unknown error")
+            )));
+        }
+        let mut diff = String::new();
+        if !append_workspace_diff(&mut diff, &tracked.stdout) {
+            return Ok(diff);
+        }
+
+        let untracked = git(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+        if untracked.exit_code != 0 {
+            return Err(CodexError::Protocol(format!(
+                "git ls-files failed: {}",
+                untracked.stderr.lines().next().unwrap_or("unknown error")
+            )));
+        }
+        let paths = untracked
+            .stdout
+            .split('\0')
+            .filter(|path| safe_git_relative_path(path))
+            .collect::<Vec<_>>();
+        for path in paths.iter().take(WORKSPACE_DIFF_FILE_LIMIT) {
+            let run_untracked = |null_path: &str| {
+                git(&[
+                    "diff",
+                    "--no-textconv",
+                    "--no-ext-diff",
+                    "--submodule=short",
+                    "--ignore-submodules=dirty",
+                    "--no-color",
+                    "--no-index",
+                    "--",
+                    null_path,
+                    path,
+                ])
+            };
+            // A remote app-server may run a different OS than this Nickel client.
+            let preferred_null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+            let alternate_null = if cfg!(windows) { "/dev/null" } else { "NUL" };
+            let mut output = run_untracked(preferred_null)?;
+            if !matches!(output.exit_code, 0 | 1) {
+                output = run_untracked(alternate_null)?;
+            }
+            if !matches!(output.exit_code, 0 | 1) {
+                return Err(CodexError::Protocol(format!(
+                    "git diff for an untracked file failed: {}",
+                    output.stderr.lines().next().unwrap_or("unknown error")
+                )));
+            }
+            if !append_workspace_diff(&mut diff, &output.stdout) {
+                return Ok(diff);
+            }
+        }
+        if paths.len() > WORKSPACE_DIFF_FILE_LIMIT {
+            append_workspace_diff(&mut diff, WORKSPACE_DIFF_OMISSION);
+        }
+        if diff.is_empty() {
+            Ok("`/diff` — _no working-tree changes_".into())
+        } else {
+            Ok(format!("```diff\n{diff}\n```"))
+        }
+    }
+    fn logout(&self) -> Result<(), CodexError> {
+        self.request("account/logout", Value::Null)?;
+        Ok(())
     }
     fn start_login(&self, method: crate::LoginMethod) -> Result<crate::LoginChallenge, CodexError> {
         let params = match method {
@@ -1394,6 +2237,7 @@ impl CodexBackend for CodexClient {
             "thread/start",
             json!({"cwd": request.cwd, "model": request.model, "projectId": request.project_id,
                 "approvalPolicy": request.approval_policy,
+                "sandboxPolicy": request.sandbox_policy,
                 "config": {"model_reasoning_effort": request.reasoning_effort}}),
         )?;
         parse_thread(value.get("thread").unwrap_or(&value))
@@ -1407,7 +2251,21 @@ impl CodexBackend for CodexClient {
     fn start_turn(&self, request: StartTurn) -> Result<Turn, CodexError> {
         let thread_id = request.thread_id.clone();
         let input = turn_input(request.text, request.images);
-        let value = self.request("turn/start", json!({"threadId": request.thread_id.0, "input": input, "model": request.model, "effort": request.reasoning_effort, "approvalPolicy": request.approval_policy}))?;
+        let mut params = json!({"threadId": request.thread_id.0, "input": input, "model": request.model.clone(), "effort": request.reasoning_effort.clone(), "approvalPolicy": request.approval_policy, "sandboxPolicy": request.sandbox_policy});
+        if request.plan_mode {
+            let model = request.model.as_deref().ok_or_else(|| {
+                CodexError::Protocol("Plan mode requires a selected model".into())
+            })?;
+            params["collaborationMode"] = json!({
+                "mode": "plan",
+                "settings": {
+                    "model": model,
+                    "reasoning_effort": request.reasoning_effort,
+                    "developer_instructions": null
+                }
+            });
+        }
+        let value = self.request("turn/start", params)?;
         let turn = value.get("turn").unwrap_or(&value);
         Ok(Turn {
             id: TurnId(
@@ -1417,6 +2275,60 @@ impl CodexBackend for CodexClient {
                     .into(),
             ),
             thread_id,
+            status: turn
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("inProgress")
+                .into(),
+        })
+    }
+    fn compact_thread(&self, thread: ThreadId) -> Result<(), CodexError> {
+        self.request("thread/compact/start", json!({"threadId": thread.0}))?;
+        Ok(())
+    }
+    fn review_uncommitted(
+        &self,
+        thread: ThreadId,
+        settings: crate::ReviewSettings,
+    ) -> Result<Turn, CodexError> {
+        self.request(
+            "thread/settings/update",
+            json!({
+                "threadId": thread.0.clone(),
+                "disabledPluginIds": null,
+                "cwd": null,
+                "approvalPolicy": settings.approval_policy,
+                "approvalsReviewer": null,
+                "sandboxPolicy": settings.sandbox_policy,
+                "permissions": null,
+                "model": settings.model,
+                "serviceTier": null,
+                "effort": settings.reasoning_effort,
+                "summary": null,
+                "collaborationMode": null,
+                "multiAgentMode": null,
+                "personality": null
+            }),
+        )?;
+        let value = self.request(
+            "review/start",
+            json!({
+                "threadId": thread.0,
+                "target": {"type": "uncommittedChanges"},
+                "delivery": "inline",
+            }),
+        )?;
+        let turn = value
+            .get("turn")
+            .ok_or_else(|| CodexError::Protocol("review/start omitted turn".into()))?;
+        Ok(Turn {
+            id: TurnId(
+                turn.get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CodexError::Protocol("review/start omitted turn id".into()))?
+                    .into(),
+            ),
+            thread_id: thread,
             status: turn
                 .get("status")
                 .and_then(Value::as_str)
@@ -1590,8 +2502,23 @@ fn parse_history_item(value: &Value) -> Option<ThreadHistoryItem> {
     Some(ThreadHistoryItem {
         id: value.get("id")?.as_str()?.into(),
         item_type: item_type.into(),
-        text: history_item_text(item_type, value),
+        // Hydration is transient backend data, but it must not hand unbounded item detail
+        // to the UI before the transcript's own admission budget runs.
+        text: bound_history_item_text(history_item_text(item_type, value)),
         command_actions,
+        status: value
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| status.len() <= 256)
+            .map(str::to_owned),
+        exit_code: value
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
+        duration_ms: value
+            .get("durationMs")
+            .and_then(Value::as_i64)
+            .filter(|duration| *duration >= 0),
     })
 }
 
@@ -1623,9 +2550,9 @@ fn history_item_text(item_type: &str, value: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .into(),
+        // Raw reasoning content is private; only the supplied summary belongs in history.
         "reasoning" => value
             .get("summary")
-            .or_else(|| value.get("content"))
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
@@ -1650,9 +2577,112 @@ fn history_item_text(item_type: &str, value: &Value) -> String {
         }
         "fileChange" => value
             .get("changes")
-            .and_then(Value::as_array)
-            .map(|changes| format!("{} file change(s)", changes.len()))
-            .unwrap_or_default(),
+            .and_then(parse_file_changes)
+            .map(|changes| {
+                // History and live completion must project the same authoritative change
+                // snapshot. The parser enforces the retained diff budget for both paths.
+                format_file_changes(&changes)
+            })
+            .or_else(|| {
+                value
+                    .get("changes")
+                    .and_then(Value::as_array)
+                    .map(|changes| format!("{} file change(s); details unavailable", changes.len()))
+            })
+            .unwrap_or_else(|| "File changes unavailable".into()),
+        "mcpToolCall" => {
+            let server = value.get("server").and_then(Value::as_str).unwrap_or("MCP");
+            let tool = value.get("tool").and_then(Value::as_str).unwrap_or("tool");
+            let status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let mut lines = vec![format!("{server} / {tool} — {status}")];
+            if let Some(error) = value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+            {
+                lines.push(format!("Error: {error}"));
+            }
+            if let Some(content) = value
+                .get("result")
+                .and_then(|result| result.get("content"))
+                .and_then(Value::as_array)
+            {
+                for part in content.iter().take(16) {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        lines.push(text.into());
+                    } else if let Some(kind) = part.get("type").and_then(Value::as_str) {
+                        lines.push(format!("[{kind} result]"));
+                    }
+                }
+            }
+            lines.join("\n")
+        }
+        "dynamicToolCall" => {
+            let namespace = value.get("namespace").and_then(Value::as_str);
+            let tool = value.get("tool").and_then(Value::as_str).unwrap_or("tool");
+            let status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let mut lines = vec![format!(
+                "{}{} — {status}",
+                namespace.map_or(String::new(), |namespace| format!("{namespace} / ")),
+                tool
+            )];
+            if let Some(content) = value.get("contentItems").and_then(Value::as_array) {
+                for part in content.iter().take(16) {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        lines.push(text.into());
+                    } else if let Some(kind) = part.get("type").and_then(Value::as_str) {
+                        lines.push(format!("[{kind} result]"));
+                    }
+                }
+            }
+            lines.join("\n")
+        }
+        "webSearch" => value
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search: {query}"))
+            .unwrap_or_else(|| "Web search".into()),
+        "imageView" => value
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| format!("Viewed image: {path}"))
+            .unwrap_or_else(|| "Viewed image".into()),
+        "imageGeneration" => {
+            let status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let path = value
+                .get("savedPath")
+                .and_then(Value::as_str)
+                .unwrap_or("No saved path reported");
+            format!("Image generation — {status}\n{path}")
+        }
+        "collabAgentToolCall" => {
+            let tool = value
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("collaboration");
+            let status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!("Delegated {tool} — {status}")
+        }
+        "subAgentActivity" => value
+            .get("agentPath")
+            .and_then(Value::as_str)
+            .map(|path| format!("Subagent: {path}"))
+            .unwrap_or_else(|| "Subagent activity".into()),
+        "enteredReviewMode" => "Entered review mode".into(),
+        "exitedReviewMode" => "Exited review mode".into(),
+        "contextCompaction" => "Context compacted".into(),
         _ => value
             .get("text")
             .or_else(|| value.get("result"))
@@ -1687,7 +2717,312 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fuzzy_file_search_parser_preserves_typed_bounded_matches() {
+        let matches = parse_file_search_matches(&json!({
+            "files": [{
+                "root": "/projects/nickel",
+                "path": "crates/nickel/src/main.rs",
+                "matchType": "file",
+                "fileName": "main.rs",
+                "score": 91,
+                "indices": [0, 1]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(matches[0].path, "crates/nickel/src/main.rs");
+        assert!(!matches[0].is_directory);
+        assert_eq!(matches[0].score, 91);
+        assert!(
+            parse_file_search_matches(&json!({
+                "files": [{
+                    "root": "/projects/nickel",
+                    "path": "src",
+                    "matchType": "unknown",
+                    "fileName": "src",
+                    "score": 1
+                }]
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn workspace_diff_helpers_reject_escaping_paths_and_bound_unicode_output() {
+        assert!(safe_git_relative_path("crates/nickel/src/main.rs"));
+        assert!(!safe_git_relative_path("../secret"));
+        assert!(!safe_git_relative_path("src/../../secret"));
+        assert!(!safe_git_relative_path("/etc/passwd"));
+        assert!(!safe_git_relative_path("C:\\Windows\\system.ini"));
+
+        let mut output = "prefix\n".to_owned();
+        assert!(!append_workspace_diff(
+            &mut output,
+            &"é".repeat(WORKSPACE_DIFF_BYTES)
+        ));
+        assert!(output.len() <= WORKSPACE_DIFF_BYTES);
+        assert!(output.ends_with(WORKSPACE_DIFF_OMISSION));
+        assert!(std::str::from_utf8(output.as_bytes()).is_ok());
+
+        let mut nearly_full = "x".repeat(WORKSPACE_DIFF_BYTES - 1);
+        assert!(!append_workspace_diff(&mut nearly_full, "overflow"));
+        assert_eq!(nearly_full.len(), WORKSPACE_DIFF_BYTES);
+        assert!(nearly_full.ends_with(WORKSPACE_DIFF_OMISSION));
+    }
+
     use super::*;
+
+    #[test]
+    fn approval_decision_set_distinguishes_missing_empty_and_malformed() {
+        assert_eq!(parse_available_decisions(&json!({})), Ok(None));
+        assert_eq!(
+            parse_available_decisions(&json!({"availableDecisions":[]})),
+            Ok(Some(vec![]))
+        );
+        assert_eq!(
+            parse_available_decisions(
+                &json!({"availableDecisions":["acceptForSession", "decline"]})
+            ),
+            Ok(Some(vec![
+                crate::CommandDecision::AcceptForSession,
+                crate::CommandDecision::Decline,
+            ]))
+        );
+        assert!(parse_available_decisions(&json!({"availableDecisions":["unknown"]})).is_err());
+        assert!(parse_available_decisions(&json!({"availableDecisions":"accept"})).is_err());
+    }
+
+    #[test]
+    fn upstream_patch_and_turn_plan_wire_shapes_preserve_structured_snapshots() {
+        let patch = parse_file_patch_updated(&json!({
+            "threadId":"thread", "turnId":"turn", "itemId":"file-1",
+            "changes":[{"path":"/project/src/main.rs", "kind":{"type":"update","move_path":"/project/src/lib.rs"},
+                "diff":"@@ -1 +1 @@\n-old\n+new"}]
+        }));
+        assert!(
+            matches!(patch, EventKind::FilePatchUpdated { thread_id, turn_id, item_id, changes }
+            if thread_id.0 == "thread" && turn_id.0 == "turn" && item_id == "file-1"
+                && changes[0].move_path.as_deref() == Some("/project/src/lib.rs")
+                && changes[0].diff.contains("+new"))
+        );
+        let plan = parse_turn_plan_updated(&json!({
+            "threadId":"thread", "turnId":"turn", "explanation":"Check the implementation",
+            "plan":[{"step":"Inspect","status":"completed"},{"step":"Test","status":"inProgress"}]
+        }));
+        assert!(
+            matches!(plan, EventKind::TurnPlanUpdated { thread_id, turn_id, explanation, steps }
+            if thread_id.0 == "thread" && turn_id.0 == "turn"
+                && explanation.as_deref() == Some("Check the implementation")
+                && steps[1].status == "inProgress")
+        );
+        assert!(matches!(
+            parse_turn_plan_updated(&json!({"plan":"not an array"})),
+            EventKind::Inconsistency { .. }
+        ));
+    }
+
+    #[test]
+    fn completed_item_uses_final_wire_payload_and_never_exposes_raw_reasoning() {
+        let completed = parse_item_completed(&json!({
+            "threadId":"thread", "turnId":"turn", "completedAtMs":42,
+            "item":{"id":"command-1","type":"commandExecution","command":"pwd",
+                "commandActions":[],"cwd":"/project","status":"completed",
+                "aggregatedOutput":"/project\n","exitCode":0,"durationMs":12}
+        }));
+        assert!(
+            matches!(completed, EventKind::ItemCompleted { item_id, completion: Some(item) }
+            if item_id == "command-1" && item.thread_id.0 == "thread"
+                && item.text == "$ pwd\n/project\n" && item.exit_code == Some(0))
+        );
+
+        let reasoning = parse_item_completed(&json!({
+            "threadId":"thread", "turnId":"turn", "completedAtMs":43,
+            "item":{"id":"reasoning-1","type":"reasoning",
+                "summary":["Public summary"], "content":["Private chain"]}
+        }));
+        assert!(
+            matches!(reasoning, EventKind::ItemCompleted { completion: Some(item), .. }
+            if item.text == "Public summary" && !item.text.contains("Private chain"))
+        );
+    }
+
+    #[test]
+    fn file_change_history_matches_live_completion_and_bounds_bad_detail() {
+        let item = json!({
+            "id":"file-1", "type":"fileChange", "status":"completed",
+            "changes":[{"path":"/project/src/main.rs", "kind":{"type":"update"},
+                "diff":"@@ -1 +1 @@\n-old\n+new"}]
+        });
+        let live = parse_item_completed(&json!({
+            "threadId":"thread", "turnId":"turn", "completedAtMs":42, "item":item
+        }));
+        let EventKind::ItemCompleted {
+            completion: Some(live),
+            ..
+        } = live
+        else {
+            panic!("expected live file-change completion");
+        };
+        let resumed = parse_history_item(&item).expect("resumed file change");
+        assert_eq!(resumed.text, live.text);
+        assert!(resumed.text.contains("+new"));
+
+        let oversized = json!({
+            "id":"file-2", "type":"fileChange",
+            "changes":[{"path":"/project/src/main.rs", "kind":{"type":"update"},
+                "diff":"x".repeat(256 * 1024 + 1)}]
+        });
+        let resumed = parse_history_item(&oversized).expect("bounded history fallback");
+        assert_eq!(resumed.text, "1 file change(s); details unavailable");
+    }
+
+    #[test]
+    fn resumed_activity_detail_is_utf8_safe_and_visibly_bounded() {
+        let oversized = json!({
+            "id":"command-1", "type":"commandExecution", "command":"echo hello",
+            "aggregatedOutput":"界".repeat(100_000)
+        });
+        let resumed = parse_history_item(&oversized).expect("bounded history item");
+        assert!(resumed.text.len() <= MAX_HISTORY_ITEM_TEXT_BYTES);
+        assert!(resumed.text.starts_with("$ echo hello\n"));
+        assert!(resumed.text.ends_with(HISTORY_OMISSION_MARKER));
+    }
+
+    #[test]
+    fn resumed_command_retains_bounded_terminal_wire_facts() {
+        let item = parse_history_item(&json!({
+            "id":"command-1", "type":"commandExecution", "command":"cargo test",
+            "status":"failed", "exitCode":2, "durationMs":17,
+            "aggregatedOutput":"failure"
+        }))
+        .expect("history item");
+        assert_eq!(item.status.as_deref(), Some("failed"));
+        assert_eq!(item.exit_code, Some(2));
+        assert_eq!(item.duration_ms, Some(17));
+        let malformed_metadata = parse_history_item(&json!({
+            "id":"command-2", "type":"commandExecution", "status":"x".repeat(300),
+            "durationMs":-1
+        }))
+        .expect("history item without unusable metadata");
+        assert!(malformed_metadata.status.is_none());
+        assert!(malformed_metadata.duration_ms.is_none());
+    }
+
+    #[test]
+    fn user_input_questions_keep_prompt_options_and_secret_flag() {
+        let questions = parse_user_input_questions(&json!({
+            "questions":[{"id":"choice","header":"Proceed","question":"Apply the patch?",
+                "options":[{"label":"Yes","description":"Apply it"},
+                    {"label":"No","description":"Leave files unchanged"}],
+                "isOther":true,"isSecret":false},
+                {"id":"token","header":"Credential","question":"Enter the token",
+                    "options":null,"isSecret":true}]
+        }))
+        .unwrap();
+        assert_eq!(questions[0].question, "Apply the patch?");
+        assert_eq!(questions[0].options[1].description, "Leave files unchanged");
+        assert!(questions[0].is_other);
+        assert!(questions[1].is_secret);
+        assert!(parse_user_input_questions(&json!({"questions":[{"id":"q"}]})).is_none());
+    }
+
+    #[test]
+    fn activity_starts_have_bounded_typed_identity_before_completion() {
+        let cases = [
+            (
+                json!({"type":"mcpToolCall", "server":"files", "tool":"read"}),
+                "files / read",
+            ),
+            (
+                json!({"type":"dynamicToolCall", "namespace":"browser", "tool":"open"}),
+                "browser / open",
+            ),
+            (
+                json!({"type":"webSearch", "query":"Nickel"}),
+                "Search: Nickel",
+            ),
+            (
+                json!({"type":"imageView", "path":"/tmp/photo.png"}),
+                "Viewed image: /tmp/photo.png",
+            ),
+            (
+                json!({"type":"collabAgentToolCall", "tool":"spawnAgent"}),
+                "Delegated spawnAgent",
+            ),
+        ];
+        for (item, expected) in cases {
+            assert!(initial_item_text(&item).contains(expected));
+        }
+        assert_eq!(
+            initial_item_text(&json!({"type":"agentMessage", "text":"later"})),
+            ""
+        );
+        assert_eq!(
+            initial_item_text(&json!({"type":"webSearch", "query":"x".repeat(4097)})),
+            ""
+        );
+    }
+
+    #[test]
+    fn upstream_retrying_and_final_turn_errors_keep_scope_and_retryability() {
+        for will_retry in [true, false] {
+            let event = parse_turn_error(&json!({
+                "threadId":"thread", "turnId":"turn", "willRetry":will_retry,
+                "error":{"message":"Service unavailable","additionalDetails":null,
+                    "codexErrorInfo":null}
+            }));
+            assert!(
+                matches!(event, EventKind::TurnError { thread_id, turn_id, message, will_retry: retry }
+                if thread_id.0 == "thread" && turn_id.0 == "turn"
+                    && message == "Service unavailable" && retry == will_retry)
+            );
+        }
+        assert!(matches!(
+            parse_turn_error(&json!({"error":{"message":"oops"}})),
+            EventKind::Inconsistency { .. }
+        ));
+    }
+
+    #[test]
+    fn public_warning_wire_shapes_keep_scope_and_reject_malformed_guardian_warning() {
+        assert!(matches!(
+            parse_warning("warning", &json!({"threadId":"thread", "message":"Low quota"})),
+            EventKind::Warning { thread_id: Some(thread), message, guardian: false }
+                if thread.0 == "thread" && message == "Low quota"
+        ));
+        assert!(matches!(
+            parse_warning("configWarning", &json!({"summary":"Deprecated setting"})),
+            EventKind::Warning { thread_id: None, message, guardian: false }
+                if message == "Deprecated setting"
+        ));
+        assert!(matches!(
+            parse_warning("guardianWarning", &json!({"message":"Review required"})),
+            EventKind::Inconsistency { .. }
+        ));
+    }
+
+    #[test]
+    fn live_tool_completion_matches_resumed_history_text() {
+        let items = [
+            json!({"id":"mcp","type":"mcpToolCall","server":"files","tool":"read",
+                "arguments":{"path":"/project/readme"},"status":"completed",
+                "result":{"content":[{"type":"text","text":"Read complete"}]}}),
+            json!({"id":"search","type":"webSearch","query":"Nickel docs"}),
+            json!({"id":"agent","type":"subAgentActivity","agentPath":"/root/review",
+                "agentThreadId":"agent-thread","kind":{"type":"started"}}),
+        ];
+        for item in items {
+            let item_type = item["type"].as_str().unwrap();
+            let resumed = history_item_text(item_type, &item);
+            let live = parse_item_completed(&json!({
+                "threadId":"thread","turnId":"turn","completedAtMs":42,"item":item
+            }));
+            assert!(
+                matches!(live, EventKind::ItemCompleted { completion: Some(completion), .. }
+                if completion.text == resumed)
+            );
+        }
+    }
 
     #[test]
     fn login_challenges_require_the_requested_flow_and_bounded_fields() {
@@ -1845,6 +3180,15 @@ mod tests {
             let mut saw_reasoning = false;
             let mut saw_thread_policy = false;
             let mut saw_turn_policy = false;
+            let mut saw_compact = false;
+            let mut saw_review = false;
+            let mut saw_review_settings = false;
+            let mut saw_logout = false;
+            let mut saw_rate_limits = false;
+            let mut saw_plan_mode = false;
+            let mut saw_file_search = false;
+            let mut saw_feedback = false;
+            let mut workspace_diff_requests = 0usize;
             while !saw_interrupt {
                 let Message::Text(text) = socket.read().unwrap() else {
                     continue;
@@ -1855,11 +3199,41 @@ mod tests {
                 };
                 let Some(method) = value.get("method").and_then(Value::as_str) else {
                     saw_approval |= id == "approval-1" && value.get("result").is_some();
+                    if saw_approval {
+                        socket
+                            .send(Message::Text(
+                                json!({
+                                    "method":"serverRequest/resolved",
+                                    "params":{"threadId":"remote-thread","requestId":"approval-1"}
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .unwrap();
+                    }
                     continue;
                 };
                 let result = match method {
                     "initialize" => json!({}),
-                    "account/read" => json!({"account":{"type":"chatgpt"}}),
+                    "account/read" => {
+                        if saw_logout {
+                            json!({"account":null})
+                        } else {
+                            json!({"account":{"type":"chatgpt"}})
+                        }
+                    }
+                    "account/logout" => {
+                        saw_logout = value.get("params").is_none();
+                        json!({})
+                    }
+                    "account/rateLimits/read" => {
+                        saw_rate_limits = value.get("params").is_none();
+                        json!({
+                            "ordinaryUsageAllowed": true,
+                            "rateLimits": {"limitId":"codex","limitName":"Codex","primary":{"usedPercent":25},"secondary":{"usedPercent":40}},
+                            "rateLimitsByLimitId": null,
+                        })
+                    }
                     "model/list" => json!({"data":[{
                         "id":"gpt-fixture","displayName":"GPT Fixture",
                         "defaultReasoningEffort":"medium",
@@ -1868,12 +3242,54 @@ mod tests {
                             {"reasoningEffort":"high","description":"Deep"}
                         ]
                     }],"nextCursor":null}),
+                    "fuzzyFileSearch" => {
+                        saw_file_search = value["params"]["query"] == "main"
+                            && value["params"]["roots"] == json!(["/srv/code/nickel"]);
+                        json!({"files":[{
+                            "root":"/srv/code/nickel",
+                            "path":"src/main.rs",
+                            "matchType":"file",
+                            "fileName":"main.rs",
+                            "score":99,
+                            "indices":[4,5,6,7]
+                        }]})
+                    }
+                    "feedback/upload" => {
+                        saw_feedback = value["params"]["classification"] == "bug"
+                            && value["params"]["reason"] == "The picker broke"
+                            && value["params"]["threadId"] == "remote-thread"
+                            && value["params"]["includeLogs"] == false
+                            && value["params"]["extraLogFiles"].is_null()
+                            && value["params"]["tags"].is_null();
+                        json!({"threadId":"feedback-report-1","promptHash":null})
+                    }
+                    "command/exec" => {
+                        workspace_diff_requests += 1;
+                        assert_eq!(value["params"]["cwd"], "/srv/code/nickel");
+                        assert_eq!(value["params"]["outputBytesCap"], WORKSPACE_DIFF_BYTES);
+                        assert_eq!(value["params"]["timeoutMs"], 30_000);
+                        assert_eq!(value["params"]["sandboxPolicy"]["type"], "readOnly");
+                        let command = value["params"]["command"].as_array().unwrap();
+                        let has = |needle: &str| command.iter().any(|part| part == needle);
+                        if has("rev-parse") {
+                            json!({"exitCode":0,"stdout":"true\n","stderr":""})
+                        } else if has("ls-files") {
+                            json!({"exitCode":0,"stdout":"new.txt\u{0}","stderr":""})
+                        } else if has("--no-index") {
+                            json!({"exitCode":1,"stdout":"diff --git a/new.txt b/new.txt\n+untracked\n","stderr":""})
+                        } else if has("diff") {
+                            json!({"exitCode":0,"stdout":"diff --git a/src/main.rs b/src/main.rs\n-old\n+new\n","stderr":""})
+                        } else {
+                            panic!("unexpected command/exec argv: {command:?}")
+                        }
+                    }
                     "thread/list" => json!({"data":[],"nextCursor":null}),
                     "thread/start" => {
                         saw_remote_cwd = value["params"]["cwd"] == "/srv/code/nickel"
                             && value["params"]["projectId"] == "remote-project"
                             && value["params"]["config"]["model_reasoning_effort"] == "high";
-                        saw_thread_policy = value["params"]["approvalPolicy"] == "on-request";
+                        saw_thread_policy = value["params"]["approvalPolicy"] == "never"
+                            && value["params"]["sandboxPolicy"]["type"] == "dangerFullAccess";
                         json!({"thread":{"id":"remote-thread","cwd":"/srv/code/nickel"}})
                     }
                     "turn/start" => {
@@ -1882,8 +3298,36 @@ mod tests {
                             9 * 1024 * 1024
                         );
                         saw_reasoning = value["params"]["effort"] == "high";
-                        saw_turn_policy = value["params"]["approvalPolicy"] == "never";
+                        saw_turn_policy = value["params"]["approvalPolicy"] == "never"
+                            && value["params"]["sandboxPolicy"]["type"] == "dangerFullAccess";
+                        saw_plan_mode = value["params"]["collaborationMode"]["mode"] == "plan"
+                            && value["params"]["collaborationMode"]["settings"]["model"]
+                                == "gpt-fixture"
+                            && value["params"]["collaborationMode"]["settings"]
+                                ["reasoning_effort"]
+                                == "high"
+                            && value["params"]["collaborationMode"]["settings"]
+                                ["developer_instructions"]
+                                .is_null();
                         json!({"turn":{"id":"remote-turn","status":"inProgress"}})
+                    }
+                    "thread/compact/start" => {
+                        saw_compact = value["params"]["threadId"] == "remote-thread";
+                        json!({})
+                    }
+                    "review/start" => {
+                        saw_review = value["params"]["threadId"] == "remote-thread"
+                            && value["params"]["target"]["type"] == "uncommittedChanges"
+                            && value["params"]["delivery"] == "inline";
+                        json!({"turn":{"id":"review-turn","status":"inProgress"},"reviewThreadId":"remote-thread"})
+                    }
+                    "thread/settings/update" => {
+                        saw_review_settings = value["params"]["threadId"] == "remote-thread"
+                            && value["params"]["model"] == "gpt-fixture"
+                            && value["params"]["effort"] == "high"
+                            && value["params"]["approvalPolicy"] == "never"
+                            && value["params"]["sandboxPolicy"]["type"] == "dangerFullAccess";
+                        json!({})
                     }
                     "thread/shellCommand" => {
                         saw_shell = value["params"]["threadId"] == "remote-thread"
@@ -1928,7 +3372,18 @@ mod tests {
                             json!({
                                 "id":"approval-1",
                                 "method":"item/commandExecution/requestApproval",
-                                "params":{"reason":"fixture approval"}
+                                "params":{
+                                    "threadId":"remote-thread",
+                                    "turnId":"remote-turn",
+                                    "itemId":"shell-1",
+                                    "reason":"fixture approval",
+                                    "command":"cargo test",
+                                    "cwd":"/srv/code/nickel",
+                                    "kind":"command",
+                                    "availableDecisions":["accept", "acceptForSession", "decline", "cancel"],
+                                    "networkApprovalContext":{"host":"example.test"},
+                                    "proposedExecpolicyAmendment":["cargo test"]
+                                }
                             })
                             .to_string()
                             .into(),
@@ -1949,7 +3404,11 @@ mod tests {
                         }),
                         json!({
                             "method":"item/completed",
-                            "params":{"item":{"id":"shell-1"}}
+                            "params":{"threadId":"remote-thread","turnId":"remote-turn","completedAtMs":42,
+                                "item":{"id":"shell-1","type":"commandExecution",
+                                    "command":"printf hello | wc -c","commandActions":[],
+                                    "cwd":"/srv/code/nickel","status":"completed",
+                                    "aggregatedOutput":"5\n","exitCode":0}}
                         }),
                     ] {
                         socket
@@ -1958,7 +3417,7 @@ mod tests {
                     }
                 }
             }
-            (
+            [
                 saw_remote_cwd,
                 saw_approval,
                 saw_shell,
@@ -1966,7 +3425,16 @@ mod tests {
                 saw_reasoning,
                 saw_thread_policy,
                 saw_turn_policy,
-            )
+                saw_compact,
+                saw_review,
+                saw_review_settings,
+                saw_logout,
+                saw_rate_limits,
+                saw_plan_mode,
+                saw_file_search,
+                saw_feedback,
+                workspace_diff_requests == 4,
+            ]
         });
 
         let client = CodexClient::connect_remote_with_timeout(
@@ -1999,7 +3467,8 @@ mod tests {
                 model: None,
                 project_id: Some("remote-project".into()),
                 reasoning_effort: Some("high".into()),
-                approval_policy: ApprovalPolicy::OnRequest,
+                approval_policy: ApprovalPolicy::Never,
+                sandbox_policy: Some(crate::SandboxPolicy::DangerFullAccess),
             })
             .unwrap();
         let turn = client
@@ -2009,12 +3478,31 @@ mod tests {
                 images: vec![crate::TurnImage {
                     data_url: "a".repeat(9 * 1024 * 1024),
                 }],
-                model: None,
+                model: Some("gpt-fixture".into()),
                 reasoning_effort: Some("high".into()),
                 approval_policy: ApprovalPolicy::Never,
+                sandbox_policy: Some(crate::SandboxPolicy::DangerFullAccess),
+                plan_mode: true,
             })
             .unwrap();
         assert_eq!(turn.id.0, "remote-turn");
+        client.compact_thread(thread.id.clone()).unwrap();
+        assert_eq!(
+            client
+                .review_uncommitted(
+                    thread.id.clone(),
+                    crate::ReviewSettings {
+                        model: Some("gpt-fixture".into()),
+                        reasoning_effort: Some("high".into()),
+                        approval_policy: ApprovalPolicy::Never,
+                        sandbox_policy: Some(crate::SandboxPolicy::DangerFullAccess),
+                    },
+                )
+                .unwrap()
+                .id
+                .0,
+            "review-turn"
+        );
         client
             .shell_command(thread.id, "printf hello | wc -c".into())
             .unwrap();
@@ -2031,7 +3519,27 @@ mod tests {
         }
         let request_id = loop {
             let event = events.recv_timeout(Duration::from_secs(2)).unwrap();
-            if let EventKind::ApprovalRequested { request_id, .. } = event.kind {
+            if let EventKind::ApprovalRequested {
+                request_id,
+                thread_id,
+                context,
+                ..
+            } = event.kind
+            {
+                assert_eq!(thread_id, Some(ThreadId("remote-thread".into())));
+                assert_eq!(context.command.as_deref(), Some("cargo test"));
+                assert_eq!(context.cwd.as_deref(), Some("/srv/code/nickel"));
+                assert!(context.asks_network_access);
+                assert!(context.proposes_session_rule);
+                assert_eq!(
+                    context.available_decisions,
+                    Some(vec![
+                        crate::CommandDecision::Accept,
+                        crate::CommandDecision::AcceptForSession,
+                        crate::CommandDecision::Decline,
+                        crate::CommandDecision::Cancel,
+                    ])
+                );
                 break request_id;
             }
         };
@@ -2045,13 +3553,53 @@ mod tests {
                 },
             )
             .unwrap();
+        let resolved = loop {
+            let event = events.recv_timeout(Duration::from_secs(2)).unwrap();
+            if let EventKind::ServerRequestResolved {
+                thread_id,
+                request_id,
+            } = event.kind
+            {
+                break (thread_id, request_id);
+            }
+        };
+        assert_eq!(resolved.0, ThreadId("remote-thread".into()));
+        assert_eq!(resolved.1, ServerRequestId("approval-1".into()));
+        let limits = client.rate_limits().unwrap();
+        assert_eq!(limits.ordinary_usage_allowed, Some(true));
+        assert_eq!(limits.buckets[0].primary_used_percent, Some(25));
+        let matches = client
+            .search_files("main".into(), vec!["/srv/code/nickel".into()])
+            .unwrap();
+        assert_eq!(matches[0].path, "src/main.rs");
+        assert_eq!(
+            client
+                .upload_feedback(
+                    "bug".into(),
+                    Some("The picker broke".into()),
+                    Some(ThreadId("remote-thread".into())),
+                    false,
+                )
+                .unwrap(),
+            "feedback-report-1"
+        );
+        let diff = client
+            .workspace_diff(std::path::PathBuf::from("/srv/code/nickel"))
+            .unwrap();
+        assert!(diff.contains("+new"));
+        assert!(diff.contains("+untracked"));
+        client.logout().unwrap();
+        assert!(!client.account().unwrap().authenticated);
         client
             .interrupt_turn(ThreadId("remote-thread".into()), turn.id)
             .unwrap();
         client.shutdown();
         assert_eq!(
             server.join().unwrap(),
-            (true, true, true, true, true, true, true)
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                true, true
+            ]
         );
         assert!(authenticated.load(Ordering::Relaxed));
     }

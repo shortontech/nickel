@@ -280,6 +280,13 @@ fn serve_app_server() -> ExitCode {
             "thread/resume" => {
                 let turns = if mode.trim() == "flood-overflow" {
                     json!([{"id":"fixture-turn","status":"completed","items":[{"id":"command-flood","type":"commandExecution","aggregatedOutput":"x".repeat(1500)}]}])
+                } else if mode.trim() == "activity-rich" {
+                    json!([{"id":"fixture-turn","status":"completed","items":[
+                        {"id":"search-1","type":"webSearch","query":"Nickel shell"},
+                        {"id":"file-1","type":"fileChange","status":"completed","changes":[
+                            {"path":"/fixture/src/main.rs","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new"}
+                        ]}
+                    ]}])
                 } else {
                     json!([])
                 };
@@ -298,6 +305,54 @@ fn serve_app_server() -> ExitCode {
                     &mut stdout,
                     &json!({"method":"item/agentMessage/delta","params":{"threadId":"fixture-thread","turnId":"fixture-turn","itemId":"message-1","delta":"hello"}}),
                 );
+                if mode.trim() == "activity-rich" {
+                    // Public app-server wire shapes exercise adapter mapping across activity
+                    // families; final snapshots are authoritative over provisional starts.
+                    write_json(
+                        &mut stdout,
+                        &json!({"method":"item/started","params":{
+                        "threadId":"fixture-thread","turnId":"fixture-turn",
+                        "item":{"id":"search-1","type":"webSearch","query":"Nickel shell"}}}),
+                    );
+                    write_json(
+                        &mut stdout,
+                        &json!({"method":"item/completed","params":{
+                        "threadId":"fixture-thread","turnId":"fixture-turn","completedAtMs":42,
+                        "item":{"id":"search-1","type":"webSearch","query":"Nickel shell"}}}),
+                    );
+                    write_json(
+                        &mut stdout,
+                        &json!({"method":"item/started","params":{
+                        "threadId":"fixture-thread","turnId":"fixture-turn",
+                        "item":{"id":"file-1","type":"fileChange"}}}),
+                    );
+                    write_json(
+                        &mut stdout,
+                        &json!({"method":"item/fileChange/patchUpdated","params":{
+                        "threadId":"fixture-thread","turnId":"fixture-turn","itemId":"file-1",
+                        "changes":[{"path":"/fixture/src/main.rs","kind":{"type":"update"},
+                            "diff":"@@ -1 +1 @@\n-old\n+new"}]}}),
+                    );
+                    write_json(
+                        &mut stdout,
+                        &json!({"method":"turn/plan/updated","params":{
+                        "threadId":"fixture-thread","turnId":"fixture-turn",
+                        "explanation":"Verify Nickel","plan":[{"step":"Inspect","status":"completed"}]}}),
+                    );
+                    write_json(
+                        &mut stdout,
+                        &json!({"method":"guardianWarning","params":{
+                            "threadId":"fixture-thread","message":"Review this operation"}}),
+                    );
+                    write_json(
+                        &mut stdout,
+                        &json!({"method":"item/completed","params":{
+                        "threadId":"fixture-thread","turnId":"fixture-turn","completedAtMs":43,
+                        "item":{"id":"file-1","type":"fileChange","status":"completed",
+                            "changes":[{"path":"/fixture/src/main.rs","kind":{"type":"update"},
+                                "diff":"@@ -1 +1 @@\n-old\n+new"}]}}}),
+                    );
+                }
                 if matches!(mode.trim(), "flood" | "flood-overflow") {
                     write_json(
                         &mut stdout,
@@ -319,7 +374,11 @@ fn serve_app_server() -> ExitCode {
                     }
                     write_json(
                         &mut stdout,
-                        &json!({"method":"item/completed","params":{"item":{"id":"command-flood","type":"commandExecution"}}}),
+                        &json!({"method":"item/completed","params":{
+                            "threadId":"fixture-thread","turnId":"fixture-turn","completedAtMs":42,
+                            "item":{"id":"command-flood","type":"commandExecution",
+                                "command":"emit flood","commandActions":[],"cwd":"/tmp",
+                                "status":"completed","aggregatedOutput":"","exitCode":0}}}),
                     );
                 }
                 write_json(
@@ -328,7 +387,7 @@ fn serve_app_server() -> ExitCode {
                 );
                 write_json(
                     &mut stdout,
-                    &json!({"id":"input-1","method":"item/tool/requestUserInput","params":{"threadId":"fixture-thread","turnId":"fixture-turn","itemId":"input-item","questions":[{"id":"q1","header":"Choice","question":"Choose","options":[]}]}}),
+                    &json!({"id":"input-1","method":"item/tool/requestUserInput","params":{"threadId":"fixture-thread","turnId":"fixture-turn","itemId":"input-item","isBlocking":true,"questions":[{"id":"q1","header":"Choice","question":"Choose a value","options":[{"label":"Yes","description":"Proceed"},{"label":"No","description":"Stop"}]}]}}),
                 );
                 if mode.trim() != "wait-for-interrupt" {
                     write_json(

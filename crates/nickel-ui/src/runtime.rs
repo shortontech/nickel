@@ -948,6 +948,8 @@ pub enum Shortcut {
     Submit,
     Rename,
     Newline,
+    NavigateUp,
+    NavigateDown,
     Escape,
     Reload,
     Back,
@@ -1227,9 +1229,22 @@ pub trait Application: Sized {
         None
     }
 
+    /// Drains a host-owned transient opening requested by the application.
+    /// The host validates its declaration and anchor after rebuilding the view.
+    fn take_transient_request(&mut self) -> Option<(OverlayId, UiId)> {
+        None
+    }
+
     /// Drains text explicitly offered to the system clipboard by an application update.
     fn take_clipboard_write(&mut self) -> Option<String> {
         None
+    }
+
+    /// Reports whether the host actually published the application's most
+    /// recent clipboard write. Returning true requests a declarative rebuild
+    /// so success or failure feedback can be shown without guessing.
+    fn clipboard_write_completed(&mut self, _result: Result<(), String>) -> bool {
+        false
     }
 
     /// Applies an application/domain completion injected by a host adapter or
@@ -3360,6 +3375,16 @@ impl<A: Application> UiHost<A> {
             combined.telemetry.paint_list_us = paint_list_us;
             combined.telemetry.layout_us = layout_us;
             combined.telemetry.rebuilt = true;
+        }
+        if let Some((id, anchor)) = self.application.take_transient_request() {
+            if !combined.telemetry.rebuilt {
+                let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
+                combined.merge(rebuild_outcome);
+                combined.telemetry.paint_list_us = paint_list_us;
+                combined.telemetry.layout_us = layout_us;
+                combined.telemetry.rebuilt = true;
+            }
+            combined.merge(self.open_transient(id, anchor));
         }
         if let Some(requested) = self.application.take_focus_request()
             && let Some(target) = self.tree.resolve_stable_target(&requested)

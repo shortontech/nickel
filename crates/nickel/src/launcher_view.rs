@@ -144,6 +144,20 @@ impl LauncherApplication {
         std::mem::take(&mut self.effects)
     }
 
+    pub(crate) fn preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
+        if self.launcher.mode() != LauncherMode::Dashboard {
+            return maximum;
+        }
+        let applications = dashboard_applications(&self.launcher);
+        let geometry = dashboard_geometry(
+            &self.launcher,
+            &applications,
+            &launcher_semantic_theme(self.palette),
+            maximum,
+        );
+        (geometry.width.ceil() as u32, geometry.height.ceil() as u32)
+    }
+
     pub fn sync(&mut self, launcher: &Launcher, palette: ThemePalette, status: Option<String>) {
         self.launcher = launcher.clone();
         self.palette = palette;
@@ -958,28 +972,20 @@ fn build_dashboard_view(
     )
 }
 
-fn build_dashboard_view_directional(
+struct DashboardGeometry {
+    width: f32,
+    height: f32,
+    sidebar_width: f32,
+    grid_cell_width: f32,
+}
+
+fn dashboard_geometry(
     launcher: &Launcher,
-    state: &LauncherViewState,
-    icons: &mut LauncherIconCache,
-    context: LauncherViewContext<'_>,
-    direction: ReadingDirection,
-) -> AnyView<LauncherAction> {
-    let viewport = context.viewport;
+    applications: &[&Application],
+    theme: &SemanticTheme,
+    viewport: (u32, u32),
+) -> DashboardGeometry {
     let (viewport_width, viewport_height) = viewport;
-    let theme = SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
-        context.palette.background,
-        context.palette.panel,
-        context.palette.surface,
-        context.palette.surface_hover,
-        context.palette.surface_hover,
-        context.palette.text,
-        context.palette.muted,
-        context.palette.accent,
-        context.palette.accent_soft,
-        context.palette.complement,
-        context.palette.complement,
-    ));
     let viewport_width = viewport_width.max(1) as f32;
     let narrow = viewport_width < START_MENU_SINGLE_PANE_BREAKPOINT;
     let recent_project_names = match launcher.dashboard_projects() {
@@ -1022,13 +1028,11 @@ fn build_dashboard_view_directional(
     let sidebar_width = (sidebar_label_width + 20.0 + theme.spacing.control + 12.0)
         .max(account_width)
         .clamp(148.0, 240.0);
-    let applications = dashboard_applications(launcher);
     let tile_width = applications
         .iter()
         .map(|application| nickel_ui::intrinsic_text_width(application.name(), 0.9))
         .fold(0.0, f32::max)
         .clamp(100.0, 142.0);
-    let application_count = applications.len();
     let columns = 3.0;
     let detail_width = columns * tile_width + (columns - 1.0) * 2.0;
     let width = if narrow {
@@ -1037,8 +1041,7 @@ fn build_dashboard_view_directional(
             .min(viewport_width)
     } else {
         (sidebar_width + detail_width + 5.0 * theme.spacing.content)
-            .max(320.0)
-            .min(DASHBOARD_MAX_WIDTH)
+            .clamp(START_MENU_SINGLE_PANE_BREAKPOINT, DASHBOARD_MAX_WIDTH)
             .min(viewport_width)
     };
     let sidebar_body_height = 20.0
@@ -1048,9 +1051,9 @@ fn build_dashboard_view_directional(
         } else {
             0.0
         };
-    let grid_rows = application_count.max(1).div_ceil(3) as f32;
+    let grid_rows = applications.len().max(1).div_ceil(3) as f32;
     let detail_body_height = 24.0 + grid_rows * 96.0 + 58.0 + 3.0 * theme.spacing.content;
-    let preferred_height =
+    let height =
         (sidebar_body_height.max(detail_body_height) + 52.0 + 52.0 + 3.0 * theme.spacing.content)
             .min(viewport_height.max(1) as f32);
     let grid_cell_width = if narrow {
@@ -1059,6 +1062,30 @@ fn build_dashboard_view_directional(
         (width - sidebar_width - 5.0 * theme.spacing.content - 4.0) / 3.0
     }
     .max(48.0);
+    DashboardGeometry {
+        width,
+        height,
+        sidebar_width,
+        grid_cell_width,
+    }
+}
+
+fn build_dashboard_view_directional(
+    launcher: &Launcher,
+    state: &LauncherViewState,
+    icons: &mut LauncherIconCache,
+    context: LauncherViewContext<'_>,
+    direction: ReadingDirection,
+) -> AnyView<LauncherAction> {
+    let applications = dashboard_applications(launcher);
+    let theme = launcher_semantic_theme(context.palette);
+    let geometry = dashboard_geometry(launcher, &applications, &theme, context.viewport);
+    let width = geometry.width;
+    let sidebar_width = geometry.sidebar_width;
+    let grid_cell_width = geometry.grid_cell_width;
+    let preferred_height = geometry.height;
+    let viewport_width = context.viewport.0.max(1) as f32;
+    let narrow = viewport_width < START_MENU_SINGLE_PANE_BREAKPOINT;
     let nav_icon = |icons: &mut LauncherIconCache, name, bytes: &[u8]| {
         structural_icon(icons, name, bytes, theme.text.secondary)
     };
@@ -1615,6 +1642,24 @@ mod tests {
             920,
             680,
         )
+    }
+
+    #[test]
+    fn dashboard_surface_matches_content_and_search_can_expand() {
+        let mut application = LauncherApplication::new(
+            Launcher::default(),
+            LauncherViewState::default(),
+            LauncherIconCache::new(),
+            palette(),
+        );
+        let maximum = (960, 720);
+        let dashboard = application.preferred_surface_size(maximum);
+        assert!((620..960).contains(&dashboard.0));
+        assert!(dashboard.1 < maximum.1);
+        assert!(application.preferred_surface_size((480, 500)).0 <= 480);
+
+        application.launcher.open_search();
+        assert_eq!(application.preferred_surface_size(maximum), maximum);
     }
 
     fn accessibility_labels(host: &UiHost<LauncherApplication>) -> Vec<String> {
@@ -2948,7 +2993,7 @@ mod tests {
         host.application_mut().sync(
             &launcher,
             palette(),
-            Some("Some applications could not be loaded.".into()),
+            Some("Some application entries could not be discovered.".into()),
         );
         host.step(nickel_ui::HostBatch {
             events: vec![nickel_ui::HostEvent::Poll],

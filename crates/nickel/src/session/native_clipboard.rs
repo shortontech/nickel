@@ -6,7 +6,6 @@ use std::{sync::Arc, time::Duration};
 
 /// One authority supplies the product limit. Keeping it optional permits a
 /// policy decision without silently choosing a cap or truncating the user's text.
-#[derive(Default)]
 pub(crate) struct NativeClipboardState {
     pub(super) text_limit: Option<usize>,
     pub(super) reads: TransferGate,
@@ -21,9 +20,28 @@ pub(crate) struct NativeClipboardState {
 }
 
 pub(super) const TRANSFER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bound compositor-owned text selections without disabling copy until the
+/// first paste event happens to configure the runtime. Eight MiB matches the
+/// largest transcript Nickel retains and is still small enough to reject an
+/// accidental unbounded transfer before allocating another copy.
+const DEFAULT_TEXT_TRANSFER_LIMIT: usize = 8 * 1024 * 1024;
 const IMAGE_TRANSFER_LIMIT: usize = 16 * 1024 * 1024;
 const IMAGE_DIMENSION_LIMIT: u32 = 8192;
 const IMAGE_DECODE_LIMIT: u64 = 256 * 1024 * 1024;
+
+impl Default for NativeClipboardState {
+    fn default() -> Self {
+        Self {
+            text_limit: Some(DEFAULT_TEXT_TRANSFER_LIMIT),
+            reads: TransferGate::default(),
+            writes: TransferGate::default(),
+            pending_read: None,
+            next_read: 0,
+            last_failure: None,
+            mime_types: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum NativePasteAuthority {
@@ -533,16 +551,28 @@ impl super::state::NickelSession {
         Ok(())
     }
     pub(super) fn flush_native_clipboard_results(&mut self) {
-        let results = [
-            self.internal_ui.take_clipboard_result(),
-            self.internal_shell
-                .as_mut()
-                .and_then(|shell| shell.take_clipboard_result()),
-        ];
-        for result in results.into_iter().flatten() {
-            let result =
+        if let Some((surface, result)) = self.internal_ui.take_clipboard_result() {
+            let published =
                 result.and_then(|text| self.publish_native_clipboard(text).map_err(str::to_owned));
-            if let Err(error) = result {
+            if let Err(error) = &published {
+                tracing::warn!(error, "native clipboard operation rejected");
+                self.native_clipboard.last_failure = Some(error.clone());
+            }
+            if self
+                .internal_ui
+                .complete_clipboard_write(surface, published)
+            {
+                self.schedule_internal_ui_frame();
+            }
+        }
+        if let Some(result) = self
+            .internal_shell
+            .as_mut()
+            .and_then(|shell| shell.take_clipboard_result())
+        {
+            let published =
+                result.and_then(|text| self.publish_native_clipboard(text).map_err(str::to_owned));
+            if let Err(error) = published {
                 tracing::warn!(error, "native clipboard operation rejected");
                 self.native_clipboard.last_failure = Some(error);
             }
@@ -666,6 +696,14 @@ impl super::state::NickelSession {
 mod tests {
     use super::*;
     use image::ImageEncoder;
+
+    #[test]
+    fn native_clipboard_starts_with_a_bounded_text_authority() {
+        assert_eq!(
+            NativeClipboardState::default().text_limit,
+            Some(DEFAULT_TEXT_TRANSFER_LIMIT)
+        );
+    }
 
     #[test]
     fn png_decode_is_rgba_and_dimension_bounded() {

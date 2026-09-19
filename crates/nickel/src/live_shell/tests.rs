@@ -37,6 +37,435 @@ include!("tests/panel_and_cache.rs");
 include!("tests/desktop_interactions.rs");
 
 #[test]
+fn codex_approval_notification_revises_in_place_and_retires_on_resolution() {
+    use nickel_codex::{ApprovalContext, ServerRequestId, ThreadId};
+    use nickel_codex_ui::{CodexApprovalNotification, PendingInteraction};
+    use nickel_ui::approval::{ApprovalPresentation, RequesterIdentity};
+
+    let mut shell = LiveShell::new().expect("live shell");
+    shell.apply_session_launcher_visibility(true);
+    shell.launcher_host.step(HostBatch {
+        surface_size: Some((920, 680)),
+        ..HostBatch::default()
+    });
+    let typing_focus = shell.launcher_host.inspect().keyboard_focus.clone();
+    assert!(typing_focus.is_some());
+    let mut surfaces = nickel_ui::InternalSurfaceSet::new();
+    let id = surfaces.insert(
+        crate::notification_view::NotificationApp::new(shell.palette),
+        1,
+        1,
+    );
+    let owner = super::CodexApprovalOwner::Internal(id);
+    let snapshot = |root: &str| CodexApprovalNotification {
+        connection_generation: 1,
+        request_revision: if root == "/safe" { 1 } else { 2 },
+        thread_id: Some(ThreadId("thread".into())),
+        interaction: PendingInteraction::Approval {
+            request_id: ServerRequestId("request".into()),
+            approval_type: "item/fileChange/requestApproval".into(),
+            summary: "Write files".into(),
+            context: ApprovalContext {
+                grant_root: Some(root.into()),
+                ..Default::default()
+            },
+        },
+        presentation: ApprovalPresentation {
+            requester: "Codex".into(),
+            identity: RequesterIdentity::BackendReported,
+            action: "Change files".into(),
+            scope: Some(root.into()),
+            duration: None,
+            warning: None,
+            detail: Some(format!(
+                "Requested files under {root}; Bearer fixture-private-token"
+            )),
+        },
+        actionable: true,
+        submitting: false,
+        unconfirmed: false,
+    };
+    shell.sync_codex_approval_notifications(vec![(owner, snapshot("/safe"))]);
+    shell.refresh_fast();
+    assert_eq!(shell.launcher_host.inspect().keyboard_focus, typing_focus);
+    let first = shell
+        .notification_feed
+        .snapshot()
+        .expect("pending notification");
+    assert_eq!(first.actions.len(), 3);
+    assert!(first.body.contains("/safe"));
+    assert!(first.body.contains("Review the full operation in Codex"));
+    assert!(!first.body.contains("fixture-private-token"));
+    assert!(!first.body.contains("Requested files under /safe"));
+
+    shell.sync_codex_approval_notifications(vec![(owner, snapshot("/broader"))]);
+    let revised = shell
+        .notification_feed
+        .snapshot()
+        .expect("revised notification");
+    assert_eq!(revised.id, first.id);
+    assert!(revised.body.contains("/broader"));
+    assert_eq!(shell.codex_approval_notifications.len(), 1);
+
+    shell.notification = Some(revised.clone());
+    shell.sync_notification_host(420, 180);
+    let cancel = shell
+        .notification_host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Cancel".into(),
+        })
+        .expect("cancel decision");
+    shell
+        .notification_host
+        .perform_semantic_action(cancel.id, SemanticAction::Invoke(ActionKind::Activate));
+    shell.apply_notification_effects();
+    assert_eq!(
+        shell.take_codex_approval_decisions(),
+        vec![(
+            owner,
+            snapshot("/broader"),
+            nickel_codex_ui::CodexApprovalChoice::Cancel,
+        )]
+    );
+    assert!(
+        shell
+            .notification_feed
+            .history()
+            .into_iter()
+            .find(|item| item.id == revised.id)
+            .unwrap()
+            .actions
+            .is_empty(),
+        "a submitted action must not be offered again"
+    );
+    shell.dismiss_notification_transport(revised.id);
+    assert!(shell.notification.is_none());
+    assert!(
+        shell
+            .dismissed_codex_approval_notifications
+            .contains(&revised.id)
+    );
+    assert!(
+        shell
+            .notification_feed
+            .history()
+            .iter()
+            .any(|item| item.id == revised.id)
+    );
+    assert!(
+        shell
+            .notification_feed
+            .history()
+            .iter()
+            .all(|item| !item.body.contains("fixture-private-token"))
+    );
+    shell.refresh_fast();
+    assert!(
+        shell.notification.is_none(),
+        "dismissal must not re-toast a pending request"
+    );
+
+    shell.sync_codex_approval_notifications(Vec::new());
+    assert!(shell.codex_approval_notifications.is_empty());
+    assert!(shell.dismissed_codex_approval_notifications.is_empty());
+    assert!(shell.notification_feed.snapshot().is_none());
+}
+
+#[test]
+fn codex_notification_reviews_large_source_decision_set_without_truncating_it() {
+    use nickel_codex::{ApprovalContext, CommandDecision, ServerRequestId};
+    use nickel_codex_ui::{CodexApprovalNotification, PendingInteraction};
+    use nickel_ui::approval::{ApprovalPresentation, RequesterIdentity};
+
+    let mut shell = LiveShell::new().expect("live shell");
+    let mut surfaces = nickel_ui::InternalSurfaceSet::new();
+    let id = surfaces.insert(
+        crate::notification_view::NotificationApp::new(shell.palette),
+        1,
+        1,
+    );
+    let owner = super::CodexApprovalOwner::Internal(id);
+    let snapshot = CodexApprovalNotification {
+        connection_generation: 1,
+        request_revision: 1,
+        thread_id: None,
+        interaction: PendingInteraction::Approval {
+            request_id: ServerRequestId("choices".into()),
+            approval_type: "item/commandExecution/requestApproval".into(),
+            summary: "Run a command".into(),
+            context: ApprovalContext {
+                available_decisions: Some(vec![
+                    CommandDecision::Accept,
+                    CommandDecision::AcceptForSession,
+                    CommandDecision::Decline,
+                    CommandDecision::Cancel,
+                ]),
+                ..Default::default()
+            },
+        },
+        presentation: ApprovalPresentation {
+            requester: "Codex".into(),
+            identity: RequesterIdentity::BackendReported,
+            action: "Run a command".into(),
+            scope: Some("/projects/nickel".into()),
+            duration: None,
+            warning: None,
+            detail: None,
+        },
+        actionable: true,
+        submitting: false,
+        unconfirmed: false,
+    };
+    shell.sync_codex_approval_notifications(vec![(owner, snapshot)]);
+    let notification = shell.notification_feed.snapshot().unwrap();
+    assert_eq!(notification.actions.len(), 1);
+    assert_eq!(notification.actions[0].key, "review");
+    shell.notification = Some(notification);
+    shell.sync_notification_host(420, 180);
+    let review = shell
+        .notification_host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Review in Codex".into(),
+        })
+        .unwrap();
+    shell
+        .notification_host
+        .perform_semantic_action(review.id, SemanticAction::Invoke(ActionKind::Activate));
+    shell.apply_notification_effects();
+    assert_eq!(shell.take_codex_approval_reviews(), vec![owner]);
+    assert!(shell.take_codex_approval_decisions().is_empty());
+}
+
+#[test]
+fn simultaneous_codex_and_remote_approvals_keep_distinct_request_owners() {
+    use nickel_codex::{ApprovalContext, ServerRequestId};
+    use nickel_codex_ui::{CodexApprovalNotification, PendingInteraction};
+    use nickel_session_protocol::{
+        RemoteLeaseRequest, RemoteLeaseRequestChanges, RemotePendingLease, RemoteResourceScope,
+    };
+    use nickel_ui::approval::{ApprovalPresentation, RequesterIdentity};
+
+    let mut shell = LiveShell::new().expect("live shell");
+    let remote = RemotePendingLease {
+        pending_generation: 7,
+        client_id: "remote-client".into(),
+        client_label: "Remote controller".into(),
+        request: RemoteLeaseRequest {
+            renewal: None,
+            scope: RemoteResourceScope::FullSession,
+            duration_seconds: Some(600),
+            allow_resumption: false,
+            full_debug: false,
+        },
+        resource_label: None,
+        changes: RemoteLeaseRequestChanges::default(),
+    };
+    shell.sync_remote_lease_notifications_from(vec![remote.clone()]);
+    let remote_id = *shell.remote_lease_notifications.keys().next().unwrap();
+
+    let mut surfaces = nickel_ui::InternalSurfaceSet::new();
+    let surface = surfaces.insert(
+        crate::notification_view::NotificationApp::new(shell.palette),
+        1,
+        1,
+    );
+    let owner = super::CodexApprovalOwner::Internal(surface);
+    let codex = |scope: &str| CodexApprovalNotification {
+        connection_generation: 2,
+        request_revision: if scope == "/first" { 1 } else { 2 },
+        thread_id: None,
+        interaction: PendingInteraction::Approval {
+            request_id: ServerRequestId("codex-request".into()),
+            approval_type: "item/fileChange/requestApproval".into(),
+            summary: "Change files".into(),
+            context: ApprovalContext {
+                grant_root: Some(scope.into()),
+                ..Default::default()
+            },
+        },
+        presentation: ApprovalPresentation {
+            requester: "Codex".into(),
+            identity: RequesterIdentity::BackendReported,
+            action: "Change files".into(),
+            scope: Some(scope.into()),
+            duration: None,
+            warning: None,
+            detail: None,
+        },
+        actionable: true,
+        submitting: false,
+        unconfirmed: false,
+    };
+    shell.sync_codex_approval_notifications(vec![(owner, codex("/first"))]);
+    assert_eq!(shell.remote_lease_notifications.len(), 1);
+    assert_eq!(shell.codex_approval_notifications.len(), 1);
+    let codex_id = *shell.codex_approval_notifications.keys().next().unwrap();
+    assert_ne!(remote_id, codex_id);
+
+    // A revision of one source must not replace or retire the other source's
+    // independently pending authority request.
+    shell.sync_codex_approval_notifications(vec![(owner, codex("/revised"))]);
+    assert!(shell.remote_lease_notifications.contains_key(&remote_id));
+    assert!(shell.codex_approval_notifications.contains_key(&codex_id));
+    assert_eq!(shell.notification_feed.history().len(), 2);
+    assert!(
+        shell
+            .notification_feed
+            .history()
+            .iter()
+            .any(|item| item.id == codex_id && item.body.contains("/revised"))
+    );
+    assert!(
+        shell
+            .notification_feed
+            .history()
+            .iter()
+            .any(|item| item.id == remote_id && item.body.contains("full desktop"))
+    );
+}
+
+#[test]
+fn codex_approval_feed_overflow_queues_one_explicit_decline() {
+    use nickel_codex::{ApprovalContext, CommandDecision, ServerRequestId, ThreadId};
+    use nickel_codex_ui::{CodexApprovalChoice, CodexApprovalNotification, PendingInteraction};
+    use nickel_ui::approval::{ApprovalPresentation, RequesterIdentity};
+
+    let mut shell = LiveShell::new().expect("live shell");
+    let mut surfaces = nickel_ui::InternalSurfaceSet::new();
+    let id = surfaces.insert(
+        crate::notification_view::NotificationApp::new(shell.palette),
+        1,
+        1,
+    );
+    let owner = super::CodexApprovalOwner::Internal(id);
+    let fixture_ids = (0..crate::notification::MAX_NOTIFICATIONS)
+        .map(|_| {
+            shell
+                .notification_feed
+                .notify_internal(crate::notification::NotificationRequest {
+                    app_name: "Persistent fixture".into(),
+                    summary: "Fixture".into(),
+                    body: String::new(),
+                    actions: Vec::new(),
+                    expire_timeout_ms: 0,
+                })
+        })
+        .collect::<Vec<_>>();
+    assert!(fixture_ids.iter().all(|id| *id != 0));
+    let pending = CodexApprovalNotification {
+        connection_generation: 1,
+        request_revision: 1,
+        thread_id: Some(ThreadId("thread".into())),
+        interaction: PendingInteraction::Approval {
+            request_id: ServerRequestId("request".into()),
+            approval_type: "item/commandExecution/requestApproval".into(),
+            summary: "Run command".into(),
+            context: ApprovalContext::default(),
+        },
+        presentation: ApprovalPresentation {
+            requester: "Codex".into(),
+            identity: RequesterIdentity::BackendReported,
+            action: "Run a command".into(),
+            scope: None,
+            duration: None,
+            warning: None,
+            detail: None,
+        },
+        actionable: true,
+        submitting: false,
+        unconfirmed: false,
+    };
+    shell.sync_codex_approval_notifications(vec![(owner, pending.clone())]);
+    shell.sync_codex_approval_notifications(vec![(owner, pending.clone())]);
+    assert_eq!(
+        shell.take_codex_approval_decisions(),
+        vec![(owner, pending.clone(), CodexApprovalChoice::Decline)]
+    );
+    let revised = CodexApprovalNotification {
+        request_revision: 2,
+        ..pending.clone()
+    };
+    shell.sync_codex_approval_notifications(vec![(owner, revised.clone())]);
+    shell.sync_codex_approval_notifications(vec![(owner, revised.clone())]);
+    assert_eq!(
+        shell.take_codex_approval_decisions(),
+        vec![(owner, revised, CodexApprovalChoice::Decline)]
+    );
+
+    let with_decisions = |id: &str, decisions| CodexApprovalNotification {
+        interaction: PendingInteraction::Approval {
+            request_id: ServerRequestId(id.into()),
+            approval_type: "item/commandExecution/requestApproval".into(),
+            summary: "Run command".into(),
+            context: ApprovalContext {
+                available_decisions: Some(decisions),
+                ..Default::default()
+            },
+        },
+        ..pending.clone()
+    };
+    let no_refusal = with_decisions("no-refusal", vec![CommandDecision::AcceptForSession]);
+    shell.sync_codex_approval_notifications(vec![(owner, no_refusal.clone())]);
+    shell.sync_codex_approval_notifications(vec![(owner, no_refusal.clone())]);
+    assert!(shell.take_codex_approval_decisions().is_empty());
+    assert_eq!(
+        shell.take_codex_approval_delivery_updates(),
+        vec![(owner, no_refusal.clone(), false)]
+    );
+    shell.notification_feed.close_internal(fixture_ids[0]);
+    shell.sync_codex_approval_notifications(vec![(owner, no_refusal.clone())]);
+    assert_eq!(
+        shell.take_codex_approval_delivery_updates(),
+        vec![(owner, no_refusal, true)]
+    );
+    shell.sync_codex_approval_notifications(Vec::new());
+    assert_eq!(
+        shell.notification_feed.history().len(),
+        crate::notification::MAX_NOTIFICATIONS - 1
+    );
+    assert_ne!(
+        shell
+            .notification_feed
+            .notify_internal(crate::notification::NotificationRequest {
+                app_name: "Persistent fixture".into(),
+                summary: "Fixture".into(),
+                body: String::new(),
+                actions: Vec::new(),
+                expire_timeout_ms: 0,
+            }),
+        0
+    );
+    let cancel = with_decisions("cancel-only", vec![CommandDecision::Cancel]);
+    shell.sync_codex_approval_notifications(vec![(owner, cancel.clone())]);
+    assert_eq!(
+        shell.take_codex_approval_decisions(),
+        vec![(
+            owner,
+            cancel,
+            CodexApprovalChoice::Command(CommandDecision::Cancel),
+        )]
+    );
+    let inactive = CodexApprovalNotification {
+        actionable: false,
+        interaction: PendingInteraction::Approval {
+            request_id: ServerRequestId("disconnected".into()),
+            approval_type: "item/commandExecution/requestApproval".into(),
+            summary: "Run command".into(),
+            context: ApprovalContext::default(),
+        },
+        ..pending
+    };
+    shell.sync_codex_approval_notifications(vec![(owner, inactive.clone())]);
+    assert!(shell.take_codex_approval_decisions().is_empty());
+    assert_eq!(
+        shell.take_codex_approval_delivery_updates(),
+        vec![(owner, inactive, false)]
+    );
+}
+
+#[test]
 fn in_process_system_feed_propagates_audio_network_and_bluetooth() {
     let mut shell = LiveShell::new().expect("live shell");
     let network = NetworkStatus {
@@ -177,15 +606,22 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
     shell.sync_remote_lease_notifications_from(host.pending.lock().unwrap().clone());
 
     let notification = shell.notification_feed.snapshot().unwrap();
-    assert_eq!(notification.summary, "Remote control request");
-    assert_eq!(
-        notification.body,
-        "Codex wants to control the full desktop for 20 minutes. This includes full Nickel debugging access."
-    );
+    assert_eq!(notification.summary, "Codex requests approval");
+    for expected in [
+        "Scope: the full desktop",
+        "Duration: 20 minutes",
+        "Requester label is self-reported",
+        "Full Nickel debugging access is requested",
+        "pointer and keyboard input",
+        "Protected surfaces and clipboard or filesystem transfer are excluded",
+    ] {
+        assert!(notification.body.contains(expected), "{expected}");
+    }
     assert_eq!(notification.actions[0].key, "deny");
     assert_eq!(notification.actions[1].key, "approve");
     assert_eq!(shell.remote_lease_notifications.len(), 1);
 
+    let notification_id = notification.id;
     shell.notification = Some(notification);
     shell.sync_notification_host(420, 180);
     let approve = shell
@@ -217,11 +653,97 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
         shell.take_remote_lease_decisions(),
         vec![(pending.clone(), true)]
     );
+    assert_eq!(
+        shell.remote_lease_notifications.len(),
+        1,
+        "dispatch is not resolution"
+    );
+    assert!(shell.remote_lease_submitting.contains(&notification_id));
+    let submitted = shell
+        .notification_feed
+        .history()
+        .into_iter()
+        .find(|item| item.id == notification_id)
+        .unwrap();
+    assert!(submitted.actions.is_empty());
+    assert!(submitted.body.contains("unconfirmed"));
+    shell.dismiss_notification_transport(notification_id);
+    assert!(shell.notification.is_none());
+    assert!(
+        shell
+            .notification_feed
+            .history()
+            .iter()
+            .any(|item| item.id == notification_id)
+    );
+    shell.refresh_fast();
+    assert!(
+        shell.notification.is_none(),
+        "dismissed pending request must not re-toast"
+    );
 
     host.pending.lock().unwrap().clear();
     shell.sync_remote_lease_notifications_from(Vec::new());
     assert!(shell.remote_lease_notifications.is_empty());
+    assert!(shell.remote_lease_submitting.is_empty());
+    assert!(shell.dismissed_remote_lease_notifications.is_empty());
     assert!(shell.notification_feed.snapshot().is_none());
+
+    let mut changed = pending.clone();
+    changed.pending_generation = 5;
+    changed.request.allow_resumption = true;
+    changed.request.renewal = Some(nickel_session_protocol::RemoteLeaseRenewal {
+        lease_id: 2,
+        generation: 1,
+    });
+    changed.changes.access_changed = true;
+    changed.changes.duration_increased = true;
+    shell.sync_remote_lease_notifications_from(vec![changed]);
+    let changed_body = shell.notification_feed.snapshot().unwrap().body;
+    for warning in [
+        "may resume after the client reconnects",
+        "broadens access",
+        "increases the duration",
+        "renews an existing lease",
+    ] {
+        assert!(changed_body.contains(warning), "{warning}");
+    }
+    shell.sync_remote_lease_notifications_from(Vec::new());
+
+    let mut oversized = pending;
+    oversized.pending_generation = 5;
+    oversized.client_label = "x".repeat(nickel_ui::approval::MAX_APPROVAL_PRESENTATION_BYTES);
+    let mut overflow = oversized.clone();
+    overflow.pending_generation = 6;
+    shell.sync_remote_lease_notifications_from(vec![oversized]);
+    let notification = shell.notification_feed.snapshot().unwrap();
+    assert_eq!(notification.actions.len(), 1);
+    assert_eq!(notification.actions[0].key, "deny");
+    assert!(notification.body.contains("Approval is unavailable"));
+
+    shell.sync_remote_lease_notifications_from(Vec::new());
+    for _ in 0..crate::notification::MAX_NOTIFICATIONS {
+        assert_ne!(
+            shell
+                .notification_feed
+                .notify_internal(crate::notification::NotificationRequest {
+                    app_name: "Persistent fixture".into(),
+                    summary: "Fixture".into(),
+                    body: String::new(),
+                    actions: Vec::new(),
+                    expire_timeout_ms: 0,
+                }),
+            0
+        );
+    }
+    shell.sync_remote_lease_notifications_from(vec![overflow.clone()]);
+    shell.sync_remote_lease_notifications_from(vec![overflow]);
+    #[cfg(target_os = "linux")]
+    assert_eq!(*host.decisions.lock().unwrap(), vec![true, false]);
+    #[cfg(target_os = "windows")]
+    assert_eq!(shell.take_remote_lease_decisions().len(), 1);
+    assert!(shell.remote_lease_notifications.is_empty());
+    assert_eq!(shell.remote_lease_overflow_rejections.len(), 1);
 }
 
 #[cfg(target_os = "linux")]
@@ -431,6 +953,102 @@ fn injected_session_host_receives_shell_commands_without_platform_transport() {
         crate::platform::ShellCommand::CreateWorkspace,
     ));
     assert_eq!(host.0.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn active_window_screenshot_uses_in_process_capture_and_crops_before_copy() {
+    use std::sync::Mutex;
+
+    use crate::session_host::DesktopCapturePoll;
+    use nickel_session_protocol::{
+        Geometry, OutputSnapshot, OutputTransform, Snapshot, WindowId, WindowSnapshot, WorkspaceId,
+    };
+
+    #[derive(Default)]
+    struct CaptureHost {
+        outputs: Mutex<Vec<Option<String>>>,
+        copied_sizes: Mutex<Vec<(u32, u32)>>,
+    }
+
+    impl crate::session_host::SessionHost for CaptureHost {
+        fn dispatch(
+            &self,
+            _: crate::platform::ShellCommand,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            Ok(())
+        }
+
+        fn capture_desktop(&self, output: Option<&str>) -> DesktopCapturePoll {
+            self.outputs.lock().unwrap().push(output.map(str::to_owned));
+            DesktopCapturePoll::Ready(Ok(crate::platform::DesktopCapture {
+                image: RgbaImage::new(200, 100),
+            }))
+        }
+
+        fn copy_image(&self, image: RgbaImage) -> Result<(), String> {
+            self.copied_sizes.lock().unwrap().push(image.dimensions());
+            Ok(())
+        }
+    }
+
+    let host = Arc::new(CaptureHost::default());
+    let mut shell = LiveShell::new_with_session_host(host.clone()).expect("live shell");
+    shell.apply_internal_session_snapshot(Snapshot {
+        outputs: vec![OutputSnapshot {
+            name: "DP-1".into(),
+            model: "Test".into(),
+            geometry: Geometry {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 50,
+            },
+            work_area: Geometry {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 50,
+            },
+            scale_120: 120,
+            transform: OutputTransform::Normal,
+            physical_width_mm: 1,
+            physical_height_mm: 1,
+            primary: true,
+            enabled: true,
+            modes: Vec::new(),
+            current_mode: None,
+        }],
+        windows: vec![WindowSnapshot {
+            id: WindowId(7),
+            application_id: "test.app".into(),
+            title: "Test".into(),
+            active: true,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            geometry: Some(Geometry {
+                x: 10,
+                y: 5,
+                width: 30,
+                height: 20,
+            }),
+            workspace: WorkspaceId(1),
+        }],
+        focused: Some(WindowId(7)),
+        ..Snapshot::default()
+    });
+
+    assert!(shell.global_shortcut(GlobalShortcut::Screenshot(
+        crate::platform::ScreenshotAction::ActiveWindow
+    )));
+    assert!(!shell.capture_screenshot());
+    assert_eq!(
+        host.outputs.lock().unwrap().as_slice(),
+        &[Some("DP-1".into())]
+    );
+    assert_eq!(host.copied_sizes.lock().unwrap().as_slice(), &[(60, 40)]);
+    assert!(!shell.screenshot.visible());
 }
 
 #[test]

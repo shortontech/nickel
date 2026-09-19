@@ -9,15 +9,16 @@ mod settings;
 
 pub use client::{CodexClient, ConnectionState};
 pub use protocol::{
-    AccountState, ApprovalPolicy, CodexBackend, CodexError, CodexEvent, CommandAction,
-    CommandDecision, EventKind, FileChangeDecision, ImportProject, InteractionResponse,
-    LoginChallenge, LoginCompletion, LoginMethod, Model, NetworkPolicyAction,
-    NetworkPolicyAmendment, Project, ProjectPage, ProjectPageResult, ProjectedItem,
-    ProjectedThread, Projection, ReasoningEffortOption, RemoteControlClient,
-    RemoteControlClientPage, RemoteControlConnectionStatus, RemoteControlStatus,
-    RemotePairingChallenge, ServerRequestId, StartThread, StartTurn, Thread, ThreadHistoryItem,
+    AccountState, ApprovalContext, ApprovalPolicy, CodexBackend, CodexError, CodexEvent,
+    CommandAction, CommandDecision, CompletedItem, EventKind, FileChangeDecision, FilePatchChange,
+    FileSearchMatch, ImportProject, InteractionResponse, LoginChallenge, LoginCompletion,
+    LoginMethod, Model, NetworkPolicyAction, NetworkPolicyAmendment, Project, ProjectPage,
+    ProjectPageResult, ProjectedItem, ProjectedThread, Projection, RateLimitBucket,
+    RateLimitsStatus, ReasoningEffortOption, RemoteControlClient, RemoteControlClientPage,
+    RemoteControlConnectionStatus, RemoteControlStatus, RemotePairingChallenge, ReviewSettings,
+    SandboxPolicy, ServerRequestId, StartThread, StartTurn, Thread, ThreadHistoryItem,
     ThreadHistoryTurn, ThreadId, ThreadPage, ThreadPageResult, ThreadRuntime, ThreadRuntimeStatus,
-    Turn, TurnId, TurnImage, UserInputAnswer,
+    Turn, TurnId, TurnImage, TurnPlanStep, UserInputAnswer, UserInputOption, UserInputQuestion,
 };
 pub use replay::{ReplayBackend, ReplayScenario};
 pub use selection::{

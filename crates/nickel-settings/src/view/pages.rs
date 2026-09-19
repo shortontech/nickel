@@ -2265,8 +2265,11 @@ impl SettingsApp {
     pub(super) fn bluetooth_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let theme = self.ui_theme();
+        let pairing = self.page == SettingsPage::BluetoothPair;
         let operation_pending = self.bluetooth_operation_rx.is_some();
-        let device_list = self.bluetooth.devices.iter().enumerate().fold(
+        let device_list = self.bluetooth.devices.iter().enumerate().filter(|(_, device)| {
+            pairing || device.paired || device.connected
+        }).fold(
             SettingsListCard::new(theme),
             |list, (index, device)| {
                 let status = if device.connected {
@@ -2289,6 +2292,8 @@ impl SettingsApp {
                     self.bluetooth.available && self.bluetooth.powered && !operation_pending;
                 let action = if device.connected {
                     self.localizer.text("settings-bluetooth-disconnect")
+                } else if !device.paired {
+                    self.localizer.text("settings-bluetooth-pair")
                 } else {
                     self.localizer.text("settings-bluetooth-connect")
                 };
@@ -2348,16 +2353,22 @@ impl SettingsApp {
         } else {
             self.localizer.text("settings-bluetooth-off")
         };
-        let discoverability = if self.bluetooth.discovering {
+        let discoverability = if pairing && self.bluetooth.discovering {
             self.localizer.text("settings-bluetooth-discovery-stop")
-        } else {
+        } else if pairing {
             self.localizer.text("settings-bluetooth-discovery-start")
+        } else {
+            self.localizer.text("settings-bluetooth-pair-devices")
         };
         let discovery_available =
             self.bluetooth.available && self.bluetooth.powered && !operation_pending;
         let discovery_button = Button::semantic(
             self.ui_theme(),
-            SettingsMessage::BluetoothDiscovery,
+            if pairing {
+                SettingsMessage::BluetoothDiscovery
+            } else {
+                SettingsMessage::OpenBluetoothPairing
+            },
             discoverability,
             if discovery_available {
                 ButtonPresentation::Secondary

@@ -118,23 +118,55 @@ pub(super) fn set_bluetooth_adapter_property(name: &str, value: bool) -> Result<
 #[cfg(target_os = "linux")]
 pub(super) fn toggle_bluetooth_device(device: &BluetoothDevice) -> Result<(), String> {
     let connection = Connection::system().map_err(|error| error.to_string())?;
-    Proxy::new(
+    let proxy = Proxy::new(
         &connection,
         "org.bluez",
         device.id.as_str(),
         "org.bluez.Device1",
     )
-    .map_err(|error| error.to_string())?
-    .call_method(
-        if device.connected {
-            "Disconnect"
-        } else {
-            "Connect"
-        },
-        &(),
-    )
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    if !device.connected && !device.paired {
+        proxy
+            .call_method("Pair", &())
+            .map_err(|error| error.to_string())?;
+    }
+    let connected = !device.connected;
+    proxy
+        .call_method(if connected { "Connect" } else { "Disconnect" }, &())
+        .map_err(|error| error.to_string())?;
+
+    // BlueZ method completion means the request was accepted, not necessarily that
+    // Device1.Connected has settled. Do not let an immediate stale refresh make a
+    // successful disconnect appear to do nothing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        if proxy.get_property::<bool>("Connected").ok() == Some(connected) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(if connected {
+                "Bluetooth device did not connect".to_owned()
+            } else {
+                "Bluetooth device did not disconnect".to_owned()
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+pub(super) fn open_bluetooth_pairing_surface() -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut child = std::process::Command::new(executable)
+        .args(["--screen", "bluetooth-pair"])
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    std::thread::Builder::new()
+        .name("nickel-settings-pairing-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "linux")]

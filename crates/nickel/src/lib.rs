@@ -406,6 +406,7 @@ struct CodexChatSurface {
     project_id: String,
     host: EmbeddedUiSurface<ChatApplication>,
     thread_id: Option<ThreadId>,
+    pending_thread: Option<ThreadId>,
 }
 
 struct CodexRuntimeInput {
@@ -722,6 +723,30 @@ impl CodexSurfaces {
         (project_menu_changed, redraw)
     }
 
+    fn approval_notifications(
+        &self,
+    ) -> Vec<(
+        crate::live_shell::CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+    )> {
+        self.chats
+            .iter()
+            .flat_map(|chat| {
+                chat.host
+                    .host
+                    .application()
+                    .approval_notifications()
+                    .into_iter()
+                    .map(move |approval| {
+                        (
+                            crate::live_shell::CodexApprovalOwner::Winit(chat.id),
+                            approval,
+                        )
+                    })
+            })
+            .collect()
+    }
+
     fn new(
         shell: &WinitShell,
         settings: &OptionalFeatureSettings,
@@ -912,7 +937,11 @@ impl CodexSurfaces {
 
     fn remove(&mut self, shell: &mut WinitShell, surface: SurfaceId) {
         if let Some(index) = self.chats.iter().position(|chat| chat.id == surface) {
-            if let Some(thread) = self.chats.remove(index).thread_id {
+            let chat = self.chats.remove(index);
+            if let Some(thread) = chat.thread_id {
+                self.writer_leases.release(&thread);
+            }
+            if let Some(thread) = chat.pending_thread {
                 self.writer_leases.release(&thread);
             }
             shell.destroy_surface(surface);
@@ -939,26 +968,46 @@ impl CodexSurfaces {
         Ok(opened)
     }
 
-    fn release_failed_resumes(&mut self) {
-        for chat in &mut self.chats {
-            for request in chat.host.application_mut().take_shell_requests() {
-                if let ShellRequest::ResumeFailed(thread) = request
-                    && chat.thread_id.as_ref() == Some(&thread)
-                {
-                    self.writer_leases.release(&thread);
-                    chat.thread_id = None;
-                }
-            }
-        }
-    }
-
-    fn resume_requests(&mut self) {
+    fn resume_requests(&mut self, shell: &mut WinitShell) {
+        let owners = self
+            .chats
+            .iter()
+            .filter_map(|chat| {
+                chat.thread_id
+                    .as_ref()
+                    .map(|thread| (thread.clone(), chat.id))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
         for chat in &mut self.chats {
             let requests = chat.host.application_mut().take_shell_requests();
             for request in requests {
                 match request {
                     ShellRequest::ResumeThread(thread) => {
-                        if chat.thread_id.as_ref() == Some(&thread) {
+                        if chat.pending_thread.is_some() {
+                            continue;
+                        }
+                        if let Some(owner) = owners.get(&thread) {
+                            shell.show(*owner);
+                            shell.raise(*owner);
+                            chat.host.application_mut().report_resume_owner_activation();
+                            continue;
+                        }
+                        if chat
+                            .host
+                            .application_mut()
+                            .state
+                            .thread_runtime
+                            .get(&thread)
+                            .is_some_and(|runtime| {
+                                runtime.status == nickel_codex::ThreadRuntimeStatus::Active
+                            })
+                        {
+                            chat.host.application_mut().report_resume_rejection(
+                                "Conversation is active outside this Nickel session",
+                            );
+                            continue;
+                        }
+                        if !chat.host.application_mut().prepare_shell_resume(&thread) {
                             continue;
                         }
                         if !self.writer_leases.acquire(&thread) {
@@ -975,16 +1024,26 @@ impl CodexSurfaces {
                             chat.host.application_mut().report_resume_rejection(error);
                             continue;
                         }
+                        chat.pending_thread = Some(thread);
+                    }
+                    ShellRequest::ResumeSucceeded(thread)
+                        if chat.pending_thread.as_ref() == Some(&thread) =>
+                    {
                         if let Some(previous) = chat.thread_id.replace(thread) {
                             self.writer_leases.release(&previous);
                         }
+                        chat.pending_thread = None;
                     }
                     ShellRequest::ResumeFailed(thread) => {
-                        if chat.thread_id.as_ref() == Some(&thread) {
+                        if chat.pending_thread.as_ref() == Some(&thread) {
+                            self.writer_leases.release(&thread);
+                            chat.pending_thread = None;
+                        } else if chat.thread_id.as_ref() == Some(&thread) {
                             self.writer_leases.release(&thread);
                             chat.thread_id = None;
                         }
                     }
+                    ShellRequest::ResumeSucceeded(_) => {}
                     ShellRequest::OpenProject { .. } => {}
                 }
             }
@@ -1038,6 +1097,7 @@ impl CodexSurfaces {
                 project_id,
                 host,
                 thread_id: initial_thread.clone(),
+                pending_thread: None,
             });
             self.present(shell, id)
                 .map_err(|error| format!("{error:?}"))?;
@@ -1631,8 +1691,7 @@ fn handle_codex_event(
             false,
         );
     }
-    codex.resume_requests();
-    codex.release_failed_resumes();
+    codex.resume_requests(shell);
     Ok(true)
 }
 
@@ -2424,7 +2483,49 @@ pub fn run() -> Result<(), String> {
             }
             controller_schedule.mark_polled(now, controller.connected());
         }
-        let (project_menu_changed, due_codex_redraw) = codex.poll_due(Instant::now());
+        let mut approval_redraw = Vec::new();
+        for (owner, snapshot, choice) in state.take_codex_approval_decisions() {
+            let crate::live_shell::CodexApprovalOwner::Winit(id) = owner else {
+                continue;
+            };
+            if let Some(host) = codex.host_mut(id)
+                && host
+                    .application_mut()
+                    .respond_approval_notification(&snapshot, choice)
+            {
+                host.step(HostBatch {
+                    application_changed: true,
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                });
+                approval_redraw.push(id);
+            }
+        }
+        for (owner, snapshot, delivered) in state.take_codex_approval_delivery_updates() {
+            let crate::live_shell::CodexApprovalOwner::Winit(id) = owner else {
+                continue;
+            };
+            if let Some(host) = codex.host_mut(id)
+                && host
+                    .application_mut()
+                    .report_approval_notification_delivery(&snapshot, delivered)
+            {
+                host.step(HostBatch {
+                    application_changed: true,
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                });
+                approval_redraw.push(id);
+            }
+        }
+        for owner in state.take_codex_approval_reviews() {
+            if let crate::live_shell::CodexApprovalOwner::Winit(id) = owner {
+                shell.raise(id);
+            }
+        }
+        let (project_menu_changed, mut due_codex_redraw) = codex.poll_due(Instant::now());
+        due_codex_redraw.extend(approval_redraw);
+        state.sync_codex_approval_notifications(codex.approval_notifications());
         project_menu_changed_since_refresh |= project_menu_changed;
         for surface in due_codex_redraw {
             if surface == codex.project_menu
@@ -2597,8 +2698,19 @@ pub fn run() -> Result<(), String> {
                         sync_visibility(&mut shell, &state);
                     }
                 }
+                #[cfg(target_os = "windows")]
+                let opening_notification_history =
+                    shortcut == platform::GlobalShortcut::ShowNotifications;
                 if state.global_shortcut(shortcut) {
                     sync_visibility(&mut shell, &state);
+                    #[cfg(target_os = "windows")]
+                    if opening_notification_history
+                        && state.surface_visible(SurfaceRole::Notification)
+                    {
+                        // Passive arrival must not interrupt typing. This user-invoked
+                        // history action is the explicit transition into keyboard focus.
+                        shell.raise_role(SurfaceRole::Notification);
+                    }
                     state.sync_transient_overlays();
                     focus_visible_overlay(&mut shell, &state);
                     render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
@@ -2917,7 +3029,7 @@ pub fn run() -> Result<(), String> {
                     render_all(&mut shell, &mut state)?;
                 }
             }
-            codex.release_failed_resumes();
+            codex.resume_requests(&mut shell);
             let codex_changed = !codex_redraw.is_empty();
             for surface in codex_redraw {
                 if surface == codex.project_menu

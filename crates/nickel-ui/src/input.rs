@@ -459,12 +459,14 @@ impl FocusedInputDispatcher {
                             UiEvent::KeyboardNavigateRight
                         })
                     }
-                    (LogicalKey::Named(NamedKey::ArrowUp), _) => {
-                        InputCommand::Ui(UiEvent::KeyboardNavigateUp)
-                    }
-                    (LogicalKey::Named(NamedKey::ArrowDown), _) => {
-                        InputCommand::Ui(UiEvent::KeyboardNavigateDown)
-                    }
+                    (LogicalKey::Named(NamedKey::ArrowUp), _) => InputCommand::Application {
+                        shortcut: Shortcut::NavigateUp,
+                        fallback: Some(UiEvent::KeyboardNavigateUp),
+                    },
+                    (LogicalKey::Named(NamedKey::ArrowDown), _) => InputCommand::Application {
+                        shortcut: Shortcut::NavigateDown,
+                        fallback: Some(UiEvent::KeyboardNavigateDown),
+                    },
                     (LogicalKey::Character(value), _)
                         if command && text_editing && value.eq_ignore_ascii_case("z") =>
                     {
@@ -1170,6 +1172,41 @@ mod tests {
                 fallback: None,
             }]
         );
+    }
+
+    #[test]
+    fn vertical_arrows_offer_application_navigation_before_ui_fallback() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        for (order, logical, physical, shortcut, fallback) in [
+            (
+                44,
+                NamedKey::ArrowUp,
+                KeyCode::ArrowUp,
+                Shortcut::NavigateUp,
+                UiEvent::KeyboardNavigateUp,
+            ),
+            (
+                45,
+                NamedKey::ArrowDown,
+                KeyCode::ArrowDown,
+                Shortcut::NavigateDown,
+                UiEvent::KeyboardNavigateDown,
+            ),
+        ] {
+            assert_eq!(
+                dispatch.dispatch_with_context(
+                    &key_at(order, LogicalKey::Named(logical), physical, &[]),
+                    InputContext {
+                        text_focused: true,
+                        ..InputContext::default()
+                    },
+                ),
+                [InputCommand::Application {
+                    shortcut,
+                    fallback: Some(fallback),
+                }]
+            );
+        }
     }
 
     #[test]

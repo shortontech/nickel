@@ -1128,7 +1128,12 @@ impl nickel_ui::Application for DesktopApplication {
                 }
                 self.dismiss_context_menu(DesktopMenuDismissReason::Action);
             }
-            DesktopMessage::BackgroundContext => self.open_background_context(None),
+            DesktopMessage::BackgroundContext => {
+                // The UI host emits this from the same secondary press that updated
+                // pointer_position. Keep that anchor when replacing the menu so the
+                // detached overlay opens at the actual invocation point.
+                self.open_background_context(self.pointer_seen.then_some(self.pointer_position))
+            }
             DesktopMessage::Command(command) => self.apply_desktop_command(command),
         }
     }

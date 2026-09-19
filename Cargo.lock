@@ -3037,6 +3037,7 @@ dependencies = [
  "nickel-logging",
  "nickel-platform",
  "nickel-remote-control",
+ "nickel-render-assets",
  "nickel-session-protocol",
  "nickel-storage",
  "nickel-ui",
@@ -3061,6 +3062,7 @@ dependencies = [
  "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "url",
  "wayland-scanner",
  "wayland-server",
  "windows",
@@ -3130,6 +3132,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
+ "url",
 ]
 
 [[package]]

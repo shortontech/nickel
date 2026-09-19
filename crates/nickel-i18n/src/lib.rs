@@ -270,4 +270,16 @@ mod tests {
         let arabic = Localizer::for_locale(Some("ar"));
         assert!(arabic.file_selection_summary(2, None).contains("تم تحديد"));
     }
+
+    #[test]
+    fn launcher_discovery_status_is_translated_in_each_supported_locale() {
+        for locale in ["en-US", "es", "de", "zh", "ar"] {
+            let localizer = Localizer::for_locale(Some(locale));
+            for key in ["launcher-discovery-empty", "launcher-discovery-partial"] {
+                let message = localizer.text(key);
+                assert!(!message.is_empty(), "{locale}: {key}");
+                assert_ne!(message, key, "{locale}: {key}");
+            }
+        }
+    }
 }

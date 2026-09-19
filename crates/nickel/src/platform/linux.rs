@@ -230,7 +230,7 @@ fn logical_rect(geometry: nickel_session_protocol::Geometry) -> nickel_core::geo
     }
 }
 
-fn crop_output_geometry(
+pub(crate) fn crop_output_geometry(
     image: image::RgbaImage,
     output: nickel_session_protocol::Geometry,
     window: nickel_session_protocol::Geometry,
@@ -646,10 +646,23 @@ impl NotificationFeed {
             .unwrap_or(0)
     }
 
+    pub(crate) fn replace_internal(&self, id: u32, request: NotificationRequest) -> u32 {
+        self.store
+            .lock()
+            .map(|mut store| store.notify(id, request, Instant::now()).0)
+            .unwrap_or(0)
+    }
+
     pub(crate) fn close_internal(&self, id: u32) {
         if let Ok(mut store) = self.store.lock() {
             store.close(id, 2);
         }
+    }
+
+    pub(crate) fn mark_internal_submitting(&self, id: u32) -> bool {
+        self.store
+            .lock()
+            .is_ok_and(|mut store| store.mark_submitting(id))
     }
 }
 

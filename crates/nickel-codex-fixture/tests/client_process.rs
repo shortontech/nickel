@@ -42,6 +42,7 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
             project_id: None,
             reasoning_effort: None,
             approval_policy: ApprovalPolicy::OnRequest,
+            sandbox_policy: None,
         })
         .unwrap();
     assert_eq!(
@@ -56,6 +57,8 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
             model: None,
             reasoning_effort: None,
             approval_policy: ApprovalPolicy::OnRequest,
+            sandbox_policy: None,
+            plan_mode: false,
         })
         .unwrap();
     assert_eq!(turn.id.0, "fixture-turn");
@@ -98,8 +101,10 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
         EventKind::UserInputRequested {
             request_id,
             question_ids,
-            ..
+            questions,
         } if request_id.0 == "input-1" && question_ids == &["q1"]
+            && questions[0].question == "Choose a value"
+            && questions[0].options[0].label == "Yes"
     ));
     assert!(matches!(
         &received[6].kind,
@@ -174,6 +179,79 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
     client
         .interrupt_turn(ThreadId("fixture-thread".into()), turn.id)
         .unwrap();
+    client.shutdown();
+}
+
+#[test]
+fn activity_wire_turn_matches_resumed_file_change_history() {
+    let executable = Path::new(env!("CARGO_BIN_EXE_nickel-codex-fixture"));
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("fixture-mode"), "activity-rich").unwrap();
+    let client = CodexClient::spawn(executable, directory.path()).unwrap();
+    let events = client.subscribe();
+    let thread = client
+        .start_thread(StartThread {
+            cwd: directory.path().into(),
+            model: None,
+            project_id: None,
+            reasoning_effort: None,
+            approval_policy: ApprovalPolicy::OnRequest,
+            sandbox_policy: None,
+        })
+        .unwrap();
+    let history = client.resume_thread(thread.id.clone()).unwrap();
+    let history_file = history.turns[0]
+        .items
+        .iter()
+        .find(|item| item.id == "file-1")
+        .expect("resumed file-change item");
+    let turn = client
+        .start_turn(StartTurn {
+            thread_id: thread.id,
+            text: "inspect".into(),
+            images: Vec::new(),
+            model: None,
+            reasoning_effort: None,
+            approval_policy: ApprovalPolicy::OnRequest,
+            sandbox_policy: None,
+            plan_mode: false,
+        })
+        .unwrap();
+    assert_eq!(turn.id.0, "fixture-turn");
+    let received: Vec<_> =
+        std::iter::from_fn(|| events.recv_timeout(Duration::from_millis(50)).ok()).collect();
+    assert!(received.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::ItemStarted { item_id, initial_text, .. }
+            if item_id == "search-1" && initial_text == "Search: Nickel shell"
+    )));
+    assert!(received.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::FilePatchUpdated { item_id, changes, .. }
+            if item_id == "file-1" && changes[0].diff.contains("+new")
+    )));
+    assert!(received.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::TurnPlanUpdated { steps, .. }
+            if steps.len() == 1 && steps[0].status == "completed"
+    )));
+    assert!(received.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Warning { thread_id: Some(thread), message, guardian: true }
+            if thread.0 == "fixture-thread" && message == "Review this operation"
+    )));
+    let live_file = received
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ItemCompleted {
+                item_id,
+                completion: Some(item),
+            } if item_id == "file-1" => Some(item),
+            _ => None,
+        })
+        .expect("live file-change completion");
+    assert_eq!(history_file.text, live_file.text);
+    assert!(live_file.text.contains("+new"));
     client.shutdown();
 }
 
@@ -327,6 +405,8 @@ fn duplicate_terminal_notifications_are_idempotent() {
             model: None,
             reasoning_effort: None,
             approval_policy: ApprovalPolicy::OnRequest,
+            sandbox_policy: None,
+            plan_mode: false,
         })
         .unwrap();
     for _ in 0..20 {
@@ -366,6 +446,8 @@ fn explicit_interrupt_reaches_terminal_interrupted_state() {
             model: None,
             reasoning_effort: None,
             approval_policy: ApprovalPolicy::OnRequest,
+            sandbox_policy: None,
+            plan_mode: false,
         })
         .unwrap();
     client
@@ -430,6 +512,8 @@ fn slow_consumer_coalesces_losslessly_and_retains_only_lifecycle_metadata() {
             model: None,
             reasoning_effort: None,
             approval_policy: ApprovalPolicy::OnRequest,
+            sandbox_policy: None,
+            plan_mode: false,
         })
         .unwrap();
     // The turn response follows all fixture notifications, so the queue was stalled
@@ -461,7 +545,7 @@ fn slow_consumer_coalesces_losslessly_and_retains_only_lifecycle_metadata() {
     );
     let delta = position(|kind| matches!(kind, EventKind::CommandOutputDelta { .. }));
     let completed = position(
-        |kind| matches!(kind, EventKind::ItemCompleted { item_id } if item_id == "command-flood"),
+        |kind| matches!(kind, EventKind::ItemCompleted { item_id, .. } if item_id == "command-flood"),
     );
     let approval = position(|kind| matches!(kind, EventKind::ApprovalRequested { .. }));
     let terminal = position(|kind| matches!(kind, EventKind::TurnCompleted { .. }));
@@ -490,6 +574,8 @@ fn stalled_noncoalescible_delivery_fails_explicitly_and_history_can_be_reloaded(
             model: None,
             reasoning_effort: None,
             approval_policy: ApprovalPolicy::OnRequest,
+            sandbox_policy: None,
+            plan_mode: false,
         })
         .unwrap();
     let metrics = events.metrics();

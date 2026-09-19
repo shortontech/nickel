@@ -44,6 +44,10 @@ impl SettingsApp {
                     self.localizer.text("settings-bluetooth-title"),
                     self.localizer.text("settings-bluetooth-subtitle"),
                 ),
+                SettingsPage::BluetoothPair => (
+                    self.localizer.text("settings-bluetooth-pair-title"),
+                    self.localizer.text("settings-bluetooth-pair-subtitle"),
+                ),
                 SettingsPage::PrintersStorage => (
                     "Printers & Storage".into(),
                     "Print queues, removable media, and filesystem usage".into(),
@@ -388,6 +392,15 @@ impl SettingsApp {
             .header(destination_header(SettingsPage::Bluetooth))
             .leading(sidebar_icon(SidebarIconKind::Bluetooth))
             .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::BluetoothPair,
+                self.localizer.text("settings-bluetooth-pair-title"),
+                SettingsMessage::Navigate(SettingsPage::BluetoothPair),
+                self.bluetooth_components(),
+            )
+            .header(destination_header(SettingsPage::BluetoothPair))
+            .leading(sidebar_icon(SidebarIconKind::Bluetooth))
+            .visible(false),
             ResponsiveNavigationDestination::new(
                 SettingsPage::PrintersStorage,
                 printers_storage_label,

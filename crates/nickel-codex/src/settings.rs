@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use crate::ApprovalPolicy;
+use crate::{ApprovalPolicy, SandboxPolicy};
 
 const SETTINGS_VERSION: u32 = 1;
 const MAX_HOSTS: usize = 64;
@@ -37,6 +37,8 @@ pub struct CodexSettings {
     pub hosts: Vec<RemoteHost>,
     #[serde(default)]
     pub approval_policy: ApprovalPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<SandboxPolicy>,
 }
 
 impl Default for CodexSettings {
@@ -46,6 +48,7 @@ impl Default for CodexSettings {
             selected: "local".into(),
             hosts: Vec::new(),
             approval_policy: ApprovalPolicy::default(),
+            sandbox_policy: None,
         }
     }
 }
@@ -325,6 +328,7 @@ mod tests {
             selected: "workstation".into(),
             hosts: vec![host()],
             approval_policy: ApprovalPolicy::Never,
+            sandbox_policy: Some(SandboxPolicy::DangerFullAccess),
         };
         settings.save(&path).unwrap();
         assert_eq!(CodexSettings::load(&path).unwrap(), settings);
@@ -383,6 +387,7 @@ mod tests {
             selected: "local".into(),
             hosts: vec![host(), host()],
             approval_policy: ApprovalPolicy::default(),
+            sandbox_policy: None,
         };
         assert_eq!(
             duplicate.validate().unwrap_err().to_string(),
@@ -397,6 +402,7 @@ mod tests {
             selected: "workstation".into(),
             hosts: vec![host()],
             approval_policy: ApprovalPolicy::default(),
+            sandbox_policy: None,
         };
         assert!(settings.remove_host("workstation"));
         assert_eq!(settings.selected, "local");

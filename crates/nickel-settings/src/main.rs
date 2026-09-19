@@ -276,6 +276,7 @@ enum SidebarIconKind {
     Appearance,
     Network,
     Bluetooth,
+    BluetoothPair,
     PrintersStorage,
     Security,
     DefaultApps,
@@ -462,6 +463,7 @@ impl std::fmt::Display for SettingsPage {
             Self::Appearance => "appearance",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
+            Self::BluetoothPair => "bluetooth-pair",
             Self::PrintersStorage => "printers-storage",
             Self::Security => "security",
             Self::DefaultApps => "default-apps",
@@ -551,6 +553,7 @@ enum SettingsMessage {
     ShowNavigation,
     SidebarSearchChanged(String),
     SetBluetoothPower(bool),
+    OpenBluetoothPairing,
     BluetoothDiscovery,
     BluetoothDevice(usize),
     BluetoothScroll,
@@ -1306,7 +1309,7 @@ impl SettingsApp {
                 self.active_destination = Some(page);
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
-                    SettingsPage::Bluetooth => self.load_bluetooth(),
+                    SettingsPage::Bluetooth | SettingsPage::BluetoothPair => self.load_bluetooth(),
                     SettingsPage::PrintersStorage => self.load_peripherals(),
                     SettingsPage::Security => self.load_maintenance(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
@@ -1326,7 +1329,7 @@ impl SettingsApp {
                     .push(SettingsEffect::FocusControl(target));
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
-                    SettingsPage::Bluetooth => self.load_bluetooth(),
+                    SettingsPage::Bluetooth | SettingsPage::BluetoothPair => self.load_bluetooth(),
                     SettingsPage::PrintersStorage => self.load_peripherals(),
                     SettingsPage::Security => self.load_maintenance(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
@@ -1363,6 +1366,18 @@ impl SettingsApp {
                     BluetoothOperation::SetDiscovery(enabled),
                     move || set_bluetooth_adapter_property("Discovering", enabled),
                 );
+            }
+            SettingsMessage::OpenBluetoothPairing => {
+                if !self.bluetooth.available
+                    || !self.bluetooth.powered
+                    || self.bluetooth_operation_rx.is_some()
+                {
+                    return;
+                }
+                if let Err(error) = open_bluetooth_pairing_surface() {
+                    self.bluetooth_status = Some(error);
+                    self.request_redraw();
+                }
             }
             SettingsMessage::SetWifiPower(enabled) => {
                 if !self.network_available
@@ -2636,7 +2651,9 @@ impl SettingsApp {
                 self.persist_shell_behavior(previous);
             }
         }
-        if self.page == SettingsPage::Bluetooth && now >= self.next_bluetooth_refresh {
+        if matches!(self.page, SettingsPage::Bluetooth | SettingsPage::BluetoothPair)
+            && now >= self.next_bluetooth_refresh
+        {
             self.load_bluetooth();
         }
         if self.page == SettingsPage::Network && now >= self.next_network_refresh {
@@ -2991,7 +3008,7 @@ impl Application for SettingsApp {
                 .as_ref()
                 .map(|(deadline, _)| *deadline),
         );
-        if self.page == SettingsPage::Bluetooth {
+        if matches!(self.page, SettingsPage::Bluetooth | SettingsPage::BluetoothPair) {
             deadlines.push(self.next_bluetooth_refresh);
         }
         if self.page == SettingsPage::Network {

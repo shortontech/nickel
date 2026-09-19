@@ -9,9 +9,9 @@ use std::{
 };
 
 use nickel_ui::{
-    Application, DamageRegion, GradientAxis, HostBatch, HostEvent, InternalSurfaceId,
-    InternalSurfaceSet, LinearGradient, Point as UiPoint, SoftwareRenderer, Text, UiEvent, View,
-    ViewContext,
+    Application, DamageRegion, GradientAxis, HostBatch, HostEvent, HostEventOutcome,
+    InternalSurfaceId, InternalSurfaceSet, LinearGradient, Point as UiPoint, SoftwareRenderer,
+    Text, UiEvent, View, ViewContext,
     backend::{FrameRenderer, PaintCommand, RenderFrame},
 };
 
@@ -1532,10 +1532,22 @@ fn interpolate_color(start: u32, end: u32, progress: f32) -> u32 {
     result
 }
 
+fn record_surface_clipboard_outcome(
+    slot: &mut Option<(InternalSurfaceId, Result<String, String>)>,
+    id: InternalSurfaceId,
+    outcome: &mut HostEventOutcome,
+) {
+    let mut result = None;
+    crate::session_host::record_clipboard_outcome(&mut result, outcome);
+    if let Some(result) = result {
+        *slot = Some((id, result));
+    }
+}
+
 /// Session-owned applications and their compositor presentation state.
 pub struct InternalUiRuntime {
     clipboard_limit: usize,
-    clipboard_result: Option<Result<String, String>>,
+    clipboard_result: Option<(InternalSurfaceId, Result<String, String>)>,
     surfaces: InternalSurfaceSet,
     surfaces_retired: bool,
     presentation: BTreeMap<InternalSurfaceId, PresentedSurface>,
@@ -1586,6 +1598,46 @@ impl Default for InternalUiRuntime {
 }
 
 impl InternalUiRuntime {
+    /// Rasterize one visible application into a bounded preview without
+    /// allocating a full-size compatibility framebuffer. Preview consumers
+    /// share the same resolved display list as on-screen presentation.
+    pub(crate) fn preview_pixels(
+        &self,
+        id: InternalSurfaceId,
+        maximum_width: u16,
+        maximum_height: u16,
+    ) -> Option<(u16, u16, Vec<u8>)> {
+        let presentation = self.presentation.get(&id)?;
+        if !presentation.visible || presentation.placement.role != InternalSurfaceRole::Application
+        {
+            return None;
+        }
+        let (_, _, logical_width, logical_height) = presentation.placement.geometry;
+        let (width, height) = crate::session::state::preview_capture_dimensions_with_limit(
+            i32::try_from(logical_width).ok()?,
+            i32::try_from(logical_height).ok()?,
+            maximum_width,
+            maximum_height,
+        )?;
+        let scale = (f32::from(width) / logical_width as f32)
+            .min(f32::from(height) / logical_height as f32);
+        let mut renderer =
+            SoftwareRenderer::new_pixel_buffer(u32::from(width), u32::from(height), scale);
+        if let Some(commands) = &presentation.external_scene {
+            let _ = renderer.render(commands);
+        } else {
+            let surface = self.surfaces.get(id)?;
+            let _ = renderer.render_frame(surface.render_frame());
+        }
+        let mut rgba = Vec::with_capacity(
+            usize::from(width) * usize::from(height) * std::mem::size_of::<nickel_ui::Pixel>(),
+        );
+        for pixel in renderer.pixels() {
+            rgba.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        Some((width, height, rgba))
+    }
+
     fn allocate_recipient_lease(&mut self) -> u64 {
         loop {
             self.next_recipient_lease = self.next_recipient_lease.wrapping_add(1).max(1);
@@ -1749,7 +1801,7 @@ impl InternalUiRuntime {
             })?;
         let semantic_failed = !outcome.semantic_failures.is_empty();
         let effect_failed = !outcome.failures.is_empty() || !outcome.completion_failures.is_empty();
-        crate::session_host::record_clipboard_outcome(&mut self.clipboard_result, &mut outcome);
+        record_surface_clipboard_outcome(&mut self.clipboard_result, id, &mut outcome);
         if outcome.changed {
             self.mark_dirty(id);
         }
@@ -2214,8 +2266,28 @@ impl InternalUiRuntime {
         }
     }
 
-    pub(crate) fn take_clipboard_result(&mut self) -> Option<Result<String, String>> {
+    pub(crate) fn take_clipboard_result(
+        &mut self,
+    ) -> Option<(InternalSurfaceId, Result<String, String>)> {
         self.clipboard_result.take()
+    }
+
+    pub(crate) fn complete_clipboard_write(
+        &mut self,
+        id: InternalSurfaceId,
+        result: Result<(), String>,
+    ) -> bool {
+        let Some(surface) = self.surfaces.get_mut(id) else {
+            return false;
+        };
+        let mut outcome = surface.clipboard_write_completed(result);
+        record_surface_clipboard_outcome(&mut self.clipboard_result, id, &mut outcome);
+        if outcome.changed
+            && let Some(presentation) = self.presentation.get_mut(&id)
+        {
+            presentation.dirty = true;
+        }
+        outcome.changed
     }
 
     pub fn step(&mut self, id: InternalSurfaceId, mut batch: HostBatch) -> bool {
@@ -2277,7 +2349,7 @@ impl InternalUiRuntime {
             return false;
         };
         let mut outcome = surface.step(batch);
-        crate::session_host::record_clipboard_outcome(&mut self.clipboard_result, &mut outcome);
+        record_surface_clipboard_outcome(&mut self.clipboard_result, id, &mut outcome);
         let changed = outcome.changed;
         if changed && let Some(presentation) = self.presentation.get_mut(&id) {
             presentation.dirty = true;
@@ -2301,7 +2373,7 @@ impl InternalUiRuntime {
             events: vec![HostEvent::Accessibility { target, action }],
             ..Default::default()
         });
-        crate::session_host::record_clipboard_outcome(&mut self.clipboard_result, &mut outcome);
+        record_surface_clipboard_outcome(&mut self.clipboard_result, id, &mut outcome);
         if !outcome.semantic_failures.is_empty() {
             return Err("local accessibility target changed".to_owned());
         }
@@ -2538,6 +2610,7 @@ impl InternalUiRuntime {
                     && point.1 < f64::from(y) + f64::from(height))
                 .then_some((
                     Self::role_order(surface.placement.role),
+                    surface.z_order,
                     *id,
                     UiPoint {
                         x: (point.0 - f64::from(x)) as f32,
@@ -2545,8 +2618,8 @@ impl InternalUiRuntime {
                     },
                 ))
             })
-            .max_by_key(|(role, id, _)| (*role, *id))
-            .map(|(_, id, local)| (id, local))
+            .max_by_key(|(role, z_order, id, _)| (*role, *z_order, *id))
+            .map(|(_, _, id, local)| (id, local))
     }
 
     /// Return an application surface irrespective of the external client scene.
@@ -2576,7 +2649,54 @@ impl InternalUiRuntime {
                     },
                 ))
             })
-            .max_by_key(|(id, _)| *id)
+            .max_by_key(|(id, _)| {
+                self.presentation
+                    .get(id)
+                    .map_or(0, |surface| surface.z_order)
+            })
+    }
+
+    pub(crate) fn application_covers(&self, id: InternalSurfaceId, point: (f64, f64)) -> bool {
+        let Some(surface) = self.presentation.get(&id) else {
+            return false;
+        };
+        if !surface.visible || surface.placement.role != InternalSurfaceRole::Application {
+            return false;
+        }
+        let (x, y, width, height) = surface.placement.geometry;
+        let inside = point.0 >= f64::from(x)
+            && point.1 >= f64::from(y)
+            && point.0 < f64::from(x) + f64::from(width)
+            && point.1 < f64::from(y) + f64::from(height);
+        inside
+            || (surface.decoration.is_some()
+                && crate::session::window_frame::hit_test(
+                    crate::session::shell_layout::Geometry {
+                        x,
+                        y,
+                        width: i32::try_from(width).unwrap_or(i32::MAX),
+                        height: i32::try_from(height).unwrap_or(i32::MAX),
+                    },
+                    point.0.round() as i32,
+                    point.1.round() as i32,
+                )
+                .is_some())
+    }
+
+    pub(crate) fn painted_bounds(&self, id: InternalSurfaceId) -> Option<(i64, i64, i64, i64)> {
+        let surface = self.presentation.get(&id)?;
+        let (x, y, width, height) = surface.placement.geometry;
+        let titlebar = if surface.decoration.is_some() {
+            i64::from(crate::session::window_frame::TITLEBAR_HEIGHT)
+        } else {
+            0
+        };
+        Some((
+            i64::from(x),
+            i64::from(y) - titlebar,
+            i64::from(width),
+            i64::from(height) + titlebar,
+        ))
     }
 
     fn dispatch_ui(&mut self, id: InternalSurfaceId, event: UiEvent) -> bool {
@@ -2825,17 +2945,22 @@ impl InternalUiRuntime {
         handled
     }
 
+    /// Ordinary application windows may straddle outputs. Their `output` field
+    /// selects scale, taskbar affinity, and child placement; it does not clip
+    /// presentation to that output. Each output renderer clips the global
+    /// application geometry to its own viewport.
     pub fn ids_for_output<'a>(
         &'a self,
         output: &'a str,
     ) -> impl Iterator<Item = InternalSurfaceId> + 'a {
         self.presentation.iter().filter_map(move |(id, surface)| {
             (surface.visible
-                && surface
-                    .placement
-                    .output
-                    .as_deref()
-                    .is_none_or(|name| name == output))
+                && (surface.placement.role == InternalSurfaceRole::Application
+                    || surface
+                        .placement
+                        .output
+                        .as_deref()
+                        .is_none_or(|name| name == output)))
             .then_some(*id)
         })
     }
@@ -2993,8 +3118,39 @@ impl InternalUiRuntime {
     where
         R::TextureId: Send + Clone + 'static,
     {
-        let frame_icons = self.frame_icons.clone();
         let ids = self.ordered_ids_for_layer_filtered(output, layer, trusted);
+        self.render_elements_for_ids(renderer, output_origin, ids)
+    }
+
+    /// Render one ordinary application in output-local coordinates. Its output
+    /// affinity is for scale and navigation, not a presentation clip.
+    pub(crate) fn render_application_elements<R: Renderer + ImportMem>(
+        &mut self,
+        renderer: &mut R,
+        output_origin: Point<i32, Logical>,
+        id: InternalSurfaceId,
+    ) -> Vec<InternalUiRenderElement<R>>
+    where
+        R::TextureId: Send + Clone + 'static,
+    {
+        if !self.presentation.get(&id).is_some_and(|surface| {
+            surface.visible && surface.placement.role == InternalSurfaceRole::Application
+        }) {
+            return Vec::new();
+        }
+        self.render_elements_for_ids(renderer, output_origin, vec![id])
+    }
+
+    fn render_elements_for_ids<R: Renderer + ImportMem>(
+        &mut self,
+        renderer: &mut R,
+        output_origin: Point<i32, Logical>,
+        ids: Vec<InternalSurfaceId>,
+    ) -> Vec<InternalUiRenderElement<R>>
+    where
+        R::TextureId: Send + Clone + 'static,
+    {
+        let frame_icons = self.frame_icons.clone();
         ids.into_iter()
             .filter_map(|id| {
                 let placement = self.presentation.get(&id)?.placement.clone();
@@ -3025,18 +3181,25 @@ impl InternalUiRuntime {
                     return Some(content);
                 };
                 let width = i32::try_from(placement.geometry.2).unwrap_or(i32::MAX);
-                let titlebar = crate::session::window_frame::render_titlebar_for(
+                let height = i32::try_from(placement.geometry.3).unwrap_or(i32::MAX);
+                let border_color = crate::session::window_frame::frame_border_color(
+                    decoration.background,
+                    decoration.foreground,
+                    decoration.active,
+                );
+                let titlebar = crate::session::window_frame::render_titlebar_for_state(
                     Some(decoration.owner),
                     width,
                     &decoration.title,
                     decoration.background,
                     decoration.foreground,
+                    decoration.active,
                 );
                 let mut framed = Vec::new();
                 let titlebar_y =
                     local.1.round() as i32 - crate::session::window_frame::TITLEBAR_HEIGHT;
                 if let Some(icons) = frame_icons.as_ref() {
-                    let icon_y = titlebar_y + 8;
+                    let icon_y = crate::session::window_frame::frame_icon_y(titlebar_y);
                     let icon_x = local.0.round() as i32 + width;
                     for (buffer, offset) in [
                         (&icons.close, 35),
@@ -3063,6 +3226,23 @@ impl InternalUiRuntime {
                         }
                     }
                 }
+                for border in
+                    crate::session::window_frame::content_border_layers(width, height, border_color)
+                {
+                    framed.push(
+                        SolidColorRenderElement::from_buffer(
+                            &border.buffer,
+                            (
+                                local.0.round() as i32 + border.offset.0,
+                                local.1.round() as i32 + border.offset.1,
+                            ),
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        )
+                        .into(),
+                    );
+                }
                 if let Some(titlebar) = titlebar
                     && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                         renderer,
@@ -3077,6 +3257,30 @@ impl InternalUiRuntime {
                     framed.push(element.into());
                 }
                 framed.append(&mut content);
+                if !decoration.maximized {
+                    let frame_height = height + crate::session::window_frame::TITLEBAR_HEIGHT;
+                    let shadows = crate::session::window_frame::shadow_layers(
+                        width,
+                        frame_height,
+                        decoration.active,
+                    );
+                    for shadow in shadows.images {
+                        if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                            renderer,
+                            (
+                                f64::from(local.0.round() as i32 + shadow.offset.0),
+                                f64::from(titlebar_y + shadow.offset.1),
+                            ),
+                            &shadow.buffer,
+                            None,
+                            None,
+                            Some(shadow.size.into()),
+                            Kind::Unspecified,
+                        ) {
+                            framed.push(element.into());
+                        }
+                    }
+                }
                 Some(framed)
             })
             .flatten()
@@ -3307,6 +3511,7 @@ mod tests {
         struct CopyApp {
             copies: usize,
             pending: bool,
+            completion: Option<Result<(), String>>,
         }
         impl Application for CopyApp {
             type Message = ();
@@ -3319,6 +3524,10 @@ mod tests {
             }
             fn take_clipboard_write(&mut self) -> Option<String> {
                 std::mem::take(&mut self.pending).then(|| "local copy".into())
+            }
+            fn clipboard_write_completed(&mut self, result: Result<(), String>) -> bool {
+                self.completion = Some(result);
+                true
             }
         }
         let mut runtime = InternalUiRuntime::default();
@@ -3335,7 +3544,12 @@ mod tests {
         );
         assert_eq!(
             runtime.take_clipboard_result(),
-            Some(Ok("local copy".into()))
+            Some((id, Ok("local copy".into())))
+        );
+        assert!(runtime.complete_clipboard_write(id, Ok(())));
+        assert_eq!(
+            runtime.application::<CopyApp>(id).unwrap().completion,
+            Some(Ok(()))
         );
         runtime.set_clipboard_limit(1);
         let generation = runtime.bounded_application_semantics(id).unwrap().0;
@@ -3345,7 +3559,7 @@ mod tests {
                 .unwrap_err(),
             "semantic action completed with a local effect failure; do not retry"
         );
-        assert!(runtime.take_clipboard_result().unwrap().is_err());
+        assert!(runtime.take_clipboard_result().unwrap().1.is_err());
         assert_eq!(runtime.application::<CopyApp>(id).unwrap().copies, 2);
         assert!(runtime.has_damage());
     }
@@ -3415,6 +3629,7 @@ mod tests {
             runtime.internal_frame_target((120.0, 60.0)),
             Some((id, crate::session::window_frame::FramePart::Titlebar))
         );
+        assert_eq!(runtime.painted_bounds(id), Some((100, 40, 460, 280)));
         assert_eq!(
             runtime.internal_frame_target((550.0, 60.0)),
             Some((id, crate::session::window_frame::FramePart::Close))
@@ -3480,6 +3695,25 @@ mod tests {
         runtime.keyboard(UiEvent::KeyboardActivate);
         runtime.clear_focus();
         assert!(runtime.drain_routed_events().is_empty());
+    }
+
+    #[test]
+    fn raised_application_wins_hit_testing_at_overlap() {
+        let mut runtime = InternalUiRuntime::default();
+        let placement = InternalSurfacePlacement {
+            role: InternalSurfaceRole::Application,
+            geometry: (0, 0, 100, 100),
+            output: None,
+        };
+        let first = runtime.insert(Counter(0), placement.clone(), 1.0);
+        let second = runtime.insert(Counter(0), placement, 1.0);
+        assert_eq!(runtime.surface_at((20.0, 20.0), false).unwrap().0, second);
+        assert!(runtime.raise(first));
+        assert_eq!(runtime.surface_at((20.0, 20.0), false).unwrap().0, first);
+        assert_eq!(
+            runtime.application_surface_at((20.0, 20.0)).unwrap().0,
+            first
+        );
     }
 
     #[test]

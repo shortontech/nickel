@@ -1962,10 +1962,10 @@ impl<Message: Clone> UiFrame<Message> {
             let step = (scroll.extent.viewport.height * 0.8).max(1.0) * direction;
             let invalidation = state.scroll_by(scroll.id.clone(), step, vertical_maximum);
             if invalidation != Invalidation::None
-                && let Some(map) = scroll.offset_mapper
                 && let Some(offset) = state.state(&scroll.id).map(|entry| entry.scroll_offset)
+                && let Some(message) = scroll.mapped_message(offset)
             {
-                messages.push(map(offset));
+                messages.push(message);
             }
             invalidation
         } else if horizontal_maximum > 0.0 {
@@ -2587,10 +2587,10 @@ impl<Message: Clone> UiFrame<Message> {
             ScrollbarAxis::Vertical => {
                 let invalidation = state.scroll_by(scroll.id.clone(), target - current, maximum);
                 if invalidation != Invalidation::None
-                    && let Some(map) = scroll.offset_mapper
                     && let Some(offset) = state.state(&scroll.id).map(|entry| entry.scroll_offset)
+                    && let Some(message) = scroll.mapped_message(offset)
                 {
-                    messages.push(map(offset));
+                    messages.push(message);
                 }
                 invalidation
             }
@@ -2636,10 +2636,10 @@ impl<Message: Clone> UiFrame<Message> {
         };
         if invalidation != Invalidation::None
             && axis == ScrollbarAxis::Vertical
-            && let Some(map) = scroll.offset_mapper
             && let Some(offset) = state.state(&scroll.id).map(|entry| entry.scroll_offset)
+            && let Some(message) = scroll.mapped_message(offset)
         {
-            messages.push(map(offset));
+            messages.push(message);
         }
         invalidation
     }
@@ -2750,11 +2750,11 @@ impl<Message: Clone> UiFrame<Message> {
                                     .max(0.0),
                             );
                             if changed != Invalidation::None
-                                && let Some(map) = scroll.offset_mapper
                                 && let Some(offset) =
                                     state.state(&scroll.id).map(|entry| entry.scroll_offset)
+                                && let Some(message) = scroll.mapped_message(offset)
                             {
-                                outcome.messages.push(map(offset));
+                                outcome.messages.push(message);
                             }
                             Some(changed)
                         })
@@ -3054,10 +3054,10 @@ impl<Message: Clone> UiFrame<Message> {
                     (scroll.extent.content.height - scroll.extent.viewport.height).max(0.0),
                 );
                 if invalidation != Invalidation::None
-                    && let Some(map) = scroll.offset_mapper
                     && let Some(offset) = state.state(&scroll.id).map(|entry| entry.scroll_offset)
+                    && let Some(message) = scroll.mapped_message(offset)
                 {
-                    outcome.messages.push(map(offset));
+                    outcome.messages.push(message);
                 }
                 invalidation
             }
@@ -4073,7 +4073,24 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     fn move_focus(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
-        let ids = self.focus_targets();
+        let focused = state.focused();
+        let open_dropdown = self.resolved.nodes().iter().find(|node| {
+            node.component == "Dropdown"
+                && state
+                    .state(&node.id)
+                    .is_some_and(|entry| entry.dropdown_open)
+                && focused.is_some_and(|focused| self.is_descendant_or_self(&node.id, focused))
+        });
+        // Tab through the choices of an open dropdown before leaving it. If
+        // focus jumps to unrelated controls first, blur closes the popup and
+        // keyboard users cannot reach its items at all.
+        let ids = self
+            .focus_targets()
+            .into_iter()
+            .filter(|id| {
+                open_dropdown.is_none_or(|dropdown| self.is_descendant_or_self(&dropdown.id, id))
+            })
+            .collect::<Vec<_>>();
         if ids.is_empty() {
             return state.set_focus(None);
         }

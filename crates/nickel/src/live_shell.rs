@@ -1,7 +1,7 @@
 mod preference_persistence;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -100,6 +100,7 @@ use nickel_session_protocol::{
     AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
     ShellPopoverAnchor, ShellSemanticTarget, WindowMenuTargetAction,
 };
+use nickel_ui::InternalSurfaceId;
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
@@ -137,8 +138,17 @@ use crate::{
     },
     winit_shell::SurfaceRole,
 };
+
 use nickel_input::KeyCode;
-use zeroize::{Zeroize, Zeroizing};
+#[cfg(not(target_os = "windows"))]
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum CodexApprovalOwner {
+    Internal(InternalSurfaceId),
+    Winit(crate::winit_shell::SurfaceId),
+}
 
 const RUN_COMMAND_LIMIT: usize = 4096;
 const RUN_SURFACE_WIDTH: u32 = 620;
@@ -570,6 +580,14 @@ pub struct LiveShell {
     session_host: Arc<dyn SessionHost>,
     screenshot_capture_pending: bool,
     pub(crate) screenshot_output: Option<String>,
+    #[cfg(target_os = "linux")]
+    active_window_capture: Option<ActiveWindowCapture>,
+    #[cfg(target_os = "linux")]
+    active_window_capture_target: Option<(
+        String,
+        nickel_session_protocol::Geometry,
+        nickel_session_protocol::Geometry,
+    )>,
     host_runtime_samples: HostRuntimeSamples,
     launcher: Launcher,
     window_feed: WindowFeed,
@@ -592,6 +610,30 @@ pub struct LiveShell {
     notification: Option<DesktopNotification>,
     notification_history_visible: bool,
     remote_lease_notifications: HashMap<u32, nickel_session_protocol::RemotePendingLease>,
+    remote_lease_submitting: HashSet<u32>,
+    dismissed_remote_lease_notifications: HashSet<u32>,
+    remote_lease_overflow_rejections: HashSet<(String, u64)>,
+    codex_approval_notifications: HashMap<
+        u32,
+        (
+            CodexApprovalOwner,
+            nickel_codex_ui::CodexApprovalNotification,
+        ),
+    >,
+    codex_approval_decisions: Vec<(
+        CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+        nickel_codex_ui::CodexApprovalChoice,
+    )>,
+    codex_approval_reviews: Vec<CodexApprovalOwner>,
+    codex_approval_delivery_updates: Vec<(
+        CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+        bool,
+    )>,
+    dismissed_codex_approval_notifications: HashSet<u32>,
+    codex_approval_overflow_outcomes:
+        HashSet<(CodexApprovalOwner, u64, nickel_codex::ServerRequestId, u64)>,
     #[cfg(target_os = "windows")]
     remote_lease_decisions: Vec<(nickel_session_protocol::RemotePendingLease, bool)>,
     wallpaper_path: Option<std::path::PathBuf>,
@@ -701,6 +743,54 @@ pub struct LiveShell {
     keyboard_deadline: Instant,
     keyboard_gesture_leases: HashMap<(nickel_input::DeviceId, Option<nickel_input::TouchId>), u64>,
     keyboard_recipient: Option<nickel_session_protocol::OnScreenKeyboardSnapshot>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct ActiveWindowCapture {
+    output: nickel_session_protocol::Geometry,
+    window: nickel_session_protocol::Geometry,
+    copy_path: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn active_window_capture_target(
+    snapshot: &nickel_session_protocol::Snapshot,
+) -> Option<(
+    String,
+    nickel_session_protocol::Geometry,
+    nickel_session_protocol::Geometry,
+)> {
+    let window = snapshot
+        .windows
+        .iter()
+        .find(|window| window.active)?
+        .geometry?;
+    let rect = nickel_core::geometry::LogicalRect {
+        x: window.x,
+        y: window.y,
+        width: window.width,
+        height: window.height,
+    };
+    let output = snapshot
+        .outputs
+        .iter()
+        .filter(|output| output.enabled)
+        .max_by_key(|output| {
+            rect.intersection_area(nickel_core::geometry::LogicalRect {
+                x: output.geometry.x,
+                y: output.geometry.y,
+                width: output.geometry.width,
+                height: output.geometry.height,
+            })
+        })?;
+    (rect.intersection_area(nickel_core::geometry::LogicalRect {
+        x: output.geometry.x,
+        y: output.geometry.y,
+        width: output.geometry.width,
+        height: output.geometry.height,
+    }) > 0)
+        .then(|| (output.name.clone(), output.geometry, window))
 }
 
 struct DesktopSurfaceViewport {
@@ -1071,6 +1161,10 @@ impl LiveShell {
             session_host: session_host.clone(),
             screenshot_capture_pending: false,
             screenshot_output: None,
+            #[cfg(target_os = "linux")]
+            active_window_capture: None,
+            #[cfg(target_os = "linux")]
+            active_window_capture_target: None,
             host_runtime_samples: HostRuntimeSamples::default(),
             launcher,
             window_feed,
@@ -1093,6 +1187,15 @@ impl LiveShell {
             notification: None,
             notification_history_visible: false,
             remote_lease_notifications: HashMap::new(),
+            remote_lease_submitting: HashSet::new(),
+            dismissed_remote_lease_notifications: HashSet::new(),
+            remote_lease_overflow_rejections: HashSet::new(),
+            codex_approval_notifications: HashMap::new(),
+            codex_approval_decisions: Vec::new(),
+            codex_approval_reviews: Vec::new(),
+            codex_approval_delivery_updates: Vec::new(),
+            dismissed_codex_approval_notifications: HashSet::new(),
+            codex_approval_overflow_outcomes: HashSet::new(),
             #[cfg(target_os = "windows")]
             remote_lease_decisions: Vec::new(),
             wallpaper_path,
@@ -1171,7 +1274,7 @@ impl LiveShell {
             launcher_view,
             launcher_icons,
             launcher_host,
-            launcher_status: application_status.map(str::to_owned),
+            launcher_status: application_status,
             #[cfg(target_os = "windows")]
             launcher_catalog_generation: 1,
             launcher_preference_persistence,
@@ -1231,7 +1334,28 @@ impl LiveShell {
                 })
                 .collect(),
         );
+        self.active_window_capture_target = active_window_capture_target(&snapshot);
         self.internal_session_snapshot = Some(snapshot);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn request_active_window_capture(&mut self, copy_path: bool) -> Result<(), String> {
+        let (output_name, output, window) = self
+            .active_window_capture_target
+            .clone()
+            .ok_or_else(|| "Nickel has no focused capturable application window".to_owned())?;
+        self.screenshot_output = Some(output_name);
+        self.active_window_capture = Some(ActiveWindowCapture {
+            output,
+            window,
+            copy_path,
+        });
+        if copy_path {
+            self.screenshot.request_capture_to_file();
+        } else {
+            self.screenshot.request_capture();
+        }
+        Ok(())
     }
 
     pub fn image_cache_diagnostics(&self) -> ShellImageCacheDiagnostics {
@@ -1448,6 +1572,21 @@ impl LiveShell {
             redraw.push(SurfaceRole::Panel);
         }
         let notification = self.notification_feed.snapshot();
+        let notification = if notification.as_ref().is_some_and(|item| {
+            self.dismissed_remote_lease_notifications.contains(&item.id)
+                || self
+                    .dismissed_codex_approval_notifications
+                    .contains(&item.id)
+        }) {
+            self.notification_feed.history().into_iter().find(|item| {
+                !self.dismissed_remote_lease_notifications.contains(&item.id)
+                    && !self
+                        .dismissed_codex_approval_notifications
+                        .contains(&item.id)
+            })
+        } else {
+            notification
+        };
         if !self.notification_history_visible && notification != self.notification {
             self.notification = notification;
             self.notification_host
@@ -1543,8 +1682,7 @@ impl LiveShell {
             discovery.status(),
             crate::model::ApplicationDiscoveryStatus::PartialFailure
         );
-        self.launcher_status =
-            application_discovery_status_label(discovery.status()).map(str::to_owned);
+        self.launcher_status = application_discovery_status_label(discovery.status());
         self.launcher
             .replace_discovered_applications(discovery.into_applications());
         #[cfg(target_os = "windows")]
@@ -2293,6 +2431,16 @@ impl LiveShell {
     pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
         self.run_visible
             .then_some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT))
+    }
+
+    pub(crate) fn launcher_preferred_surface_size(&mut self, maximum: (u32, u32)) -> (u32, u32) {
+        let status = self.launcher_status_text();
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, status);
+        self.launcher_host
+            .application()
+            .preferred_surface_size(maximum)
     }
 
     pub fn next_host_deadline(&self) -> Option<Instant> {
@@ -4375,20 +4523,30 @@ impl LiveShell {
                 self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch)
             }
             platform::GlobalShortcut::LockState { locked } => {
-                self.locked = locked;
-                let application = self.lock_host.application_mut();
-                application.password.zeroize();
-                application.status = None;
-                if locked {
-                    self.desktop_host
-                        .application_mut()
-                        .dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
-                    self.launcher_visible = false;
-                    self.control_visible = false;
-                    self.codex_project_menu_visible = false;
-                    self.close_window_preview();
+                #[cfg(target_os = "windows")]
+                {
+                    if locked && !platform::lock_workstation() {
+                        tracing::warn!("native Windows workstation lock request failed");
+                    }
+                    return true;
                 }
-                true
+                #[cfg(not(target_os = "windows"))]
+                {
+                    self.locked = locked;
+                    let application = self.lock_host.application_mut();
+                    application.password.zeroize();
+                    application.status = None;
+                    if locked {
+                        self.desktop_host
+                            .application_mut()
+                            .dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
+                        self.launcher_visible = false;
+                        self.control_visible = false;
+                        self.codex_project_menu_visible = false;
+                        self.close_window_preview();
+                    }
+                    true
+                }
             }
             platform::GlobalShortcut::ShowRun => self.set_run_visible(true),
             platform::GlobalShortcut::OpenFiles => self.launch_named_application("Nickel File"),
@@ -4477,26 +4635,38 @@ impl LiveShell {
                 true
             }
             platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::ActiveWindow) => {
-                if let Err(error) = platform::capture_active_window() {
+                #[cfg(target_os = "linux")]
+                let result = self.request_active_window_capture(false);
+                #[cfg(not(target_os = "linux"))]
+                let result = platform::capture_active_window();
+                if let Err(error) = result {
                     tracing::warn!(%error, "failed to copy active window screenshot");
                     self.screenshot.show_error(error);
                     self.set_screenshot_focus(true);
                     return true;
                 }
-                false
+                cfg!(target_os = "linux")
             }
             platform::GlobalShortcut::Screenshot(
                 platform::ScreenshotAction::ActiveWindowToFile,
             ) => {
-                if let Err(error) = platform::capture_active_window_to_file() {
+                #[cfg(target_os = "linux")]
+                let result = self.request_active_window_capture(true);
+                #[cfg(not(target_os = "linux"))]
+                let result = platform::capture_active_window_to_file();
+                if let Err(error) = result {
                     tracing::warn!(%error, "failed to capture active window to a temporary file");
                     self.screenshot.show_error(error);
                     self.set_screenshot_focus(true);
                     return true;
                 }
-                false
+                cfg!(target_os = "linux")
             }
             platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::InteractiveRegion) => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.active_window_capture = None;
+                }
                 let was_visible = self.screenshot.visible();
                 self.screenshot.request_capture();
                 if was_visible {
@@ -4507,6 +4677,10 @@ impl LiveShell {
             platform::GlobalShortcut::Screenshot(
                 platform::ScreenshotAction::InteractiveRegionToFile,
             ) => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.active_window_capture = None;
+                }
                 let was_visible = self.screenshot.visible();
                 self.screenshot.request_capture_to_file();
                 if was_visible {
@@ -4668,12 +4842,42 @@ impl LiveShell {
             crate::session_host::DesktopCapturePoll::Ready(result) => match result {
                 Ok(capture) => {
                     self.screenshot_capture_pending = false;
+                    #[cfg(target_os = "linux")]
+                    if let Some(active) = self.active_window_capture.take() {
+                        self.screenshot_output = None;
+                        let result = platform::crop_output_geometry(
+                            capture.image,
+                            active.output,
+                            active.window,
+                        )
+                        .and_then(|image| {
+                            if active.copy_path {
+                                self.session_host.copy_image_path(&image).map(|_| ())
+                            } else {
+                                self.session_host.copy_image(image)
+                            }
+                        });
+                        return match result {
+                            Ok(()) => false,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to finish active window capture");
+                                self.screenshot.show_error(error);
+                                self.set_screenshot_focus(true);
+                                true
+                            }
+                        };
+                    }
                     self.screenshot.show(capture.image);
                     self.set_screenshot_focus(true);
                     true
                 }
                 Err(error) => {
                     self.screenshot_capture_pending = false;
+                    self.screenshot_output = None;
+                    #[cfg(target_os = "linux")]
+                    {
+                        self.active_window_capture = None;
+                    }
                     tracing::warn!(%error, "failed to capture desktop");
                     self.screenshot.show_error(error);
                     self.set_screenshot_focus(true);
@@ -5505,30 +5709,71 @@ impl LiveShell {
                     notification_id,
                     key,
                 } => {
-                    #[cfg(target_os = "linux")]
-                    if let Some(pending) = self.remote_lease_notifications.remove(&notification_id)
+                    let offered = self.notification_feed.history().iter().any(|notification| {
+                        notification.id == notification_id
+                            && notification.actions.iter().any(|action| action.key == key)
+                    });
+                    if !offered {
+                        tracing::warn!(notification_id, %key, "notification action was not offered");
+                        continue;
+                    }
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    if let Some(pending) = self
+                        .remote_lease_notifications
+                        .get(&notification_id)
+                        .cloned()
                     {
-                        let allow = key == "approve";
-                        if (allow || key == "deny")
-                            && let Err(error) =
-                                self.session_host.decide_remote_lease(&pending, allow)
+                        if (key == "approve" || key == "deny")
+                            && !self.remote_lease_submitting.contains(&notification_id)
+                            && self
+                                .notification_feed
+                                .mark_internal_submitting(notification_id)
                         {
-                            tracing::warn!(%error, "remote lease notification action failed");
-                        }
-                    } else {
-                        self.notification_feed.invoke(notification_id, &key);
-                    }
-                    #[cfg(target_os = "windows")]
-                    if let Some(pending) = self.remote_lease_notifications.remove(&notification_id)
-                    {
-                        let allow = key == "approve";
-                        if allow || key == "deny" {
+                            self.remote_lease_submitting.insert(notification_id);
+                            let allow = key == "approve";
+                            #[cfg(target_os = "linux")]
+                            if let Err(error) =
+                                self.session_host.decide_remote_lease(&pending, allow)
+                            {
+                                tracing::warn!(%error, "remote lease notification decision is unconfirmed");
+                            }
+                            #[cfg(target_os = "windows")]
                             self.remote_lease_decisions.push((pending, allow));
+                            if self
+                                .notification
+                                .as_ref()
+                                .is_some_and(|item| item.id == notification_id)
+                            {
+                                self.notification = self
+                                    .notification_feed
+                                    .history()
+                                    .into_iter()
+                                    .find(|item| item.id == notification_id);
+                            }
                         }
-                    } else {
-                        self.notification_feed.invoke(notification_id, &key);
+                        continue;
                     }
-                    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                    if let Some((owner, pending)) = self
+                        .codex_approval_notifications
+                        .get(&notification_id)
+                        .cloned()
+                    {
+                        if key == "review" && pending.needs_review() && pending.actionable {
+                            self.codex_approval_reviews.push(owner);
+                            self.dismiss_notification_transport(notification_id);
+                            continue;
+                        }
+                        let choice = pending.notification_choice(&key);
+                        if let Some(choice) = choice
+                            && self
+                                .notification_feed
+                                .mark_internal_submitting(notification_id)
+                        {
+                            // The owning app revalidates the complete snapshot before dispatch.
+                            self.codex_approval_decisions.push((owner, pending, choice));
+                        }
+                        continue;
+                    }
                     self.notification_feed.invoke(notification_id, &key);
                     self.dismiss_notification_transport(notification_id);
                 }
@@ -5562,10 +5807,169 @@ impl LiveShell {
         self.sync_remote_lease_notifications_from(pending);
     }
 
+    pub(crate) fn sync_codex_approval_notifications(
+        &mut self,
+        pending: Vec<(
+            CodexApprovalOwner,
+            nickel_codex_ui::CodexApprovalNotification,
+        )>,
+    ) {
+        use nickel_codex_ui::PendingInteraction;
+
+        let identity =
+            |owner: CodexApprovalOwner, snapshot: &nickel_codex_ui::CodexApprovalNotification| {
+                let PendingInteraction::Approval { request_id, .. } = &snapshot.interaction else {
+                    unreachable!("approval projection cannot contain a question")
+                };
+                (owner, snapshot.connection_generation, request_id.clone())
+            };
+        let overflow_identity =
+            |owner: CodexApprovalOwner, snapshot: &nickel_codex_ui::CodexApprovalNotification| {
+                let (owner, generation, request_id) = identity(owner, snapshot);
+                (owner, generation, request_id, snapshot.request_revision)
+            };
+        self.codex_approval_overflow_outcomes.retain(|key| {
+            pending
+                .iter()
+                .any(|(owner, snapshot)| overflow_identity(*owner, snapshot) == *key)
+        });
+        let stale = self
+            .codex_approval_notifications
+            .iter()
+            .filter(|(_, (owner, shown))| {
+                !pending.iter().any(|(current_owner, current)| {
+                    identity(*current_owner, current) == identity(*owner, shown)
+                })
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in stale {
+            self.codex_approval_notifications.remove(&id);
+            self.dismissed_codex_approval_notifications.remove(&id);
+            self.notification_feed.close_internal(id);
+        }
+        for (owner, snapshot) in pending {
+            let key = identity(owner, &snapshot);
+            let existing =
+                self.codex_approval_notifications
+                    .iter()
+                    .find_map(|(id, (shown_owner, shown))| {
+                        (identity(*shown_owner, shown) == key).then_some((*id, shown.clone()))
+                    });
+            if existing
+                .as_ref()
+                .is_some_and(|(_, shown)| shown == &snapshot)
+            {
+                continue;
+            }
+            let displayable = snapshot.presentation.is_within_budget();
+            let request = NotificationRequest {
+                app_name: "Nickel Codex".into(),
+                summary: if displayable {
+                    snapshot.presentation.title()
+                } else {
+                    "Codex request cannot be displayed safely".into()
+                },
+                body: if displayable {
+                    // Notification history and copied summaries can outlive the
+                    // request. A raw command may contain credentials, so retain
+                    // exact detail only in the owning Codex interaction surface.
+                    let mut body = snapshot.presentation.notification_body();
+                    if snapshot.presentation.detail.is_some() {
+                        body.push_str(" Review the full operation in Codex before approving.");
+                    }
+                    body
+                } else {
+                    "Request details exceed the local display limit; approval is unavailable."
+                        .into()
+                },
+                actions: if snapshot.actionable && snapshot.needs_review() {
+                    vec![NotificationAction {
+                        key: "review".into(),
+                        label: "Review in Codex".into(),
+                    }]
+                } else if snapshot.actionable {
+                    snapshot
+                        .notification_actions()
+                        .into_iter()
+                        .filter(|(key, _)| {
+                            displayable || matches!(key.as_str(), "cancel" | "decline")
+                        })
+                        .map(|(key, label)| NotificationAction { key, label })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                expire_timeout_ms: 0,
+            };
+            let id = match existing {
+                Some((id, _)) => self.notification_feed.replace_internal(id, request),
+                None => self.notification_feed.notify_internal(request),
+            };
+            if id != 0 {
+                if self
+                    .codex_approval_overflow_outcomes
+                    .remove(&overflow_identity(owner, &snapshot))
+                {
+                    self.codex_approval_delivery_updates
+                        .push((owner, snapshot.clone(), true));
+                }
+                self.codex_approval_notifications
+                    .insert(id, (owner, snapshot));
+            } else if self
+                .codex_approval_overflow_outcomes
+                .insert(overflow_identity(owner, &snapshot))
+            {
+                // Preserve source authority: the backend may not have offered
+                // Decline, and a fabricated response would fail validation.
+                if let Some(choice) = snapshot.overflow_refusal_choice() {
+                    self.codex_approval_decisions
+                        .push((owner, snapshot, choice));
+                } else {
+                    self.codex_approval_delivery_updates
+                        .push((owner, snapshot, false));
+                    tracing::warn!(
+                        "Codex approval could not enter the notification feed and has no offered refusal; it remains pending in Codex"
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn take_codex_approval_decisions(
+        &mut self,
+    ) -> Vec<(
+        CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+        nickel_codex_ui::CodexApprovalChoice,
+    )> {
+        std::mem::take(&mut self.codex_approval_decisions)
+    }
+
+    pub(crate) fn take_codex_approval_reviews(&mut self) -> Vec<CodexApprovalOwner> {
+        std::mem::take(&mut self.codex_approval_reviews)
+    }
+
+    pub(crate) fn take_codex_approval_delivery_updates(
+        &mut self,
+    ) -> Vec<(
+        CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+        bool,
+    )> {
+        std::mem::take(&mut self.codex_approval_delivery_updates)
+    }
+
     pub(crate) fn sync_remote_lease_notifications_from(
         &mut self,
         pending: Vec<nickel_session_protocol::RemotePendingLease>,
     ) {
+        self.remote_lease_overflow_rejections
+            .retain(|(client_id, generation)| {
+                pending.iter().any(|request| {
+                    request.client_id == *client_id && request.pending_generation == *generation
+                })
+            });
         let stale = self
             .remote_lease_notifications
             .iter()
@@ -5579,6 +5983,8 @@ impl LiveShell {
             .collect::<Vec<_>>();
         for id in stale {
             self.remote_lease_notifications.remove(&id);
+            self.remote_lease_submitting.remove(&id);
+            self.dismissed_remote_lease_notifications.remove(&id);
             self.notification_feed.close_internal(id);
         }
         for request in pending {
@@ -5609,43 +6015,87 @@ impl LiveShell {
                             "a display".to_owned()
                         }
                     });
-            let duration = request
-                .request
-                .duration_seconds
-                .map(|seconds| {
-                    format!(
-                        " for {} minute{}",
-                        seconds.div_ceil(60),
-                        if seconds.div_ceil(60) == 1 { "" } else { "s" }
-                    )
-                })
-                .unwrap_or_default();
+            let duration = Some(request.request.duration_seconds.map_or_else(
+                || "until logout".to_owned(),
+                |seconds| {
+                    if seconds % 3_600 == 0 {
+                        format!("{} hours", seconds / 3_600)
+                    } else if seconds % 60 == 0 {
+                        format!("{} minutes", seconds / 60)
+                    } else {
+                        format!("{seconds} seconds")
+                    }
+                },
+            ));
+            let mut warnings = Vec::new();
+            if request.request.full_debug {
+                warnings.push("Full Nickel debugging access is requested.");
+            }
+            if request.request.allow_resumption {
+                warnings.push("This lease may resume after the client reconnects.");
+            }
+            if request.changes.access_changed {
+                warnings.push("This request broadens access from the previous request.");
+            }
+            if request.changes.duration_increased {
+                warnings.push("This request increases the duration.");
+            }
+            if request.request.renewal.is_some() {
+                warnings.push("This renews an existing lease; it does not extend until approved.");
+            }
+            let presentation = nickel_ui::approval::ApprovalPresentation {
+                requester: request.client_label.clone(),
+                identity: nickel_ui::approval::RequesterIdentity::SelfReportedRemote,
+                action: "Control desktop resources".into(),
+                scope: Some(scope),
+                duration,
+                warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
+                // These operations are implied by the resource lease, not separate grants.
+                detail: Some("Control may include observing and capturing the covered resource, pointer and keyboard input, and window management. Covered application launches may be possible when the scope permits. Protected surfaces and clipboard or filesystem transfer are excluded.".into()),
+            };
+            let displayable = presentation.is_within_budget();
             let id = self.notification_feed.notify_internal(NotificationRequest {
                 app_name: "Nickel".into(),
-                summary: "Remote control request".into(),
-                body: format!(
-                    "{} wants to control {scope}{duration}.{}",
-                    request.client_label,
-                    if request.request.full_debug {
-                        " This includes full Nickel debugging access."
-                    } else {
-                        ""
-                    }
-                ),
-                actions: vec![
+                summary: if displayable {
+                    presentation.title()
+                } else {
+                    "Remote control request cannot be displayed safely".into()
+                },
+                body: if displayable {
+                    presentation.notification_body_with_detail()
+                } else {
+                    "Request details exceed the local display limit. Approval is unavailable; you can deny the request."
+                        .into()
+                },
+                actions: [
                     NotificationAction {
                         key: "deny".into(),
                         label: "Deny".into(),
                     },
-                    NotificationAction {
-                        key: "approve".into(),
-                        label: "Approve".into(),
-                    },
-                ],
+                ]
+                .into_iter()
+                .chain(displayable.then_some(NotificationAction {
+                    key: "approve".into(),
+                    label: "Approve".into(),
+                }))
+                .collect(),
                 expire_timeout_ms: 0,
             });
             if id != 0 {
                 self.remote_lease_notifications.insert(id, request);
+            } else if self
+                .remote_lease_overflow_rejections
+                .insert((request.client_id.clone(), request.pending_generation))
+            {
+                tracing::warn!(
+                    "remote approval could not enter the bounded notification feed; rejecting the request"
+                );
+                #[cfg(target_os = "linux")]
+                if let Err(error) = self.session_host.decide_remote_lease(&request, false) {
+                    tracing::warn!(%error, "remote approval overflow rejection was unconfirmed");
+                }
+                #[cfg(target_os = "windows")]
+                self.remote_lease_decisions.push((request, false));
             }
         }
     }
@@ -5662,7 +6112,21 @@ impl LiveShell {
             return;
         }
         self.notification = None;
-        self.notification_feed.dismiss(notification_id);
+        if self
+            .remote_lease_notifications
+            .contains_key(&notification_id)
+        {
+            self.dismissed_remote_lease_notifications
+                .insert(notification_id);
+        } else if self
+            .codex_approval_notifications
+            .contains_key(&notification_id)
+        {
+            self.dismissed_codex_approval_notifications
+                .insert(notification_id);
+        } else {
+            self.notification_feed.dismiss(notification_id);
+        }
         self.notification_host
             .application_mut()
             .sync(None, self.palette);
@@ -5846,19 +6310,31 @@ impl LiveShell {
     }
 
     fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let had_project_pet = self.panel_host.application().groups.iter().take(12).any(|group| {
-            group
-                .application_id
-                .as_ref()
-                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-        });
+        let had_project_pet = self
+            .panel_host
+            .application()
+            .groups
+            .iter()
+            .take(12)
+            .any(|group| {
+                group
+                    .application_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+            });
         let application_changed = self.sync_panel_host();
-        let has_project_pet = self.panel_host.application().groups.iter().take(12).any(|group| {
-            group
-                .application_id
-                .as_ref()
-                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-        });
+        let has_project_pet = self
+            .panel_host
+            .application()
+            .groups
+            .iter()
+            .take(12)
+            .any(|group| {
+                group
+                    .application_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+            });
         let outcome = self.panel_host.step(HostBatch {
             application_changed,
             surface_size: Some((width, height)),
@@ -6630,12 +7106,15 @@ fn session_feed_status_label(
 
 fn application_discovery_status_label(
     status: crate::model::ApplicationDiscoveryStatus,
-) -> Option<&'static str> {
+) -> Option<String> {
+    let localizer = nickel_i18n::Localizer::system();
     match status {
-        crate::model::ApplicationDiscoveryStatus::ReadyEmpty => Some("No applications found."),
+        crate::model::ApplicationDiscoveryStatus::ReadyEmpty => {
+            Some(localizer.text("launcher-discovery-empty"))
+        }
         crate::model::ApplicationDiscoveryStatus::Ready => None,
         crate::model::ApplicationDiscoveryStatus::PartialFailure => {
-            Some("Some applications could not be loaded.")
+            Some(localizer.text("launcher-discovery-partial"))
         }
     }
 }

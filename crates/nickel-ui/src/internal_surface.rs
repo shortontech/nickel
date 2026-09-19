@@ -93,6 +93,7 @@ pub trait InternalUiSurface {
     fn render_frame(&self) -> crate::backend::RenderFrame<'_>;
     fn render_software(&self, renderer: &mut SoftwareRenderer) -> DamageRegion;
     fn paste_clipboard_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> bool;
+    fn clipboard_write_completed(&mut self, result: Result<(), String>) -> HostEventOutcome;
     fn set_controller_family(&mut self, family: ControllerFamily) -> bool;
     fn application(&self) -> &dyn Any;
     fn application_mut(&mut self) -> &mut dyn Any;
@@ -163,6 +164,17 @@ impl<A: crate::Application + 'static> InternalUiSurface for HostedApplication<A>
             self.scale_factor = scale;
         }
         self.host.step(batch)
+    }
+
+    fn clipboard_write_completed(&mut self, result: Result<(), String>) -> HostEventOutcome {
+        let changed = self
+            .host
+            .application_mut()
+            .clipboard_write_completed(result);
+        self.host.step(HostBatch {
+            application_changed: changed,
+            ..HostBatch::default()
+        })
     }
 
     fn inspect(&self) -> HostInspection {

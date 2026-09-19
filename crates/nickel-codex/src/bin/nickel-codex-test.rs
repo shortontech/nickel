@@ -216,6 +216,7 @@ fn backend_operation(
                 project_id: None,
                 reasoning_effort: None,
                 approval_policy: ApprovalPolicy::OnRequest,
+                sandbox_policy: None,
             })?;
             if option(args, "--text").is_some() {
                 let text = turn_text(args)?;
@@ -226,6 +227,8 @@ fn backend_operation(
                     model: None,
                     reasoning_effort: None,
                     approval_policy: ApprovalPolicy::OnRequest,
+                    sandbox_policy: None,
+                    plan_mode: false,
                 })?;
                 json_value(json!({"thread": thread, "turn": turn}))
             } else {
@@ -254,6 +257,8 @@ fn backend_operation(
                         model: None,
                         reasoning_effort: None,
                         approval_policy: ApprovalPolicy::OnRequest,
+                        sandbox_policy: None,
+                        plan_mode: false,
                     })
                 })
                 .and_then(json_value)

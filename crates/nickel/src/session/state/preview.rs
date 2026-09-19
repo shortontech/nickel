@@ -35,13 +35,27 @@ impl PreviewFailure {
 }
 
 pub(crate) fn preview_capture_dimensions(width: i32, height: i32) -> Option<(u16, u16)> {
+    preview_capture_dimensions_with_limit(
+        width,
+        height,
+        PREVIEW_WIDTH as u16,
+        PREVIEW_HEIGHT as u16,
+    )
+}
+
+pub(crate) fn preview_capture_dimensions_with_limit(
+    width: i32,
+    height: i32,
+    maximum_width: u16,
+    maximum_height: u16,
+) -> Option<(u16, u16)> {
     if width <= 0 || height <= 0 {
         return None;
     }
     let width = u64::try_from(width).ok()?;
     let height = u64::try_from(height).ok()?;
-    let max_width = PREVIEW_WIDTH as u64;
-    let max_height = PREVIEW_HEIGHT as u64;
+    let max_width = u64::from(maximum_width.max(1));
+    let max_height = u64::from(maximum_height.max(1));
     let (fitted_width, fitted_height) = if width * max_height > max_width * height {
         (max_width, (height * max_width / width).max(1))
     } else {
@@ -384,6 +398,46 @@ impl NickelSession {
         let now = Instant::now();
         let admitted = self.preview_admitted.clone();
         let dirty = self.preview_dirty.clone();
+        let internal = self
+            .internal_window_surfaces
+            .iter()
+            .filter_map(|(id, surface)| admitted.contains(id).then_some((*id, *surface)))
+            .collect::<Vec<_>>();
+        for (id, surface) in internal {
+            if !self.preview_retry_ready(id, now)
+                || (!dirty.contains(&id) && self.preview_frames.contains_key(&id))
+            {
+                if self.preview_frames.contains_key(&id) {
+                    self.preview_counters.skipped_unchanged += 1;
+                }
+                continue;
+            }
+            let generation = self
+                .preview_content_generation
+                .get(&id)
+                .copied()
+                .unwrap_or(1);
+            if !record_preview_capture_attempt(&mut self.preview_attempted, id, generation, wave) {
+                continue;
+            }
+            if let Some((width, height, rgba)) = self.internal_ui.preview_pixels(
+                surface,
+                PREVIEW_WIDTH as u16,
+                PREVIEW_HEIGHT as u16,
+            ) {
+                self.store_preview(
+                    id,
+                    PreviewFrame {
+                        width,
+                        height,
+                        rgba,
+                    },
+                );
+            } else {
+                self.preview_counters.capture_failures += 1;
+                self.record_preview_failure(id, now);
+            }
+        }
         let mut candidates = Vec::new();
         let windows = self.space.elements().cloned().collect::<Vec<_>>();
         for window in windows {

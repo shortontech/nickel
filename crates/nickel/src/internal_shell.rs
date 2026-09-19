@@ -181,6 +181,42 @@ impl InternalShellCoordinator {
         self.shell.set_dashboard_projects(projects)
     }
 
+    pub(crate) fn sync_codex_approval_notifications(
+        &mut self,
+        pending: Vec<(
+            crate::live_shell::CodexApprovalOwner,
+            nickel_codex_ui::CodexApprovalNotification,
+        )>,
+    ) {
+        self.shell.sync_codex_approval_notifications(pending);
+    }
+
+    pub(crate) fn take_codex_approval_decisions(
+        &mut self,
+    ) -> Vec<(
+        crate::live_shell::CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+        nickel_codex_ui::CodexApprovalChoice,
+    )> {
+        self.shell.take_codex_approval_decisions()
+    }
+
+    pub(crate) fn take_codex_approval_reviews(
+        &mut self,
+    ) -> Vec<crate::live_shell::CodexApprovalOwner> {
+        self.shell.take_codex_approval_reviews()
+    }
+
+    pub(crate) fn take_codex_approval_delivery_updates(
+        &mut self,
+    ) -> Vec<(
+        crate::live_shell::CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+        bool,
+    )> {
+        self.shell.take_codex_approval_delivery_updates()
+    }
+
     pub fn take_requested_codex_project(&mut self) -> Option<String> {
         self.shell.take_requested_codex_project()
     }
@@ -252,7 +288,12 @@ impl InternalShellCoordinator {
                 SurfaceRole::Screenshot,
                 SurfaceRole::OnScreenKeyboard,
             ] {
-                let size = role_size(role, primary.width, primary.height, self.panel_edge);
+                let maximum = role_size(role, primary.width, primary.height, self.panel_edge);
+                let size = if role == SurfaceRole::Launcher {
+                    self.shell.launcher_preferred_surface_size(maximum)
+                } else {
+                    maximum
+                };
                 desired.push((role, None, size));
             }
         }
@@ -373,6 +414,10 @@ impl InternalShellCoordinator {
 
     pub fn surfaces(&self) -> &[InternalShellSurface] {
         &self.entries
+    }
+
+    pub(crate) fn launcher_preferred_surface_size(&mut self, maximum: (u32, u32)) -> (u32, u32) {
+        self.shell.launcher_preferred_surface_size(maximum)
     }
 
     /// Keep scene layout and normalized input in the same compositor-owned
@@ -1366,6 +1411,27 @@ mod tests {
     fn coordinator() -> InternalShellCoordinator {
         InternalShellCoordinator::new(Arc::new(TestHost), PanelEdge::Bottom)
             .expect("headless shell coordinator")
+    }
+
+    #[test]
+    fn dashboard_launcher_slot_uses_its_content_size() {
+        let mut shell = coordinator();
+        shell.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "test".into(),
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+        }]);
+        let launcher = shell.surface(SurfaceRole::Launcher, None).unwrap();
+        assert!(launcher.size.0 >= nickel_ui::START_MENU_SINGLE_PANE_BREAKPOINT as u32);
+        assert!(launcher.size.0 < 960);
+        assert!(launcher.size.1 < 720);
+        assert_eq!(
+            shell.surfaces.get(launcher.id).unwrap().logical_size(),
+            launcher.size
+        );
     }
 
     struct StorageHost(Arc<AtomicU8>);

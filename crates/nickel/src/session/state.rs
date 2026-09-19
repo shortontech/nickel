@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     hash::Hash,
+    io::Write,
     os::fd::AsFd,
     os::fd::AsRawFd,
     os::unix::net::UnixDatagram,
@@ -18,6 +19,64 @@ type RemoteIndicatorAccessibility = (
     crate::trusted_accessibility::native::IndicatorAccessibility,
     Vec<(u64, u64, u64)>,
 );
+
+/// Data source used when an embedded Nickel File surface starts a drag.
+/// Unlike a standalone winit window, the embedded surface has no client-side
+/// Wayland data device; the compositor owns the drag source and serves the
+/// same bounded URI payload to the receiving client.
+struct InternalFileDragSource {
+    paths: Arc<Vec<PathBuf>>,
+}
+
+impl InternalFileDragSource {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths: Arc::new(paths),
+        }
+    }
+}
+
+impl smithay::utils::IsAlive for InternalFileDragSource {
+    fn alive(&self) -> bool {
+        true
+    }
+}
+
+impl smithay::input::dnd::Source for InternalFileDragSource {
+    fn metadata(&self) -> Option<smithay::input::dnd::SourceMetadata> {
+        Some(smithay::input::dnd::SourceMetadata {
+            mime_types: vec!["text/uri-list".into()],
+            dnd_actions: vec![
+                smithay::input::dnd::DndAction::Copy,
+                smithay::input::dnd::DndAction::Move,
+            ]
+            .into_iter()
+            .collect(),
+        })
+    }
+
+    fn choose_action(&self, _action: smithay::input::dnd::DndAction) {}
+
+    fn send(&self, mime_type: &str, fd: std::os::fd::OwnedFd) {
+        if mime_type != "text/uri-list" {
+            return;
+        }
+        let paths = Arc::clone(&self.paths);
+        std::thread::spawn(move || {
+            let mut stream = std::fs::File::from(fd);
+            for path in paths.iter() {
+                let Ok(uri) = url::Url::from_file_path(path) else {
+                    continue;
+                };
+                let _ = writeln!(stream, "{uri}");
+            }
+        });
+    }
+
+    fn drop_performed(&self) {}
+    fn cancel(&self) {}
+    fn finished(&self) {}
+}
 
 /// A stalled local subscriber must never block compositor input or revocation.
 /// Existing send-error handling retires subscribers whose bounded queue is full.
@@ -1816,7 +1875,10 @@ use smithay::{
         pointer_constraints::PointerConstraintsState,
         relative_pointer::RelativePointerManagerState,
         seat::WaylandFocus,
-        selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
+        selection::{
+            data_device::DataDeviceState, ext_data_control::DataControlState,
+            primary_selection::PrimarySelectionState,
+        },
         shell::xdg::{
             ToplevelSurface, XdgShellState, decoration::XdgDecorationState, dialog::XdgDialogState,
         },
@@ -3241,6 +3303,20 @@ mod internal_shell_placement_tests {
     }
 
     #[test]
+    fn launcher_placement_anchors_the_actual_content_sized_surface() {
+        let placement = internal_shell_surface_placement(
+            SurfaceRole::Launcher,
+            None,
+            (640, 600),
+            &outputs(),
+            Some("right"),
+        );
+
+        assert_eq!(placement.geometry, (18, 1016, 640, 600));
+        assert_eq!(placement.geometry.1 + placement.geometry.3 as i32, 1616);
+    }
+
+    #[test]
     fn context_menu_moves_away_from_trusted_control_without_leaving_output() {
         assert_eq!(
             avoid_trusted_control_collision(
@@ -3357,6 +3433,29 @@ mod internal_shell_placement_tests {
     }
 
     #[test]
+    fn codex_menu_fits_a_nested_960_by_600_output_above_the_panel() {
+        let outputs = vec![(
+            crate::internal_shell::InternalOutput {
+                name: "nested".into(),
+                width: 960,
+                height: 600,
+                scale: 1.0,
+                x: 0,
+                y: 0,
+            },
+            0,
+            0,
+        )];
+        let placement = internal_codex_project_menu_placement(None, &outputs, None);
+        let (width, height) = placement.menu_size.expect("sized menu");
+        assert_eq!((width, height), (520, 528));
+        assert!(placement.origin.0 >= 0);
+        assert!(placement.origin.0 + width as i32 <= 960);
+        assert!(placement.origin.1 >= 0);
+        assert!(placement.origin.1 + height as i32 <= 544);
+    }
+
+    #[test]
     fn codex_chat_frame_is_centered_inside_nonzero_output_work_area() {
         let placement = internal_codex_chat_placement(&outputs(), Some("right"));
 
@@ -3393,6 +3492,35 @@ mod internal_shell_placement_tests {
         assert!(outer.y >= -120);
         assert!(outer.x + outer.width <= 0);
         assert!(outer.y + outer.height <= -120 + 1080 - crate::winit_shell::PANEL_HEIGHT as i32);
+    }
+
+    #[test]
+    fn codex_chat_frame_fits_a_nested_960_by_600_output() {
+        let outputs = vec![(
+            crate::internal_shell::InternalOutput {
+                name: "nested".into(),
+                width: 960,
+                height: 600,
+                scale: 1.0,
+                x: 0,
+                y: 0,
+            },
+            0,
+            0,
+        )];
+        let placement = internal_codex_chat_placement(&outputs, Some("nested"));
+        let (width, height) = placement.chat_size.expect("bounded chat size");
+        assert_eq!((width, height), (950, 494));
+        let outer =
+            crate::session::window_frame::outer_geometry(crate::session::shell_layout::Geometry {
+                x: placement.origin.0,
+                y: placement.origin.1,
+                width: width as i32,
+                height: height as i32,
+            });
+        assert!(outer.x >= 0 && outer.y >= 0);
+        assert!(outer.x + outer.width <= 960);
+        assert!(outer.y + outer.height <= 544);
     }
 }
 
@@ -3998,6 +4126,12 @@ fn revisions_for_authorized_x11_request(
         .then(|| authority.revisions())
 }
 
+#[derive(Clone)]
+pub(crate) enum OrdinarySceneWindow {
+    Internal(nickel_ui::InternalSurfaceId),
+    Client(Window),
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -4031,7 +4165,10 @@ pub struct NickelSession {
     pub(crate) remote_indicator_accessibility:
         HashMap<nickel_ui::InternalSurfaceId, RemoteIndicatorAccessibility>,
     remote_indicator_accessibility_wake: smithay::reexports::calloop::channel::Sender<()>,
-    internal_file_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+    pub(crate) internal_file_surfaces:
+        HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+    pub(crate) internal_file_drag_serial:
+        Option<(nickel_ui::InternalSurfaceId, smithay::utils::Serial)>,
     internal_file_context_popup:
         Option<(nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId)>,
     /// Latest motion is reduced immediately; scene work is bounded by frames.
@@ -4057,6 +4194,7 @@ pub struct NickelSession {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<NickelSession>,
     pub data_device_state: DataDeviceState,
+    pub ext_data_control_state: DataControlState,
     pub primary_selection_state: PrimarySelectionState,
     pub dnd_icon: Option<WlSurface>,
     pub relative_pointer_state: RelativePointerManagerState,
@@ -4101,6 +4239,7 @@ pub struct NickelSession {
     pub launcher_visibility: LauncherVisibility,
     launcher_output_name: Option<String>,
     last_interaction_output_name: Option<String>,
+    pub(crate) last_absolute_pointer_anchor: Option<AbsolutePointerAnchor>,
     launcher_focus: FocusTransactions<ObjectId>,
     seat_focus: FocusTransactions<Option<crate::session::focus::KeyboardFocusTarget>>,
     seat_focus_security_epoch: u64,
@@ -4318,7 +4457,8 @@ pub use preview::{
 };
 pub(crate) use preview::{
     PreviewCacheCounters, bounded_preview_ids, preview_capture_dimensions,
-    preview_mapping_has_exact_size, protocol_preview_from_cached, reuse_preview_pixels,
+    preview_capture_dimensions_with_limit, preview_mapping_has_exact_size,
+    protocol_preview_from_cached, reuse_preview_pixels,
 };
 #[cfg(test)]
 use preview::{
@@ -4737,7 +4877,7 @@ impl NickelSession {
         }
         let internal = self.internal_ui.surface_at(
             (f64::from(x), f64::from(y)),
-            self.client_scene_under(point) && !self.internal_applications_are_foremost(),
+            self.client_scene_foremost_at(point),
         );
         match target {
             PointerTarget::Window {
@@ -4754,10 +4894,10 @@ impl NickelSession {
                 let Some(window) = self.window_for_registry_id(id) else {
                     return false;
                 };
-                self.space
-                    .element_under(point)
-                    .is_some_and(|(hit, _)| hit == &window)
-                    && self.surface_under(point).is_some()
+                matches!(
+                    self.effective_scene_hit_at(point),
+                    Some(OrdinarySceneWindow::Client(hit)) if hit == window
+                ) && self.surface_under(point).is_some()
             }
             PointerTarget::Surface {
                 surface_id,
@@ -4805,13 +4945,21 @@ impl NickelSession {
         if let Some((surface, _)) = internal {
             return !self.internal_ui.remote_access_protected(surface);
         }
-        let Some((window, _)) = self.space.element_under(point) else {
-            return true;
-        };
-        window
-            .wl_surface()
-            .and_then(|surface| self.surface_windows.get(&surface.id()))
-            .is_some_and(|id| !self.remote_window_is_protected(*id))
+        match self.effective_scene_hit_at(point) {
+            None => true,
+            Some(OrdinarySceneWindow::Internal(surface)) => {
+                !self.internal_ui.remote_access_protected(surface)
+            }
+            Some(OrdinarySceneWindow::Client(window)) => window
+                .wl_surface()
+                .and_then(|surface| self.surface_windows.get(&surface.id()).copied())
+                .or_else(|| {
+                    window
+                        .x11_surface()
+                        .and_then(|surface| self.x11_windows.get(&surface.window_id()).copied())
+                })
+                .is_some_and(|id| !self.remote_window_is_protected(id)),
+        }
     }
 
     fn remote_window_summary(
@@ -6666,9 +6814,19 @@ impl NickelSession {
                 .collect::<Vec<_>>(),
         );
 
-        for surface in shell.surfaces().to_vec() {
+        for mut surface in shell.surfaces().to_vec() {
             if !shell.visible(surface.id) {
                 continue;
+            }
+            if surface.role == crate::winit_shell::SurfaceRole::Launcher
+                && let Some(size) = launcher_surface_size_for_output(
+                    shell,
+                    &outputs,
+                    self.launcher_output_name.as_deref(),
+                )
+            {
+                surface.size = size;
+                shell.set_surface_size(surface.id, size);
             }
             let Some(scene) = shell.scene(surface.id) else {
                 continue;
@@ -6791,6 +6949,66 @@ impl NickelSession {
         let chat_placement =
             internal_codex_chat_placement(&self.internal_outputs(), chat_output.as_deref());
         if let Some(mut codex) = self.internal_codex.take() {
+            let approval_decisions = self
+                .internal_shell
+                .as_mut()
+                .map(|shell| shell.take_codex_approval_decisions())
+                .unwrap_or_default();
+            for (owner, snapshot, choice) in approval_decisions {
+                let crate::live_shell::CodexApprovalOwner::Internal(id) = owner else {
+                    continue;
+                };
+                if self
+                    .internal_ui
+                    .application_mut::<nickel_codex_ui::ChatApplication>(id)
+                    .is_some_and(|app| app.respond_approval_notification(&snapshot, choice))
+                {
+                    self.internal_ui.step(
+                        id,
+                        nickel_ui::HostBatch {
+                            application_changed: true,
+                            events: vec![nickel_ui::HostEvent::Poll],
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            let delivery_updates = self
+                .internal_shell
+                .as_mut()
+                .map(|shell| shell.take_codex_approval_delivery_updates())
+                .unwrap_or_default();
+            for (owner, snapshot, delivered) in delivery_updates {
+                let crate::live_shell::CodexApprovalOwner::Internal(id) = owner else {
+                    continue;
+                };
+                if self
+                    .internal_ui
+                    .application_mut::<nickel_codex_ui::ChatApplication>(id)
+                    .is_some_and(|app| {
+                        app.report_approval_notification_delivery(&snapshot, delivered)
+                    })
+                {
+                    self.internal_ui.step(
+                        id,
+                        nickel_ui::HostBatch {
+                            application_changed: true,
+                            events: vec![nickel_ui::HostEvent::Poll],
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            let approval_reviews = self
+                .internal_shell
+                .as_mut()
+                .map(|shell| shell.take_codex_approval_reviews())
+                .unwrap_or_default();
+            for owner in approval_reviews {
+                if let crate::live_shell::CodexApprovalOwner::Internal(id) = owner {
+                    self.focus_internal_surface(id);
+                }
+            }
             let changed = codex.poll_due(&mut self.internal_ui, now);
             let opened = codex
                 .service_requests(&mut self.internal_ui, chat_placement)
@@ -6798,10 +7016,16 @@ impl NickelSession {
                     tracing::warn!(%error, "could not service internal Codex request");
                     Vec::new()
                 });
+            let chat_requests_changed = codex.service_chat_requests(&mut self.internal_ui);
             let projection_changed = self
                 .internal_shell
                 .as_mut()
                 .is_some_and(|shell| codex.sync_shell_projection(&self.internal_ui, shell));
+            if let Some(shell) = self.internal_shell.as_mut() {
+                shell.sync_codex_approval_notifications(
+                    codex.approval_notifications(&self.internal_ui),
+                );
+            }
             self.internal_codex = Some(codex);
             for surface in &opened {
                 self.register_internal_application(*surface);
@@ -6810,7 +7034,11 @@ impl NickelSession {
             if projection_changed {
                 self.sync_internal_shell();
             }
-            if !changed.is_empty() || !opened.is_empty() || projection_changed {
+            if !changed.is_empty()
+                || !opened.is_empty()
+                || chat_requests_changed
+                || projection_changed
+            {
                 self.schedule_internal_ui_frame();
             }
         }
@@ -7064,30 +7292,208 @@ impl NickelSession {
         self.internal_surface_windows.get(&surface).copied()
     }
 
-    /// Whether the foremost ordinary window is compositor-hosted.
-    ///
-    /// Internal applications currently form one contiguous scene group. The
-    /// canonical registry decides which side of the external client group it
-    /// occupies, so activating either kind produces ordinary raise behavior.
-    pub(crate) fn internal_applications_are_foremost(&self) -> bool {
+    /// One production-owned ordinary window order, front to back. Renderers
+    /// and input routing project this order rather than moving all internal
+    /// applications as a separate block.
+    pub(crate) fn ordinary_scene_order(&self) -> Vec<OrdinarySceneWindow> {
         self.windows
             .snapshot()
-            .last()
-            .is_some_and(|window| self.internal_surface_for_window(window.id).is_some())
+            .into_iter()
+            .rev()
+            .filter_map(|window| {
+                if let Some(surface) = self.internal_surface_for_window(window.id) {
+                    self.internal_ui
+                        .is_visible(surface)
+                        .then_some(OrdinarySceneWindow::Internal(surface))
+                } else {
+                    self.window_for_registry_id(window.id)
+                        .map(OrdinarySceneWindow::Client)
+                }
+            })
+            .collect()
     }
 
-    pub(crate) fn foremost_internal_application_covers(
-        &self,
-        position: Point<f64, Logical>,
-    ) -> bool {
-        if !self.internal_applications_are_foremost() {
-            return false;
+    /// Resolve the top ordinary application from the registry order shared by
+    /// renderers and input. A returned client may be hit only on its frame.
+    fn ordinary_scene_hit_at(&self, pos: Point<f64, Logical>) -> Option<OrdinarySceneWindow> {
+        if self.locked {
+            return None;
         }
-        let point = (position.x, position.y);
-        self.internal_ui
-            .application_surface_at(point)
-            .is_some_and(|(id, _)| self.internal_ui.is_visible(id))
-            || self.internal_ui.internal_frame_target(point).is_some()
+        let point = (pos.x, pos.y);
+        for window in self.ordinary_scene_order() {
+            match window {
+                OrdinarySceneWindow::Internal(id) => {
+                    if self.internal_ui.application_covers(id, point) {
+                        return Some(OrdinarySceneWindow::Internal(id));
+                    }
+                }
+                OrdinarySceneWindow::Client(window) => {
+                    let Some(location) = self.space.element_location(&window) else {
+                        continue;
+                    };
+                    if window
+                        .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                        .is_some()
+                    {
+                        return Some(OrdinarySceneWindow::Client(window));
+                    }
+                    if self.is_server_decorated(&window)
+                        && !self.is_fullscreen_window(&window)
+                        && self.space.element_geometry(&window).is_some_and(|bounds| {
+                            crate::session::window_frame::hit_test(
+                                crate::session::shell_layout::Geometry {
+                                    x: bounds.loc.x,
+                                    y: bounds.loc.y,
+                                    width: bounds.size.w,
+                                    height: bounds.size.h,
+                                },
+                                pos.x.round() as i32,
+                                pos.y.round() as i32,
+                            )
+                            .is_some()
+                        })
+                    {
+                        return Some(OrdinarySceneWindow::Client(window));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn effective_scene_hit_at(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<OrdinarySceneWindow> {
+        if let Some((surface, _)) = self.internal_ui.surface_at((pos.x, pos.y), true) {
+            return Some(OrdinarySceneWindow::Internal(surface));
+        }
+        let space_hit = self
+            .space
+            .element_under(pos)
+            .filter(|(window, _)| !self.locked || self.lock_windows.contains(window));
+        if let Some((window, _)) = space_hit
+            && self.is_shell_owned_window(window)
+            && !self.desktop_windows.contains(window)
+        {
+            return Some(OrdinarySceneWindow::Client(window.clone()));
+        }
+        self.ordinary_scene_hit_at(pos)
+            .or_else(|| space_hit.map(|(window, _)| OrdinarySceneWindow::Client(window.clone())))
+    }
+
+    /// Whether a client, rather than an ordinary internal application, owns
+    /// the foremost hit at this point. Renderers use the same registry order.
+    pub(crate) fn client_scene_foremost_at(&self, pos: Point<f64, Logical>) -> bool {
+        match self.effective_scene_hit_at(pos) {
+            Some(OrdinarySceneWindow::Client(_)) => true,
+            Some(OrdinarySceneWindow::Internal(_)) => false,
+            None => self.client_scene_under(pos),
+        }
+    }
+
+    pub(crate) fn client_frame_target_at(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(Window, crate::session::window_frame::FramePart)> {
+        let OrdinarySceneWindow::Client(window) = self.effective_scene_hit_at(pos)? else {
+            return None;
+        };
+        if self.shell_windows().any(|shell| shell == &window)
+            || self.is_fullscreen_window(&window)
+            || !self.is_server_decorated(&window)
+        {
+            return None;
+        }
+        let bounds = self.space.element_geometry(&window)?;
+        let part = crate::session::window_frame::hit_test(
+            crate::session::shell_layout::Geometry {
+                x: bounds.loc.x,
+                y: bounds.loc.y,
+                width: bounds.size.w,
+                height: bounds.size.h,
+            },
+            pos.x.round() as i32,
+            pos.y.round() as i32,
+        )?;
+        if part.is_resize() {
+            if self.is_maximized_window(&window) {
+                return None;
+            }
+            let constraints =
+                crate::session::grabs::resize_grab::operation_geometry_constraints(&window);
+            if !part.resize_allowed(
+                constraints
+                    .max_width
+                    .is_none_or(|max| max > constraints.min_width),
+                constraints
+                    .max_height
+                    .is_none_or(|max| max > constraints.min_height),
+            ) {
+                return None;
+            }
+        }
+        // XWayland's window geometry can expose the client surface across the
+        // compositor-owned titlebar offset. Once ordinary-scene ordering has
+        // selected this decorated X11 owner, its explicit frame geometry is
+        // authoritative. Wayland subsurfaces/popups still occlude a frame when
+        // their real surface tree occupies the point.
+        if window.x11_surface().is_none() {
+            let location = self.space.element_location(&window)?;
+            let occupying_surface = window
+                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                .map(|(surface, _)| surface);
+            if occupying_surface.is_some_and(|surface| {
+                window
+                    .wl_surface()
+                    .is_none_or(|root| root.as_ref() != &surface)
+            }) {
+                return None;
+            }
+        }
+        Some((window, part))
+    }
+
+    pub(crate) fn internal_frame_target_at(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(
+        nickel_ui::InternalSurfaceId,
+        crate::session::window_frame::FramePart,
+    )> {
+        let (surface, part) = self.internal_ui.internal_frame_target((pos.x, pos.y))?;
+        if !part.is_resize() {
+            return Some((surface, part));
+        }
+        let window = self.internal_window_for_surface(surface)?;
+        if self.internal_maximized_restore.contains_key(&window) {
+            return None;
+        }
+        let constraints = self.internal_resize_constraints(surface);
+        part.resize_allowed(
+            constraints
+                .max_width
+                .is_none_or(|max| max > constraints.min_width),
+            constraints
+                .max_height
+                .is_none_or(|max| max > constraints.min_height),
+        )
+        .then_some((surface, part))
+    }
+
+    pub(crate) fn effective_frame_part_at(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<crate::session::window_frame::FramePart> {
+        match self.effective_scene_hit_at(pos)? {
+            OrdinarySceneWindow::Internal(expected) => self
+                .internal_frame_target_at(pos)
+                .filter(|(surface, _)| *surface == expected)
+                .map(|(_, part)| part),
+            OrdinarySceneWindow::Client(_) => {
+                self.client_frame_target_at(pos).map(|(_, part)| part)
+            }
+        }
     }
 
     fn apply_internal_file_action(&mut self, action: nickel_file::FileWindowAction) {
@@ -8160,6 +8566,15 @@ impl NickelSession {
                 }
                 continue;
             }
+            if surface.role == crate::winit_shell::SurfaceRole::Launcher
+                && let Some(size) = launcher_surface_size_for_output(
+                    &mut shell,
+                    &outputs,
+                    self.launcher_output_name.as_deref(),
+                )
+            {
+                surface.size = size;
+            }
             let interaction_output = match surface.role {
                 crate::winit_shell::SurfaceRole::ControlCenter => shell
                     .popover_anchor(nickel_session_protocol::AnchorSide::Above)
@@ -8391,6 +8806,52 @@ impl NickelSession {
         removed
     }
 
+    fn resolve_moved_internal_application(
+        &self,
+        mut placement: crate::session::InternalSurfacePlacement,
+    ) -> (crate::session::InternalSurfacePlacement, f32) {
+        let outputs = self.internal_outputs();
+        let candidates = outputs
+            .iter()
+            .map(|(output, _, _)| nickel_core::dpi::OutputScale {
+                identity: output.name.clone(),
+                geometry: nickel_core::dpi::LogicalRect {
+                    x: output.x,
+                    y: output.y,
+                    width: output.width as i32,
+                    height: output.height as i32,
+                },
+                scale: nickel_core::dpi::Scale120::new((output.scale * 120.0).round() as u32)
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        let selected = nickel_core::dpi::select_effective_output(
+            nickel_core::dpi::LogicalRect {
+                x: placement.geometry.0,
+                y: placement.geometry.1,
+                width: placement.geometry.2 as i32,
+                height: placement.geometry.3 as i32,
+            },
+            &candidates,
+            placement.output.as_deref(),
+            self.last_interaction_output_name.as_deref(),
+            4_096,
+        );
+        if let Some(output) = selected.output {
+            placement.output = Some(output);
+        } else if !outputs
+            .iter()
+            .any(|(output, _, _)| Some(output.name.as_str()) == placement.output.as_deref())
+        {
+            placement.output = outputs.first().map(|(output, _, _)| output.name.clone());
+        }
+        let scale = outputs
+            .iter()
+            .find(|(output, _, _)| Some(output.name.as_str()) == placement.output.as_deref())
+            .map_or(1.0, |(output, _, _)| output.scale);
+        (placement, scale)
+    }
+
     pub(crate) fn apply_internal_move(
         &mut self,
         surface: nickel_ui::InternalSurfaceId,
@@ -8431,7 +8892,9 @@ impl NickelSession {
             nickel_core::geometry_authority::GeometryField::Placement,
             write.revision,
         );
-        self.internal_ui.relocate(surface, placement)
+        let (placement, scale) = self.resolve_moved_internal_application(placement);
+        self.internal_ui
+            .configure_surface(surface, placement, scale)
     }
 
     pub(crate) fn finish_internal_move(
@@ -8472,7 +8935,9 @@ impl NickelSession {
         let desired = self.geometry_authorities[&id].base_placement.value;
         placement.geometry.0 = desired.x;
         placement.geometry.1 = desired.y;
-        self.internal_ui.relocate(surface, placement)
+        let (placement, scale) = self.resolve_moved_internal_application(placement);
+        self.internal_ui
+            .configure_surface(surface, placement, scale)
     }
 
     pub(crate) fn internal_resize_constraints(
@@ -8483,9 +8948,28 @@ impl NickelSession {
             .internal_ui
             .application::<nickel_file::FileApp>(surface)
             .is_some();
+        let codex_chat = self
+            .internal_ui
+            .application::<nickel_codex_ui::ChatApplication>(surface)
+            .is_some()
+            && self
+                .internal_ui
+                .placement(surface)
+                .is_some_and(|placement| {
+                    placement.role == crate::session::InternalSurfaceRole::Application
+                });
+        // The project picker is an overlay, but chat uses 0246's supported
+        // 640×480 logical client minimum under the shared geometry authority.
+        let minimum = if codex_chat {
+            nickel_codex_ui::CHAT_MINIMUM_LOGICAL_SIZE
+        } else if file {
+            (560, 360)
+        } else {
+            (200, 120)
+        };
         nickel_core::geometry_authority::GeometryConstraints {
-            min_width: if file { 560 } else { 200 },
-            min_height: if file { 360 } else { 120 },
+            min_width: minimum.0 as i32,
+            min_height: minimum.1 as i32,
             max_width: None,
             max_height: None,
         }
@@ -8577,12 +9061,65 @@ impl NickelSession {
         batch: nickel_ui::HostBatch,
     ) -> bool {
         let changed = self.internal_ui.step(id, batch);
+        self.start_pending_internal_file_drag(id);
+        // Clipboard effects are independent of visual invalidation.  A button
+        // which only copies text can therefore return `changed == false`; do
+        // not leave that effect stranded until some unrelated shell input.
+        self.flush_native_clipboard_results();
         if changed {
             self.schedule_internal_ui_frame();
         }
         changed
     }
 
+    fn start_pending_internal_file_drag(&mut self, id: nickel_ui::InternalSurfaceId) {
+        let Some((surface, serial)) = self.internal_file_drag_serial else {
+            return;
+        };
+        if surface != id {
+            return;
+        }
+        let Some(drag) = self
+            .internal_ui
+            .application_mut::<nickel_file::FileApp>(id)
+            .and_then(|app| nickel_ui::Application::take_outbound_file_drag(app))
+        else {
+            return;
+        };
+        self.internal_file_drag_serial = None;
+        if drag.paths.is_empty()
+            || self
+                .seat
+                .get_pointer()
+                .is_none_or(|pointer| pointer.is_grabbed())
+        {
+            return;
+        }
+        use smithay::input::{
+            dnd::DnDGrab,
+            pointer::{Focus, GrabStartData},
+        };
+        let pointer = self.seat.get_pointer().expect("file drag needs a pointer");
+        let location = pointer.current_location();
+        let start_data = GrabStartData {
+            focus: None,
+            button: 0,
+            location,
+        };
+        pointer.set_grab(
+            self,
+            DnDGrab::new_pointer(
+                &self.display_handle,
+                start_data,
+                InternalFileDragSource::new(drag.paths),
+                self.seat.clone(),
+            ),
+            serial,
+            Focus::Clear,
+        );
+    }
+
+    /// Schedule a paced redraw after an internal surface changes.
     pub(super) fn schedule_internal_ui_frame(&mut self) {
         self.internal_shell_timer.counters.redraw_requests = self
             .internal_shell_timer
@@ -8667,6 +9204,13 @@ struct RevisionedPlacementRestore {
 struct RevisionedInternalRestore {
     placement: crate::session::InternalSurfacePlacement,
     last_owned_revision: nickel_core::geometry_authority::GeometryRevision,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AbsolutePointerAnchor {
+    pub(crate) output_name: String,
+    pub(crate) normalized_x: f64,
+    pub(crate) normalized_y: f64,
 }
 
 fn internal_placement_geometry(placement: &crate::session::InternalSurfacePlacement) -> Geometry {
@@ -9160,6 +9704,12 @@ impl NickelSession {
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        let ext_data_control_state =
+            DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |client| {
+                client
+                    .get_data::<ClientState>()
+                    .is_some_and(|state| state.data_control_allowed)
+            });
         let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
         let idle_inhibit_state = IdleInhibitManagerState::new::<Self>(&dh);
@@ -9389,6 +9939,7 @@ impl NickelSession {
             remote_indicator_accessibility_wake,
             pending_desktop_scenes: HashSet::new(),
             internal_file_surfaces: HashMap::new(),
+            internal_file_drag_serial: None,
             internal_file_context_popup: None,
             internal_shell_timer: InternalShellTimer::default(),
             internal_system_status_source: None,
@@ -9408,6 +9959,7 @@ impl NickelSession {
             output_manager_state,
             seat_state,
             data_device_state,
+            ext_data_control_state,
             primary_selection_state,
             dnd_icon: None,
             relative_pointer_state,
@@ -9448,6 +10000,7 @@ impl NickelSession {
             launcher_visibility: LauncherVisibility::default(),
             launcher_output_name: None,
             last_interaction_output_name: None,
+            last_absolute_pointer_anchor: None,
             launcher_focus: FocusTransactions::default(),
             seat_focus: FocusTransactions::default(),
             seat_focus_security_epoch: 0,
@@ -9612,6 +10165,13 @@ impl NickelSession {
             #[cfg(feature = "backend-winit")]
             winit_redraw_window: None,
         };
+        // Hosted applications must receive the compositor's clipboard bound
+        // before their first pointer action. Waiting for a keyboard paste to
+        // synchronize it leaves copy-only controls with the runtime default
+        // of zero and rejects their payload before native publication.
+        session
+            .internal_ui
+            .set_clipboard_limit(session.native_clipboard.text_limit.unwrap_or(0));
         if !cfg!(test) {
             let settings =
                 nickel_remote_control::RemoteAiControlSettings::load_default().unwrap_or_default();
@@ -9876,9 +10436,11 @@ impl NickelSession {
         }
         self.rescue_stranded_windows();
         self.relayout_shell_surfaces();
+        self.reconcile_internal_shell_outputs();
         self.reconstrain_all_reactive_popups();
         self.space.refresh();
         self.refresh_surface_scales();
+        self.reconcile_stationary_pointer_after_topology_change();
         self.request_output_redraw();
         self.notify_protocol_snapshot();
         Ok(())
@@ -9920,11 +10482,15 @@ impl NickelSession {
         let Some(removed) = self.space.output_geometry(output) else {
             return;
         };
-        let Some(fallback) = self
+        let Some((fallback_output, fallback)) = self
             .space
             .outputs()
             .filter(|candidate| *candidate != output)
-            .find_map(|candidate| self.space.output_geometry(candidate))
+            .find_map(|candidate| {
+                self.space
+                    .output_geometry(candidate)
+                    .map(|geometry| (candidate.clone(), geometry))
+            })
         else {
             return;
         };
@@ -10106,8 +10672,56 @@ impl NickelSession {
                 rescue_revision,
             });
         }
+        self.rescue_internal_windows_from_output(
+            &output.name(),
+            removed_geometry,
+            &fallback_output.name(),
+            fallback_output.current_scale().fractional_scale() as f32,
+            fallback_geometry,
+        );
         self.displaced_output_windows
             .insert(output.name(), displaced);
+    }
+
+    fn rescue_internal_windows_from_output(
+        &mut self,
+        removed_name: &str,
+        removed: Geometry,
+        fallback_name: &str,
+        fallback_scale: f32,
+        fallback: Geometry,
+    ) {
+        let surfaces = self
+            .internal_window_surfaces
+            .iter()
+            .map(|(window, surface)| (*window, *surface))
+            .collect::<Vec<_>>();
+        for (window, surface) in surfaces {
+            let Some(mut placement) = self.internal_ui.placement(surface).cloned() else {
+                continue;
+            };
+            if placement.output.as_deref() != Some(removed_name) {
+                continue;
+            }
+            self.supersede_internal_move_for_presentation(surface);
+            let content = internal_placement_geometry(&placement);
+            let relocated = clamp_decorated_content_to_work_area(
+                Geometry {
+                    x: fallback.x + content.x - removed.x,
+                    y: fallback.y + content.y - removed.y,
+                    ..content
+                },
+                fallback,
+            );
+            placement.geometry.0 = relocated.x;
+            placement.geometry.1 = relocated.y;
+            placement.output = Some(fallback_name.to_owned());
+            self.record_desired_geometry(window, relocated);
+            self.internal_ui
+                .configure_surface(surface, placement, fallback_scale);
+        }
+        self.sync_internal_window_decorations();
+        self.schedule_internal_ui_frame();
     }
 
     pub(crate) fn restore_output_windows(&mut self, output: &Output) {
@@ -10590,7 +11204,7 @@ impl NickelSession {
     /// Resolves a logical point through the compositor's single output hit
     /// authority. Input handlers record the result rather than reproducing the
     /// output geometry walk themselves.
-    fn output_name_at(&self, location: Point<f64, Logical>) -> Option<String> {
+    pub(crate) fn output_name_at(&self, location: Point<f64, Logical>) -> Option<String> {
         self.space.outputs().find_map(|output| {
             self.space
                 .output_geometry(output)
@@ -11958,6 +12572,12 @@ impl NickelSession {
             return false;
         };
         self.apply_compositor_moved_window_effect(window, window_id, placement, activate)
+    }
+
+    pub(crate) fn admit_managed_window_placement(&mut self, id: WindowId, geometry: Geometry) {
+        if let Some(authority) = self.geometry_authorities.get_mut(&id) {
+            authority.admit_managed_placement(geometry);
+        }
     }
 
     pub(crate) fn authorize_interactive_resize(
@@ -15325,8 +15945,11 @@ impl NickelSession {
         self.resolve_interaction_output(InvocationSource::Pointer)
     }
 
-    pub(crate) fn keyboard_interaction_output_name(&self) -> Option<String> {
-        self.resolve_interaction_output(InvocationSource::Keyboard)
+    pub(crate) fn task_switcher_output_name(&self) -> Option<String> {
+        // Alt-Tab is a global spatial overlay. Keep it with the pointer so it
+        // appears on the display the user is currently looking at, rather
+        // than following the previously focused window to another output.
+        self.resolve_interaction_output(InvocationSource::Pointer)
     }
 
     fn focused_surface_output_name(&self) -> Option<String> {
@@ -15658,13 +16281,16 @@ impl NickelSession {
                 // Inside the callback, you should insert the client into the display.
                 //
                 // You may also associate some data with the client when inserting the client.
-                let portal_capture_allowed = nix::sys::socket::getsockopt(
+                let peer_credentials = nix::sys::socket::getsockopt(
                     &client_stream,
                     nix::sys::socket::sockopt::PeerCredentials,
                 )
-                .ok()
-                .is_some_and(|credentials| {
+                .ok();
+                let portal_capture_allowed = peer_credentials.as_ref().is_some_and(|credentials| {
                     crate::session::handlers::portal_capture_pid_allowed(credentials.pid())
+                });
+                let data_control_allowed = peer_credentials.as_ref().is_some_and(|credentials| {
+                    u32::try_from(credentials.pid()).ok() == Some(std::process::id())
                 });
                 state
                     .display_handle
@@ -15673,6 +16299,7 @@ impl NickelSession {
                         Arc::new(ClientState {
                             compositor_state: CompositorClientState::default(),
                             portal_capture_allowed,
+                            data_control_allowed,
                         }),
                     )
                     .unwrap();
@@ -15729,14 +16356,13 @@ impl NickelSession {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space
-            .element_under(pos)
-            .filter(|(window, _)| !self.locked || self.lock_windows.contains(window))
-            .and_then(|(window, location)| {
-                window
-                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(s, p)| (s, (p + location).to_f64()))
-            })
+        let OrdinarySceneWindow::Client(window) = self.effective_scene_hit_at(pos)? else {
+            return None;
+        };
+        let location = self.space.element_location(&window)?;
+        window
+            .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+            .map(|(surface, origin)| (surface, (origin + location).to_f64()))
     }
 
     /// Whether the ordinary client scene occupies `pos`, including the
@@ -15780,19 +16406,18 @@ impl NickelSession {
         crate::session::focus::PointerFocusTarget,
         Point<f64, Logical>,
     )> {
-        self.space
-            .element_under(pos)
-            .filter(|(window, _)| !self.locked || self.lock_windows.contains(window))
-            .and_then(|(window, location)| {
-                window
-                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(surface, origin)| {
-                        let target = window.x11_surface().map_or_else(
-                            || crate::session::focus::PointerFocusTarget::Wayland(surface),
-                            |x11| crate::session::focus::PointerFocusTarget::X11(x11.clone()),
-                        );
-                        (target, (origin + location).to_f64())
-                    })
+        let OrdinarySceneWindow::Client(window) = self.effective_scene_hit_at(pos)? else {
+            return None;
+        };
+        let location = self.space.element_location(&window)?;
+        window
+            .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+            .map(|(surface, origin)| {
+                let target = window.x11_surface().map_or_else(
+                    || crate::session::focus::PointerFocusTarget::Wayland(surface),
+                    |x11| crate::session::focus::PointerFocusTarget::X11(x11.clone()),
+                );
+                (target, (origin + location).to_f64())
             })
     }
 }
@@ -15831,6 +16456,18 @@ fn internal_keyboard_surface_placement(
     Some(placement)
 }
 
+fn launcher_surface_size_for_output(
+    shell: &mut crate::internal_shell::InternalShellCoordinator,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+    launcher_output: Option<&str>,
+) -> Option<(u32, u32)> {
+    let output = launcher_output
+        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
+        .or_else(|| outputs.first())?;
+    let maximum = crate::internal_shell::launcher_size(output.0.width, output.0.height);
+    Some(shell.launcher_preferred_surface_size(maximum))
+}
+
 fn internal_shell_surface_placement(
     surface_role: crate::winit_shell::SurfaceRole,
     surface_output: Option<&str>,
@@ -15861,7 +16498,6 @@ fn internal_shell_surface_placement(
         .unwrap_or((None, 0, 0, surface_size.0, surface_size.1));
 
     let surface_size = match surface_role {
-        SurfaceRole::Launcher => crate::internal_shell::launcher_size(output_width, output_height),
         SurfaceRole::ControlCenter => {
             crate::internal_shell::control_center_size(output_width, output_height)
         }
@@ -15949,20 +16585,29 @@ fn internal_codex_project_menu_placement(
     let Some((output, origin_x, origin_y)) = selected else {
         return crate::internal_codex::CodexSurfacePlacement::default();
     };
-    let (menu_width, menu_height) = crate::internal_codex::MENU_SIZE;
+    let work_height = output
+        .height
+        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
+    // Menus are compositor-owned overlays, so their client size must fit the
+    // usable logical output before anchor placement is clamped.
+    let menu_width = crate::internal_codex::MENU_SIZE
+        .0
+        .min(output.width.saturating_sub(16).max(1));
+    let menu_height = crate::internal_codex::MENU_SIZE
+        .1
+        .min(work_height.saturating_sub(16).max(1));
     let max_x = output.width.saturating_sub(menu_width) as i32;
     let anchor_center = anchor
         .filter(|anchor| anchor.output == output.name)
         .map_or(24, |anchor| anchor.bounds.x + anchor.bounds.width / 2);
     let x = (anchor_center - menu_width as i32 / 2).clamp(0, max_x);
-    let work_height = output
-        .height
-        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
     let y = work_height.saturating_sub(menu_height).saturating_sub(8) as i32;
     crate::internal_codex::CodexSurfacePlacement {
         output: Some(output.name.clone()),
         origin: (origin_x + x, origin_y + y),
         scale: output.scale,
+        menu_size: Some((menu_width, menu_height)),
+        chat_size: None,
     }
 }
 
@@ -15976,16 +16621,26 @@ fn internal_codex_chat_placement(
     let Some((output, origin_x, origin_y)) = selected else {
         return crate::internal_codex::CodexSurfacePlacement::default();
     };
-    let (content_width, content_height) = crate::internal_codex::CHAT_SIZE;
     let border = crate::session::window_frame::RESIZE_BORDER.max(0) as u32;
     let titlebar = crate::session::window_frame::TITLEBAR_HEIGHT.max(0) as u32;
+    let work_height = output
+        .height
+        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
+    // Account for server decorations before choosing a client size. Merely
+    // centering the default client size still leaves compact outputs clipped.
+    let content_width = crate::internal_codex::CHAT_SIZE
+        .0
+        .min(output.width.saturating_sub(border.saturating_mul(2)).max(1));
+    let content_height = crate::internal_codex::CHAT_SIZE.1.min(
+        work_height
+            .saturating_sub(titlebar)
+            .saturating_sub(border.saturating_mul(2))
+            .max(1),
+    );
     let outer_width = content_width.saturating_add(border.saturating_mul(2));
     let outer_height = content_height
         .saturating_add(titlebar)
         .saturating_add(border.saturating_mul(2));
-    let work_height = output
-        .height
-        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
     let outer_x = output.width.saturating_sub(outer_width) / 2;
     let outer_y = work_height.saturating_sub(outer_height) / 2;
     crate::internal_codex::CodexSurfacePlacement {
@@ -15995,6 +16650,8 @@ fn internal_codex_chat_placement(
             origin_y + outer_y as i32 + titlebar as i32 + border as i32,
         ),
         scale: output.scale,
+        menu_size: None,
+        chat_size: Some((content_width, content_height)),
     }
 }
 
@@ -16154,6 +16811,7 @@ impl Drop for NickelSession {
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
     pub portal_capture_allowed: bool,
+    pub data_control_allowed: bool,
 }
 
 impl ClientData for ClientState {
@@ -17600,6 +18258,267 @@ mod protocol_tests {
     }
 
     #[test]
+    fn internal_application_move_crosses_output_without_losing_presentation() {
+        #[derive(Default)]
+        struct App;
+        impl nickel_ui::Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("cross-output target")
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let second = Output::new(
+            "second-test".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Nickel".into(),
+                model: "Test".into(),
+                serial_number: "second-test".into(),
+            },
+        );
+        second.change_current_state(
+            Some(smithay::output::Mode {
+                size: (1280, 720).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(smithay::output::Scale::Fractional(1.5)),
+            Some((1280, 0).into()),
+        );
+        session.space.map_output(&second, (1280, 0));
+        let negative = Output::new(
+            "negative-test".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Nickel".into(),
+                model: "Test".into(),
+                serial_number: "negative-test".into(),
+            },
+        );
+        negative.change_current_state(
+            Some(smithay::output::Mode {
+                size: (800, 720).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(smithay::output::Scale::Fractional(0.75)),
+            Some((-800, 0).into()),
+        );
+        session.space.map_output(&negative, (-800, 0));
+
+        let surface = session.insert_internal_surface(
+            App,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (1060, 20, 300, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        session
+            .register_internal_application(surface)
+            .expect("internal application admitted");
+        assert!(
+            session
+                .internal_ui
+                .ids_for_output("file-test")
+                .any(|id| id == surface)
+        );
+        assert!(
+            session
+                .internal_ui
+                .ids_for_output("second-test")
+                .any(|id| id == surface)
+        );
+
+        let mut moved = session.internal_ui.placement(surface).unwrap().clone();
+        moved.geometry.0 = 1250;
+        assert!(session.apply_internal_move(surface, moved));
+        assert_eq!(
+            session
+                .internal_ui
+                .placement(surface)
+                .unwrap()
+                .output
+                .as_deref(),
+            Some("second-test")
+        );
+        assert_eq!(session.internal_ui.scale_factor(surface), Some(1.5));
+        assert!(
+            session
+                .internal_ui
+                .ids_for_output("file-test")
+                .any(|id| id == surface)
+        );
+        assert!(
+            session
+                .internal_ui
+                .ids_for_output("second-test")
+                .any(|id| id == surface)
+        );
+        assert!(!session.finish_internal_move(surface, false));
+        let settled = session.internal_ui.placement(surface).unwrap();
+        assert_eq!(settled.geometry.0, 1250);
+        assert_eq!(settled.output.as_deref(), Some("second-test"));
+
+        let mut returned = settled.clone();
+        returned.geometry.0 = 1060;
+        assert!(session.apply_internal_move(surface, returned));
+        assert!(!session.finish_internal_move(surface, false));
+        let returned = session.internal_ui.placement(surface).unwrap();
+        assert_eq!(returned.output.as_deref(), Some("file-test"));
+        assert_eq!(session.internal_ui.scale_factor(surface), Some(1.0));
+
+        let mut cancelled = returned.clone();
+        cancelled.geometry.0 = 1250;
+        assert!(session.apply_internal_move(surface, cancelled));
+        assert!(session.finish_internal_move(surface, true));
+        let restored = session.internal_ui.placement(surface).unwrap();
+        assert_eq!(restored.geometry.0, 1060);
+        assert_eq!(restored.output.as_deref(), Some("file-test"));
+
+        let mut negative_move = restored.clone();
+        negative_move.geometry.0 = -700;
+        assert!(session.apply_internal_move(surface, negative_move));
+        assert!(!session.finish_internal_move(surface, false));
+        let negative_settled = session.internal_ui.placement(surface).unwrap();
+        assert_eq!(negative_settled.output.as_deref(), Some("negative-test"));
+        assert_eq!(session.internal_ui.scale_factor(surface), Some(0.75));
+
+        let mut final_return = negative_settled.clone();
+        final_return.geometry.0 = 100;
+        assert!(session.apply_internal_move(surface, final_return));
+        assert!(!session.finish_internal_move(surface, false));
+        let final_return = session.internal_ui.placement(surface).unwrap();
+        assert_eq!(final_return.output.as_deref(), Some("file-test"));
+        assert_eq!(session.internal_ui.scale_factor(surface), Some(1.0));
+    }
+
+    #[test]
+    fn removed_output_rescues_internal_window_without_replacing_its_surface() {
+        #[derive(Default)]
+        struct App;
+        impl nickel_ui::Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("output removal target")
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let second = Output::new(
+            "removed-test".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Nickel".into(),
+                model: "Test".into(),
+                serial_number: "removed-test".into(),
+            },
+        );
+        second.change_current_state(
+            Some(smithay::output::Mode {
+                size: (640, 480).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(smithay::output::Scale::Fractional(1.25)),
+            Some((1280, 0).into()),
+        );
+        session.space.map_output(&second, (1280, 0));
+        let surface = session.insert_internal_surface(
+            App,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (1500, 80, 500, 300),
+                output: Some("removed-test".into()),
+            },
+            1.25,
+        );
+        let window = session
+            .register_internal_application(surface)
+            .expect("internal application admitted");
+
+        let subject = crate::session::grabs::move_internal_grab::operation_window(surface);
+        let operation = crate::session::grabs::move_grab::WindowPointerOperation::begin(
+            &mut session.window_operations,
+            nickel_core::window_operation::BeginRequest {
+                seat: nickel_core::window_operation::SeatId::new(1),
+                subject: nickel_core::window_operation::WindowMapping {
+                    window: subject,
+                    native_lifetime: nickel_core::window_operation::NativeLifetimeId::new(
+                        surface.snapshot_token(),
+                    ),
+                    generation: nickel_core::window_operation::MappingGeneration::new(
+                        surface.snapshot_token(),
+                    ),
+                },
+                kind: nickel_core::window_operation::OperationKind::Move,
+                control: nickel_core::geometry_authority::ControlMode::Enforced,
+                origin: nickel_core::window_operation::CompletionBinding {
+                    source: nickel_core::window_operation::Source {
+                        id: nickel_core::window_operation::SourceId::new(1),
+                        generation: nickel_core::window_operation::SourceGeneration::new(1),
+                    },
+                    gesture: nickel_core::window_operation::CompletionGesture::Button(0x110),
+                    press_epoch: nickel_core::window_operation::PressEpoch::new(1),
+                },
+                optional_update_sources: Vec::new(),
+            },
+        )
+        .expect("internal move admitted");
+        let operation_id = operation.id();
+        let mut dragged = session.internal_ui.placement(surface).unwrap().clone();
+        dragged.geometry.0 += 20;
+        assert!(session.apply_internal_move(surface, dragged));
+        assert!(session.internal_move_baselines.contains_key(&surface));
+
+        session.stage_output_removal(&second);
+        session.space.unmap_output(&second);
+        session.reconcile_output_removal("removed-test");
+
+        let placement = session.internal_ui.placement(surface).unwrap();
+        assert_eq!(
+            session.window_operations.terminal_outcome(operation_id),
+            Some(nickel_core::window_operation::TerminalOutcome::Cancelled(
+                nickel_core::window_operation::CancellationReason::Superseded,
+            ))
+        );
+        assert!(!session.internal_move_baselines.contains_key(&surface));
+        assert!(
+            operation
+                .propose(&mut session.window_operations, 60, 0)
+                .is_none(),
+            "late drag motion cannot overwrite output-removal recovery"
+        );
+        assert_eq!(session.internal_window_for_surface(surface), Some(window));
+        assert_eq!(placement.output.as_deref(), Some("file-test"));
+        assert_eq!(session.internal_ui.scale_factor(surface), Some(1.0));
+        let frame = crate::session::window_frame::outer_geometry(
+            super::internal_placement_geometry(placement),
+        );
+        let work_area =
+            session.work_area_for_output(session.output_geometry_named("file-test").unwrap());
+        assert!(frame.x >= work_area.x);
+        assert!(frame.y >= work_area.y);
+        assert!(frame.x + frame.width <= work_area.x + work_area.width);
+        assert!(
+            session
+                .internal_ui
+                .ids_for_output("file-test")
+                .any(|id| id == surface)
+        );
+    }
+
+    #[test]
     fn internal_resize_updates_placement_and_compensates_owned_geometry() {
         #[derive(Default)]
         struct App;
@@ -17635,6 +18554,86 @@ mod protocol_tests {
             session.internal_ui.placement(surface).unwrap().geometry,
             (10, 20, 300, 200)
         );
+    }
+
+    #[test]
+    fn exposed_internal_frame_corners_use_effective_scene_hit_authority() {
+        #[derive(Default)]
+        struct App;
+        impl nickel_ui::Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("corner target")
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.insert_internal_surface(
+            App,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (100, 140, 300, 200),
+                output: Some("resize-test".into()),
+            },
+            1.0,
+        );
+        let lower = session.register_internal_application(surface).unwrap();
+
+        assert_eq!(
+            session.effective_frame_part_at((105.0, 105.0).into()),
+            Some(crate::session::window_frame::FramePart::ResizeNorthWest)
+        );
+        assert_eq!(
+            session.effective_frame_part_at((395.0, 105.0).into()),
+            Some(crate::session::window_frame::FramePart::ResizeNorthEast)
+        );
+
+        let covering = session.insert_internal_surface(
+            App,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (90, 90, 220, 160),
+                output: Some("resize-test".into()),
+            },
+            1.0,
+        );
+        session.register_internal_application(covering).unwrap();
+        assert_eq!(
+            session.effective_frame_part_at((105.0, 105.0).into()),
+            None,
+            "an upper window's content must occlude a lower resize corner"
+        );
+        session.activate_window(lower);
+        assert_eq!(
+            session.effective_frame_part_at((105.0, 105.0).into()),
+            Some(crate::session::window_frame::FramePart::ResizeNorthWest),
+            "raising the lower owner must expose its corner through production scene order"
+        );
+    }
+
+    #[test]
+    fn internal_codex_chat_resize_uses_supported_logical_minimum() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let backend =
+            nickel_codex::ReplayBackend::from_json(r#"{"name":"minimum","events":[]}"#).unwrap();
+        let chat = nickel_codex_ui::ChatApplication::new(nickel_codex_ui::BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        let surface = session.insert_internal_surface(
+            chat,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (10, 20, 1120, 760),
+                output: Some("resize-test".into()),
+            },
+            1.0,
+        );
+        let constraints = session.internal_resize_constraints(surface);
+        assert_eq!((constraints.min_width, constraints.min_height), (640, 480));
     }
 
     #[test]
@@ -17877,6 +18876,16 @@ mod protocol_tests {
             "late titlebar motion cannot overwrite maximized placement"
         );
         assert!(session.internal_maximized_restore.contains_key(&id));
+        let placement = session.internal_ui.placement(surface).unwrap();
+        let corner = smithay::utils::Point::from((
+            f64::from(placement.geometry.0 + 5),
+            f64::from(placement.geometry.1 - crate::session::window_frame::TITLEBAR_HEIGHT + 5),
+        ));
+        assert_eq!(
+            session.internal_frame_target_at(corner),
+            None,
+            "maximized internal windows must not advertise a resize cursor"
+        );
     }
 
     #[test]
@@ -17907,11 +18916,45 @@ mod protocol_tests {
             CaptureApp { protected: true },
             crate::session::InternalSurfacePlacement {
                 role: crate::session::InternalSurfaceRole::Application,
-                geometry: (0, 0, 100, 100),
+                geometry: (1500, 0, 100, 100),
                 output: Some("another-output".into()),
             },
             1.0,
         );
+        assert!(session.output_capture_evidence(&identity).is_ok());
+        let mut straddling = session.internal_ui.placement(elsewhere).unwrap().clone();
+        straddling.geometry.0 = 1250;
+        assert!(session.internal_ui.relocate(elsewhere, straddling.clone()));
+        assert_eq!(
+            session.output_capture_evidence(&identity).unwrap_err(),
+            "output capture contains protected content"
+        );
+        straddling.geometry.0 = 1500;
+        assert!(session.internal_ui.relocate(elsewhere, straddling));
+        assert!(session.output_capture_evidence(&identity).is_ok());
+        assert!(session.internal_ui.set_window_decoration(
+            elsewhere,
+            crate::session::internal_ui::InternalWindowDecoration {
+                owner: 1,
+                title: "Protected fixture".into(),
+                active: false,
+                maximized: false,
+                background: 0xff20_2020,
+                foreground: 0xffff_ffff,
+            },
+        ));
+        let mut titlebar_only = session.internal_ui.placement(elsewhere).unwrap().clone();
+        titlebar_only.geometry.0 = 100;
+        titlebar_only.geometry.1 = 740;
+        assert!(session.internal_ui.relocate(elsewhere, titlebar_only));
+        assert_eq!(
+            session.output_capture_evidence(&identity).unwrap_err(),
+            "output capture contains protected content"
+        );
+        let mut clear = session.internal_ui.placement(elsewhere).unwrap().clone();
+        clear.geometry.0 = 1500;
+        clear.geometry.1 = 0;
+        assert!(session.internal_ui.relocate(elsewhere, clear));
         assert!(session.output_capture_evidence(&identity).is_ok());
 
         let application = session.internal_ui.insert(
@@ -19151,7 +20194,10 @@ mod protocol_tests {
         session.apply_internal_file_action(action);
         let (&file, &surface) = session.internal_file_surfaces.iter().next().unwrap();
         let window = session.internal_window_for_surface(surface).unwrap();
-        assert!(session.internal_applications_are_foremost());
+        assert!(matches!(
+            session.ordinary_scene_order().first(),
+            Some(super::OrdinarySceneWindow::Internal(id)) if *id == surface
+        ));
         assert_eq!(session.internal_ui.focused(), Some(surface));
         let application_deadline = session.internal_ui.surface_deadline(surface).unwrap();
         assert!(
@@ -19161,17 +20207,16 @@ mod protocol_tests {
         let (x, y, width, height) = session.internal_ui.placement(surface).unwrap().geometry;
         assert!(
             session
-                .foremost_internal_application_covers((f64::from(x + 1), f64::from(y + 1)).into())
+                .internal_ui
+                .application_covers(surface, (f64::from(x + 1), f64::from(y + 1)))
         );
-        assert!(
-            !session.foremost_internal_application_covers(
-                (
-                    f64::from(x + i32::try_from(width).unwrap() + 10),
-                    f64::from(y + i32::try_from(height).unwrap() + 10)
-                )
-                    .into()
+        assert!(!session.internal_ui.application_covers(
+            surface,
+            (
+                f64::from(x + i32::try_from(width).unwrap() + 10),
+                f64::from(y + i32::try_from(height).unwrap() + 10)
             )
-        );
+        ));
         assert!(
             session
                 .protocol_windows()
@@ -19370,6 +20415,225 @@ mod protocol_tests {
         fn title(&self) -> &str {
             "Internal hit test"
         }
+    }
+
+    #[test]
+    fn admitted_internal_window_produces_real_switcher_preview_pixels() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.internal_ui.insert(
+            InternalHitTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (200, 150, 250, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let window = session.register_internal_application(surface).unwrap();
+        session.set_switcher_preview_interest(vec![window]);
+
+        let wave = session.begin_preview_render_wave();
+        assert!(session.preview_capture_candidates(wave).is_empty());
+        let frame = session
+            .preview_frames
+            .get(&window)
+            .expect("internal preview is captured without a Wayland client window");
+        assert_eq!((frame.width, frame.height), (168, 135));
+        assert_eq!(
+            frame.rgba.len(),
+            usize::from(frame.width) * usize::from(frame.height) * 4
+        );
+        assert!(
+            frame
+                .rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel[3] != 0 && pixel[..3] != [0, 0, 0]),
+            "the preview must contain the hosted application's rendered pixels"
+        );
+    }
+
+    #[test]
+    fn effective_hit_order_tracks_internal_activation_and_privileged_overlay() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let placement = crate::session::InternalSurfacePlacement {
+            role: crate::session::InternalSurfaceRole::Application,
+            geometry: (200, 150, 250, 200),
+            output: Some("file-test".into()),
+        };
+        let first = session
+            .internal_ui
+            .insert(InternalHitTestApp, placement.clone(), 1.0);
+        let first_window = session.register_internal_application(first).unwrap();
+        let second = session
+            .internal_ui
+            .insert(InternalHitTestApp, placement, 1.0);
+        session.register_internal_application(second).unwrap();
+        let point = (320.0, 260.0).into();
+        assert!(matches!(
+            session.effective_scene_hit_at(point),
+            Some(super::OrdinarySceneWindow::Internal(id)) if id == second
+        ));
+        session.activate_window(first_window);
+        assert!(matches!(
+            session.effective_scene_hit_at(point),
+            Some(super::OrdinarySceneWindow::Internal(id)) if id == first
+        ));
+        assert!(session.pointer_surface_under(point).is_none());
+
+        let overlay = session.internal_ui.insert(
+            InternalHitTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Overlay,
+                geometry: (300, 240, 100, 70),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        assert!(matches!(
+            session.effective_scene_hit_at(point),
+            Some(super::OrdinarySceneWindow::Internal(id)) if id == overlay
+        ));
+        assert!(!session.client_scene_foremost_at(point));
+    }
+
+    #[test]
+    fn semantic_window_click_raises_only_the_exposed_internal_target() {
+        use nickel_session_protocol::{
+            PointerInteraction, TestInput, WindowId as ProtocolWindowId,
+        };
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let first = session.internal_ui.insert(
+            InternalHitTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (200, 150, 250, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let first_window = session.register_internal_application(first).unwrap();
+        let second = session.internal_ui.insert(
+            InternalHitTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (260, 150, 250, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let second_window = session.register_internal_application(second).unwrap();
+        assert_eq!(
+            session.windows.snapshot().last().map(|window| window.id),
+            Some(second_window)
+        );
+
+        session
+            .inject_test_input(TestInput::WindowPointer {
+                window: ProtocolWindowId(first_window.0),
+                interaction: PointerInteraction::LeftClick,
+            })
+            .unwrap();
+        assert_eq!(
+            session.windows.snapshot().last().map(|window| window.id),
+            Some(first_window)
+        );
+        assert!(matches!(
+            session.effective_scene_hit_at((300.0, 250.0).into()),
+            Some(super::OrdinarySceneWindow::Internal(id)) if id == first
+        ));
+
+        session.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchNext);
+        assert_eq!(session.task_switcher.selected(), Some(&second_window));
+        session.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
+        assert_eq!(
+            session.windows.snapshot().last().map(|window| window.id),
+            Some(first_window),
+            "cancelling Alt+Tab must preserve the existing front window"
+        );
+        session.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchNext);
+        assert_eq!(session.task_switcher.selected(), Some(&second_window));
+        session.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CommitSwitch);
+        assert_eq!(
+            session.windows.snapshot().last().map(|window| window.id),
+            Some(second_window),
+            "committing Alt+Tab must raise only its selected window"
+        );
+        assert!(matches!(
+            session.effective_scene_hit_at((300.0, 250.0).into()),
+            Some(super::OrdinarySceneWindow::Internal(id)) if id == second
+        ));
+        session.activate_window(first_window);
+
+        session.minimize_window(first_window);
+        let minimized_order = session.ordinary_scene_order();
+        assert_eq!(minimized_order.len(), 1);
+        assert!(matches!(
+            minimized_order.as_slice(),
+            [super::OrdinarySceneWindow::Internal(id)] if *id == second
+        ));
+        assert!(matches!(
+            session.effective_scene_hit_at((300.0, 250.0).into()),
+            Some(super::OrdinarySceneWindow::Internal(id)) if id == second
+        ));
+
+        session.activate_window(first_window);
+        let restored_order = session.ordinary_scene_order();
+        assert_eq!(restored_order.len(), 2);
+        assert!(matches!(
+            restored_order.as_slice(),
+            [
+                super::OrdinarySceneWindow::Internal(front),
+                super::OrdinarySceneWindow::Internal(back),
+            ] if *front == first && *back == second
+        ));
+
+        let original_workspace = session.workspaces.active();
+        let other_workspace = session.workspaces.create().unwrap();
+        let hide = session.workspaces.switch_to(other_workspace, None).unwrap();
+        session.apply_workspace_transition(hide);
+        assert!(session.ordinary_scene_order().is_empty());
+        assert!(
+            session
+                .effective_scene_hit_at((300.0, 250.0).into())
+                .is_none()
+        );
+        let show = session
+            .workspaces
+            .switch_to(original_workspace, None)
+            .unwrap();
+        session.apply_workspace_transition(show);
+        let returned_order = session.ordinary_scene_order();
+        assert_eq!(returned_order.len(), 2);
+        assert!(matches!(
+            returned_order.as_slice(),
+            [
+                super::OrdinarySceneWindow::Internal(front),
+                super::OrdinarySceneWindow::Internal(back),
+            ] if *front == first && *back == second
+        ));
+
+        session.close_window(first_window);
+        let closed_order = session.ordinary_scene_order();
+        assert_eq!(closed_order.len(), 1);
+        assert!(matches!(
+            closed_order.as_slice(),
+            [super::OrdinarySceneWindow::Internal(id)] if *id == second
+        ));
+    }
+
+    #[test]
+    fn hosted_app_clipboard_limit_is_ready_before_first_input() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, session) = preview_test_session();
+        assert_eq!(
+            session.internal_ui.clipboard_limit(),
+            session.native_clipboard.text_limit.unwrap()
+        );
+        assert!(session.internal_ui.clipboard_limit() > 0);
     }
 
     #[test]
@@ -22459,7 +23723,7 @@ mod protocol_tests {
         event_loop
             .dispatch(Duration::from_millis(25), &mut session)
             .unwrap();
-        let shell = session.internal_shell.as_ref().unwrap();
+        let shell = session.internal_shell.as_mut().unwrap();
         assert!(shell.launcher_visible());
         let launcher = shell
             .surface(crate::winit_shell::SurfaceRole::Launcher, None)
@@ -23278,6 +24542,38 @@ mod protocol_tests {
     }
 
     #[test]
+    fn task_switcher_opens_on_the_pointer_output() {
+        use nickel_session_protocol::{TestInput, TestOutput};
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "secondary".into(),
+                logical_width: 1000,
+                logical_height: 800,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        let secondary = session
+            .space
+            .outputs()
+            .find(|output| output.name() == "secondary")
+            .unwrap()
+            .clone();
+        session.space.map_output(&secondary, (-1000, 0));
+        session
+            .inject_test_input(TestInput::PointerMove { x: -500, y: 200 })
+            .unwrap();
+
+        assert_eq!(
+            session.task_switcher_output_name().as_deref(),
+            Some("secondary")
+        );
+    }
+
+    #[test]
     fn native_screenshot_captures_and_opens_on_the_invoking_pointer_output() {
         use crate::session_host::DesktopCapturePoll;
         use crate::winit_shell::SurfaceRole;
@@ -23604,16 +24900,18 @@ mod protocol_tests {
             .surface(crate::winit_shell::SurfaceRole::Launcher, None)
             .unwrap()
             .id;
-        // Resolve the native presentation's label instead of copying layout coordinates.
+        // The native launcher owns its sidebar even if an ordinary client scene
+        // lies underneath the same global point.
         let bounds = shell
             .scene(launcher)
             .unwrap()
             .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { bounds, text, .. } if text == "Applications" => Some(*bounds),
+            .filter_map(|command| match command {
+                PaintCommand::Text { bounds, text, .. } if text == "Places" => Some(*bounds),
                 _ => None,
             })
-            .expect("Applications sidebar label");
+            .min_by(|a, b| a.origin.x.total_cmp(&b.origin.x))
+            .expect("Places sidebar label");
         let runtime = session.internal_shell_surfaces[&launcher];
         let geometry = session.internal_ui.placement(runtime).unwrap().geometry;
         session
@@ -23635,18 +24933,84 @@ mod protocol_tests {
             assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
             assert_eq!(session.internal_ui.focused(), Some(runtime));
         }
+        assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
+    }
+
+    #[test]
+    fn native_launcher_all_applications_tile_accepts_pointer_activation() {
+        use nickel_session_protocol::{InputState, TestInput, TestPointerButton};
+        use nickel_ui::backend::PaintCommand;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        assert!(session.toggle_internal_launcher());
         let shell = session.internal_shell.as_mut().unwrap();
+        let launcher = shell
+            .surface(crate::winit_shell::SurfaceRole::Launcher, None)
+            .unwrap()
+            .id;
+        assert!(shell.scene(launcher).unwrap().iter().any(|command| {
+            matches!(command, PaintCommand::Text { text, .. } if text == "All applications")
+        }));
+        let runtime = session.internal_shell_surfaces[&launcher];
+        let geometry = session.internal_ui.placement(runtime).unwrap().geometry;
+        let target = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .bounded_shell_semantics(launcher)
+            .unwrap()
+            .1
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("All applications"))
+            .unwrap();
+        let point = (
+            geometry.0 + (target.bounds.origin.x + target.bounds.size.width / 2.0) as i32,
+            geometry.1 + (target.bounds.origin.y + target.bounds.size.height / 2.0) as i32,
+        );
         assert_eq!(
-            shell
-                .scene(launcher)
-                .unwrap()
-                .iter()
-                .filter(|command| matches!(
-                    command, PaintCommand::Text { text, .. } if text == "Applications"
-                ))
-                .count(),
-            2,
-            "sidebar click must show the Applications content heading"
+            session
+                .internal_ui
+                .surface_at((f64::from(point.0), f64::from(point.1)), true)
+                .map(|(id, _)| id),
+            Some(runtime),
+            "launcher tile must own its pointer coordinate"
+        );
+        session
+            .inject_test_input(TestInput::PointerMove {
+                x: point.0,
+                y: point.1,
+            })
+            .unwrap();
+        for state in [InputState::Pressed, InputState::Released] {
+            session
+                .inject_test_input(TestInput::PointerButton {
+                    button: TestPointerButton::Left,
+                    state,
+                })
+                .unwrap();
+        }
+        event_loop
+            .dispatch(Duration::from_millis(25), &mut session)
+            .unwrap();
+        session.flush_internal_shell_input();
+        session.sync_internal_shell();
+        // The application view places its return link beneath its heading,
+        // reversing the painted order seen on the favorites dashboard.
+        let scene = session
+            .internal_shell
+            .as_mut()
+            .unwrap()
+            .scene(launcher)
+            .unwrap();
+        let text_y = |label| {
+            scene.iter().find_map(|command| match command {
+                PaintCommand::Text { bounds, text, .. } if text == label => Some(bounds.origin.y),
+                _ => None,
+            })
+        };
+        assert!(
+            text_y("All applications").unwrap() < text_y("Pinned & recent").unwrap(),
+            "pointer activation should show the application heading above the return link"
         );
     }
 
@@ -23678,12 +25042,12 @@ mod protocol_tests {
     fn applying_multi_output_fractional_scale_rebuilds_internal_surfaces_at_native_scale() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
-        for (name, width, height) in [("high", 1200, 900), ("normal", 1000, 800)] {
+        for name in ["one", "quarter", "half", "double"] {
             session
                 .apply_test_output(TestOutput::Connect {
                     name: name.into(),
-                    logical_width: width,
-                    logical_height: height,
+                    logical_width: 1200,
+                    logical_height: 900,
                     scale_120: 120,
                     transform: OutputTransform::Normal,
                 })
@@ -23695,22 +25059,38 @@ mod protocol_tests {
 
         session
             .apply_output_layout(nickel_session_protocol::OutputLayout {
-                primary: "high".into(),
+                primary: "quarter".into(),
                 placements: vec![
                     nickel_session_protocol::OutputPlacement {
-                        name: "high".into(),
+                        name: "one".into(),
+                        x: -1200,
+                        y: 0,
+                        enabled: true,
+                        scale_120: 120,
+                        mode: None,
+                    },
+                    nickel_session_protocol::OutputPlacement {
+                        name: "quarter".into(),
                         x: 0,
+                        y: -120,
+                        enabled: true,
+                        scale_120: 150,
+                        mode: None,
+                    },
+                    nickel_session_protocol::OutputPlacement {
+                        name: "half".into(),
+                        x: 960,
                         y: 0,
                         enabled: true,
                         scale_120: 180,
                         mode: None,
                     },
                     nickel_session_protocol::OutputPlacement {
-                        name: "normal".into(),
-                        x: 800,
-                        y: 0,
+                        name: "double".into(),
+                        x: 1760,
+                        y: -80,
                         enabled: true,
-                        scale_120: 120,
+                        scale_120: 240,
                         mode: None,
                     },
                 ],
@@ -23718,22 +25098,109 @@ mod protocol_tests {
             .unwrap();
 
         let outputs = session.protocol_outputs();
-        let high = outputs.iter().find(|output| output.name == "high").unwrap();
-        let normal = outputs
-            .iter()
-            .find(|output| output.name == "normal")
-            .unwrap();
-        assert_eq!((high.geometry.width, high.scale_120), (800, 180));
-        assert_eq!((normal.geometry.x, normal.scale_120), (800, 120));
+        for (name, x, y, width, height, scale_120) in [
+            ("one", 0, 120, 1200, 900, 120),
+            ("quarter", 1200, 0, 960, 720, 150),
+            ("half", 2160, 120, 800, 600, 180),
+            ("double", 2960, 40, 600, 450, 240),
+        ] {
+            let output = outputs.iter().find(|output| output.name == name).unwrap();
+            assert_eq!(
+                (
+                    output.geometry.x,
+                    output.geometry.y,
+                    output.geometry.width,
+                    output.geometry.height,
+                    output.scale_120,
+                ),
+                (x, y, width, height, scale_120)
+            );
+        }
+
+        // Display settings normalize their saved layout to a non-negative
+        // origin. Compositor-global coordinates can nevertheless be negative
+        // while topology is changing, so move the already scaled outputs as a
+        // group and ensure internal chrome follows that authoritative space.
+        let shifted_outputs = session.space.outputs().cloned().collect::<Vec<_>>();
+        for output in shifted_outputs {
+            let geometry = session.space.output_geometry(&output).unwrap();
+            let shifted = (geometry.loc.x - 1400, geometry.loc.y - 300).into();
+            output.change_current_state(None, None, None, Some(shifted));
+            session.space.map_output(&output, shifted);
+        }
+        session.reconcile_internal_shell_outputs();
+        session.space.refresh();
+        let outputs = session.protocol_outputs();
+        assert!(outputs.iter().any(|output| output.geometry.x < 0));
+        assert!(outputs.iter().any(|output| output.geometry.y < 0));
 
         let shell = session.internal_shell.as_ref().unwrap();
-        for (name, expected) in [("high", 1.5_f32), ("normal", 1.0_f32)] {
+        for (name, expected) in [
+            ("one", 1.0_f32),
+            ("quarter", 1.25_f32),
+            ("half", 1.5_f32),
+            ("double", 2.0_f32),
+        ] {
             let surface = shell
                 .surface(crate::winit_shell::SurfaceRole::Desktop, Some(name))
                 .unwrap();
             let runtime = session.internal_shell_surfaces[&surface.id];
             assert_eq!(session.internal_ui.scale_factor(runtime), Some(expected));
+
+            let panel = shell
+                .surface(crate::winit_shell::SurfaceRole::Panel, Some(name))
+                .unwrap();
+            let panel_runtime = session.internal_shell_surfaces[&panel.id];
+            let placement = session.internal_ui.placement(panel_runtime).unwrap();
+            let output = outputs.iter().find(|output| output.name == name).unwrap();
+            assert_eq!(placement.geometry.0, output.geometry.x);
+            assert_eq!(
+                placement.geometry.1,
+                output.geometry.y + output.geometry.height
+                    - i32::try_from(crate::winit_shell::PANEL_HEIGHT).unwrap()
+            );
         }
+    }
+
+    #[test]
+    fn output_scale_change_reprojects_stationary_absolute_pointer_without_new_motion() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "absolute".into(),
+                logical_width: 1200,
+                logical_height: 900,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        session.last_absolute_pointer_anchor = Some(super::AbsolutePointerAnchor {
+            output_name: "absolute".into(),
+            normalized_x: 0.75,
+            normalized_y: 0.5,
+        });
+
+        session
+            .apply_output_layout(nickel_session_protocol::OutputLayout {
+                primary: "absolute".into(),
+                placements: vec![nickel_session_protocol::OutputPlacement {
+                    name: "absolute".into(),
+                    x: 0,
+                    y: 0,
+                    enabled: true,
+                    scale_120: 240,
+                    mode: None,
+                }],
+            })
+            .unwrap();
+
+        let location = session.seat.get_pointer().unwrap().current_location();
+        assert_eq!(location, (450.0, 225.0).into());
+        assert_eq!(
+            session.output_name_at(location).as_deref(),
+            Some("absolute")
+        );
     }
 
     #[test]

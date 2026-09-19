@@ -41,6 +41,7 @@ use windows::{
             TH32CS_SNAPPROCESS,
         },
         System::LibraryLoader::GetModuleHandleW,
+        System::Shutdown::LockWorkStation,
         System::SystemInformation::GetTickCount64,
         System::Threading::{
             AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, GetProcessTimes,
@@ -159,6 +160,45 @@ pub fn wallpaper() -> Wallpaper {
             eprintln!("Nickel wallpaper COM query failed: {error}");
             fallback_wallpaper()
         })
+    }
+}
+
+pub fn lock_workstation() -> bool {
+    lock_workstation_with(|| {
+        // SAFETY: LockWorkStation takes no pointers or handles. Windows validates
+        // that this process belongs to an interactive logged-on user session and
+        // performs the secure Winlogon transition asynchronously.
+        unsafe { LockWorkStation() }
+    })
+}
+
+fn lock_workstation_with(call: impl FnOnce() -> windows::core::Result<()>) -> bool {
+    match call() {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(error = %error, "Windows rejected the workstation lock request");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_lock_tests {
+    #[test]
+    fn native_lock_reports_admission_and_rejection_without_a_fallback_window() {
+        let mut calls = 0;
+        assert!(super::lock_workstation_with(|| {
+            calls += 1;
+            Ok(())
+        }));
+        assert_eq!(calls, 1);
+
+        assert!(!super::lock_workstation_with(|| {
+            Err(windows::core::Error::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                "test rejection",
+            ))
+        }));
     }
 }
 
@@ -3727,13 +3767,13 @@ pub fn configure_preview_window(window: &impl raw_window_handle::HasWindowHandle
     }
 }
 
-pub fn show_preview_window_without_activation(window: &impl raw_window_handle::HasWindowHandle) {
+pub fn show_overlay_window_without_activation(window: &impl raw_window_handle::HasWindowHandle) {
     let Some(hwnd) = window_hwnd(window) else {
         return;
     };
-    // Showing a WS_EX_NOACTIVATE window through the ordinary Winit visibility path can still use
-    // an activating ShowWindow command. Select the native no-activate command explicitly so the
-    // application being switched remains the foreground keyboard target throughout Alt+Tab.
+    // Winit's ordinary visibility path may activate an overlay. Keep the
+    // foreground keyboard target while a preview or notification arrives;
+    // deliberate notification opening can focus the window afterward.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
@@ -4568,10 +4608,29 @@ impl NotificationFeed {
             .unwrap_or(0)
     }
 
+    pub(crate) fn replace_internal(
+        &self,
+        id: u32,
+        mut request: crate::notification::NotificationRequest,
+    ) -> u32 {
+        request
+            .actions
+            .truncate(crate::notification::MAX_NOTIFICATION_ACTIONS);
+        self.store
+            .lock()
+            .map(|mut store| store.notify(id, request, Instant::now()).0)
+            .unwrap_or(0)
+    }
+
     pub(crate) fn close_internal(&self, id: u32) {
         if let Ok(mut store) = self.store.lock() {
             store.close(id, 2);
         }
+    }
+    pub(crate) fn mark_internal_submitting(&self, id: u32) -> bool {
+        self.store
+            .lock()
+            .is_ok_and(|mut store| store.mark_submitting(id))
     }
 }
 impl NotificationSource for NotificationFeed {
@@ -4660,6 +4719,9 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     use std::sync::atomic::Ordering;
 
     let (window, action) = match command {
+        ShellCommand::SessionAction(crate::platform::SessionAction::Lock) => {
+            return lock_workstation();
+        }
         ShellCommand::Show | ShellCommand::ShowFromController => {
             let foreground = unsafe { GetForegroundWindow() };
             PREVIOUS_FOREGROUND_WINDOW.store(foreground.0 as isize, Ordering::Relaxed);

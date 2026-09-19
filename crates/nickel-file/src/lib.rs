@@ -273,7 +273,9 @@ pub fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), String> 
 }
 
 pub fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
-    platform::publish_file_clipboard(paths, cut).map_err(|error| error.to_string())
+    platform::publish_file_clipboard(paths, cut, 1)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Applies the native file clipboard through Nickel File's bounded operation planner.

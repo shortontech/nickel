@@ -238,3 +238,5 @@ size-tebibytes = { $value } TiB
 file-selection-count = { $count } seleccionados
 file-selection-summary = { $count } · { $size }
 file-selection-accessible-bytes = { $count } · { $bytes } bytes
+launcher-discovery-empty = No se encontraron aplicaciones.
+launcher-discovery-partial = No se pudieron detectar algunas entradas de aplicaciones.

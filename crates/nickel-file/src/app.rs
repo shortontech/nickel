@@ -219,6 +219,14 @@ pub struct FileApp {
     pub(crate) rename_editor: Option<RenameEditor>,
     rename_rx: Option<Receiver<RenameResult>>,
     pub(crate) file_clipboard: Option<ClipboardOffer>,
+    #[cfg(target_os = "linux")]
+    native_clipboard_generation: u64,
+    #[cfg(target_os = "linux")]
+    native_clipboard_publication: Option<crate::platform::FileClipboardPublication>,
+    #[cfg(target_os = "linux")]
+    native_clipboard_ready: bool,
+    #[cfg(target_os = "linux")]
+    native_clipboard_pending: Option<(Vec<PathBuf>, bool, u64)>,
     pub(crate) drag_hover: Option<PathBuf>,
     native_drop_batch: Vec<PathBuf>,
     native_drop_deadline: Option<Instant>,
@@ -632,6 +640,14 @@ impl FileApp {
             rename_editor: None,
             rename_rx: None,
             file_clipboard: None,
+            #[cfg(target_os = "linux")]
+            native_clipboard_generation: 0,
+            #[cfg(target_os = "linux")]
+            native_clipboard_publication: None,
+            #[cfg(target_os = "linux")]
+            native_clipboard_ready: false,
+            #[cfg(target_os = "linux")]
+            native_clipboard_pending: None,
             drag_hover: None,
             native_drop_batch: Vec::new(),
             native_drop_deadline: None,
@@ -2534,12 +2550,33 @@ impl FileApp {
                     .iter()
                     .map(|source| source.path.clone())
                     .collect::<Vec<_>>();
-                if let Err(error) =
-                    crate::platform::publish_file_clipboard(&paths, intent == TransferIntent::Move)
+                // The local offer is authoritative for Nickel-to-Nickel paste
+                // and must survive native publication setup or serving loss.
+                self.file_clipboard = Some(offer);
+                #[cfg(target_os = "linux")]
                 {
+                    self.native_clipboard_generation =
+                        self.native_clipboard_generation.wrapping_add(1).max(1);
+                    let generation = self.native_clipboard_generation;
+                    let cut = intent == TransferIntent::Move;
+                    if self.native_clipboard_publication.is_some() && !self.native_clipboard_ready {
+                        // Setup cannot be cancelled inside wl-clipboard-rs. Keep
+                        // only the latest requested replacement and start it
+                        // after the current generation has claimed ownership.
+                        self.native_clipboard_pending = Some((paths, cut, generation));
+                    } else {
+                        self.start_native_clipboard_publication(paths, cut, generation);
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                if let Err(error) = crate::platform::publish_file_clipboard(
+                    &paths,
+                    intent == TransferIntent::Move,
+                    1,
+                ) {
+                    self.status = "Copied for Nickel File; system clipboard unavailable".into();
                     tracing::debug!(%error, "native file clipboard unavailable");
                 }
-                self.file_clipboard = Some(offer);
             }
             Err(_) => self.status = "Nothing eligible is selected".into(),
         }
@@ -2784,6 +2821,98 @@ impl FileApp {
         self.transfer_cancel = None;
         self.refresh_directory(self.browser.show_hidden());
         true
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_native_clipboard_publication(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cut: bool,
+        generation: u64,
+    ) {
+        match crate::platform::publish_file_clipboard(&paths, cut, generation) {
+            Ok(publication) => {
+                self.native_clipboard_publication = Some(publication);
+                self.native_clipboard_ready = false;
+            }
+            Err(error) => {
+                self.native_clipboard_publication = None;
+                self.native_clipboard_ready = false;
+                self.status = "Copied for Nickel File; system clipboard unavailable".into();
+                tracing::debug!(%error, "native file clipboard unavailable");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn poll_native_clipboard(&mut self) -> bool {
+        let Some(publication) = self.native_clipboard_publication.as_ref() else {
+            return false;
+        };
+        match publication.try_recv() {
+            Ok(event) => {
+                let event_generation = match event {
+                    crate::platform::FileClipboardPublisherEvent::Ready { generation }
+                    | crate::platform::FileClipboardPublisherEvent::OwnerLost { generation }
+                    | crate::platform::FileClipboardPublisherEvent::Unavailable { generation }
+                    | crate::platform::FileClipboardPublisherEvent::Failed { generation } => {
+                        generation
+                    }
+                };
+                if event_generation != publication.generation() {
+                    return false;
+                }
+                if matches!(
+                    event,
+                    crate::platform::FileClipboardPublisherEvent::Ready { .. }
+                ) {
+                    self.native_clipboard_ready = true;
+                    if let Some((paths, cut, generation)) = self.native_clipboard_pending.take() {
+                        self.start_native_clipboard_publication(paths, cut, generation);
+                    }
+                    return true;
+                }
+                self.native_clipboard_publication = None;
+                self.native_clipboard_ready = false;
+                if let Some((paths, cut, generation)) = self.native_clipboard_pending.take() {
+                    self.start_native_clipboard_publication(paths, cut, generation);
+                    return true;
+                }
+                let Some(status) = (match event {
+                    crate::platform::FileClipboardPublisherEvent::OwnerLost { .. } => Some(
+                        "System clipboard ownership ended; Nickel File can still paste this selection",
+                    ),
+                    crate::platform::FileClipboardPublisherEvent::Unavailable { .. } => {
+                        // Nickel's compositor does not currently expose the
+                        // optional data-control protocol required by this
+                        // client adapter. Local file paste remains available;
+                        // preserve the successful copy/cut status rather than
+                        // presenting a new runtime failure.
+                        None
+                    }
+                    crate::platform::FileClipboardPublisherEvent::Failed { .. } => {
+                        Some("System clipboard failed; Nickel File can still paste this selection")
+                    }
+                    crate::platform::FileClipboardPublisherEvent::Ready { .. } => unreachable!(),
+                }) else {
+                    return false;
+                };
+                self.status = status.into();
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.native_clipboard_publication = None;
+                self.native_clipboard_ready = false;
+                if let Some((paths, cut, generation)) = self.native_clipboard_pending.take() {
+                    self.start_native_clipboard_publication(paths, cut, generation);
+                    return true;
+                }
+                self.status =
+                    "System clipboard stopped; Nickel File can still paste this selection".into();
+                true
+            }
+        }
     }
 
     fn poll_rename(&mut self) -> bool {
@@ -3301,6 +3430,16 @@ impl Application for FileApp {
             || self.poll_rename()
             || self.poll_native_drop()
             || self.poll_transfer()
+            || {
+                #[cfg(target_os = "linux")]
+                {
+                    self.poll_native_clipboard()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    false
+                }
+            }
             || self.poll_navigation()
             || self.poll_directory_watch()
             || self.poll_sidebar_children()
@@ -3324,6 +3463,10 @@ impl Application for FileApp {
             #[cfg(target_os = "linux")]
             (!self.launches.is_empty()).then_some(Duration::from_millis(250)),
             self.transfer_rx.as_ref().map(|_| Duration::from_millis(16)),
+            #[cfg(target_os = "linux")]
+            self.native_clipboard_publication
+                .as_ref()
+                .map(|_| Duration::from_millis(50)),
             self.rename_rx.as_ref().map(|_| Duration::from_millis(16)),
             self.native_drop_deadline
                 .map(|deadline| deadline.saturating_duration_since(Instant::now())),
@@ -3452,6 +3595,86 @@ mod live_reconciliation_tests {
             assert!(Instant::now() < deadline, "live reconciliation timed out");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixture_offer(path: &std::path::Path) -> ClipboardOffer {
+        ClipboardOffer::new(
+            TransferIntent::Move,
+            vec![TransferSource {
+                provider: "local".into(),
+                identity: crate::file_identity(path).unwrap(),
+                path: path.to_path_buf(),
+                capabilities: ItemCapabilities {
+                    readable: true,
+                    removable: true,
+                },
+            }],
+        )
+        .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_clipboard_failure_retains_internal_offer_and_recovers() {
+        use crate::platform::{FileClipboardPublication, FileClipboardPublisherEvent};
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.txt");
+        fs::write(&source, b"data").unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        app.file_clipboard = Some(fixture_offer(&source));
+        app.native_clipboard_generation = 7;
+        let (publication, sender) = FileClipboardPublication::fixture(7);
+        app.native_clipboard_publication = Some(publication);
+
+        sender
+            .try_send(FileClipboardPublisherEvent::Failed { generation: 7 })
+            .unwrap();
+        assert!(app.poll_native_clipboard());
+        assert!(app.native_clipboard_publication.is_none());
+        assert!(app.file_clipboard.is_some());
+        assert!(app.status.contains("Nickel File can still paste"));
+
+        app.native_clipboard_generation = 8;
+        let (publication, _sender) = FileClipboardPublication::fixture(8);
+        app.native_clipboard_publication = Some(publication);
+        assert_eq!(
+            app.native_clipboard_publication
+                .as_ref()
+                .unwrap()
+                .generation(),
+            8
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replacing_native_clipboard_ignores_old_generation_completion() {
+        use crate::platform::{FileClipboardPublication, FileClipboardPublisherEvent};
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        let (old_publication, old_sender) = FileClipboardPublication::fixture(10);
+        app.native_clipboard_generation = 10;
+        app.native_clipboard_publication = Some(old_publication);
+
+        let (new_publication, _new_sender) = FileClipboardPublication::fixture(11);
+        app.native_clipboard_generation = 11;
+        app.native_clipboard_publication = Some(new_publication);
+        assert!(
+            old_sender
+                .try_send(FileClipboardPublisherEvent::OwnerLost { generation: 10 })
+                .is_err()
+        );
+        assert!(!app.poll_native_clipboard());
+        assert_eq!(
+            app.native_clipboard_publication
+                .as_ref()
+                .unwrap()
+                .generation(),
+            11
+        );
     }
 
     fn wait_for_listing(app: &mut FileApp, matches: impl Fn(&DirectoryBrowser) -> bool) {

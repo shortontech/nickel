@@ -105,3 +105,5 @@ size-tebibytes = { $value } TiB
 file-selection-count = 已选择 { $count } 项
 file-selection-summary = { $count } · { $size }
 file-selection-accessible-bytes = { $count } · { $bytes } 字节
+launcher-discovery-empty = 未找到应用程序。
+launcher-discovery-partial = 部分应用程序条目无法识别。

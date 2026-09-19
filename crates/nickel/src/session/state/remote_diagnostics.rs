@@ -1495,11 +1495,7 @@ impl NickelSession {
                 .map(|(surface, part)| (surface, Some(part)))
                 .or_else(|| {
                     self.internal_ui
-                        .surface_at(
-                            (point.x, point.y),
-                            self.client_scene_under(point)
-                                && !self.internal_applications_are_foremost(),
-                        )
+                        .surface_at((point.x, point.y), self.client_scene_foremost_at(point))
                         .map(|(surface, _)| (surface, None))
                 });
             if let Some((surface, frame_part)) = internal_hit {
@@ -1642,10 +1638,7 @@ impl NickelSession {
             let point = pointer.current_location();
             if self
                 .internal_ui
-                .surface_at(
-                    (point.x, point.y),
-                    self.client_scene_under(point) && !self.internal_applications_are_foremost(),
-                )
+                .surface_at((point.x, point.y), self.client_scene_foremost_at(point))
                 .is_some()
             {
                 return None;

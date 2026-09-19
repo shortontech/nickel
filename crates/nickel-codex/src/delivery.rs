@@ -402,8 +402,10 @@ mod tests {
             sequence: 3,
             kind: EventKind::ApprovalRequested {
                 request_id: crate::ServerRequestId("request".into()),
+                thread_id: None,
                 approval_type: "command".into(),
                 summary: None,
+                context: crate::ApprovalContext::default(),
             },
         })
         .unwrap();
@@ -429,6 +431,7 @@ mod tests {
                 sequence,
                 kind: EventKind::ItemCompleted {
                     item_id: sequence.to_string(),
+                    completion: None,
                 },
             })
             .unwrap();

@@ -388,6 +388,7 @@ pub(super) fn layout_element<Message: Clone>(
                     id: id.clone(),
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
+                    extent_mapper: element.scroll_extent_mapper,
                     rect: scroll_rect,
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
@@ -410,6 +411,7 @@ pub(super) fn layout_element<Message: Clone>(
                     id: id.clone(),
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
+                    extent_mapper: element.scroll_extent_mapper,
                     rect: scroll_rect,
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
@@ -480,6 +482,7 @@ pub(super) fn layout_element<Message: Clone>(
                         id: id.clone(),
                         message: Some(message.clone()),
                         offset_mapper: element.message_mapper,
+                        extent_mapper: element.scroll_extent_mapper,
                         rect: viewport,
                         clip,
                         extent,
@@ -610,6 +613,7 @@ pub(super) fn layout_element<Message: Clone>(
                     id: id.clone(),
                     message: element.message.clone(),
                     offset_mapper: element.message_mapper,
+                    extent_mapper: element.scroll_extent_mapper,
                     rect: scroll_rect,
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
@@ -712,6 +716,12 @@ pub(super) fn apply_transient_state<Message>(
         {
             element.style.background = Some(background);
         }
+        // A transparent editor already exposes keyboard focus through its caret.
+        // Filling its entire text node with the generic fallback tint makes a
+        // blue/purple strip appear and disappear as input modality changes.
+        let transparent_editor = element.text_mapper.is_some()
+            && matches!(element.kind, Kind::Text { .. })
+            && element.style.background.is_none();
         let active_focus_tint = if scope_background_active {
             None
         } else {
@@ -728,10 +738,9 @@ pub(super) fn apply_transient_state<Message>(
                     InputModality::Keyboard | InputModality::Accessibility
                 )
             {
-                element
-                    .style
-                    .focus_background_tint
-                    .or(Some(crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE))
+                element.style.focus_background_tint.or_else(|| {
+                    (!transparent_editor).then_some(crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE)
+                })
             } else {
                 None
             }

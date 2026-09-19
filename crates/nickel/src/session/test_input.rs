@@ -18,7 +18,7 @@ use smithay::backend::input::{
 };
 use smithay::utils::{Logical, Rectangle};
 
-use crate::session::state::NickelSession;
+use crate::session::state::{NickelSession, OrdinarySceneWindow};
 
 #[cfg(target_os = "linux")]
 pub(crate) struct TestController {
@@ -864,17 +864,55 @@ impl NickelSession {
         window: nickel_session_protocol::WindowId,
         interaction: PointerInteraction,
     ) -> Result<(), String> {
-        let window = self
-            .window_for_registry_id(crate::session::window_registry::WindowId(window.0))
-            .ok_or("managed window is not mapped")?;
-        let geometry = self
-            .space
-            .element_bbox(&window)
-            .ok_or("managed window has no production geometry")?;
-        let (x, y) = visible_point_in(geometry, |x, y| {
-            self.space
-                .element_under((f64::from(x), f64::from(y)))
-                .is_some_and(|(candidate, _)| candidate == &window)
+        let id = crate::session::window_registry::WindowId(window.0);
+        let target = if let Some(surface) = self.internal_surface_for_window(id) {
+            let placement = self
+                .internal_ui
+                .placement(surface)
+                .ok_or("internal window has no production geometry")?;
+            let (x, y, width, height) = placement.geometry;
+            let content = crate::session::shell_layout::Geometry {
+                x,
+                y,
+                width: i32::try_from(width).unwrap_or(i32::MAX),
+                height: i32::try_from(height).unwrap_or(i32::MAX),
+            };
+            let frame = crate::session::window_frame::outer_geometry(content);
+            (
+                Rectangle::new(
+                    (frame.x, frame.y).into(),
+                    (frame.width, frame.height).into(),
+                ),
+                OrdinarySceneWindow::Internal(surface),
+            )
+        } else {
+            let window = self
+                .window_for_registry_id(id)
+                .ok_or("managed window is not mapped")?;
+            let geometry = self
+                .space
+                .element_bbox(&window)
+                .ok_or("managed window has no production geometry")?;
+            (geometry, OrdinarySceneWindow::Client(window))
+        };
+        let (x, y) = visible_point_in(target.0, |x, y| {
+            if !self.point_is_on_an_output(x, y) {
+                return false;
+            }
+            match (
+                self.effective_scene_hit_at((f64::from(x), f64::from(y)).into()),
+                &target.1,
+            ) {
+                (
+                    Some(OrdinarySceneWindow::Internal(actual)),
+                    OrdinarySceneWindow::Internal(expected),
+                ) => actual == *expected,
+                (
+                    Some(OrdinarySceneWindow::Client(actual)),
+                    OrdinarySceneWindow::Client(expected),
+                ) => actual == *expected,
+                _ => false,
+            }
         })
         .ok_or("managed window has no visible production input point")?;
         self.inject_test_input(TestInput::PointerMove { x, y })?;
@@ -936,9 +974,14 @@ fn linux_key_code(key: TestKey) -> u32 {
     match key {
         TestKey::A => 30,
         TestKey::C => 46,
+        TestKey::E => 18,
         TestKey::P => 25,
+        TestKey::S => 31,
+        TestKey::T => 20,
+        TestKey::U => 22,
         TestKey::V => 47,
         TestKey::X => 45,
+        TestKey::Slash => 53,
         TestKey::Enter => 28,
         TestKey::Escape => 1,
         TestKey::Tab => 15,
@@ -992,9 +1035,14 @@ mod tests {
     fn semantic_keys_map_to_linux_input_codes_at_the_backend_boundary() {
         assert_eq!(linux_key_code(TestKey::A), 30);
         assert_eq!(linux_key_code(TestKey::C), 46);
+        assert_eq!(linux_key_code(TestKey::E), 18);
         assert_eq!(linux_key_code(TestKey::P), 25);
+        assert_eq!(linux_key_code(TestKey::S), 31);
+        assert_eq!(linux_key_code(TestKey::T), 20);
+        assert_eq!(linux_key_code(TestKey::U), 22);
         assert_eq!(linux_key_code(TestKey::V), 47);
         assert_eq!(linux_key_code(TestKey::X), 45);
+        assert_eq!(linux_key_code(TestKey::Slash), 53);
         assert_eq!(linux_key_code(TestKey::Enter), 28);
         assert_eq!(linux_key_code(TestKey::Escape), 1);
         assert_eq!(linux_key_code(TestKey::Tab), 15);

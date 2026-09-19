@@ -33,6 +33,7 @@ image.workspace = true
 dirs.workspace = true
 jiff.workspace = true
 sha2.workspace = true
+url.workspace = true
 nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
 nickel-file = { path = "../nickel-file" }
@@ -42,6 +43,7 @@ nickel-i18n = { path = "../nickel-i18n" }
 nickel-input = { path = "../nickel-input", features = ["winit", "windows"] }
 nickel-remote-control = { path = "../nickel-remote-control" }
 nickel-logging = { path = "../nickel-logging" }
+nickel-render-assets = { path = "../nickel-render-assets" }
 nickel-storage = { path = "../nickel-storage" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nucleo-matcher.workspace = true
@@ -116,6 +118,7 @@ windows = { workspace = true, features = [
     "Win32_System_Variant",
     "Win32_System_Threading",
     "Win32_System_RemoteDesktop",
+    "Win32_System_Shutdown",
     "Win32_System_StationsAndDesktops",
     "Win32_UI_Accessibility",
     "Win32_System_SystemInformation",

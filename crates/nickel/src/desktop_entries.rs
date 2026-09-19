@@ -260,8 +260,13 @@ fn application_from_entry_result(
         None => Vec::new(),
     };
     let launch_class = match entry.desktop_entry("Terminal") {
-        None | Some("false") => ApplicationLaunchClass::Graphical,
-        Some("true") => ApplicationLaunchClass::Terminal,
+        None => ApplicationLaunchClass::Graphical,
+        Some(value) if value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no") => {
+            ApplicationLaunchClass::Graphical
+        }
+        Some(value) if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes") => {
+            ApplicationLaunchClass::Terminal
+        }
         Some(_) => return Err(ApplicationSkipReason::InvalidTerminal),
     };
 
@@ -434,6 +439,27 @@ mod tests {
         assert_eq!(
             application_from_entry_result(&entry, &[], &[], "hicolor"),
             Err(ApplicationSkipReason::InvalidTerminal)
+        );
+    }
+
+    #[test]
+    fn legacy_terminal_yes_no_values_have_unambiguous_launch_classes() {
+        let graphical = parse(
+            "[Desktop Entry]\nType=Application\nName=Graphical\nExec=graphical\nTerminal=No\n",
+        );
+        assert_eq!(
+            application_from_entry_result(&graphical, &[], &[], "hicolor")
+                .unwrap()
+                .launch_class(),
+            ApplicationLaunchClass::Graphical
+        );
+        let terminal =
+            parse("[Desktop Entry]\nType=Application\nName=CLI\nExec=cli\nTerminal=Yes\n");
+        assert_eq!(
+            application_from_entry_result(&terminal, &[], &[], "hicolor")
+                .unwrap()
+                .launch_class(),
+            ApplicationLaunchClass::Terminal
         );
     }
 

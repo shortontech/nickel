@@ -3002,6 +3002,30 @@ fn pointer_drag_selects_visible_text_and_caret_blink_only_changes_paint() {
 }
 
 #[test]
+fn transparent_text_field_keeps_keyboard_focus_without_filling_its_text_area() {
+    fn query(value: String) -> TestMessage {
+        TestMessage::Query(value)
+    }
+
+    let field = || TextField::on_change("typed text", query).id("query");
+    let mut state = UiStateStore::default();
+    let initial = UiFrame::layout_with_state(field(), Rect::new(0.0, 0.0, 240.0, 40.0), &mut state);
+    initial.handle_event(&mut state, UiEvent::FocusNext);
+    let focused = UiFrame::layout_with_state(field(), Rect::new(0.0, 0.0, 240.0, 40.0), &mut state);
+
+    let fallback = crate::focused_surface(
+        crate::theme::FALLBACK_FOCUS_SURFACE,
+        crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE,
+    );
+    assert!(
+        !focused.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == fallback)
+        )
+    );
+    assert_eq!(state.focused(), Some(&UiId::from("root/query")));
+}
+
+#[test]
 fn focused_text_field_transforms_its_explicit_surface() {
     const SURFACE: Color = 0xe7e9ed;
     const FOREGROUND: Color = 0x17191d;
@@ -4513,6 +4537,38 @@ fn vertical_scroll_emits_the_resulting_offset() {
         },
     );
     assert_eq!(outcome.messages, vec![TestMessage::Volume(30)]);
+}
+
+#[test]
+fn vertical_scroll_can_report_measured_extent_with_resulting_offset() {
+    fn scrolled(extent: ScrollExtent) -> TestMessage {
+        TestMessage::Query(format!(
+            "{}:{}:{}",
+            extent.viewport.height, extent.content.height, extent.offset
+        ))
+    }
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(
+        Column::new()
+            .id("scroll")
+            .height(60.0)
+            .overflow_y(Overflow::Auto)
+            .on_scroll_extent(scrolled)
+            .children((0..4).map(|_| Spacer::vertical(30.0))),
+        Rect::new(0.0, 0.0, 200.0, 60.0),
+        &mut state,
+    );
+    let outcome = tree.handle_event(
+        &mut state,
+        UiEvent::Scroll {
+            point: Point { x: 10.0, y: 10.0 },
+            delta_y: 30.0,
+        },
+    );
+    assert_eq!(
+        outcome.messages,
+        vec![TestMessage::Query("60:120:30".into())]
+    );
 }
 
 #[test]

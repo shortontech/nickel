@@ -5,7 +5,7 @@ use std::{
     path::Path,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{self},
     },
@@ -45,8 +45,8 @@ use nickel_codex::{
     AccountState, ApprovalPolicy, BackendChoice, CodexBackend, CodexClient, CodexEvent,
     CommandDecision, FileChangeDecision, ImportProject, InteractionResponse, LoginChallenge,
     LoginMethod, Model, Project, ProjectPage, RemoteControlClientPage, RemoteControlStatus,
-    RemoteHost, RemotePairingChallenge, ReplayBackend, Selector, ServerRequestId, StartThread,
-    StartTurn, Thread, ThreadId, ThreadPage, ThreadPageResult, UserInputAnswer,
+    RemoteHost, RemotePairingChallenge, ReplayBackend, SandboxPolicy, Selector, ServerRequestId,
+    StartThread, StartTurn, Thread, ThreadId, ThreadPage, ThreadPageResult, UserInputAnswer,
 };
 
 #[derive(Clone)]
@@ -79,8 +79,13 @@ pub enum ControllerCommand {
         client_id: String,
     },
     LoadThreads,
+    LoadMoreThreads {
+        cursor: String,
+        request: u64,
+    },
     NewChat,
     NewChatIn(PathBuf, Option<String>),
+    ConfigureProject(PathBuf, Option<String>),
     SelectThread(ThreadId),
     Send {
         text: String,
@@ -88,8 +93,29 @@ pub enum ControllerCommand {
         model: Option<String>,
         reasoning_effort: Option<String>,
         approval_policy: ApprovalPolicy,
+        sandbox_policy: Option<SandboxPolicy>,
+        plan_mode: bool,
     },
     Shell(String),
+    Compact,
+    Review {
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        approval_policy: ApprovalPolicy,
+        sandbox_policy: Option<SandboxPolicy>,
+    },
+    Logout,
+    ReadRateLimits,
+    SearchFiles {
+        query: String,
+        root: PathBuf,
+    },
+    UploadFeedback {
+        classification: String,
+        reason: Option<String>,
+        include_logs: bool,
+    },
+    Diff,
     Interrupt,
     CommandApproval {
         request_id: ServerRequestId,
@@ -116,10 +142,53 @@ pub enum ControllerEvent {
         threads: Vec<Thread>,
         runtime: std::collections::HashMap<ThreadId, nickel_codex::ThreadRuntime>,
         thread_error: Option<String>,
+        thread_next_cursor: Option<String>,
+    },
+    ThreadPageLoaded {
+        request: u64,
+        cursor: String,
+        threads: Vec<Thread>,
+        runtime: std::collections::HashMap<ThreadId, nickel_codex::ThreadRuntime>,
+        next_cursor: Option<String>,
+    },
+    ThreadPageFailed {
+        request: u64,
+        cursor: String,
+        message: String,
     },
     ThreadCreated(Thread),
     ThreadSelected(Thread),
+    BackendSelected {
+        source: nickel_codex::CandidateSource,
+        fallback_reason: Option<String>,
+    },
+    ProjectConfigured,
+    NewChatPrepared,
+    NewChatFailed(String),
     TurnAccepted,
+    CompactionAccepted,
+    CompactionFailed(String),
+    ReviewAccepted,
+    ReviewFailed(String),
+    AccountLoggedOut(AccountState),
+    LogoutFailed(String),
+    RateLimitsLoaded(nickel_codex::RateLimitsStatus),
+    RateLimitsFailed(String),
+    FileSearchLoaded {
+        query: String,
+        matches: Vec<nickel_codex::FileSearchMatch>,
+    },
+    FileSearchFailed {
+        query: String,
+        message: String,
+    },
+    FeedbackUploaded {
+        report_id: String,
+        include_logs: bool,
+    },
+    FeedbackUploadFailed(String),
+    DiffLoaded(String),
+    DiffFailed(String),
     LoginStarted(LoginChallenge),
     LoginCancelled(String),
     RemoteControlStatus(RemoteControlStatus),
@@ -133,6 +202,11 @@ pub enum ControllerEvent {
         message: String,
     },
     ApprovalPolicyAccepted(ApprovalPolicy),
+    SandboxPolicyAccepted(Option<SandboxPolicy>),
+    InteractionResponseFailed {
+        request_id: ServerRequestId,
+        message: String,
+    },
     Protocol(CodexEvent),
     Incompatible(String),
     Unavailable(String),
@@ -191,7 +265,40 @@ enum SnapshotScope {
     NewProjectChat,
 }
 
+// The shell owns one persistent project-menu controller. Its app-server is the
+// single remote-control endpoint for this Codex profile; project chats retain
+// separate app-servers for their local thread/event scopes.
+static SHELL_PHONE_CLIENT: OnceLock<Mutex<Option<CodexClient>>> = OnceLock::new();
+
+fn shell_phone_client() -> &'static Mutex<Option<CodexClient>> {
+    SHELL_PHONE_CLIENT.get_or_init(|| Mutex::new(None))
+}
+
 impl ChatController {
+    #[cfg(test)]
+    pub(crate) fn fixture_with_events(
+        generation: u64,
+    ) -> (
+        Self,
+        nickel_codex::delivery::DeliverySender<(u64, ControllerEvent)>,
+    ) {
+        let (commands, command_receiver) = nickel_codex::delivery::channel();
+        let (event_sender, events) = nickel_codex::delivery::channel();
+        drop(command_receiver);
+        (
+            Self {
+                generation,
+                commands,
+                events,
+                shutdown: Arc::new(AtomicBool::new(false)),
+                interrupt: Arc::new(AtomicBool::new(false)),
+                command_rejected: AtomicBool::new(false),
+                worker: None,
+            },
+            event_sender,
+        )
+    }
+
     #[cfg(any(test, feature = "workbench-fixtures"))]
     pub(crate) fn fixture_idle(generation: u64) -> Self {
         let (commands, command_receiver) = nickel_codex::delivery::channel();
@@ -206,6 +313,29 @@ impl ChatController {
             command_rejected: AtomicBool::new(false),
             worker: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_with_commands(
+        generation: u64,
+    ) -> (
+        Self,
+        nickel_codex::delivery::DeliveryReceiver<ControllerCommand>,
+    ) {
+        let (commands, receiver) = nickel_codex::delivery::channel();
+        let (_event_sender, events) = nickel_codex::delivery::channel();
+        (
+            Self {
+                generation,
+                commands,
+                events,
+                shutdown: Arc::new(AtomicBool::new(false)),
+                interrupt: Arc::new(AtomicBool::new(false)),
+                command_rejected: AtomicBool::new(false),
+                worker: None,
+            },
+            receiver,
+        )
     }
 
     pub fn spawn(mode: BackendMode) -> Self {
@@ -315,6 +445,7 @@ fn run_worker(
     interrupt: Arc<AtomicBool>,
 ) {
     let send = |event| events.send((generation, event)).is_ok();
+    let mut phone_client = None;
     let (backend, cwd, provenance, remote): (Box<dyn CodexBackend>, PathBuf, String, bool) =
         match mode {
             BackendMode::Replay { backend, cwd } => {
@@ -322,7 +453,7 @@ fn run_worker(
             }
             BackendMode::Live { choice, cwd } => {
                 let selection = Selector::platform_default().select(choice);
-                let Some(candidate) = selection.selected else {
+                let Some(candidate) = selection.selected.clone() else {
                     let reason = selection
                         .probes
                         .last()
@@ -338,14 +469,40 @@ fn run_worker(
                     .find(|probe| probe.candidate == candidate)
                     .and_then(|probe| probe.version.clone())
                     .unwrap_or_else(|| "compatible version".into());
+                let fallback_reason = rejected_installed_reason(&selection, &candidate);
                 let provenance = codex_attribution(&version);
                 let isolated_home = std::env::var_os("NICKEL_CODEX_HOME").map(PathBuf::from);
-                let client = match isolated_home.as_deref() {
-                    Some(home) => CodexClient::spawn_with_home(&candidate.path, &cwd, home),
-                    None => CodexClient::spawn(&candidate.path, &cwd),
+                let client = if matches!(scope, SnapshotScope::NewProjectChat) {
+                    CodexClient::spawn_without_remote_control(
+                        &candidate.path,
+                        &cwd,
+                        isolated_home.as_deref(),
+                    )
+                } else {
+                    match isolated_home.as_deref() {
+                        Some(home) => CodexClient::spawn_with_home(&candidate.path, &cwd, home),
+                        None => CodexClient::spawn(&candidate.path, &cwd),
+                    }
                 };
                 match client {
-                    Ok(client) => (Box::new(client), cwd, provenance, false),
+                    Ok(client) => {
+                        if matches!(scope, SnapshotScope::ProjectsOnly) {
+                            *shell_phone_client()
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner()) =
+                                Some(client.clone());
+                        } else if matches!(scope, SnapshotScope::NewProjectChat) {
+                            phone_client = shell_phone_client()
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .clone();
+                        }
+                        let _ = send(ControllerEvent::BackendSelected {
+                            source: candidate.source,
+                            fallback_reason,
+                        });
+                        (Box::new(client), cwd, provenance, false)
+                    }
                     Err(error) => {
                         let _ = send(ControllerEvent::Failure(error.to_string()));
                         return;
@@ -389,6 +546,9 @@ fn run_worker(
             }
         };
     let protocol_events = backend.subscribe();
+    let phone_backend = phone_client
+        .as_ref()
+        .map_or(&*backend, |client| client as &dyn CodexBackend);
     let current_snapshot = || match scope {
         SnapshotScope::Full => snapshot(&*backend, provenance.clone()),
         SnapshotScope::ProjectsOnly => project_snapshot(&*backend, provenance.clone()),
@@ -449,7 +609,7 @@ fn run_worker(
             && Instant::now() >= next_remote_pairing_poll
         {
             next_remote_pairing_poll = Instant::now() + Duration::from_secs(1);
-            match backend.remote_pairing_claimed(Some(&pairing.pairing_code), None) {
+            match phone_backend.remote_pairing_claimed(Some(&pairing.pairing_code), None) {
                 Ok(false) => {}
                 Ok(true) => {
                     let environment_id = pairing.environment_id.clone();
@@ -457,7 +617,8 @@ fn run_worker(
                     if !send(ControllerEvent::RemotePairingClaimed) {
                         return;
                     }
-                    if let Ok(clients) = backend.remote_control_clients(&environment_id, None, 100)
+                    if let Ok(clients) =
+                        phone_backend.remote_control_clients(&environment_id, None, 100)
                     {
                         let _ = send(ControllerEvent::RemoteClients(clients));
                     }
@@ -513,26 +674,26 @@ fn run_worker(
                         .map_err(|error| error.to_string())
                 }
             }
-            ControllerCommand::ReadRemoteControl => backend
+            ControllerCommand::ReadRemoteControl => phone_backend
                 .remote_control_status()
                 .map(|status| {
                     let environment_id = status.environment_id.clone();
                     let _ = send(ControllerEvent::RemoteControlStatus(status));
                     if let Some(environment_id) = environment_id
                         && let Ok(clients) =
-                            backend.remote_control_clients(&environment_id, None, 100)
+                            phone_backend.remote_control_clients(&environment_id, None, 100)
                     {
                         let _ = send(ControllerEvent::RemoteClients(clients));
                     }
                 })
                 .map_err(|error| error.to_string()),
-            ControllerCommand::EnableRemoteControl => backend
+            ControllerCommand::EnableRemoteControl => phone_backend
                 .enable_remote_control(false)
                 .map(|status| {
                     let _ = send(ControllerEvent::RemoteControlStatus(status));
                 })
                 .map_err(|error| error.to_string()),
-            ControllerCommand::DisableRemoteControl => backend
+            ControllerCommand::DisableRemoteControl => phone_backend
                 .disable_remote_control(false)
                 .map(|status| {
                     active_remote_pairing = None;
@@ -543,7 +704,7 @@ fn run_worker(
                     }));
                 })
                 .map_err(|error| error.to_string()),
-            ControllerCommand::StartRemotePairing => backend
+            ControllerCommand::StartRemotePairing => phone_backend
                 .start_remote_pairing(true)
                 .map(|challenge| {
                     active_remote_pairing = Some(challenge.clone());
@@ -560,9 +721,9 @@ fn run_worker(
             ControllerCommand::RevokeRemoteClient {
                 environment_id,
                 client_id,
-            } => backend
+            } => phone_backend
                 .revoke_remote_control_client(&environment_id, &client_id)
-                .and_then(|()| backend.remote_control_clients(&environment_id, None, 100))
+                .and_then(|()| phone_backend.remote_control_clients(&environment_id, None, 100))
                 .map(|clients| {
                     let _ = send(ControllerEvent::RemoteClients(clients));
                 })
@@ -570,16 +731,70 @@ fn run_worker(
             ControllerCommand::LoadThreads => send(snapshot(&*backend, provenance.clone()))
                 .then_some(())
                 .ok_or_else(|| "UI disconnected".to_owned()),
-            ControllerCommand::NewChat => next_new_thread_cwd(remote, &cwd).map(|workspace| {
-                new_thread_cwd = workspace;
-                selected_thread = None;
-                active_turn = None;
-            }),
+            ControllerCommand::LoadMoreThreads { cursor, request } => {
+                // The opaque cursor is correlated with the view's current page; a stale reply
+                // cannot overwrite a newer refresh or project selection.
+                if cursor.len() > 4096 {
+                    let _ = send(ControllerEvent::ThreadPageFailed {
+                        request,
+                        cursor,
+                        message: "Thread-page cursor exceeded the local limit".into(),
+                    });
+                } else {
+                    match backend.list_threads(ThreadPage {
+                        cursor: Some(cursor.clone()),
+                        limit: Some(100),
+                    }) {
+                        Ok(page) => {
+                            let _ = send(ControllerEvent::ThreadPageLoaded {
+                                request,
+                                cursor,
+                                threads: page.threads,
+                                runtime: page.runtime,
+                                next_cursor: page.next_cursor,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = send(ControllerEvent::ThreadPageFailed {
+                                request,
+                                cursor,
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                }
+                Ok(())
+            }
+            ControllerCommand::NewChat => {
+                match next_new_thread_cwd(remote, &cwd) {
+                    Ok(workspace) => {
+                        new_thread_cwd = workspace;
+                        selected_thread = None;
+                        active_turn = None;
+                        let _ = send(ControllerEvent::NewChatPrepared);
+                    }
+                    Err(error) => {
+                        // Navigation failure must not discard the view's current transcript.
+                        let _ = send(ControllerEvent::NewChatFailed(error));
+                    }
+                }
+                Ok(())
+            }
             ControllerCommand::NewChatIn(workspace, project_id) => {
                 new_thread_cwd = workspace;
                 new_thread_project_id = project_id;
                 selected_thread = None;
                 active_turn = None;
+                let _ = send(ControllerEvent::NewChatPrepared);
+                Ok(())
+            }
+            ControllerCommand::ConfigureProject(workspace, project_id) => {
+                // Initial host configuration is not a user-requested transcript replacement.
+                new_thread_cwd = workspace;
+                new_thread_project_id = project_id;
+                selected_thread = None;
+                active_turn = None;
+                let _ = send(ControllerEvent::ProjectConfigured);
                 Ok(())
             }
             ControllerCommand::SelectThread(id) => {
@@ -603,6 +818,8 @@ fn run_worker(
                 model,
                 reasoning_effort,
                 approval_policy,
+                sandbox_policy,
+                plan_mode,
             } => {
                 let requested_model = model.clone();
                 let thread = match selected_thread.clone() {
@@ -614,6 +831,7 @@ fn run_worker(
                             project_id: new_thread_project_id.clone(),
                             reasoning_effort: reasoning_effort.clone(),
                             approval_policy,
+                            sandbox_policy,
                         })
                         .map(|thread| {
                             selected_thread = Some(thread.id.clone());
@@ -630,12 +848,15 @@ fn run_worker(
                             model,
                             reasoning_effort,
                             approval_policy,
+                            sandbox_policy,
+                            plan_mode,
                         })
                     })
                     .map(|turn| {
                         active_turn = Some(turn.id);
                         let _ = send(ControllerEvent::TurnAccepted);
                         let _ = send(ControllerEvent::ApprovalPolicyAccepted(approval_policy));
+                        let _ = send(ControllerEvent::SandboxPolicyAccepted(sandbox_policy));
                     });
                 match result {
                     Ok(()) => Ok(()),
@@ -662,6 +883,7 @@ fn run_worker(
                             project_id: new_thread_project_id.clone(),
                             reasoning_effort: None,
                             approval_policy: ApprovalPolicy::default(),
+                            sandbox_policy: None,
                         })
                         .map(|thread| {
                             selected_thread = Some(thread.id.clone());
@@ -673,6 +895,140 @@ fn run_worker(
                     .and_then(|thread_id| backend.shell_command(thread_id, command))
                     .map_err(|error| error.to_string())
             }
+            ControllerCommand::Compact => {
+                let result = match selected_thread.clone() {
+                    Some(thread) if active_turn.is_none() => backend.compact_thread(thread),
+                    Some(_) => Err(nickel_codex::CodexError::Protocol(
+                        "Wait for the active turn before compacting".into(),
+                    )),
+                    None => Err(nickel_codex::CodexError::Protocol(
+                        "Start a conversation before compacting".into(),
+                    )),
+                };
+                match result {
+                    Ok(()) => {
+                        let _ = send(ControllerEvent::CompactionAccepted);
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::CompactionFailed(error.to_string()));
+                    }
+                }
+                Ok(())
+            }
+            ControllerCommand::Review {
+                model,
+                reasoning_effort,
+                approval_policy,
+                sandbox_policy,
+            } => {
+                let result = match selected_thread.clone() {
+                    Some(thread) if active_turn.is_none() => backend.review_uncommitted(
+                        thread,
+                        nickel_codex::ReviewSettings {
+                            model,
+                            reasoning_effort,
+                            approval_policy,
+                            sandbox_policy,
+                        },
+                    ),
+                    Some(_) => Err(nickel_codex::CodexError::Protocol(
+                        "Wait for the active turn before starting a review".into(),
+                    )),
+                    None => Err(nickel_codex::CodexError::Protocol(
+                        "Start a conversation before reviewing changes".into(),
+                    )),
+                };
+                match result {
+                    Ok(turn) => {
+                        active_turn = Some(turn.id);
+                        let _ = send(ControllerEvent::ReviewAccepted);
+                        let _ = send(ControllerEvent::ApprovalPolicyAccepted(approval_policy));
+                        let _ = send(ControllerEvent::SandboxPolicyAccepted(sandbox_policy));
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::ReviewFailed(error.to_string()));
+                    }
+                }
+                Ok(())
+            }
+            ControllerCommand::Logout => {
+                let result = if active_turn.is_some() {
+                    Err(nickel_codex::CodexError::Protocol(
+                        "Wait for the active turn before signing out".into(),
+                    ))
+                } else {
+                    backend.logout().and_then(|()| backend.account())
+                };
+                match result {
+                    Ok(account) => {
+                        let _ = send(ControllerEvent::AccountLoggedOut(account));
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::LogoutFailed(error.to_string()));
+                    }
+                }
+                Ok(())
+            }
+            ControllerCommand::ReadRateLimits => {
+                match backend.rate_limits() {
+                    Ok(status) => {
+                        let _ = send(ControllerEvent::RateLimitsLoaded(status));
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::RateLimitsFailed(error.to_string()));
+                    }
+                }
+                Ok(())
+            }
+            ControllerCommand::SearchFiles { query, root } => {
+                let root = root.to_string_lossy().into_owned();
+                match backend.search_files(query.clone(), vec![root]) {
+                    Ok(matches) => {
+                        let _ = send(ControllerEvent::FileSearchLoaded { query, matches });
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::FileSearchFailed {
+                            query,
+                            message: error.to_string(),
+                        });
+                    }
+                }
+                Ok(())
+            }
+            ControllerCommand::UploadFeedback {
+                classification,
+                reason,
+                include_logs,
+            } => {
+                match backend.upload_feedback(
+                    classification,
+                    reason,
+                    selected_thread.clone(),
+                    include_logs,
+                ) {
+                    Ok(report_id) => {
+                        let _ = send(ControllerEvent::FeedbackUploaded {
+                            report_id,
+                            include_logs,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::FeedbackUploadFailed(error.to_string()));
+                    }
+                }
+                Ok(())
+            }
+            ControllerCommand::Diff => {
+                match backend.workspace_diff(new_thread_cwd.clone()) {
+                    Ok(diff) => {
+                        let _ = send(ControllerEvent::DiffLoaded(diff));
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::DiffFailed(error.to_string()));
+                    }
+                }
+                Ok(())
+            }
             ControllerCommand::Interrupt => match (selected_thread.clone(), active_turn.clone()) {
                 (Some(thread), Some(turn)) => backend
                     .interrupt_turn(thread, turn)
@@ -682,27 +1038,51 @@ fn run_worker(
             ControllerCommand::CommandApproval {
                 request_id,
                 decision,
-            } => backend
-                .respond(
-                    request_id,
-                    InteractionResponse::CommandApproval { decision },
-                )
-                .map_err(|error| error.to_string()),
+            } => match backend.respond(
+                request_id.clone(),
+                InteractionResponse::CommandApproval { decision },
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = send(ControllerEvent::InteractionResponseFailed {
+                        request_id,
+                        message: error.to_string(),
+                    });
+                    Ok(())
+                }
+            },
             ControllerCommand::FileApproval {
                 request_id,
                 decision,
-            } => backend
-                .respond(
-                    request_id,
-                    InteractionResponse::FileChangeApproval { decision },
-                )
-                .map_err(|error| error.to_string()),
+            } => match backend.respond(
+                request_id.clone(),
+                InteractionResponse::FileChangeApproval { decision },
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = send(ControllerEvent::InteractionResponseFailed {
+                        request_id,
+                        message: error.to_string(),
+                    });
+                    Ok(())
+                }
+            },
             ControllerCommand::UserInput {
                 request_id,
                 answers,
-            } => backend
-                .respond(request_id, InteractionResponse::UserInput { answers })
-                .map_err(|error| error.to_string()),
+            } => match backend.respond(
+                request_id.clone(),
+                InteractionResponse::UserInput { answers },
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = send(ControllerEvent::InteractionResponseFailed {
+                        request_id,
+                        message: error.to_string(),
+                    });
+                    Ok(())
+                }
+            },
             ControllerCommand::Shutdown => return,
         };
         if let Err(error) = result
@@ -727,6 +1107,25 @@ fn error_indicates_model_rejection(message: &str) -> bool {
         ]
         .into_iter()
         .any(|reason| message.contains(reason))
+}
+
+fn rejected_installed_reason(
+    selection: &nickel_codex::Selection,
+    selected: &nickel_codex::Candidate,
+) -> Option<String> {
+    // Only an automatic installed-to-bundled fallback warrants this explanation.
+    (selected.source == nickel_codex::CandidateSource::Bundled)
+        .then(|| {
+            selection
+                .probes
+                .iter()
+                .find(|probe| {
+                    probe.candidate.source == nickel_codex::CandidateSource::Installed
+                        && !probe.compatible
+                })
+                .map(|probe| probe.reason.clone())
+        })
+        .flatten()
 }
 
 fn selection_failure_event(no_candidates: bool, reason: String) -> ControllerEvent {
@@ -833,6 +1232,7 @@ fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
             threads: page.threads,
             runtime: page.runtime,
             thread_error,
+            thread_next_cursor: page.next_cursor,
         },
         Err(error) => ControllerEvent::Failure(error.to_string()),
     }
@@ -879,6 +1279,7 @@ fn project_snapshot(backend: &dyn CodexBackend, provenance: String) -> Controlle
                         threads: page.threads,
                         runtime: page.runtime,
                         thread_error: None,
+                        thread_next_cursor: page.next_cursor,
                     }
                 }
                 Err(error) => ControllerEvent::Ready {
@@ -889,6 +1290,7 @@ fn project_snapshot(backend: &dyn CodexBackend, provenance: String) -> Controlle
                     threads: Vec::new(),
                     runtime: HashMap::new(),
                     thread_error: Some(error.to_string()),
+                    thread_next_cursor: None,
                 },
             }
         }
@@ -940,6 +1342,7 @@ fn new_project_chat_snapshot(backend: &dyn CodexBackend, provenance: String) -> 
             threads: Vec::new(),
             runtime: HashMap::new(),
             thread_error: None,
+            thread_next_cursor: None,
         },
         (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
             ControllerEvent::Failure(error.to_string())
@@ -948,24 +1351,11 @@ fn new_project_chat_snapshot(backend: &dyn CodexBackend, provenance: String) -> 
 }
 
 fn list_threads(backend: &dyn CodexBackend) -> Result<ThreadPageResult, nickel_codex::CodexError> {
-    let mut result = ThreadPageResult {
-        threads: Vec::new(),
-        next_cursor: None,
-        runtime: std::collections::HashMap::new(),
-    };
-    let mut cursor = None;
-    loop {
-        let page = backend.list_threads(ThreadPage {
-            cursor: cursor.clone(),
-            limit: Some(100),
-        })?;
-        result.threads.extend(page.threads);
-        result.runtime.extend(page.runtime);
-        if page.next_cursor.is_none() || page.next_cursor == cursor {
-            return Ok(result);
-        }
-        cursor = page.next_cursor;
-    }
+    // A page is retained at a time; later pages remain reachable through the backend cursor.
+    backend.list_threads(ThreadPage {
+        cursor: None,
+        limit: Some(100),
+    })
 }
 
 fn import_missing_thread_projects(
@@ -1045,9 +1435,44 @@ mod tests {
 
     use super::{
         ControllerEvent, create_managed_workspace_at, error_indicates_model_rejection,
-        next_new_thread_cwd, project_snapshot, selection_failure_event, snapshot,
-        sort_projects_by_recent_threads, verify_thread_is_resumable,
+        next_new_thread_cwd, project_snapshot, rejected_installed_reason, selection_failure_event,
+        snapshot, sort_projects_by_recent_threads, verify_thread_is_resumable,
     };
+
+    #[test]
+    fn bundled_fallback_keeps_installed_rejection_reason() {
+        use nickel_codex::{Candidate, CandidateSource, Compatibility, Selection};
+        let installed = Candidate {
+            source: CandidateSource::Installed,
+            path: "/installed/codex".into(),
+        };
+        let bundled = Candidate {
+            source: CandidateSource::Bundled,
+            path: "/bundle/codex".into(),
+        };
+        let probe = |candidate: Candidate, compatible: bool, reason: &str| Compatibility {
+            candidate,
+            version: None,
+            executable_sha256: None,
+            compatible,
+            reason: reason.into(),
+            additive_methods: Vec::new(),
+            protocol_profile_sha256: String::new(),
+            generated_schema_sha256: None,
+        };
+        let selection = Selection {
+            selected: Some(bundled.clone()),
+            probes: vec![
+                probe(installed.clone(), false, "schema rejected"),
+                probe(bundled.clone(), true, "accepted"),
+            ],
+        };
+        assert_eq!(
+            rejected_installed_reason(&selection, &bundled).as_deref(),
+            Some("schema rejected")
+        );
+        assert_eq!(rejected_installed_reason(&selection, &installed), None);
+    }
 
     #[test]
     fn saturated_commands_preserve_interrupt_shutdown_and_explicit_failure() {
@@ -1101,6 +1526,8 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 approval_policy: nickel_codex::ApprovalPolicy::default(),
+                sandbox_policy: None,
+                plan_mode: false,
             })
             .unwrap();
         assert!(receiver.metrics().bytes > nickel_codex::delivery::EVENT_BYTES);
@@ -1212,6 +1639,35 @@ mod tests {
             thread_error.as_deref(),
             Some("Codex protocol error: duplicate thread id")
         );
+    }
+
+    #[test]
+    fn initial_thread_snapshot_preserves_backend_pagination_cursor() {
+        let threads = (0..150)
+            .map(|index| {
+                serde_json::json!({
+                    "id":format!("thread-{index}"), "title":null, "cwd":null
+                })
+            })
+            .collect::<Vec<_>>();
+        let backend = ReplayBackend::from_json(
+            &serde_json::json!({
+                "name":"paged", "account":{"authenticated":true},
+                "threads":threads, "events":[]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let ControllerEvent::Ready {
+            threads,
+            thread_next_cursor,
+            ..
+        } = snapshot(&backend, "Replay fixture".into())
+        else {
+            panic!("authenticated snapshot must be ready");
+        };
+        assert_eq!(threads.len(), 100);
+        assert_eq!(thread_next_cursor.as_deref(), Some("100"));
     }
 
     #[test]

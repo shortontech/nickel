@@ -476,8 +476,11 @@ impl ShellSurface {
 
 fn show_surface_native(surface: &ShellSurface) {
     #[cfg(target_os = "windows")]
-    if surface.role == SurfaceRole::WindowPreview {
-        let _ = crate::platform::show_preview_window_without_activation(&surface.window);
+    if matches!(
+        surface.role,
+        SurfaceRole::WindowPreview | SurfaceRole::Notification
+    ) {
+        crate::platform::show_overlay_window_without_activation(&surface.window);
         return;
     }
     surface.window.set_visible(true);
@@ -1168,6 +1171,12 @@ impl WinitShell {
             .with_inner_size(LogicalSize::new(
                 1120.min(geometry.width),
                 760.min(geometry.height),
+            ))
+            // 0246 measures Codex in logical client units; keep native resize
+            // admission aligned with the smallest layout we actually support.
+            .with_min_inner_size(LogicalSize::new(
+                nickel_codex_ui::CHAT_MINIMUM_LOGICAL_SIZE.0,
+                nickel_codex_ui::CHAT_MINIMUM_LOGICAL_SIZE.1,
             ))
             .with_resizable(true);
         #[cfg(target_os = "linux")]

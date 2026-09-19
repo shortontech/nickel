@@ -12,7 +12,12 @@ pub use controller::{
     BackendMode, ChatController, ControllerCommand, ControllerEvent, create_managed_workspace,
 };
 pub use model::{ChatItem, ChatItemKind, ChatState, ConnectionStatus, PendingInteraction};
-pub use view::{ChatApplication, ChatMessage, ShellRequest};
+pub use view::{
+    ChatApplication, ChatMessage, CodexApprovalChoice, CodexApprovalNotification, ShellRequest,
+};
+
+/// Supported logical client minimum shared by the Winit and internal chat hosts.
+pub const CHAT_MINIMUM_LOGICAL_SIZE: (u32, u32) = (640, 480);
 
 pub fn shell_application(
     cwd: std::path::PathBuf,
@@ -77,6 +82,15 @@ mod tests {
         SemanticRole, Shortcut, SoftwareRenderer, UiEvent, UiFrame, UiHost, UiId, UiStateStore,
     };
     use nickel_ui_testkit::{ActivationVia, Scenario, Selector};
+
+    fn open_run_settings(scenario: &mut Scenario<ChatApplication>) {
+        scenario
+            .pointer_activate(&Selector::id("root/menu-bar/codex-menu"))
+            .expect("Codex menu opens");
+        scenario
+            .pointer_activate(&Selector::role_name(SemanticRole::MenuItem, "Run settings"))
+            .expect("Run settings opens from Codex menu");
+    }
 
     use super::*;
 
@@ -152,6 +166,7 @@ mod tests {
         state.apply(2, ControllerEvent::Failure("stale".into()));
         assert_eq!(state.status, ConnectionStatus::Loading);
         state.status = ConnectionStatus::Ready;
+        state.account.authenticated = true;
         state.draft = "   ".into();
         assert!(state.begin_send().is_none());
         state.draft = "hello".into();
@@ -163,6 +178,7 @@ mod tests {
     fn new_thread_and_server_user_item_preserve_the_optimistic_message() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
+        state.account.authenticated = true;
         state.draft = "hello".into();
         assert_eq!(state.begin_send().map(|sent| sent.0), Some("hello".into()));
 
@@ -198,6 +214,7 @@ mod tests {
                 2,
                 EventKind::ItemCompleted {
                     item_id: "server-user".into(),
+                    completion: None,
                 },
             ),
         );
@@ -231,6 +248,7 @@ mod tests {
                 2,
                 EventKind::ItemCompleted {
                     item_id: "empty-reasoning".into(),
+                    completion: None,
                 },
             ),
         );
@@ -292,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_agent_items_in_one_turn_share_a_response_card() {
+    fn activity_between_agent_items_preserves_chronology() {
         let mut state = ChatState::default();
         state.apply(
             1,
@@ -338,6 +356,7 @@ mod tests {
                     sequence + 2,
                     EventKind::ItemCompleted {
                         item_id: item_id.into(),
+                        completion: None,
                     },
                 ),
             );
@@ -361,11 +380,10 @@ mod tests {
                 );
             }
         }
-        assert_eq!(state.items.len(), 2);
-        assert_eq!(
-            state.items[0].text,
-            "I’ll read the README.\n\nRead it completely."
-        );
+        assert_eq!(state.items.len(), 3);
+        assert_eq!(state.items[0].text, "I’ll read the README.");
+        assert_eq!(state.items[1].kind, ChatItemKind::Activity);
+        assert_eq!(state.items[2].text, "Read it completely.");
     }
 
     #[test]
@@ -453,12 +471,14 @@ mod tests {
                             item_type: "userMessage".into(),
                             text: "previous question".into(),
                             command_actions: Vec::new(),
+                            ..Default::default()
                         },
                         nickel_codex::ThreadHistoryItem {
                             id: "agent".into(),
                             item_type: "agentMessage".into(),
                             text: "previous answer".into(),
                             command_actions: Vec::new(),
+                            ..Default::default()
                         },
                     ],
                 }],
@@ -477,19 +497,23 @@ mod tests {
     #[test]
     fn approvals_are_visible_and_never_implicit() {
         let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        state.account.authenticated = true;
         state.apply(
             1,
             event(
                 1,
                 EventKind::ApprovalRequested {
                     request_id: ServerRequestId("approval".into()),
-                    approval_type: "commandExecution".into(),
+                    thread_id: Some(ThreadId("thread".into())),
+                    approval_type: "item/commandExecution/requestApproval".into(),
                     summary: Some("cargo test".into()),
+                    context: nickel_codex::ApprovalContext::default(),
                 },
             ),
         );
         assert_eq!(state.pending.len(), 1);
-        for action in ["Approve", "Decline"] {
+        for action in ["Approve", "Decline", "Cancel"] {
             let backend = ReplayBackend::from_json(r#"{"name":"approval","events":[]}"#).unwrap();
             let mut app = ChatApplication::new(BackendMode::Replay {
                 backend,
@@ -500,14 +524,24 @@ mod tests {
             scenario
                 .pointer_activate(&Selector::role_name(SemanticRole::Button, action))
                 .unwrap();
+            let application = scenario.host_mut().application_mut();
+            assert_eq!(application.state.pending.len(), 1);
             assert!(
-                scenario
-                    .host_mut()
-                    .application_mut()
+                application
                     .state
-                    .pending
-                    .is_empty()
+                    .interaction_submission_pending(&ServerRequestId("approval".into()))
             );
+            application.state.apply(
+                1,
+                event(
+                    2,
+                    EventKind::ServerRequestResolved {
+                        thread_id: ThreadId("thread".into()),
+                        request_id: ServerRequestId("approval".into()),
+                    },
+                ),
+            );
+            assert!(application.state.pending.is_empty());
         }
     }
 
@@ -659,7 +693,7 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str().ends_with("thread-sidebar"))
         );
-        assert!(has_accessible_text(
+        assert!(!has_accessible_text(
             &tree,
             "powered by OpenAI Codex CLI v0.149.0."
         ));
@@ -667,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn file_menu_exposes_existing_new_and_refresh_actions() {
+    fn app_chrome_exposes_file_and_codex_actions() {
         let backend = ReplayBackend::from_json(r#"{"name":"file-menu","events":[]}"#).unwrap();
         let app = ChatApplication::new(BackendMode::Replay {
             backend,
@@ -677,13 +711,24 @@ mod tests {
         scenario
             .pointer_activate(&Selector::id("root/menu-bar/file-menu"))
             .expect("production semantic menu expansion");
-        for name in ["New conversation", "Refresh", "Phone access…"] {
+        for name in ["New conversation", "Refresh"] {
             scenario
                 .assert_action_available(
                     &Selector::role_name(SemanticRole::MenuItem, name),
                     nickel_ui::ActionKind::Activate,
                 )
                 .expect("expanded menu item is semantic and actionable");
+        }
+        scenario
+            .pointer_activate(&Selector::id("root/menu-bar/codex-menu"))
+            .expect("Codex actions open from app chrome");
+        for name in ["Run settings", "Phone access…", "Diagnostics…"] {
+            scenario
+                .assert_action_available(
+                    &Selector::role_name(SemanticRole::MenuItem, name),
+                    nickel_ui::ActionKind::Activate,
+                )
+                .expect("expanded Codex action is semantic and actionable");
         }
     }
 
@@ -765,6 +810,7 @@ mod tests {
     fn long_transcript_cannot_crush_sidebarless_composer() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
+        state.account.authenticated = true;
         state.draft = "How are you doing?".into();
         state.models = vec![Model {
             id: "gpt-5.6-sol".into(),
@@ -788,6 +834,13 @@ mod tests {
                 reasoning_effort: None,
             })
             .collect();
+        state.thread_runtime.insert(
+            ThreadId("thread-0".into()),
+            nickel_codex::ThreadRuntime {
+                status: nickel_codex::ThreadRuntimeStatus::Idle,
+                ..Default::default()
+            },
+        );
         for index in 0..10 {
             state.items.push_back(ChatItem {
                 id: format!("message-{index}"),
@@ -815,39 +868,380 @@ mod tests {
                     .expect("named chat layout node")
             };
             let conversation = find("conversation");
+            let transcript = find("transcript-column");
             let composer = find("composer");
             let draft = find("chat-draft");
-            let controls = find("composer-controls");
             let status = find("composer-status");
-            let resume = find("resume-button");
             let send = find("send-button");
             assert!(composer.allocated.size.height >= 70.0);
+            assert!(transcript.allocated.size.width <= conversation.allocated.size.width + 0.01);
+            assert!(
+                transcript.allocated.size.width >= conversation.allocated.size.width - 36.01,
+                "transcript must use the conversation width at {width}×{height}: {:?}",
+                transcript.allocated
+            );
+            let conversation_center =
+                conversation.allocated.origin.x + conversation.allocated.size.width / 2.0;
+            let transcript_center =
+                transcript.allocated.origin.x + transcript.allocated.size.width / 2.0;
+            assert!((transcript_center - conversation_center).abs() <= 1.0);
             assert!(draft.allocated.size.height > 0.0);
             assert!(
                 conversation.allocated.origin.y + conversation.allocated.size.height
                     <= composer.allocated.origin.y + 0.01
             );
             assert!(composer.allocated.origin.y + composer.allocated.size.height <= height + 0.01);
-            assert!(
-                controls.allocated.origin.y + controls.allocated.size.height
-                    <= status.allocated.origin.y + 0.01
-            );
-            assert!(
-                resume.allocated.size.width >= 60.0,
-                "resume: {:?}",
-                resume.allocated
-            );
+            assert!(status.allocated.size.height > 0.0);
             assert!(
                 send.allocated.size.width >= 48.0,
                 "send: {:?}",
                 send.allocated
             );
             assert!(
-                send.allocated.origin.x + send.allocated.size.width <= width - 17.0,
-                "send escapes the padded composer: {:?}",
+                send.allocated.origin.x + send.allocated.size.width <= width + 0.01,
+                "send escapes the edge-to-edge composer: {:?}",
                 send.allocated
             );
         }
+    }
+
+    #[test]
+    fn footer_resume_is_contextual() {
+        let mut state = ChatState::default();
+        state.status = ConnectionStatus::Ready;
+        let empty = UiFrame::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(
+            !empty
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .any(|node| node.id.as_str().ends_with("resume-button"))
+        );
+        state.threads.push(Thread {
+            id: ThreadId("saved".into()),
+            title: Some("Saved work".into()),
+            cwd: None,
+            last_used_at: None,
+            turns: Vec::new(),
+            model: None,
+            reasoning_effort: None,
+        });
+        state.thread_runtime.insert(
+            ThreadId("saved".into()),
+            nickel_codex::ThreadRuntime {
+                status: nickel_codex::ThreadRuntimeStatus::Idle,
+                ..Default::default()
+            },
+        );
+        let resumable = UiFrame::layout(view::chat_view(&state), Rect::new(0.0, 0.0, 900.0, 640.0));
+        assert!(
+            resumable
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .all(|node| !node.id.as_str().ends_with("resume-button"))
+        );
+    }
+
+    #[test]
+    fn streamed_content_offscreen_offers_explicit_jump_without_auto_following() {
+        let backend = ReplayBackend::from_json(r#"{"name":"scroll","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        for index in 0..24 {
+            app.state.items.push_back(ChatItem {
+                id: format!("item-{index}"),
+                kind: ChatItemKind::Agent,
+                text: "A paragraph of work in progress. ".repeat(20),
+                complete: index != 23,
+            });
+        }
+        app.update(ChatMessage::ConversationScrolled(nickel_ui::ScrollExtent {
+            viewport: nickel_ui::Size::new(900.0, 400.0),
+            content: nickel_ui::Size::new(900.0, 3000.0),
+            offset_x: 0.0,
+            offset: 0.0,
+        }));
+        assert!(!app.state.conversation_pinned);
+        assert!(!app.state.new_content_while_unpinned);
+        app.state.apply(
+            app.state.generation,
+            event(
+                1,
+                EventKind::AgentMessageDelta {
+                    item_id: "item-23".into(),
+                    delta: " More streamed output.".into(),
+                },
+            ),
+        );
+        assert!(!app.state.conversation_pinned);
+        assert!(app.state.new_content_while_unpinned);
+        let mut scenario = Scenario::new(app, 900, 640);
+        scenario
+            .pointer_activate(&Selector::role_name(SemanticRole::Button, "Jump to latest"))
+            .unwrap();
+        assert!(scenario.host().application().state.conversation_pinned);
+        assert!(
+            !scenario
+                .host()
+                .application()
+                .state
+                .new_content_while_unpinned
+        );
+        let measured = nickel_ui::ScrollExtent {
+            viewport: nickel_ui::Size::new(900.0, 400.0),
+            content: nickel_ui::Size::new(900.0, 3000.0),
+            offset_x: 0.0,
+            offset: 2579.0,
+        };
+        scenario
+            .host_mut()
+            .application_mut()
+            .update(ChatMessage::ConversationScrolled(measured));
+        assert!(!scenario.host().application().state.conversation_pinned);
+        scenario
+            .host_mut()
+            .application_mut()
+            .update(ChatMessage::ConversationScrolled(nickel_ui::ScrollExtent {
+                offset: 2580.0,
+                ..measured
+            }));
+        assert!(scenario.host().application().state.conversation_pinned);
+    }
+
+    #[test]
+    fn compact_composer_retains_primary_action_and_reveals_all_run_settings() {
+        let backend = ReplayBackend::from_json(r#"{"name":"compact","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
+        app.state.draft = "Run the tests".into();
+        app.state.models.push(Model {
+            id: "model".into(),
+            display_name: "A very long model name".into(),
+            default_reasoning_effort: Some("high".into()),
+            supported_reasoning_efforts: vec![nickel_codex::ReasoningEffortOption {
+                reasoning_effort: "high".into(),
+                description: "High effort".into(),
+            }],
+        });
+        app.state.selected_model = Some("model".into());
+        let rect = Rect::new(0.0, 0.0, 640.0, 480.0);
+        let layout = |app: &ChatApplication| {
+            UiFrame::layout(
+                app.view(nickel_ui::ViewContext::new(
+                    rect,
+                    nickel_ui::InputModality::Keyboard,
+                )),
+                rect,
+            )
+        };
+        let closed = layout(&app);
+        let has = |tree: &UiFrame<ChatMessage>, suffix: &str| {
+            tree.resolved_layout()
+                .nodes()
+                .iter()
+                .any(|node| node.id.as_str().ends_with(suffix))
+        };
+        assert!(!has(&closed, "run-settings-button"));
+        assert!(has(&closed, "send-button"));
+        assert!(!has(&closed, "model-selector"));
+        let mut scenario = Scenario::new(app, 640, 480);
+        open_run_settings(&mut scenario);
+        let app = scenario.host().application();
+        let open = layout(app);
+        for id in [
+            "model-selector",
+            "reasoning-effort-selector",
+            "approval-policy-selector",
+            "close-run-settings",
+        ] {
+            assert!(has(&open, id), "missing {id}");
+        }
+        assert!(has(&open, "send-button"));
+        assert_eq!(app.state.draft, "Run the tests");
+        let find = |suffix: &str| {
+            open.resolved_layout()
+                .nodes()
+                .iter()
+                .find(|node| node.id.as_str().ends_with(suffix))
+                .unwrap()
+                .allocated
+        };
+        let conversation = find("conversation");
+        let composer = find("composer");
+        let settings = find("compact-run-settings");
+        let action = find("send-button");
+        assert!(
+            conversation.size.height >= 120.0,
+            "conversation: {conversation:?}, settings: {settings:?}, composer: {composer:?}"
+        );
+        assert!(composer.origin.y + composer.size.height <= rect.size.height + 0.01);
+        assert!(
+            action.origin.x + action.size.width <= composer.origin.x + composer.size.width + 0.01
+        );
+        for (width, height) in [
+            (960.0, 540.0),
+            (1120.0, 760.0),
+            (1279.0, 720.0),
+            (1280.0, 720.0),
+            (1366.0, 768.0),
+            (1920.0, 1080.0),
+            (640.0, 960.0),
+        ] {
+            let area = Rect::new(0.0, 0.0, width, height);
+            let frame = UiFrame::layout(
+                app.view(nickel_ui::ViewContext::new(
+                    area,
+                    nickel_ui::InputModality::Keyboard,
+                )),
+                area,
+            );
+            assert!(!has(&frame, "run-settings-button"), "width {width}");
+            assert!(has(&frame, "send-button"), "width {width}");
+            assert!(has(&frame, "model-selector"), "width {width}");
+            let find = |suffix: &str| {
+                frame
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .find(|node| node.id.as_str().ends_with(suffix))
+                    .unwrap()
+                    .allocated
+            };
+            let transcript = find("conversation");
+            let composer = find("composer");
+            let status = find("composer-status");
+            let action = find("send-button");
+            let model = find("model-selector");
+            let approval = find("approval-policy-selector");
+            assert!(
+                transcript.size.height >= 120.0,
+                "{width}×{height}: {transcript:?}"
+            );
+            assert!(composer.origin.y + composer.size.height <= height + 0.01);
+            assert!(
+                status.origin.x + status.size.width
+                    <= composer.origin.x + composer.size.width + 0.01
+            );
+            assert!(
+                action.origin.x + action.size.width
+                    <= composer.origin.x + composer.size.width + 0.01
+            );
+            assert!(
+                model.origin.x + model.size.width <= composer.origin.x + composer.size.width + 0.01
+            );
+            if width >= 900.0 {
+                assert_eq!(model.origin.y, approval.origin.y, "width {width}");
+            } else {
+                assert!(approval.origin.y > model.origin.y, "width {width}");
+            }
+        }
+        scenario
+            .pointer_activate(&Selector::role_name(
+                SemanticRole::Button,
+                "Close run settings",
+            ))
+            .expect("graphical close control dismisses run settings");
+        assert!(!has(
+            &layout(scenario.host().application()),
+            "model-selector"
+        ));
+    }
+
+    #[test]
+    fn resizing_across_settings_collapse_retains_primary_action_and_rehomes_popup() {
+        let backend = ReplayBackend::from_json(r#"{"name":"resize","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
+        app.state.draft = "Keep this prompt".into();
+        app.state.models.push(Model {
+            id: "long-model".into(),
+            display_name: "Long model name requiring compact layout".into(),
+            default_reasoning_effort: None,
+            supported_reasoning_efforts: Vec::new(),
+        });
+        app.state.models.push(Model {
+            id: "alternative".into(),
+            display_name: "Alternative model".into(),
+            default_reasoning_effort: None,
+            supported_reasoning_efforts: Vec::new(),
+        });
+        app.state.selected_model = Some("long-model".into());
+        let mut scenario = Scenario::new(app, 1280, 720);
+        open_run_settings(&mut scenario);
+        scenario
+            .pointer_activate(&Selector::role_name(SemanticRole::Button, "Model selector"))
+            .unwrap();
+        assert!(scenario.host().application().model_picker_generation > 0);
+        let wide_option = scenario
+            .host()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::MenuItem,
+                name: "Alternative model".into(),
+            })
+            .expect("open model option");
+        assert!(wide_option.bounds.origin.x >= 0.0);
+        assert!(wide_option.bounds.origin.y >= 0.0);
+        assert!(wide_option.bounds.origin.x + wide_option.bounds.size.width <= 1280.0);
+        assert!(wide_option.bounds.origin.y + wide_option.bounds.size.height <= 720.0);
+        scenario.host_mut().resize(1279, 540);
+        // Menu-owned settings persist across the width threshold; the open
+        // choice must be rehomed within the smaller client area.
+        let resized_option = scenario
+            .host()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::MenuItem,
+                name: "Alternative model".into(),
+            })
+            .expect("model option remains reachable after resize");
+        assert!(resized_option.bounds.origin.x >= 0.0);
+        assert!(resized_option.bounds.origin.y >= 0.0);
+        assert!(resized_option.bounds.origin.x + resized_option.bounds.size.width <= 1279.0);
+        assert!(resized_option.bounds.origin.y + resized_option.bounds.size.height <= 540.0);
+        assert!(
+            scenario
+                .host()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Send".into()
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            scenario.host().application().state.draft,
+            "Keep this prompt"
+        );
+        assert!(
+            scenario
+                .host()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Model selector".into()
+                })
+                .is_ok()
+        );
+        let compact_option = scenario
+            .host()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::MenuItem,
+                name: "Alternative model".into(),
+            })
+            .expect("compact model option");
+        assert!(compact_option.bounds.origin.x >= 0.0);
+        assert!(compact_option.bounds.origin.y >= 0.0);
+        assert!(compact_option.bounds.origin.x + compact_option.bounds.size.width <= 1279.0);
+        assert!(compact_option.bounds.origin.y + compact_option.bounds.size.height <= 540.0);
     }
 
     #[test]
@@ -878,6 +1272,205 @@ mod tests {
                     });
                 image.save(output).unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn two_hundred_percent_output_uses_960_by_540_logical_client_geometry() {
+        let backend = ReplayBackend::from_json(r#"{"name":"high-scale","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
+        app.state.draft = "A prompt at high scale".into();
+        let mut host = UiHost::new(app, 960, 540);
+        host.set_scale_factor(2.0);
+        assert_eq!(host.inspect().scale_factor, 2.0);
+        assert_eq!(host.render_frame().logical_size, (960, 540));
+        let send = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Send".into(),
+            })
+            .expect("send at high scale");
+        assert!(send.bounds.origin.x >= 0.0);
+        assert!(send.bounds.origin.y >= 0.0);
+        assert!(send.bounds.origin.x + send.bounds.size.width <= 960.0);
+        assert!(send.bounds.origin.y + send.bounds.size.height <= 540.0);
+        let mut renderer = SoftwareRenderer::new(1920, 1080, 2.0);
+        assert!(!host.render_software(&mut renderer).is_empty());
+    }
+
+    #[test]
+    fn content_stress_preserves_transcript_and_composer_at_required_viewports() {
+        let backend = ReplayBackend::from_json(r#"{"name":"stress","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
+        app.state.draft = "A long unsent prompt. ".repeat(280);
+        app.state.models.push(Model {
+            id: "long-label".into(),
+            display_name: "A particularly long model label that must not widen the composer".into(),
+            default_reasoning_effort: None,
+            supported_reasoning_efforts: Vec::new(),
+        });
+        app.state.selected_model = Some("long-label".into());
+        let thread_id = ThreadId("stress-thread".into());
+        app.state.selected_thread = Some(thread_id.clone());
+        app.state.threads.push(Thread {
+            id: thread_id,
+            title: Some("Very long thread title ".repeat(60)),
+            cwd: Some("/projects/nickel".into()),
+            last_used_at: None,
+            turns: Vec::new(),
+            model: None,
+            reasoning_effort: None,
+        });
+        for (kind, text) in [
+            (ChatItemKind::User, "Long user prose. ".repeat(180)),
+            (ChatItemKind::Agent, "Long assistant prose. ".repeat(240)),
+            (
+                ChatItemKind::Command,
+                format!(
+                    "$ {}\n{}",
+                    "very-long-command ".repeat(50),
+                    "output ".repeat(300)
+                ),
+            ),
+            (
+                ChatItemKind::FileChange,
+                format!(
+                    "/very/long/path/{}\n{}",
+                    "nested/".repeat(80),
+                    "+ changed line\n".repeat(160)
+                ),
+            ),
+            (ChatItemKind::Error, "Backend error detail. ".repeat(160)),
+            (
+                ChatItemKind::Unknown("future-event".into()),
+                "Unknown event summary. ".repeat(120),
+            ),
+        ] {
+            app.state.items.push_back(ChatItem {
+                id: format!("stress-{}", app.state.items.len()),
+                kind,
+                text,
+                complete: true,
+            });
+        }
+        for (width, height) in [
+            (1920.0, 1080.0),
+            (1366.0, 768.0),
+            (1280.0, 720.0),
+            (1120.0, 760.0),
+            (960.0, 540.0),
+            (640.0, 480.0),
+            (640.0, 960.0),
+        ] {
+            let area = Rect::new(0.0, 0.0, width, height);
+            let frame = UiFrame::layout(
+                app.view(nickel_ui::ViewContext::new(
+                    area,
+                    nickel_ui::InputModality::Keyboard,
+                )),
+                area,
+            );
+            let bounds = |suffix: &str| {
+                frame
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .find(|node| node.id.as_str().ends_with(suffix))
+                    .unwrap_or_else(|| panic!("missing {suffix} at {width}×{height}"))
+                    .allocated
+            };
+            let transcript = bounds("conversation");
+            let composer = bounds("composer");
+            let status = bounds("composer-status");
+            let send = bounds("send-button");
+            assert!(
+                transcript.size.height >= 120.0,
+                "{width}×{height}: {transcript:?}"
+            );
+            assert!(
+                composer.origin.y >= 0.0
+                    && composer.origin.y + composer.size.height <= height + 0.01
+            );
+            assert!(send.origin.x >= 0.0 && send.origin.x + send.size.width <= width + 0.01);
+            assert!(send.origin.y >= 0.0 && send.origin.y + send.size.height <= height + 0.01);
+            assert!(
+                status.origin.x >= composer.origin.x
+                    && status.origin.x + status.size.width
+                        <= composer.origin.x + composer.size.width + 0.01,
+                "status escapes composer at {width}×{height}: {status:?} within {composer:?}"
+            );
+            assert!(
+                frame
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .any(|node| node.id.as_str().ends_with("codex-menu")),
+                "Codex settings menu missing at {width}×{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_approval_remains_actionable_through_live_collapse_and_resize() {
+        let backend =
+            ReplayBackend::from_json(r#"{"name":"approval-resize","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
+        app.state.apply(
+            app.state.generation,
+            event(
+                1,
+                EventKind::ApprovalRequested {
+                    request_id: ServerRequestId("approval-resize".into()),
+                    thread_id: Some(ThreadId("thread".into())),
+                    approval_type: "item/commandExecution/requestApproval".into(),
+                    summary: Some("Review this command".into()),
+                    context: nickel_codex::ApprovalContext {
+                        command: Some("cargo test ".repeat(80)),
+                        cwd: Some("/projects/nickel".into()),
+                        ..Default::default()
+                    },
+                },
+            ),
+        );
+        let mut scenario = Scenario::new(app, 1280, 720);
+        for (width, height) in [(1280, 720), (1279, 540), (640, 480), (960, 540)] {
+            scenario.host_mut().resize(width, height);
+            assert!(
+                scenario
+                    .host()
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: "Approve".into(),
+                    })
+                    .is_ok(),
+                "approval lost at {width}×{height}"
+            );
+            assert!(
+                scenario
+                    .host()
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: "Decline".into(),
+                    })
+                    .is_ok(),
+                "decline lost at {width}×{height}"
+            );
+            assert_eq!(scenario.host().application().state.pending.len(), 1);
         }
     }
 
@@ -942,6 +1535,7 @@ mod tests {
             cwd: directory.path().into(),
         });
         app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
         app.state.draft = "first\nsecond".into();
         assert!(app.shortcut_outcome(Shortcut::Submit).changed);
         // Submission is staged until the backend acknowledges TurnStarted, so a failed
@@ -963,13 +1557,28 @@ mod tests {
         });
         app.state.status = ConnectionStatus::Ready;
         app.poll_controller();
+        app.state.account.authenticated = true;
 
-        app.update(ChatMessage::ToggleCommandPicker);
-        assert!(app.command_picker_open);
+        app.state.draft = "/".into();
+        assert_eq!(app.state.draft, "/");
         let generation = app.model_picker_generation;
         app.update(ChatMessage::SelectCommand("/model".into()));
         assert!(app.model_picker_generation > generation);
-        assert!(!app.command_picker_open);
+        assert!(app.state.draft.is_empty());
+        let model_frame = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(
+            model_frame
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .any(|node| { node.id.as_str().ends_with("model-selector") })
+        );
         app.update(ChatMessage::SelectReasoningEffort("high".into()));
         assert_eq!(app.state.selected_reasoning_effort.as_deref(), Some("high"));
 
@@ -983,6 +1592,40 @@ mod tests {
         app.update(ChatMessage::Send);
         assert!(app.resume_picker_open);
 
+        app.update(ChatMessage::SelectCommand("/permissions".into()));
+        assert!(app.state.draft.is_empty());
+        let permissions_frame = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(
+            permissions_frame
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .any(|node| { node.id.as_str().ends_with("approval-policy-selector") })
+        );
+
+        app.update(ChatMessage::SelectCommand("/status".into()));
+        assert!(app.state.draft.is_empty());
+        let status_frame = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(
+            status_frame
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .any(|node| { node.id.as_str().ends_with("codex-diagnostics") })
+        );
+
         app.state.draft = "!printf hello".into();
         app.update(ChatMessage::Send);
         assert_eq!(app.pending_shell_command.as_deref(), Some("printf hello"));
@@ -990,6 +1633,130 @@ mod tests {
         app.update(ChatMessage::ConfirmShell);
         assert!(app.pending_shell_command.is_none());
         assert!(app.shell_warning_acknowledged);
+    }
+
+    #[test]
+    fn compact_command_dispatches_to_the_selected_thread_without_sending_a_prompt() {
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"compact","threads":[{"id":"recent","title":"Chosen","cwd":"/projects/nickel"}],"thread_runtime":{"recent":{"project_id":"nickel","status":"Idle","active_flags":[],"can_accept_direct_input":true}},"events":[]}"#,
+        )
+        .unwrap();
+        let backend_probe = backend.clone();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        for _ in 0..100 {
+            app.poll_controller();
+            if app.state.status == ConnectionStatus::Ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        app.update(ChatMessage::SelectThread(ThreadId("recent".into())));
+        for _ in 0..100 {
+            app.poll_controller();
+            if app.state.selected_thread.as_ref() == Some(&ThreadId("recent".into())) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(app.state.selected_thread, Some(ThreadId("recent".into())));
+        app.update(ChatMessage::SelectCommand("/compact".into()));
+        for _ in 0..100 {
+            app.poll_controller();
+            if !backend_probe.compacted_threads().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(
+            backend_probe.compacted_threads(),
+            vec![ThreadId("recent".into())]
+        );
+        assert!(backend_probe.started_turns().is_empty());
+        assert!(app.state.draft.is_empty());
+
+        app.update(ChatMessage::SelectCommand("/review".into()));
+        for _ in 0..100 {
+            app.poll_controller();
+            if !backend_probe.reviewed_threads().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(
+            backend_probe.reviewed_threads(),
+            vec![ThreadId("recent".into())]
+        );
+        assert!(backend_probe.started_turns().is_empty());
+    }
+
+    #[test]
+    fn logout_command_uses_account_api_and_refreshes_authentication() {
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"logout","account":{"authenticated":true,"account_type":"chatgpt","email":null},"events":[]}"#,
+        )
+        .unwrap();
+        let backend_probe = backend.clone();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        for _ in 0..100 {
+            app.poll_controller();
+            if app.state.account.authenticated {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.state.account.authenticated);
+        app.update(ChatMessage::SelectCommand("/logout".into()));
+        for _ in 0..100 {
+            app.poll_controller();
+            if backend_probe.was_logged_out() && !app.state.account.authenticated {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(backend_probe.was_logged_out());
+        assert!(!app.state.account.authenticated);
+        assert!(app.state.draft.is_empty());
+    }
+
+    #[test]
+    fn status_command_reads_and_displays_backend_rate_limits() {
+        let backend = ReplayBackend::from_json(
+            r#"{"name":"status","rate_limits":{"ordinary_usage_allowed":true,"buckets":[{"name":"Codex","primary_used_percent":25,"secondary_used_percent":40}]},"events":[]}"#,
+        )
+        .unwrap();
+        let backend_probe = backend.clone();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.update(ChatMessage::SelectCommand("/status".into()));
+        for _ in 0..100 {
+            app.poll_controller();
+            if app.state.rate_limits.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(backend_probe.rate_limit_reads(), 1);
+        assert_eq!(
+            app.state.rate_limits.as_ref().unwrap().buckets[0].primary_used_percent,
+            Some(25)
+        );
+        let frame = UiFrame::layout(
+            app.view(nickel_ui::ViewContext::new(
+                Rect::new(0.0, 0.0, 900.0, 640.0),
+                nickel_ui::InputModality::Keyboard,
+            )),
+            Rect::new(0.0, 0.0, 900.0, 640.0),
+        );
+        assert!(has_accessible_text(&frame, "Ordinary usage allowed"));
+        assert!(has_accessible_text(&frame, "Codex: primary 25% used"));
     }
 
     #[test]
@@ -1006,6 +1773,7 @@ mod tests {
         });
         app.state.status = ConnectionStatus::Ready;
         app.poll_controller();
+        app.state.account.authenticated = true;
         app.state.models = vec![
             Model {
                 id: "first".into(),
@@ -1023,6 +1791,7 @@ mod tests {
         app.state.selected_model = Some("first".into());
         let mut scenario = Scenario::new(app, 900, 640);
 
+        open_run_settings(&mut scenario);
         scenario
             .pointer_activate(&Selector::role_name(SemanticRole::Button, "Model selector"))
             .unwrap();
@@ -1129,6 +1898,78 @@ mod tests {
     }
 
     #[test]
+    fn never_ask_does_not_grant_full_access_but_yolo_sends_both_authorities() {
+        for (full_access, expected_sandbox) in [
+            (false, None),
+            (true, Some(nickel_codex::SandboxPolicy::DangerFullAccess)),
+        ] {
+            let backend = ReplayBackend::from_json(r#"{"name":"sandbox","events":[]}"#).unwrap();
+            let backend_probe = backend.clone();
+            let mut app = ChatApplication::new(BackendMode::Replay {
+                backend,
+                cwd: "/projects/nickel".into(),
+            });
+            app.poll_controller();
+            app.state.status = ConnectionStatus::Ready;
+            app.state.account.authenticated = true;
+            app.update(ChatMessage::SelectApprovalPolicy(
+                nickel_codex::ApprovalPolicy::Never,
+            ));
+            if full_access {
+                app.update(ChatMessage::SelectSandboxPolicy(expected_sandbox));
+            }
+            app.state.draft = "check authority".into();
+            app.update(ChatMessage::Send);
+            for _ in 0..100 {
+                app.poll_controller();
+                if !backend_probe.started_turns().is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let turns = backend_probe.started_turns();
+            assert_eq!(turns.len(), 1);
+            assert_eq!(
+                turns[0].approval_policy,
+                nickel_codex::ApprovalPolicy::Never
+            );
+            assert_eq!(turns[0].sandbox_policy, expected_sandbox);
+        }
+    }
+
+    #[test]
+    fn yolo_is_an_explicit_menu_owned_unsandboxed_choice() {
+        let backend = ReplayBackend::from_json(r#"{"name":"yolo-menu","events":[]}"#).unwrap();
+        let app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        let mut scenario = Scenario::new(app, 900, 640);
+        open_run_settings(&mut scenario);
+        scenario
+            .pointer_activate(&Selector::role_name(
+                SemanticRole::Button,
+                "Sandbox access selector",
+            ))
+            .unwrap();
+        scenario
+            .pointer_activate(&Selector::role_name(
+                SemanticRole::MenuItem,
+                "YOLO — full access, unsandboxed",
+            ))
+            .unwrap();
+        let state = &scenario.host().application().state;
+        assert_eq!(
+            state.selected_sandbox_policy,
+            Some(nickel_codex::SandboxPolicy::DangerFullAccess)
+        );
+        assert_eq!(
+            state.selected_approval_policy,
+            nickel_codex::ApprovalPolicy::Never
+        );
+    }
+
+    #[test]
     fn every_approval_policy_transition_is_staged_then_persisted_after_acceptance() {
         use nickel_codex::ApprovalPolicy::{Never, OnFailure, OnRequest, Untrusted};
 
@@ -1228,6 +2069,7 @@ mod tests {
         app.state.pending.push(PendingInteraction::Approval {
             request_id: ServerRequestId("pending".into()),
             approval_type: "commandExecution".into(),
+            context: nickel_codex::ApprovalContext::default(),
             summary: "Existing request".into(),
         });
         app.update(ChatMessage::SelectApprovalPolicy(
@@ -1262,7 +2104,28 @@ mod tests {
                 backend,
                 cwd: "/projects/nickel".into(),
             });
-            let mut scenario = Scenario::new(app, 1200, 700);
+            let mut scenario = Scenario::new(app, 1280, 700);
+            if via == ActivationVia::Controller {
+                // Enter the main pane before navigating back to menu chrome;
+                // the generic spatial route otherwise enters File's submenu.
+                scenario
+                    .host_mut()
+                    .handle_controller_action(nickel_ui::ControllerAction::Down);
+                scenario
+                    .host_mut()
+                    .handle_controller_action(nickel_ui::ControllerAction::Down);
+                scenario
+                    .activate_via(via, &Selector::id("root/menu-bar/codex-menu"))
+                    .unwrap();
+                scenario
+                    .activate_via(
+                        via,
+                        &Selector::role_name(SemanticRole::MenuItem, "Run settings"),
+                    )
+                    .unwrap();
+            } else {
+                open_run_settings(&mut scenario);
+            }
             scenario
                 .activate_via(
                     via,
@@ -1285,7 +2148,7 @@ mod tests {
                             "Never ask — Codex cannot pause to request approval",
                         ),
                     )
-                    .unwrap();
+                    .unwrap_or_else(|error| panic!("{via:?}: {error:?}"));
             }
             assert_eq!(
                 scenario.host().application().state.selected_approval_policy,
@@ -1417,6 +2280,7 @@ mod tests {
                             item_type: "agentMessage".into(),
                             text: "latest preview text".into(),
                             command_actions: Vec::new(),
+                            ..Default::default()
                         }],
                     })
                     .into_iter()
@@ -1434,7 +2298,7 @@ mod tests {
             );
         }
 
-        app.update(ChatMessage::ToggleCommandPicker);
+        app.state.draft = "/".into();
         let commands = UiFrame::layout(
             app.view(nickel_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
@@ -1442,9 +2306,13 @@ mod tests {
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
-        assert!(has_accessible_text(&commands, "/review — unavailable"));
+        assert!(has_accessible_text(
+            &commands,
+            "/review — review uncommitted changes"
+        ));
 
-        app.update(ChatMessage::ToggleCommandPicker);
+        app.state.draft.clear();
+        app.update(ChatMessage::ToggleRunSettings);
         app.update(ChatMessage::ToggleModelPicker);
         let models = UiFrame::layout(
             app.view(nickel_ui::ViewContext::new(
@@ -1473,7 +2341,9 @@ mod tests {
             name: name.into(),
         };
         assert!(scenario.host().query_unique(&button("eligible")).is_ok());
-        assert!(scenario.host().query_unique(&button("active")).is_err());
+        // Shell-hosted active threads can focus an existing local writer;
+        // the host rejects active writers owned outside this session.
+        assert!(scenario.host().query_unique(&button("active")).is_ok());
         assert!(scenario.host().query_unique(&button("other")).is_err());
         scenario
             .activate(&Selector::role_name(SemanticRole::Button, "eligible"))
@@ -1501,12 +2371,14 @@ mod tests {
                         item_type: "userMessage".into(),
                         text: "older message".into(),
                         command_actions: Vec::new(),
+                        ..Default::default()
                     },
                     nickel_codex::ThreadHistoryItem {
                         id: "new".into(),
                         item_type: "agentMessage".into(),
                         text: long,
                         command_actions: Vec::new(),
+                        ..Default::default()
                     },
                 ],
             }],
@@ -1555,6 +2427,7 @@ mod tests {
                 threads: vec![make("old", 1), make("new", 3), make("old", 9)],
                 runtime,
                 thread_error: None,
+                thread_next_cursor: None,
             },
         );
         assert_eq!(
@@ -1698,6 +2571,119 @@ mod tests {
     }
 
     #[test]
+    fn ime_composition_survives_live_resize_across_compact_threshold() {
+        let backend = ReplayBackend::from_json(r#"{"name":"ime-resize","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
+        let mut scenario = Scenario::new(app, 1024, 720);
+        let composer = scenario
+            .host()
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .expect("composer field");
+        scenario
+            .host_mut()
+            .handle_event(UiEvent::AccessibilityFocus(composer.id.clone()));
+        scenario
+            .host_mut()
+            .handle_event(UiEvent::ImePreedit("世".into()));
+        assert!(scenario.host().application().state.draft.is_empty());
+        scenario.host_mut().resize(1023, 540);
+        assert_eq!(scenario.host().inspect().keyboard_focus, Some(composer.id));
+        scenario
+            .host_mut()
+            .handle_event(UiEvent::TextInput("世界".into()));
+        assert_eq!(scenario.host().application().state.draft, "世界");
+        assert!(
+            scenario
+                .host()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Send".into(),
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn streaming_agent_output_survives_live_resize_without_losing_text() {
+        let backend = ReplayBackend::from_json(r#"{"name":"stream-resize","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
+        app.state.conversation_viewport_height = 300.0;
+        app.state.apply(
+            app.state.generation,
+            event(
+                1,
+                EventKind::TurnStarted {
+                    thread_id: ThreadId("stream".into()),
+                    turn_id: TurnId("turn".into()),
+                },
+            ),
+        );
+        app.state.apply(
+            app.state.generation,
+            event(
+                2,
+                EventKind::ItemStarted {
+                    thread_id: Some(ThreadId("stream".into())),
+                    turn_id: Some(TurnId("turn".into())),
+                    item_id: "agent".into(),
+                    item_type: "agentMessage".into(),
+                    command_actions: Vec::new(),
+                    initial_text: String::new(),
+                },
+            ),
+        );
+        app.state.apply(
+            app.state.generation,
+            event(
+                3,
+                EventKind::AgentMessageDelta {
+                    item_id: "agent".into(),
+                    delta: "First half ".into(),
+                },
+            ),
+        );
+        let mut host = UiHost::new(app, 1024, 720);
+        host.resize(1023, 540);
+        let generation = host.application().state.generation;
+        host.application_mut().state.apply(
+            generation,
+            event(
+                4,
+                EventKind::AgentMessageDelta {
+                    item_id: "agent".into(),
+                    delta: "second half".into(),
+                },
+            ),
+        );
+        host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            host.application().state.items[0].text,
+            "First half second half"
+        );
+        assert!(host.commands().iter().any(|command| match command {
+            nickel_ui::backend::PaintCommand::Text { text, .. }
+            | nickel_ui::backend::PaintCommand::StyledText { text, .. } => {
+                text.contains("First half second half")
+            }
+            _ => false,
+        }));
+        assert!(host.inspect().diagnostics.is_empty());
+    }
+
+    #[test]
     fn interrupt_request_is_visible_and_clears_only_at_terminal_turn_state() {
         let backend = ReplayBackend::from_json(r#"{"name":"interrupt","events":[]}"#).unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -1735,6 +2721,7 @@ mod tests {
         let mut first = ChatApplication::new(mode());
         let second = ChatApplication::new(mode());
         first.state.status = ConnectionStatus::Ready;
+        first.state.account.authenticated = true;
         first.state.draft = "only first".into();
         first.state.begin_send();
         assert_eq!(first.state.items.len(), 1);
@@ -1930,6 +2917,17 @@ mod tests {
         let mut selected_renderer = SoftwareRenderer::new(1120, 760, 1.0);
         selected_renderer.render(selected.commands());
         assert_ne!(selected_renderer.pixels(), unselected_pixels.as_slice());
+        for (width, height) in [(1280.0, 720.0), (640.0, 480.0), (1120.0, 760.0)] {
+            let resized = UiFrame::layout_with_state(
+                view::chat_view(&state),
+                Rect::new(0.0, 0.0, width, height),
+                &mut ui_state,
+            );
+            assert_eq!(
+                resized.selected_text(&ui_state).as_deref(),
+                Some(copied.as_str())
+            );
+        }
     }
 
     #[test]
@@ -2045,6 +3043,74 @@ mod tests {
         assert_eq!(non_git_entries, 0);
     }
 
+    #[cfg(feature = "authenticated-live-tests")]
+    #[test]
+    #[ignore = "requires NICKEL_CODEX_LIVE=1 and an installed Codex app-server"]
+    fn authenticated_live_file_mention_and_workspace_diff() {
+        assert_eq!(
+            std::env::var("NICKEL_CODEX_LIVE").as_deref(),
+            Ok("1"),
+            "set NICKEL_CODEX_LIVE=1 explicitly"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("src")).unwrap();
+        std::fs::write(directory.path().join("src/main.rs"), "fn original() {}\n").unwrap();
+        for args in [
+            &["init", "--quiet"][..],
+            &["add", "src/main.rs"][..],
+            &[
+                "-c",
+                "user.name=Nickel Test",
+                "-c",
+                "user.email=nickel@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(directory.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(directory.path().join("src/main.rs"), "fn changed() {}\n").unwrap();
+        std::fs::write(directory.path().join("notes.txt"), "untracked\n").unwrap();
+
+        let mut app = ChatApplication::new(BackendMode::Live {
+            choice: BackendChoice::Installed,
+            cwd: directory.path().into(),
+        });
+        wait_until(&mut app, |state| state.status == ConnectionStatus::Ready);
+        app.update(ChatMessage::DraftChanged("@main".into()));
+        wait_until(&mut app, |state| {
+            !state.file_search_pending
+                && state
+                    .file_search_matches
+                    .iter()
+                    .any(|file| file.path.ends_with("src/main.rs"))
+        });
+
+        app.update(ChatMessage::DraftChanged("/diff".into()));
+        app.update(ChatMessage::Send);
+        wait_until(&mut app, |state| {
+            state.items.iter().any(|item| {
+                item.id.starts_with("local:diff:")
+                    && item.text.contains("+fn changed() {}")
+                    && item.text.contains("+untracked")
+            })
+        });
+        assert!(
+            app.state.diagnostics.is_empty(),
+            "{:?}",
+            app.state.diagnostics
+        );
+    }
+
     fn wait_until(app: &mut ChatApplication, mut predicate: impl FnMut(&ChatState) -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
@@ -2054,7 +3120,16 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("application state did not reach the expected condition");
+        panic!(
+            "application state did not reach the expected condition: status={:?}, file_search_query={:?}, file_search_pending={}, file_search_matches={:?}, file_search_error={:?}, command_feedback={:?}, diagnostics={:?}",
+            app.state.status,
+            app.state.file_search_query,
+            app.state.file_search_pending,
+            app.state.file_search_matches,
+            app.state.file_search_error,
+            app.state.command_feedback,
+            app.state.diagnostics,
+        );
     }
 
     #[cfg(feature = "authenticated-live-tests")]

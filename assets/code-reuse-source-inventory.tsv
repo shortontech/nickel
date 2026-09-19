@@ -1,10 +1,13 @@
 # crate	rust_sources
+# Audit: nickel-file/context_popup.rs reuses nickel-ui OverlayMenu; nickel/session/grabs/
+# resize_internal_grab.rs delegates operation policy to nickel-core window_operation;
+# nickel-ui/approval.rs is the shared authority-neutral approval presentation.
 nickel-build-support	1
 nickel-codex	12
 nickel-codex-fixture	3
 nickel-codex-ui	8
 nickel-core	34
-nickel-file	18
+nickel-file	19
 nickel-gaze	8
 nickel-i18n	1
 nickel-i18n-lint	2
@@ -16,13 +19,13 @@ nickel-mcp-client	2
 nickel-platform	15
 nickel-remote-control	40
 nickel-render-assets	1
-nickel	160
+nickel	161
 nickel-session-protocol	7
 nickel-settings	11
 nickel-storage	1
 nickel-terminal	3
 nickel-terminal-ui	2
-nickel-ui	37
+nickel-ui	38
 nickel-ui-testkit	1
 nickel-ui-workbench	4
 ui-declarative-macros	1

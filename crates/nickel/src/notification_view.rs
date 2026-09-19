@@ -11,6 +11,7 @@ pub enum NotificationMessage {
     Invoke(String),
     Dismiss,
     Scroll(f32),
+    ScrollBody(f32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,6 +31,7 @@ pub struct NotificationApp {
     history: Vec<DesktopNotification>,
     history_mode: bool,
     history_offset: f32,
+    body_offset: f32,
     palette: ThemePalette,
     effects: Vec<NotificationEffect>,
     effect_evidence: Vec<EffectEvidence>,
@@ -44,6 +46,7 @@ impl NotificationApp {
             history: Vec::new(),
             history_mode: false,
             history_offset: 0.0,
+            body_offset: 0.0,
             palette,
             effects: Vec::new(),
             effect_evidence: Vec::new(),
@@ -54,6 +57,8 @@ impl NotificationApp {
 
     pub fn sync(&mut self, notification: Option<&DesktopNotification>, palette: ThemePalette) {
         if self.notification.as_ref() != notification || self.palette != palette {
+            // A revised request starts at its new scope rather than inheriting old scroll.
+            self.body_offset = 0.0;
             self.notification = notification.cloned();
             self.palette = palette;
             self.dirty = true;
@@ -102,6 +107,10 @@ impl Application for NotificationApp {
         match message {
             NotificationMessage::Scroll(offset) => {
                 self.history_offset = offset.max(0.0);
+                self.dirty = true;
+            }
+            NotificationMessage::ScrollBody(offset) => {
+                self.body_offset = offset.max(0.0);
                 self.dirty = true;
             }
             NotificationMessage::Invoke(key) => {
@@ -269,11 +278,19 @@ impl Application for NotificationApp {
                                 .bold(true),
                         )
                         .child(
-                            Text::new(&notification.body)
-                                .height((context.viewport.size.height - 116.0).max(1.0))
-                                .scale(16.0)
-                                .color(self.palette.muted)
-                                .wrap(true),
+                            VerticalScroll::new(
+                                NotificationMessage::ScrollBody(self.body_offset),
+                                self.body_offset,
+                            )
+                            .theme(self.palette.into())
+                            .on_scroll(NotificationMessage::ScrollBody)
+                            .height((context.viewport.size.height - 116.0).max(1.0))
+                            .child(
+                                Text::new(&notification.body)
+                                    .scale(16.0)
+                                    .color(self.palette.muted)
+                                    .wrap(true),
+                            ),
                         )
                         .child(actions),
                 ),
@@ -328,6 +345,47 @@ mod tests {
         let mut host = NotificationHost::new(app, 420, 180);
         host.poll();
         host
+    }
+
+    #[test]
+    fn long_consent_body_scrolls_without_moving_decision_buttons() {
+        let mut host = host();
+        let palette = ThemePalette::from_appearance(Appearance::default());
+        let mut request = host.application().notification.clone().unwrap();
+        request.body = "Inspect the requested command and scope before approving. ".repeat(80);
+        host.application_mut().sync(Some(&request), palette);
+        host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        let button = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .unwrap()
+            .bounds;
+        assert!(button.origin.y + button.size.height <= 180.0);
+
+        host.application_mut()
+            .update(NotificationMessage::ScrollBody(140.0));
+        host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        assert_eq!(host.application().body_offset, 140.0);
+        let scrolled_button = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .unwrap()
+            .bounds;
+        assert_eq!(button, scrolled_button);
+
+        request.body = "Revised scope".into();
+        host.application_mut().sync(Some(&request), palette);
+        assert_eq!(host.application().body_offset, 0.0);
     }
 
     #[test]

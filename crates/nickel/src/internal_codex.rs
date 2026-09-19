@@ -4,7 +4,11 @@
 //! coordinator contains no native window or event-loop identity: the session's
 //! [`InternalUiRuntime`] owns each `UiHost` and its frame lifecycle.
 
-use std::{collections::HashSet, path::PathBuf, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::Instant,
+};
 
 use nickel_codex::{BackendChoice, ThreadId};
 use nickel_codex_ui::{ChatApplication, ShellRequest, shell_application_with_backend};
@@ -21,6 +25,10 @@ pub struct CodexSurfacePlacement {
     pub output: Option<String>,
     pub origin: (i32, i32),
     pub scale: f32,
+    /// Override only the project menu's client size when an output is compact.
+    pub menu_size: Option<(u32, u32)>,
+    /// Bound a new chat's client area to its decorated output work area.
+    pub chat_size: Option<(u32, u32)>,
 }
 
 impl Default for CodexSurfacePlacement {
@@ -29,6 +37,8 @@ impl Default for CodexSurfacePlacement {
             output: None,
             origin: (0, 0),
             scale: 1.0,
+            menu_size: None,
+            chat_size: None,
         }
     }
 }
@@ -38,6 +48,7 @@ struct ChatSurface {
     id: InternalSurfaceId,
     project_id: String,
     thread_id: Option<ThreadId>,
+    pending_thread: Option<ThreadId>,
 }
 
 /// Owns the identities and domain leases for compositor-hosted Codex UI.
@@ -161,6 +172,31 @@ impl InternalCodexHost {
             .chain(self.chats.iter().map(|chat| chat.id))
     }
 
+    pub(crate) fn approval_notifications(
+        &self,
+        runtime: &InternalUiRuntime,
+    ) -> Vec<(
+        crate::live_shell::CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+    )> {
+        self.chats
+            .iter()
+            .filter_map(|chat| {
+                runtime
+                    .application::<ChatApplication>(chat.id)
+                    .map(|app| (chat.id, app.approval_notifications()))
+            })
+            .flat_map(|(id, approvals)| {
+                approvals.into_iter().map(move |approval| {
+                    (
+                        crate::live_shell::CodexApprovalOwner::Internal(id),
+                        approval,
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub fn project_application_id(&self, surface: InternalSurfaceId) -> Option<String> {
         self.chats
             .iter()
@@ -218,10 +254,15 @@ impl InternalCodexHost {
         runtime: &mut InternalUiRuntime,
         placement: CodexSurfacePlacement,
     ) -> Result<InternalSurfaceId, String> {
+        let size = placement.menu_size.unwrap_or(MENU_SIZE);
         if let Some(id) = self.project_menu {
-            runtime.relocate(
+            let scale = placement.scale;
+            // Configure the existing host when crossing output sizes; relocate
+            // alone intentionally rejects a geometry change.
+            runtime.configure_surface(
                 id,
-                internal_placement(placement, MENU_SIZE, InternalSurfaceRole::Overlay),
+                internal_placement(placement, size, InternalSurfaceRole::Overlay),
+                scale,
             );
             return Ok(id);
         }
@@ -236,7 +277,7 @@ impl InternalCodexHost {
         let scale = placement.scale;
         let id = runtime.insert(
             application,
-            internal_placement(placement, MENU_SIZE, InternalSurfaceRole::Overlay),
+            internal_placement(placement, size, InternalSurfaceRole::Overlay),
             scale,
         );
         self.project_menu = Some(id);
@@ -274,9 +315,10 @@ impl InternalCodexHost {
             )?;
             application.set_theme(self.theme);
             let scale = placement.scale;
+            let size = placement.chat_size.unwrap_or(CHAT_SIZE);
             let id = runtime.insert(
                 application,
-                internal_placement(placement, CHAT_SIZE, InternalSurfaceRole::Application),
+                internal_placement(placement, size, InternalSurfaceRole::Application),
                 scale,
             );
             runtime.focus_surface(id);
@@ -284,6 +326,7 @@ impl InternalCodexHost {
                 id,
                 project_id,
                 thread_id: initial_thread.clone(),
+                pending_thread: None,
             });
             Ok(id)
         })();
@@ -405,6 +448,91 @@ impl InternalCodexHost {
         Ok(opened)
     }
 
+    /// Route conversation selection through the shell's single-writer leases.
+    pub fn service_chat_requests(&mut self, runtime: &mut InternalUiRuntime) -> bool {
+        let owners = self
+            .chats
+            .iter()
+            .filter_map(|chat| {
+                chat.thread_id
+                    .as_ref()
+                    .map(|thread| (thread.clone(), chat.id))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut changed = false;
+        for chat in &mut self.chats {
+            let Some(app) = runtime.application_mut::<ChatApplication>(chat.id) else {
+                continue;
+            };
+            for request in app.take_shell_requests() {
+                match request {
+                    ShellRequest::ResumeThread(thread) => {
+                        if chat.pending_thread.is_some() {
+                            continue;
+                        }
+                        changed = true;
+                        if let Some(owner) = owners.get(&thread) {
+                            runtime.focus_surface(*owner);
+                            if let Some(app) = runtime.application_mut::<ChatApplication>(chat.id) {
+                                app.report_resume_owner_activation();
+                            }
+                            continue;
+                        }
+                        let Some(app) = runtime.application_mut::<ChatApplication>(chat.id) else {
+                            continue;
+                        };
+                        if app.state.thread_runtime.get(&thread).is_some_and(|entry| {
+                            entry.status == nickel_codex::ThreadRuntimeStatus::Active
+                        }) {
+                            app.report_resume_rejection(
+                                "Conversation is active outside this Nickel session",
+                            );
+                            continue;
+                        }
+                        if !app.prepare_shell_resume(&thread) {
+                            continue;
+                        }
+                        if !self.writer_leases.insert(thread.clone()) {
+                            app.report_resume_rejection(format!(
+                                "Conversation {} already has a Nickel writer",
+                                thread.0
+                            ));
+                            continue;
+                        }
+                        if let Err(error) = app.resume_thread(thread.clone()) {
+                            self.writer_leases.remove(&thread);
+                            app.report_resume_rejection(error);
+                            continue;
+                        }
+                        chat.pending_thread = Some(thread);
+                    }
+                    ShellRequest::ResumeSucceeded(thread) => {
+                        if chat.pending_thread.as_ref() == Some(&thread) {
+                            if let Some(previous) = chat.thread_id.replace(thread) {
+                                self.writer_leases.remove(&previous);
+                            }
+                            chat.pending_thread = None;
+                            changed = true;
+                        }
+                    }
+                    ShellRequest::ResumeFailed(thread) => {
+                        if chat.pending_thread.as_ref() == Some(&thread) {
+                            self.writer_leases.remove(&thread);
+                            chat.pending_thread = None;
+                            changed = true;
+                        } else if chat.thread_id.as_ref() == Some(&thread) {
+                            self.writer_leases.remove(&thread);
+                            chat.thread_id = None;
+                            changed = true;
+                        }
+                    }
+                    ShellRequest::OpenProject { .. } => {}
+                }
+            }
+        }
+        changed
+    }
+
     pub fn close(&mut self, runtime: &mut InternalUiRuntime, id: InternalSurfaceId) -> bool {
         if self.project_menu == Some(id) {
             self.project_menu = None;
@@ -413,7 +541,11 @@ impl InternalCodexHost {
         let Some(index) = self.chats.iter().position(|chat| chat.id == id) else {
             return false;
         };
-        if let Some(thread) = self.chats.remove(index).thread_id {
+        let chat = self.chats.remove(index);
+        if let Some(thread) = chat.thread_id {
+            self.writer_leases.remove(&thread);
+        }
+        if let Some(thread) = chat.pending_thread {
             self.writer_leases.remove(&thread);
         }
         runtime.remove(id)
@@ -510,6 +642,7 @@ mod tests {
                 id,
                 project_id: "project-1".into(),
                 thread_id: None,
+                pending_thread: None,
             });
         }
         let expected =
@@ -632,6 +765,8 @@ mod tests {
                     output: Some("right".into()),
                     origin: (1920, 312),
                     scale: 1.0,
+                    menu_size: Some((520, 528)),
+                    chat_size: None,
                 },
             )
             .unwrap();
@@ -643,7 +778,7 @@ mod tests {
         );
         assert_eq!(
             runtime.placement(id).unwrap().geometry,
-            (1920, 312, 520, 680)
+            (1920, 312, 520, 528)
         );
     }
 
@@ -652,16 +787,20 @@ mod tests {
         let mut runtime = InternalUiRuntime::default();
         let id = runtime.insert(TestApp, placement(InternalSurfaceRole::Application), 1.0);
         let thread = ThreadId("thread-1".into());
+        let pending = ThreadId("thread-2".into());
         let mut host = host();
         host.writer_leases.insert(thread.clone());
+        host.writer_leases.insert(pending.clone());
         host.chats.push(ChatSurface {
             id,
             project_id: "project-1".into(),
             thread_id: Some(thread.clone()),
+            pending_thread: Some(pending.clone()),
         });
 
         assert!(host.close(&mut runtime, id));
         assert!(!host.writer_leases.contains(&thread));
+        assert!(!host.writer_leases.contains(&pending));
         assert!(runtime.is_empty());
     }
 
@@ -677,6 +816,7 @@ mod tests {
             id: chat,
             project_id: "project-1".into(),
             thread_id: None,
+            pending_thread: None,
         });
 
         host.shutdown(&mut runtime);

@@ -76,7 +76,7 @@ use crate::session::{
         OutputLayout, SessionActivity,
         drm_scanner::{DrmScanEvent, DrmScanner},
     },
-    state::PreviewFrame,
+    state::{OrdinarySceneWindow, PreviewFrame},
 };
 
 const FORMATS: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
@@ -1158,12 +1158,13 @@ pub fn init_udev(
         use smithay::backend::input::{Event, InputEvent};
         // Preserve libinput's device/output association at the native boundary;
         // the backend-neutral Device trait intentionally lacks this metadata.
-        let touch_device = match &event {
+        let absolute_device = match &event {
+            InputEvent::PointerMotionAbsolute { event } => Some(event.device()),
             InputEvent::TouchDown { event } => Some(event.device()),
             InputEvent::TouchMotion { event } => Some(event.device()),
             _ => None,
         };
-        let output_name = touch_device
+        let output_name = absolute_device
             .as_ref()
             .and_then(|device| device.output_name());
         if let Some(vt) = data.process_input_event_on_output(event, output_name.as_deref())
@@ -1952,6 +1953,7 @@ impl NickelSession {
         self.restore_output_windows(&output);
         self.relayout_shell_surfaces();
         self.reconstrain_all_reactive_popups();
+        self.reconcile_stationary_pointer_after_topology_change();
         self.schedule_render(node, Duration::ZERO);
         tracing::info!(output = %name, "DRM output connected");
         Ok(())
@@ -2000,6 +2002,7 @@ impl NickelSession {
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
         self.reconstrain_all_reactive_popups();
+        self.reconcile_stationary_pointer_after_topology_change();
         tracing::info!(output = %name, "DRM output disconnected");
     }
 
@@ -2182,6 +2185,7 @@ impl NickelSession {
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
         self.reconstrain_all_reactive_popups();
+        self.reconcile_stationary_pointer_after_topology_change();
         self.retire_inactive_renderers();
         tracing::info!(output = %name, "DRM output disabled by user");
         Ok(())
@@ -2280,6 +2284,7 @@ impl NickelSession {
         self.relayout_fullscreen_windows();
         self.relayout_shell_surfaces();
         self.reconstrain_all_reactive_popups();
+        self.reconcile_stationary_pointer_after_topology_change();
         self.retire_inactive_renderers();
         tracing::info!(%node, forget_discovery, "DRM device resources retired");
     }
@@ -2540,6 +2545,7 @@ impl NickelSession {
             );
             let mut mapped_external_windows = 0_u32;
             let mut external_render_elements = 0_u32;
+            let mut client_element_starts = Vec::new();
             if let Some(output_geometry) = self.space.output_geometry(&output) {
                 // Space stores windows back-to-front. Build each window and its
                 // frame together, front-to-back, so overlapping frames obey the
@@ -2554,6 +2560,8 @@ impl NickelSession {
                     if !output_geometry.overlaps(bounds) {
                         continue;
                     }
+                    let client_start = elements.len();
+                    client_element_starts.push((window.clone(), client_start));
                     mapped_external_windows = mapped_external_windows.saturating_add(1);
                     let Some(location) = self.space.element_location(window) else {
                         continue;
@@ -2591,7 +2599,6 @@ impl NickelSession {
                         .and_then(|id| self.windows.title(id))
                         .unwrap_or_default();
                     let maximized = self.is_maximized_window(window);
-                    let frame_index = elements.len();
                     // element_bbox includes popups. A transient popup must not stretch the
                     // owning window's server-side frame beyond its content geometry.
                     let Some(frame_bounds) = self.space.element_geometry(window) else {
@@ -2610,12 +2617,13 @@ impl NickelSession {
                             height: frame_bounds.size.h,
                         },
                     );
-                    if let Some(titlebar) = crate::session::window_frame::render_titlebar_for(
+                    if let Some(titlebar) = crate::session::window_frame::render_titlebar_for_state(
                         registry_id.map(|id| id.0),
                         titlebar_geometry.width,
                         title,
                         frame_palette.panel,
                         foreground,
+                        active,
                     ) && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                         &mut renderer,
                         (
@@ -2628,23 +2636,25 @@ impl NickelSession {
                         Some((titlebar_geometry.width, titlebar_geometry.height).into()),
                         Kind::Unspecified,
                     ) {
-                        elements.push(NativeCustomElement::from(element).into());
+                        elements.insert(client_start, NativeCustomElement::from(element).into());
                     }
-                    let frame_height =
-                        frame_bounds.size.h + crate::session::window_frame::TITLEBAR_HEIGHT;
-                    for shadow in crate::session::window_frame::shadow_layers(
+                    let border_color = crate::session::window_frame::frame_border_color(
+                        frame_palette.panel,
+                        foreground,
+                        active,
+                    );
+                    for border in crate::session::window_frame::content_border_layers(
                         frame_bounds.size.w,
-                        frame_height,
+                        frame_bounds.size.h,
+                        border_color,
                     ) {
-                        elements.push(
+                        elements.insert(
+                            client_start,
                             NativeCustomElement::from(SolidColorRenderElement::from_buffer(
-                                &shadow.buffer,
+                                &border.buffer,
                                 (
-                                    frame_bounds.loc.x - output_geometry.loc.x + shadow.offset.0,
-                                    frame_bounds.loc.y
-                                        - output_geometry.loc.y
-                                        - crate::session::window_frame::TITLEBAR_HEIGHT
-                                        + shadow.offset.1,
+                                    frame_bounds.loc.x - output_geometry.loc.x + border.offset.0,
+                                    frame_bounds.loc.y - output_geometry.loc.y + border.offset.1,
                                 ),
                                 1.0,
                                 1.0,
@@ -2653,11 +2663,45 @@ impl NickelSession {
                             .into(),
                         );
                     }
+                    let frame_height =
+                        frame_bounds.size.h + crate::session::window_frame::TITLEBAR_HEIGHT;
+                    if !maximized {
+                        let shadows = crate::session::window_frame::shadow_layers(
+                            frame_bounds.size.w,
+                            frame_height,
+                            active,
+                        );
+                        for shadow in shadows.images {
+                            if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                                &mut renderer,
+                                (
+                                    f64::from(
+                                        frame_bounds.loc.x - output_geometry.loc.x
+                                            + shadow.offset.0,
+                                    ),
+                                    f64::from(
+                                        frame_bounds.loc.y
+                                            - output_geometry.loc.y
+                                            - crate::session::window_frame::TITLEBAR_HEIGHT
+                                            + shadow.offset.1,
+                                    ),
+                                ),
+                                &shadow.buffer,
+                                None,
+                                None,
+                                Some(shadow.size.into()),
+                                Kind::Unspecified,
+                            ) {
+                                elements.push(NativeCustomElement::from(element).into());
+                            }
+                        }
+                    }
                     if let Some(icons) = &frame_icons {
-                        let icon_y = frame_bounds.loc.y
-                            - output_geometry.loc.y
-                            - crate::session::window_frame::TITLEBAR_HEIGHT
-                            + 8;
+                        let icon_y = crate::session::window_frame::frame_icon_y(
+                            frame_bounds.loc.y
+                                - output_geometry.loc.y
+                                - crate::session::window_frame::TITLEBAR_HEIGHT,
+                        );
                         let icon_x =
                             frame_bounds.loc.x - output_geometry.loc.x + frame_bounds.size.w;
                         for (buffer, offset) in [
@@ -2682,11 +2726,65 @@ impl NickelSession {
                                 Kind::Unspecified,
                             ) {
                                 elements
-                                    .insert(frame_index, NativeCustomElement::from(icon).into());
+                                    .insert(client_start, NativeCustomElement::from(icon).into());
                             }
                         }
                     }
                 }
+            }
+            // Keep each client and its server-side frame together when projecting
+            // the registry's ordinary-window order into the native render scene.
+            let mut client_groups = Vec::new();
+            let mut remaining_elements = elements;
+            for (window, start) in client_element_starts.into_iter().rev() {
+                client_groups.push((window, Some(remaining_elements.split_off(start))));
+            }
+            client_groups.reverse();
+            let mut elements = Vec::new();
+            for (window, group) in &mut client_groups {
+                if window.toplevel().is_some_and(|surface| {
+                    shell_surfaces.contains(&surface.wl_surface().id())
+                        && !desktop_surfaces.contains(&surface.wl_surface().id())
+                }) {
+                    elements.extend(group.take().into_iter().flatten());
+                }
+            }
+            if let Some(output_geometry) = self.space.output_geometry(&output) {
+                for window in self.ordinary_scene_order() {
+                    match window {
+                        OrdinarySceneWindow::Internal(surface) => elements.extend(
+                            self.internal_ui
+                                .render_application_elements(
+                                    &mut renderer,
+                                    output_geometry.loc,
+                                    surface,
+                                )
+                                .into_iter()
+                                .map(|element| {
+                                    NativeElement::from(NativeCustomElement::from(element))
+                                }),
+                        ),
+                        OrdinarySceneWindow::Client(window) => {
+                            if let Some((_, group)) = client_groups
+                                .iter_mut()
+                                .find(|(candidate, _)| *candidate == window)
+                            {
+                                elements.extend(group.take().into_iter().flatten());
+                            }
+                        }
+                    }
+                }
+            }
+            for (window, group) in &mut client_groups {
+                if !window
+                    .toplevel()
+                    .is_some_and(|surface| desktop_surfaces.contains(&surface.wl_surface().id()))
+                {
+                    elements.extend(group.take().into_iter().flatten());
+                }
+            }
+            for (_, group) in client_groups {
+                elements.extend(group.into_iter().flatten());
             }
             let external_scene_signature =
                 (u64::from(mapped_external_windows) << 32) | u64::from(external_render_elements);
@@ -2787,25 +2885,10 @@ impl NickelSession {
                     )
                     .into_iter()
                     .map(|element| NativeElement::from(NativeCustomElement::from(element)));
-                let application_elements = self
-                    .internal_ui
-                    .render_elements_for_layer(
-                        &mut renderer,
-                        &output.name(),
-                        output_geometry.loc,
-                        Some(crate::session::InternalSurfaceLayer::Application),
-                    )
-                    .into_iter()
-                    .map(|element| NativeElement::from(NativeCustomElement::from(element)));
-                // DRM elements are front-to-back. Keep internal applications at
-                // the ordinary application boundary, behind mapped clients.
-                if !self.internal_applications_are_foremost() {
-                    elements.extend(application_elements);
-                }
                 // Backgrounds must remain behind every ordinary application,
                 // including internal windows that have lost foreground focus.
                 elements.extend(background_elements);
-                let mut overlay_elements = self
+                let overlay_elements = self
                     .internal_ui
                     .render_elements_without_trusted(
                         &mut renderer,
@@ -2816,19 +2899,6 @@ impl NickelSession {
                     .into_iter()
                     .map(|element| NativeElement::from(NativeCustomElement::from(element)))
                     .collect::<Vec<_>>();
-                if self.internal_applications_are_foremost() {
-                    let application_elements = self
-                        .internal_ui
-                        .render_elements_for_layer(
-                            &mut renderer,
-                            &output.name(),
-                            output_geometry.loc,
-                            Some(crate::session::InternalSurfaceLayer::Application),
-                        )
-                        .into_iter()
-                        .map(|element| NativeElement::from(NativeCustomElement::from(element)));
-                    overlay_elements.extend(application_elements);
-                }
                 elements.splice(0..0, overlay_elements);
             }
             if !self.locked && self.shell_recovery_visible() {
@@ -2893,7 +2963,7 @@ impl NickelSession {
                 .as_deref()
                 .is_none_or(|name| name == output.name());
             let owns_switcher = self
-                .keyboard_interaction_output_name()
+                .task_switcher_output_name()
                 .is_some_and(|name| name == output.name());
             let mode_size = output.current_mode().map(|mode| mode.size);
             let switcher = (!self.locked && owns_switcher)
@@ -3554,7 +3624,8 @@ fn task_switcher_buffer(
         .saturating_sub(padding * 2 + gap * count.saturating_sub(1) as u32))
         / count as u32)
         .clamp(140, 220);
-    let card_height = 180_u32;
+    let card_height = 204_u32;
+    let label_height = 24_u32;
     let width = padding * 2 + card_width * count as u32 + gap * count.saturating_sub(1) as u32;
     let height = card_height + padding * 2;
     let size = (width as i32, height as i32);
@@ -3584,21 +3655,47 @@ fn task_switcher_buffer(
                 image::Rgba([43, 56, 82, 255]),
             );
             let id = candidates[index];
-            let Some(frame) = state.preview_frames.get(&id) else {
-                continue;
-            };
-            let Some(source) = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
-                u32::from(frame.width),
-                u32::from(frame.height),
-                frame.rgba.as_slice(),
-            ) else {
-                continue;
-            };
-            draw_contained_preview(
-                &mut image,
-                &source,
-                (x + 8, padding + 8, card_width - 16, card_height - 16),
-            );
+            if let Some(frame) = state.preview_frames.get(&id)
+                && let Some(source) = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
+                    u32::from(frame.width),
+                    u32::from(frame.height),
+                    frame.rgba.as_slice(),
+                )
+            {
+                draw_contained_preview(
+                    &mut image,
+                    &source,
+                    (
+                        x + 8,
+                        padding + 8,
+                        card_width - 16,
+                        card_height - label_height - 20,
+                    ),
+                );
+            }
+            let title = state
+                .windows
+                .title(id)
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("Untitled window");
+            if let Some(label) = crate::session::window_frame::render_task_switcher_label(
+                card_width - 16,
+                label_height,
+                title,
+                0x002b3852,
+                0x00e8edf4,
+            ) && let Some(label) = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
+                card_width - 16,
+                label_height,
+                label.as_slice(),
+            ) {
+                image::imageops::overlay(
+                    &mut image,
+                    &label,
+                    i64::from(x + 8),
+                    i64::from(padding + card_height - label_height - 6),
+                );
+            }
         }
     });
     Some((buffer, size.into()))
