@@ -7,6 +7,23 @@ use nickel_ui::{
 
 const REMOTE_ACCESS_ACTION_HEIGHT: f32 = 48.0;
 
+fn bluetooth_kind_icon(kind: &str) -> Option<String> {
+    let icon = match kind {
+        "audio-card" | "audio-headphones" | "audio-headset" => "🎧",
+        "input-keyboard" => "⌨",
+        "input-mouse" => "🖱",
+        "input-gaming" => "🎮",
+        "phone" => "📱",
+        "computer" => "💻",
+        _ => return None,
+    };
+    Some(icon.to_owned())
+}
+
+fn bluetooth_signal_label(signal_dbm: i16) -> String {
+    format!("{signal_dbm} dBm")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemoteExposurePresentation {
     pub(crate) kind: SettingsStatusKind,
@@ -2009,7 +2026,10 @@ impl SettingsApp {
             AnyView::new(nickel_ui::Container::new())
         };
         let compact_cards = content_width < 520.0;
-        let display_cards = self.displays.iter().enumerate().map(|(index, display)| {
+        let mut display_order = (0..self.displays.len()).collect::<Vec<_>>();
+        display_order.sort_by_key(|index| (*index == self.selected) as u8);
+        let display_cards = display_order.into_iter().map(|index| {
+            let display = &self.displays[index];
             let selected = index == self.selected;
             let detail = if display.enabled {
                 display.detail.clone()
@@ -2065,7 +2085,7 @@ impl SettingsApp {
         } else {
             AnyView::new(
                 Layer::new()
-                    .width(content_width)
+                    .fill_width()
                     .height(216.0)
                     .children(display_cards),
             )
@@ -2262,16 +2282,24 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn bluetooth_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+    pub(super) fn bluetooth_components(&self) -> AnyView<SettingsMessage> {
         let palette = self.palette();
         let theme = self.ui_theme();
         let pairing = self.page == SettingsPage::BluetoothPair;
         let operation_pending = self.bluetooth_operation_rx.is_some();
-        let device_list = self.bluetooth.devices.iter().enumerate().filter(|(_, device)| {
-            pairing || device.paired || device.connected
-        }).fold(
-            SettingsListCard::new(theme),
-            |list, (index, device)| {
+        let device_list = self
+            .bluetooth
+            .devices
+            .iter()
+            .enumerate()
+            .filter(|(_, device)| {
+                if pairing {
+                    !device.paired && !device.connected
+                } else {
+                    device.paired || device.connected
+                }
+            })
+            .fold(SettingsListCard::new(theme), |list, (index, device)| {
                 let status = if device.connected {
                     self.localizer.text("settings-bluetooth-connected")
                 } else if device.paired {
@@ -2279,10 +2307,20 @@ impl SettingsApp {
                 } else {
                     self.localizer.text("settings-bluetooth-available")
                 };
-                let detail = device
-                    .battery_percent
-                    .map(|percent| format!("{percent}%"))
-                    .unwrap_or_default();
+                let detail = if pairing {
+                    let kind = device.kind.as_deref().and_then(bluetooth_kind_icon);
+                    let signal = device.signal_dbm.map(bluetooth_signal_label);
+                    [kind, signal]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                } else {
+                    device
+                        .battery_percent
+                        .map(|percent| format!("{percent}%"))
+                        .unwrap_or_default()
+                };
                 let supporting = if detail.is_empty() {
                     status
                 } else {
@@ -2314,8 +2352,7 @@ impl SettingsApp {
                             .id(format!("bluetooth-device-{index}-action")),
                         ),
                 )
-            },
-        );
+            });
 
         let adapter_status = if let Some(operation) = &self.bluetooth_operation {
             match operation {
@@ -2377,7 +2414,19 @@ impl SettingsApp {
             },
         )
         .width(150.0);
-        let device_list = if self.bluetooth.devices.is_empty() {
+        let visible_device_count = self
+            .bluetooth
+            .devices
+            .iter()
+            .filter(|device| {
+                if pairing {
+                    !device.paired && !device.connected
+                } else {
+                    device.paired || device.connected
+                }
+            })
+            .count();
+        let device_list = if visible_device_count == 0 {
             AnyView::new(
                 ui! { <Column><Text color={palette.muted}>{if self.bluetooth.available {
                     self.localizer.text("settings-bluetooth-no-devices")
@@ -2420,26 +2469,61 @@ impl SettingsApp {
             .id("bluetooth-power")
             .accessibility_label(bluetooth_label),
         );
-        let content = ui! {
-            <Column gap={12.0}>
-                {bluetooth_power}
-                <Text scale={1.0} color={palette.muted}>{adapter_status}</Text>
-                <Row height={36.0}>
-                    <Text width={390.0} color={palette.text}>{self.localizer.text("settings-bluetooth-devices")}</Text>
-                    {discovery_button}
-                </Row>
-                {device_list}
-            </Column>
+        let content = if pairing {
+            AnyView::new(ui! {
+                <Column gap={12.0}>
+                    <Text scale={1.0} color={palette.muted}>{adapter_status}</Text>
+                    <Row height={36.0}>
+                        <Text color={palette.text} grow={1.0}>{self.localizer.text("settings-bluetooth-nearby-devices")}</Text>
+                        {discovery_button}
+                    </Row>
+                    {device_list}
+                </Column>
+            })
+        } else {
+            AnyView::new(ui! {
+                <Column gap={12.0}>
+                    {bluetooth_power}
+                    <Text scale={1.0} color={palette.muted}>{adapter_status}</Text>
+                    <Row height={36.0}>
+                        <Text width={390.0} color={palette.text}>{self.localizer.text("settings-bluetooth-devices")}</Text>
+                        {discovery_button}
+                    </Row>
+                    {device_list}
+                </Column>
+            })
         };
 
-        ui! {
-            <Column grow={1.0} padding={Insets {
-                top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
-            }}>
+        let content_padding = if pairing {
+            Insets::all(0.0)
+        } else {
+            Insets {
+                top: 20.0,
+                right: 40.0,
+                bottom: 20.0,
+                left: 20.0,
+            }
+        };
+        AnyView::new(ui! {
+            <Column grow={1.0} padding={content_padding}>
                 <VerticalScroll id={"bluetooth-list"} on_scroll={SettingsMessage::BluetoothScroll}
                     offset={0.0} theme={theme}>{content}</VerticalScroll>
             </Column>
-        }
+        })
+    }
+
+    pub(super) fn bluetooth_pairing_view(&self) -> AnyView<SettingsMessage> {
+        let theme = self.ui_theme();
+        AnyView::new(ui! {
+            <Column grow={1.0} padding={Insets::all(20.0)} gap={12.0}>
+                {PageHeader::new(
+                    theme,
+                    self.localizer.text("settings-bluetooth-pair-title"),
+                    self.localizer.text("settings-bluetooth-pair-subtitle"),
+                )}
+                {self.bluetooth_components()}
+            </Column>
+        })
     }
 
     pub(super) fn bar_components(&self) -> impl nickel_ui::Component<SettingsMessage> {

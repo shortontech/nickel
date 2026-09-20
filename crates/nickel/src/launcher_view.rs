@@ -985,6 +985,7 @@ fn dashboard_geometry(
     theme: &SemanticTheme,
     viewport: (u32, u32),
 ) -> DashboardGeometry {
+    let density = nickel_ui::DesktopDensity::COMPACT;
     let (viewport_width, viewport_height) = viewport;
     let viewport_width = viewport_width.max(1) as f32;
     let narrow = viewport_width < START_MENU_SINGLE_PANE_BREAKPOINT;
@@ -1028,19 +1029,18 @@ fn dashboard_geometry(
     let sidebar_width = (sidebar_label_width + 20.0 + theme.spacing.control + 12.0)
         .max(account_width)
         .clamp(148.0, 240.0);
-    let tile_width = applications
-        .iter()
-        .map(|application| nickel_ui::intrinsic_text_width(application.name(), 0.9))
-        .fold(0.0, f32::max)
-        .clamp(100.0, 142.0);
+    // Application labels are bounded content inside a stable three-column
+    // rhythm. A single unusually long name must not widen every column and
+    // therefore the complete launcher.
+    let tile_width = 124.0;
     let columns = 3.0;
     let detail_width = columns * tile_width + (columns - 1.0) * 2.0;
     let width = if narrow {
-        (sidebar_width.max(detail_width) + 2.0 * theme.spacing.content)
+        (sidebar_width.max(detail_width) + 2.0 * density.surface_inset)
             .max(320.0)
             .min(viewport_width)
     } else {
-        (sidebar_width + detail_width + 5.0 * theme.spacing.content)
+        (sidebar_width + detail_width + 5.0 * density.surface_inset)
             .clamp(START_MENU_SINGLE_PANE_BREAKPOINT, DASHBOARD_MAX_WIDTH)
             .min(viewport_width)
     };
@@ -1057,9 +1057,9 @@ fn dashboard_geometry(
         (sidebar_body_height.max(detail_body_height) + 52.0 + 52.0 + 3.0 * theme.spacing.content)
             .min(viewport_height.max(1) as f32);
     let grid_cell_width = if narrow {
-        (width - 4.0 * theme.spacing.content - 4.0) / 3.0
+        (width - 4.0 * density.surface_inset - 4.0) / 3.0
     } else {
-        (width - sidebar_width - 5.0 * theme.spacing.content - 4.0) / 3.0
+        (width - sidebar_width - 5.0 * density.surface_inset - 4.0) / 3.0
     }
     .max(48.0);
     DashboardGeometry {
@@ -2732,7 +2732,10 @@ mod tests {
         let short = tile_width("Game");
         let long =
             tile_width("Heroes of Might and Magic III: Shadows of Amn and an even longer subtitle");
-        assert!(short < long, "short={short}, long={long}");
+        assert_eq!(
+            short, long,
+            "one long label must not widen every grid column"
+        );
         assert!(long <= 142.0, "long={long}");
     }
 

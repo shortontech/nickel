@@ -5,13 +5,15 @@ use crate::platform::{
 };
 use nickel_core::display_projection::ProjectionMode;
 use nickel_core::theme::{Appearance, ThemePalette};
+use nickel_i18n::Localizer;
 use nickel_ui::{
-    Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Insets,
-    Length, LinearGradient, Row, SemanticRole, SemanticTheme, SemanticTokenSet, Slider, Spacer,
-    Switch, SwitchState, Text, UiHost, VerticalScroll, ViewContext,
+    Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, CustomPaint,
+    DesktopDensity, Grid, Insets, Length, LinearGradient, ReadingDirection, Rect, Row,
+    SemanticRole, SemanticTheme, SemanticTokenSet, Slider, Spacer, Switch, SwitchState, Text,
+    UiHost, VerticalScroll, ViewContext, backend::PaintCommand,
 };
 
-const HEADER: f32 = 66.0;
+const HEADER: f32 = 48.0;
 const ROW: f32 = 46.0;
 
 fn control_theme(palette: ThemePalette) -> SemanticTheme {
@@ -24,7 +26,7 @@ fn control_theme(palette: ThemePalette) -> SemanticTheme {
         palette.text,
         palette.muted,
         palette.accent,
-        palette.surface,
+        palette.accent_soft,
         palette.complement,
         palette.complement,
     ))
@@ -33,13 +35,16 @@ fn control_theme(palette: ThemePalette) -> SemanticTheme {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlAction {
     ToggleWifiSection,
+    WifiScroll,
     SetWifiEnabled(bool),
     ActivateWifi { id: String },
     ToggleBluetoothSection,
+    BluetoothScroll,
     SetBluetoothPowered(bool),
     SetBluetoothDiscovery(bool),
     ToggleBluetoothDevice { id: String },
     ToggleAudioSection,
+    AudioScroll,
     SetAudioVolume(u8),
     SetAudioMuted(bool),
     SelectAudioDevice { id: String },
@@ -77,6 +82,8 @@ pub struct ControlCenterApp {
     workspaces: Vec<WorkspaceSummary>,
     supported_projection_modes: Vec<ProjectionMode>,
     state: ControlViewState,
+    direction_override: Option<ReadingDirection>,
+    locale_override: Option<String>,
     effects: Vec<ControlAction>,
     dirty: bool,
 }
@@ -101,6 +108,8 @@ impl ControlCenterApp {
                 ProjectionMode::ExternalOnly,
             ],
             state: ControlViewState::default(),
+            direction_override: None,
+            locale_override: None,
             effects: Vec::new(),
             dirty: false,
         }
@@ -109,6 +118,23 @@ impl ControlCenterApp {
     pub fn set_palette(&mut self, palette: ThemePalette) {
         if self.palette != palette {
             self.palette = palette;
+            self.dirty = true;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_reading_direction(&mut self, direction: Option<ReadingDirection>) {
+        if self.direction_override != direction {
+            self.direction_override = direction;
+            self.dirty = true;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_locale(&mut self, locale: Option<&str>) {
+        let locale = locale.map(str::to_owned);
+        if self.locale_override != locale {
+            self.locale_override = locale;
             self.dirty = true;
         }
     }
@@ -216,6 +242,14 @@ struct Card {
     view: AnyView<ControlAction>,
 }
 
+fn directional_row(row: Row<ControlAction>, direction: ReadingDirection) -> Row<ControlAction> {
+    if direction == ReadingDirection::RightToLeft {
+        row.reverse()
+    } else {
+        row
+    }
+}
+
 fn control_center_view(app: &ControlCenterApp, context: ViewContext) -> AnyView<ControlAction> {
     let ControlCenterApp {
         palette,
@@ -225,8 +259,21 @@ fn control_center_view(app: &ControlCenterApp, context: ViewContext) -> AnyView<
         workspaces,
         supported_projection_modes,
         state,
+        direction_override,
+        locale_override,
         ..
     } = app;
+    let localizer = locale_override
+        .as_deref()
+        .map(|locale| Localizer::for_locale(Some(locale)))
+        .unwrap_or_else(Localizer::system);
+    let direction = direction_override.unwrap_or_else(|| {
+        if localizer.is_right_to_left() {
+            ReadingDirection::RightToLeft
+        } else {
+            ReadingDirection::LeftToRight
+        }
+    });
     let palette = *palette;
     let width = context.viewport.size.width.max(280.0);
     let height = context.viewport.size.height.max(240.0);
@@ -238,24 +285,31 @@ fn control_center_view(app: &ControlCenterApp, context: ViewContext) -> AnyView<
             supported_projection_modes,
             width,
             height,
+            direction,
+            &localizer,
         );
     }
     let cards = vec![
-        wifi(palette, network, state.wifi_expanded),
-        bluetooth_view(palette, bluetooth, state.bluetooth_expanded),
-        audio_view(palette, audio, state.audio_expanded),
-        workspaces_view(palette, workspaces),
+        wifi(palette, network, state.wifi_expanded, direction, &localizer),
+        bluetooth_view(
+            palette,
+            bluetooth,
+            state.bluetooth_expanded,
+            direction,
+            &localizer,
+        ),
+        audio_view(palette, audio, state.audio_expanded, direction, &localizer),
+        workspaces_view(palette, workspaces, direction, &localizer),
         card(
             palette,
-            64.0,
-            vec![AnyView::new(
+            vec![AnyView::new(directional_row(
                 Row::new()
                     .gap(8.0)
                     .child(
                         button(
                             palette,
                             action(ControlAction::ToggleShowDesktop),
-                            "Show desktop",
+                            localizer.text("control-center-show-desktop"),
                         )
                         .id("show-desktop"),
                     )
@@ -263,22 +317,26 @@ fn control_center_view(app: &ControlCenterApp, context: ViewContext) -> AnyView<
                         button(
                             palette,
                             action(ControlAction::ShowNotifications),
-                            "Notifications",
+                            localizer.text("control-center-notifications"),
                         )
                         .id("show-notifications"),
                     ),
-            )],
+                direction,
+            ))],
         ),
         projection_view(
             palette,
             state.pending_projection,
             supported_projection_modes,
+            direction,
+            &localizer,
         ),
-        session_view(palette, state.pending_session_action),
+        session_view(palette, state.pending_session_action, direction, &localizer),
     ];
+    let density = DesktopDensity::COMPACT;
     let content = Column::new()
-        .gap(12.0)
-        .padding(16.0)
+        .gap(density.related_gap)
+        .padding(density.surface_inset)
         .children(cards.into_iter().map(|card| card.view));
     AnyView::new(
         Column::new()
@@ -288,16 +346,11 @@ fn control_center_view(app: &ControlCenterApp, context: ViewContext) -> AnyView<
             .child(
                 Container::new()
                     .height(HEADER)
-                    .padding(Insets {
-                        top: 17.0,
-                        right: 16.0,
-                        bottom: 19.0,
-                        left: 16.0,
-                    })
+                    .padding(Insets::symmetric(10.0, density.surface_inset))
                     .background(palette.panel)
                     .child(
-                        Text::new("Control Center")
-                            .scale(3.0)
+                        Text::new(localizer.text("control-center-title"))
+                            .scale(1.5)
                             .bold(true)
                             .color(palette.text),
                     ),
@@ -316,43 +369,62 @@ fn projection_view(
     palette: ThemePalette,
     pending: Option<ProjectionMode>,
     supported: &[ProjectionMode],
+    direction: ReadingDirection,
+    localizer: &Localizer,
 ) -> Card {
     if pending.is_some() {
         return card(
             palette,
-            82.0,
             vec![
-                AnyView::new(Text::new("Keep these display settings?").color(palette.text)),
                 AnyView::new(
+                    Text::new(localizer.text("control-center-keep-display-settings"))
+                        .color(palette.text),
+                ),
+                AnyView::new(directional_row(
                     Row::new()
                         .gap(8.0)
                         .child(button(
                             palette,
                             action(ControlAction::CancelProjection),
-                            "Revert",
+                            localizer.text("control-center-revert"),
                         ))
                         .child(button(
                             palette,
                             action(ControlAction::ConfirmProjection),
-                            "Keep",
+                            localizer.text("control-center-keep"),
                         )),
-                ),
+                    direction,
+                )),
             ],
         );
     }
     let modes = [
-        ("PC screen", ProjectionMode::InternalOnly),
-        ("Duplicate", ProjectionMode::Duplicate),
-        ("Extend", ProjectionMode::Extend),
-        ("Second screen", ProjectionMode::ExternalOnly),
+        (
+            localizer.text("control-center-display-internal"),
+            ProjectionMode::InternalOnly,
+        ),
+        (
+            localizer.text("control-center-display-duplicate"),
+            ProjectionMode::Duplicate,
+        ),
+        (
+            localizer.text("control-center-display-extend"),
+            ProjectionMode::Extend,
+        ),
+        (
+            localizer.text("control-center-display-external"),
+            ProjectionMode::ExternalOnly,
+        ),
     ];
     card(
         palette,
-        96.0,
-        vec![
-            AnyView::new(Text::new("Project displays").color(palette.text)),
-            AnyView::new(
-                Row::new().gap(6.0).children(
+        vec![AnyView::new(directional_row(
+            Row::new()
+                .gap(DesktopDensity::COMPACT.related_gap)
+                .align_items(Align::Center)
+                .child(Text::new(localizer.text("control-center-displays")).color(palette.text))
+                .child(Spacer::flex())
+                .children(
                     modes
                         .into_iter()
                         .filter(|(_, mode)| supported.contains(mode))
@@ -364,8 +436,8 @@ fn projection_view(
                             ))
                         }),
                 ),
-            ),
-        ],
+            direction,
+        ))],
     )
 }
 
@@ -375,26 +447,26 @@ fn projection_chooser_view(
     supported: &[ProjectionMode],
     width: f32,
     height: f32,
+    direction: ReadingDirection,
+    localizer: &Localizer,
 ) -> AnyView<ControlAction> {
     let content = if supported.is_empty() {
         AnyView::new(
             Column::new()
                 .gap(8.0)
                 .child(
-                    Text::new("Project displays")
+                    Text::new(localizer.text("control-center-displays"))
                         .scale(3.0)
                         .bold(true)
                         .color(palette.text),
                 )
                 .child(
-                    Text::new(
-                        "No display projection modes are available for the current topology.",
-                    )
-                    .color(palette.muted),
+                    Text::new(localizer.text("control-center-displays-unavailable"))
+                        .color(palette.muted),
                 ),
         )
     } else {
-        projection_view(palette, pending, supported).view
+        projection_view(palette, pending, supported, direction, localizer).view
     };
     AnyView::new(
         Container::new()
@@ -406,13 +478,13 @@ fn projection_chooser_view(
     )
 }
 
-fn card(palette: ThemePalette, height: f32, children: Vec<AnyView<ControlAction>>) -> Card {
+fn card(palette: ThemePalette, children: Vec<AnyView<ControlAction>>) -> Card {
+    let density = DesktopDensity::COMPACT;
     Card {
         view: AnyView::new(
             Column::new()
-                .height(height)
-                .padding(14.0)
-                .gap(8.0)
+                .padding(density.related_gap)
+                .gap(density.related_gap)
                 .background(palette.surface)
                 .border(palette.surface_hover, 1.0)
                 .radius(12.0)
@@ -441,13 +513,24 @@ fn action(value: ControlAction) -> ControlAction {
     value
 }
 
+const fn translucent(color: u32, alpha: u32) -> u32 {
+    (color & 0x00ff_ffff) | (alpha << 24)
+}
+
+const fn subdued_accent(accent: u32, neutral: u32) -> u32 {
+    let red = (((accent >> 16) & 0xff) + 3 * ((neutral >> 16) & 0xff)) / 4;
+    let green = (((accent >> 8) & 0xff) + 3 * ((neutral >> 8) & 0xff)) / 4;
+    let blue = ((accent & 0xff) + 3 * (neutral & 0xff)) / 4;
+    (red << 16) | (green << 8) | blue
+}
+
 fn button(
     palette: ThemePalette,
     value: ControlAction,
     label: impl Into<String>,
 ) -> Button<ControlAction> {
     Button::new(value, label)
-        .height(32.0)
+        .height(DesktopDensity::COMPACT.touch_target)
         .padding(Insets {
             top: 6.0,
             right: 10.0,
@@ -456,9 +539,51 @@ fn button(
         })
         .radius(7.0)
         .background(palette.surface_hover)
+        .border(translucent(palette.muted, 0x38), 1.0)
         .color(palette.text)
+        .center_label_vertically()
         .focus_background_tint(palette.accent)
         .controller_focus_background_tint(palette.accent)
+}
+
+fn workspace_mark_button(
+    palette: ThemePalette,
+    value: ControlAction,
+    id: &'static str,
+    label: &'static str,
+    plus: bool,
+    enabled: bool,
+) -> Container<ControlAction> {
+    let mut commands = vec![PaintCommand::RoundedFill {
+        rect: Rect::new(3.0, 8.0, 12.0, 2.0),
+        color: palette.text,
+        radius: 1.0,
+    }];
+    if plus {
+        commands.push(PaintCommand::RoundedFill {
+            rect: Rect::new(8.0, 3.0, 2.0, 12.0),
+            color: palette.text,
+            radius: 1.0,
+        });
+    }
+    Container::new()
+        .id(id)
+        .width(DesktopDensity::COMPACT.touch_target)
+        .height(DesktopDensity::COMPACT.touch_target)
+        .shrink(0.0)
+        .radius(7.0)
+        .background(palette.surface_hover)
+        .border(translucent(palette.muted, 0x38), 1.0)
+        .interaction_backgrounds(palette.surface_hover, palette.surface)
+        .focus_background_tint(palette.accent)
+        .controller_focus_background_tint(palette.accent)
+        .align_items(Align::Center)
+        .justify_content(nickel_ui::Justify::Center)
+        .semantic_role(SemanticRole::Button)
+        .accessibility_label(label)
+        .message(value)
+        .enabled(enabled)
+        .child(CustomPaint::commands(commands).width(18.0).height(18.0))
 }
 
 fn section(
@@ -466,18 +591,19 @@ fn section(
     id: &str,
     expanded: bool,
     value: ControlAction,
+    localizer: &Localizer,
 ) -> AnyView<ControlAction> {
     AnyView::new(
         Button::new(
             action(value),
             if expanded {
-                "Hide devices"
+                localizer.text("control-center-hide-devices")
             } else {
-                "Show devices"
+                localizer.text("control-center-show-devices")
             },
         )
         .id(id)
-        .height(34.0)
+        .height(DesktopDensity::COMPACT.touch_target)
         .padding(8.0)
         .background(palette.surface)
         .color(palette.muted)
@@ -558,7 +684,13 @@ fn status_row(
     }
 }
 
-fn wifi(palette: ThemePalette, status: &NetworkStatus, expanded: bool) -> Card {
+fn wifi(
+    palette: ThemePalette,
+    status: &NetworkStatus,
+    expanded: bool,
+    direction: ReadingDirection,
+    localizer: &Localizer,
+) -> Card {
     let detail = if !status.available {
         "Unavailable".into()
     } else if !status.enabled {
@@ -572,30 +704,35 @@ fn wifi(palette: ThemePalette, status: &NetworkStatus, expanded: bool) -> Card {
     } else {
         format!("{} nearby", status.networks.len())
     };
-    let mut children = vec![
-        AnyView::new(
-            Row::new()
-                .height(38.0)
-                .align_items(Align::Start)
-                .child(title(palette, "Wi-Fi", detail, palette.muted))
-                .child(Spacer::flex())
-                .child(toggle(
-                    palette,
-                    "wifi-power",
-                    status.enabled,
-                    status.available,
-                    ControlAction::SetWifiEnabled(!status.enabled),
-                )),
-        ),
-        section(
-            palette,
-            "wifi-section",
-            expanded,
-            ControlAction::ToggleWifiSection,
-        ),
-    ];
+    let mut children = vec![AnyView::new(directional_row(
+        Row::new()
+            .min_height(DesktopDensity::COMPACT.touch_target)
+            .align_items(Align::Center)
+            .child(title(
+                palette,
+                &localizer.text("control-center-wifi"),
+                detail,
+                palette.muted,
+            ))
+            .child(Spacer::flex())
+            .child(section(
+                palette,
+                "wifi-section",
+                expanded,
+                ControlAction::ToggleWifiSection,
+                localizer,
+            ))
+            .child(toggle(
+                palette,
+                "wifi-power",
+                status.enabled,
+                status.available,
+                ControlAction::SetWifiEnabled(!status.enabled),
+            )),
+        direction,
+    ))];
     if expanded {
-        children.extend(status.networks.iter().take(8).map(|network| {
+        let rows = status.networks.iter().take(8).map(|network| {
             let detail = if network.connected {
                 format!("CONNECTED · {}%", network.signal_percent)
             } else if network.saved {
@@ -613,16 +750,25 @@ fn wifi(palette: ThemePalette, status: &NetworkStatus, expanded: bool) -> Card {
                     id: network.id.clone(),
                 }),
             )
-        }));
+        });
+        children.push(AnyView::new(
+            VerticalScroll::new(ControlAction::WifiScroll, 0.0)
+                .id("wifi-devices-scroll")
+                .theme(control_theme(palette))
+                .max_height(80.0)
+                .child(Column::new().gap(2.0).children(rows)),
+        ));
     }
-    card(
-        palette,
-        78.0 + usize::from(expanded) as f32 * status.networks.len().min(8) as f32 * ROW,
-        children,
-    )
+    card(palette, children)
 }
 
-fn bluetooth_view(palette: ThemePalette, status: &BluetoothStatus, expanded: bool) -> Card {
+fn bluetooth_view(
+    palette: ThemePalette,
+    status: &BluetoothStatus,
+    expanded: bool,
+    direction: ReadingDirection,
+    localizer: &Localizer,
+) -> Card {
     let connected = status
         .devices
         .iter()
@@ -640,23 +786,37 @@ fn bluetooth_view(palette: ThemePalette, status: &BluetoothStatus, expanded: boo
         format!("{} known devices", status.devices.len())
     };
     let scan = ControlAction::SetBluetoothDiscovery(!status.discovering);
-    let mut children = vec![
-        AnyView::new(
+    let mut children = vec![AnyView::new(directional_row(
+        Row::new()
+            .min_height(DesktopDensity::COMPACT.touch_target)
+            .align_items(Align::Center)
+            .child(title(
+                palette,
+                &localizer.text("control-center-bluetooth"),
+                detail,
+                palette.muted,
+            ))
+            .child(Spacer::flex())
+            .child(section(
+                palette,
+                "bluetooth-section",
+                expanded,
+                ControlAction::ToggleBluetoothSection,
+                localizer,
+            ))
+            .child(toggle(
+                palette,
+                "bluetooth-power",
+                status.powered,
+                status.available,
+                ControlAction::SetBluetoothPowered(!status.powered),
+            )),
+        direction,
+    ))];
+    if expanded {
+        children.push(AnyView::new(directional_row(
             Row::new()
-                .height(38.0)
-                .child(title(palette, "Bluetooth", detail, palette.muted))
-                .child(Spacer::flex())
-                .child(toggle(
-                    palette,
-                    "bluetooth-power",
-                    status.powered,
-                    status.available,
-                    ControlAction::SetBluetoothPowered(!status.powered),
-                )),
-        ),
-        AnyView::new(
-            Row::new()
-                .height(36.0)
+                .min_height(DesktopDensity::COMPACT.touch_target)
                 .child(if status.available && status.powered {
                     AnyView::new(
                         button(
@@ -670,13 +830,13 @@ fn bluetooth_view(palette: ThemePalette, status: &BluetoothStatus, expanded: boo
                         )
                         .id("bluetooth-scan")
                         .width(116.0)
-                        .height(28.0),
+                        .height(DesktopDensity::COMPACT.touch_target),
                     )
                 } else {
                     AnyView::new(
                         Container::new()
                             .width(116.0)
-                            .height(28.0)
+                            .height(DesktopDensity::COMPACT.touch_target)
                             .radius(14.0)
                             .background(palette.surface_hover)
                             .child(
@@ -689,17 +849,10 @@ fn bluetooth_view(palette: ThemePalette, status: &BluetoothStatus, expanded: boo
                             ),
                     )
                 })
-                .child(Spacer::flex())
-                .child(section(
-                    palette,
-                    "bluetooth-section",
-                    expanded,
-                    ControlAction::ToggleBluetoothSection,
-                )),
-        ),
-    ];
-    if expanded {
-        children.extend(status.devices.iter().take(8).map(|device| {
+                .child(Spacer::flex()),
+            direction,
+        )));
+        let rows = status.devices.iter().take(8).map(|device| {
             status_row(
                 palette,
                 format!("bluetooth-{}", device.id),
@@ -717,20 +870,29 @@ fn bluetooth_view(palette: ThemePalette, status: &BluetoothStatus, expanded: boo
                     id: device.id.clone(),
                 }),
             )
-        }));
+        });
+        children.push(AnyView::new(
+            VerticalScroll::new(ControlAction::BluetoothScroll, 0.0)
+                .id("bluetooth-devices-scroll")
+                .theme(control_theme(palette))
+                .max_height(80.0)
+                .child(Column::new().gap(2.0).children(rows)),
+        ));
     }
-    card(
-        palette,
-        96.0 + usize::from(expanded) as f32 * status.devices.len().min(8) as f32 * ROW,
-        children,
-    )
+    card(palette, children)
 }
 
 fn volume(value: f32) -> ControlAction {
     ControlAction::SetAudioVolume((value.clamp(0.0, 1.0) * 100.0).round() as u8)
 }
 
-fn audio_view(palette: ThemePalette, status: &AudioStatus, expanded: bool) -> Card {
+fn audio_view(
+    palette: ThemePalette,
+    status: &AudioStatus,
+    expanded: bool,
+    direction: ReadingDirection,
+    localizer: &Localizer,
+) -> Card {
     let selected = status
         .devices
         .iter()
@@ -743,32 +905,41 @@ fn audio_view(palette: ThemePalette, status: &AudioStatus, expanded: bool) -> Ca
         format!("{}% · {selected}", status.volume_percent)
     };
     let mut children = vec![
-        title(
-            palette,
-            "Audio",
-            detail,
-            if status.muted {
-                palette.complement
-            } else {
-                palette.muted
-            },
-        ),
+        AnyView::new(directional_row(
+            Row::new()
+                .min_height(DesktopDensity::COMPACT.touch_target)
+                .align_items(Align::Center)
+                .child(title(
+                    palette,
+                    &localizer.text("control-center-audio"),
+                    detail,
+                    if status.muted {
+                        palette.complement
+                    } else {
+                        palette.muted
+                    },
+                ))
+                .child(Spacer::flex())
+                .child(section(
+                    palette,
+                    "audio-section",
+                    expanded,
+                    ControlAction::ToggleAudioSection,
+                    localizer,
+                )),
+            direction,
+        )),
         AnyView::new(
             Slider::on_change(volume, f32::from(status.volume_percent) / 100.0)
-                .colors(palette.surface_hover, palette.accent, palette.text)
+                .colors(palette.surface_hover, palette.accent, palette.muted)
+                .thumb_border(translucent(palette.muted, 0x60))
                 .id("audio-volume")
                 .accessibility_label("Audio volume")
                 .width_length(Length::Fill),
         ),
-        section(
-            palette,
-            "audio-section",
-            expanded,
-            ControlAction::ToggleAudioSection,
-        ),
     ];
     if expanded {
-        children.extend(status.devices.iter().take(8).map(|device| {
+        let rows = status.devices.iter().take(8).map(|device| {
             status_row(
                 palette,
                 format!("audio-{}", device.id),
@@ -784,16 +955,24 @@ fn audio_view(palette: ThemePalette, status: &AudioStatus, expanded: bool) -> Ca
                     id: device.id.clone(),
                 }),
             )
-        }));
+        });
+        children.push(AnyView::new(
+            VerticalScroll::new(ControlAction::AudioScroll, 0.0)
+                .id("audio-devices-scroll")
+                .theme(control_theme(palette))
+                .max_height(80.0)
+                .child(Column::new().gap(2.0).children(rows)),
+        ));
     }
-    card(
-        palette,
-        116.0 + usize::from(expanded) as f32 * status.devices.len().min(8) as f32 * ROW,
-        children,
-    )
+    card(palette, children)
 }
 
-fn workspaces_view(palette: ThemePalette, workspaces: &[WorkspaceSummary]) -> Card {
+fn workspaces_view(
+    palette: ThemePalette,
+    workspaces: &[WorkspaceSummary],
+    direction: ReadingDirection,
+    localizer: &Localizer,
+) -> Card {
     let workspace_controls = workspaces
         .iter()
         .take(10)
@@ -806,13 +985,22 @@ fn workspaces_view(palette: ThemePalette, workspaces: &[WorkspaceSummary]) -> Ca
                     (index + 1).to_string(),
                 )
                 .id(format!("workspace-{}", workspace.id))
-                .width(34.0)
-                .height(28.0)
+                .width(DesktopDensity::COMPACT.touch_target)
+                .height(DesktopDensity::COMPACT.touch_target)
+                .shrink(0.0)
                 .background(if workspace.active {
                     palette.accent
                 } else {
                     palette.surface_hover
-                }),
+                })
+                .border(
+                    if workspace.active {
+                        translucent(subdued_accent(palette.accent, palette.muted), 0x78)
+                    } else {
+                        translucent(palette.muted, 0x38)
+                    },
+                    1.0,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -821,60 +1009,56 @@ fn workspaces_view(palette: ThemePalette, workspaces: &[WorkspaceSummary]) -> Ca
         .iter()
         .find(|workspace| workspace.active)
         .map_or(0, |workspace| workspace.id);
-    let create = AnyView::new(
-        button(palette, action(ControlAction::CreateWorkspace), "+")
-            .id("workspace-create")
-            .width(34.0)
-            .height(28.0),
-    );
-    let remove = AnyView::new(
-        button(
-            palette,
-            action(ControlAction::RemoveWorkspace(active_workspace)),
-            "−",
-        )
-        .id("workspace-remove")
-        .width(34.0)
-        .height(28.0)
-        .enabled(can_remove),
-    );
+    let create = AnyView::new(workspace_mark_button(
+        palette,
+        action(ControlAction::CreateWorkspace),
+        "workspace-create",
+        "Add workspace",
+        true,
+        true,
+    ));
+    let remove = AnyView::new(workspace_mark_button(
+        palette,
+        action(ControlAction::RemoveWorkspace(active_workspace)),
+        "workspace-remove",
+        "Remove workspace",
+        false,
+        can_remove,
+    ));
+    let controls = Row::new()
+        .fill_width()
+        .min_height(DesktopDensity::COMPACT.touch_target)
+        .gap(DesktopDensity::COMPACT.related_gap)
+        .align_items(Align::Center)
+        .children(workspace_controls)
+        .child(Spacer::flex())
+        .child(create)
+        .child(remove);
     card(
         palette,
-        82.0,
         vec![
             AnyView::new(
-                Text::new("Workspaces")
+                Text::new(localizer.text("control-center-workspaces"))
                     .height(22.0)
-                    .scale(1.5)
                     .bold(true)
                     .color(palette.text),
             ),
-            AnyView::new(
-                Row::new()
-                    .fill_width()
-                    .height(28.0)
-                    .gap(6.0)
-                    .child(
-                        Row::new()
-                            .height(28.0)
-                            .gap(6.0)
-                            .children(workspace_controls),
-                    )
-                    .child(Spacer::flex())
-                    .child(create)
-                    .child(remove),
-            ),
+            AnyView::new(directional_row(controls, direction)),
         ],
     )
 }
 
-fn session_view(palette: ThemePalette, pending: Option<SessionAction>) -> Card {
+fn session_view(
+    palette: ThemePalette,
+    pending: Option<SessionAction>,
+    direction: ReadingDirection,
+    localizer: &Localizer,
+) -> Card {
     if let Some(pending) = pending {
         let cancel = action(ControlAction::CancelSessionAction);
         let confirm = action(ControlAction::ConfirmSessionAction);
         return card(
             palette,
-            98.0,
             vec![
                 AnyView::new(
                     Text::new(confirmation(pending))
@@ -883,47 +1067,51 @@ fn session_view(palette: ThemePalette, pending: Option<SessionAction>) -> Card {
                         .bold(true)
                         .color(palette.text),
                 ),
-                AnyView::new(
+                AnyView::new(directional_row(
                     Row::new()
-                        .height(30.0)
+                        .height(DesktopDensity::COMPACT.touch_target)
                         .child(
                             button(palette, cancel, "Cancel")
                                 .id("session-cancel")
                                 .width(104.0)
-                                .height(30.0),
+                                .height(DesktopDensity::COMPACT.touch_target),
                         )
                         .child(Spacer::flex())
                         .child(
                             button(palette, confirm, "Confirm")
                                 .id("session-confirm")
                                 .width(118.0)
-                                .height(30.0)
+                                .height(DesktopDensity::COMPACT.touch_target)
                                 .background(control_theme(palette).text.danger),
                         ),
-                ),
+                    direction,
+                )),
             ],
         );
     }
     let entries = [
-        ("Lock", ControlAction::SessionAction(SessionAction::Lock)),
         (
-            "Suspend",
+            localizer.text("control-center-lock"),
+            ControlAction::SessionAction(SessionAction::Lock),
+        ),
+        (
+            localizer.text("control-center-suspend"),
             ControlAction::RequestSessionAction(SessionAction::Suspend),
         ),
         (
-            "Restart shell",
+            localizer.text("control-center-restart-shell"),
             ControlAction::RequestSessionAction(SessionAction::RestartShell),
         ),
         (
-            "Log out",
+            localizer.text("control-center-log-out"),
             ControlAction::RequestSessionAction(SessionAction::LogOut),
         ),
         (
-            "Restart",
+            localizer.text("control-center-restart"),
             ControlAction::RequestSessionAction(SessionAction::Reboot),
         ),
         (
-            "Shut down",
+            localizer.text("control-center-shut-down"),
             ControlAction::RequestSessionAction(SessionAction::PowerOff),
         ),
     ];
@@ -935,16 +1123,19 @@ fn session_view(palette: ThemePalette, pending: Option<SessionAction>) -> Card {
         });
     card(
         palette,
-        174.0,
         vec![
             AnyView::new(
-                Text::new("Session")
+                Text::new(localizer.text("control-center-session"))
                     .height(22.0)
                     .scale(1.5)
                     .bold(true)
                     .color(palette.text),
             ),
-            AnyView::new(Grid::fixed(2).height(112.0).gap(8.0).children(controls)),
+            AnyView::new(
+                Grid::fixed(3)
+                    .gap(DesktopDensity::COMPACT.related_gap)
+                    .children(controls),
+            ),
         ],
     )
 }
@@ -969,12 +1160,17 @@ fn nonempty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlAction, ControlCenterApp, ControlCenterHost};
+    use super::{ControlAction, ControlCenterApp, ControlCenterHost, HEADER};
     use crate::platform::{
-        AudioStatus, BluetoothStatus, NetworkStatus, SessionAction, WorkspaceSummary,
+        AudioDeviceStatus, AudioStatus, BluetoothDeviceStatus, BluetoothStatus, NetworkStatus,
+        SessionAction, WifiNetworkStatus, WorkspaceSummary,
     };
     use nickel_core::display_projection::ProjectionMode;
-    use nickel_ui::{Application, SemanticAction, SemanticRole, SemanticValueInput};
+    use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
+    use nickel_ui::{
+        ActionKind, Application, ReadingDirection, SemanticAction, SemanticRole, SemanticValueInput,
+    };
+    use nickel_ui_testkit::{ActivationVia, Scenario, Selector};
 
     #[test]
     fn idle_control_center_declares_no_poll_deadline() {
@@ -1162,10 +1358,10 @@ mod tests {
                 .expect("workspace control should remain present")
         };
 
-        let one_create = control(&one, "+");
-        let one_remove = control(&one, "−");
-        let three_create = control(&three, "+");
-        let three_remove = control(&three, "−");
+        let one_create = control(&one, "Add workspace");
+        let one_remove = control(&one, "Remove workspace");
+        let three_create = control(&three, "Add workspace");
+        let three_remove = control(&three, "Remove workspace");
         assert_eq!(one_create.bounds, three_create.bounds);
         assert_eq!(one_remove.bounds, three_remove.bounds);
         assert!(!one_remove.enabled);
@@ -1188,5 +1384,517 @@ mod tests {
             host.application_mut().take_effects(),
             vec![ControlAction::SetAudioVolume(73)]
         );
+    }
+
+    #[test]
+    fn collapsed_control_center_fits_four_hundred_by_seven_twenty_without_scrolling() {
+        let host = ControlCenterHost::new(
+            ControlCenterApp::new(
+                NetworkStatus::default(),
+                BluetoothStatus::default(),
+                AudioStatus::default(),
+                (1..=4)
+                    .map(|id| WorkspaceSummary {
+                        id,
+                        active: id == 1,
+                    })
+                    .collect(),
+            ),
+            400,
+            720,
+        );
+
+        let extent = host
+            .scroll_extent(&ControlAction::ToggleWifiSection)
+            .expect("Control Center owns one bounded top-level scroll region");
+        assert!(
+            !extent.can_scroll(),
+            "collapsed Control Center must fit without scrolling: {extent:?}"
+        );
+        for action in [
+            ControlAction::ToggleWifiSection,
+            ControlAction::ToggleBluetoothSection,
+            ControlAction::ToggleAudioSection,
+            ControlAction::ToggleShowDesktop,
+            ControlAction::ShowNotifications,
+            ControlAction::SessionAction(SessionAction::Lock),
+            ControlAction::RequestSessionAction(SessionAction::PowerOff),
+        ] {
+            let targets = host.semantic_targets_for_message(&action);
+            assert!(!targets.is_empty(), "{action:?} must remain reachable");
+            assert!(targets.iter().any(|target| {
+                target.bounds.origin.y >= HEADER
+                    && target.bounds.origin.y + target.bounds.size.height <= 720.0
+            }));
+        }
+    }
+
+    #[test]
+    fn expanded_device_list_owns_bounded_scroll_and_keeps_collapse_reachable() {
+        let mut network = NetworkStatus {
+            available: true,
+            enabled: true,
+            ..NetworkStatus::default()
+        };
+        network.networks = (0..8)
+            .map(|index| WifiNetworkStatus {
+                id: format!("wifi-{index}"),
+                name: format!("Network {index}"),
+                signal_percent: 80,
+                saved: true,
+                ..WifiNetworkStatus::default()
+            })
+            .collect();
+        let mut app = ControlCenterApp::new(
+            network,
+            BluetoothStatus::default(),
+            AudioStatus::default(),
+            vec![WorkspaceSummary {
+                id: 1,
+                active: true,
+            }],
+        );
+        app.state.wifi_expanded = true;
+        let host = ControlCenterHost::new(app, 400, 720);
+
+        assert!(
+            host.scroll_extent(&ControlAction::WifiScroll)
+                .is_some_and(|extent| extent.can_scroll()),
+            "the expanded device region, not an unbounded card, owns overflow"
+        );
+        assert!(
+            host.scroll_extent(&ControlAction::ToggleWifiSection)
+                .is_some(),
+            "the existing top-level scroll owner remains available for expanded content"
+        );
+        assert!(
+            host.semantic_targets_for_message(&ControlAction::ToggleWifiSection)
+                .iter()
+                .any(|target| target.bounds.origin.y + target.bounds.size.height <= 720.0)
+        );
+    }
+
+    #[test]
+    fn every_expanded_device_list_owns_bounded_overflow_and_preserves_disclosure_focus() {
+        let network = NetworkStatus {
+            available: true,
+            enabled: true,
+            networks: (0..8)
+                .map(|index| WifiNetworkStatus {
+                    id: format!("wifi-{index}"),
+                    name: format!("Network {index}"),
+                    signal_percent: 80,
+                    saved: true,
+                    ..WifiNetworkStatus::default()
+                })
+                .collect(),
+            ..NetworkStatus::default()
+        };
+        let bluetooth = BluetoothStatus {
+            available: true,
+            powered: true,
+            devices: (0..8)
+                .map(|index| BluetoothDeviceStatus {
+                    id: format!("bluetooth-{index}"),
+                    name: format!("Bluetooth device {index}"),
+                    paired: true,
+                    ..BluetoothDeviceStatus::default()
+                })
+                .collect(),
+            ..BluetoothStatus::default()
+        };
+        let audio = AudioStatus {
+            available: true,
+            devices: (0..8)
+                .map(|index| AudioDeviceStatus {
+                    id: format!("audio-{index}"),
+                    name: format!("Audio device {index}"),
+                    is_default: index == 0,
+                })
+                .collect(),
+            ..AudioStatus::default()
+        };
+
+        for (disclosure, toggle, scroll) in [
+            (
+                "wifi-section",
+                ControlAction::ToggleWifiSection,
+                ControlAction::WifiScroll,
+            ),
+            (
+                "bluetooth-section",
+                ControlAction::ToggleBluetoothSection,
+                ControlAction::BluetoothScroll,
+            ),
+            (
+                "audio-section",
+                ControlAction::ToggleAudioSection,
+                ControlAction::AudioScroll,
+            ),
+        ] {
+            let mut scenario = Scenario::new(
+                ControlCenterApp::new(
+                    network.clone(),
+                    bluetooth.clone(),
+                    audio.clone(),
+                    vec![WorkspaceSummary {
+                        id: 1,
+                        active: true,
+                    }],
+                ),
+                400,
+                720,
+            );
+            let disclosure_id = scenario
+                .host()
+                .semantic_targets_for_message(&toggle)
+                .into_iter()
+                .find(|target| target.id.as_str().ends_with(disclosure))
+                .expect("disclosure target")
+                .id;
+            let selector = Selector::id(disclosure_id.clone());
+            scenario.keyboard_activate(&selector).unwrap();
+
+            assert_eq!(
+                scenario.host().inspect().keyboard_focus,
+                Some(disclosure_id.clone()),
+                "expansion must retain focus on {disclosure}"
+            );
+            let extent = scenario
+                .host()
+                .scroll_extent(&scroll)
+                .expect("expanded device scroll");
+            assert!(
+                extent.can_scroll() && extent.viewport.height <= 80.0,
+                "{disclosure} must give overflow to its bounded device list: {extent:?}"
+            );
+            let disclosure_target = scenario
+                .host()
+                .semantic_nodes()
+                .into_iter()
+                .find(|target| target.id == disclosure_id)
+                .expect("expanded disclosure remains semantic");
+            assert!(
+                disclosure_target.bounds.origin.y >= HEADER
+                    && disclosure_target.bounds.origin.y + disclosure_target.bounds.size.height
+                        <= 720.0,
+                "expanded {disclosure} must keep its collapse action visible"
+            );
+            scenario.keyboard_activate(&selector).unwrap();
+            assert_eq!(
+                scenario.host().inspect().keyboard_focus,
+                Some(disclosure_id),
+                "collapse must retain focus on {disclosure}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_center_primary_action_activates_through_every_supported_modality() {
+        for via in [
+            ActivationVia::Pointer,
+            ActivationVia::Touch,
+            ActivationVia::Keyboard,
+            ActivationVia::Controller,
+            ActivationVia::Accessibility,
+        ] {
+            let mut scenario = Scenario::new(
+                ControlCenterApp::new(
+                    NetworkStatus::default(),
+                    BluetoothStatus::default(),
+                    AudioStatus::default(),
+                    vec![WorkspaceSummary {
+                        id: 1,
+                        active: true,
+                    }],
+                ),
+                400,
+                720,
+            );
+            let target = scenario
+                .host()
+                .unique_semantic_target_for_message(&ControlAction::ToggleShowDesktop)
+                .expect("Show desktop target");
+            scenario
+                .invoke_via(via, &Selector::id(target.id), ActionKind::Activate)
+                .unwrap_or_else(|error| panic!("{via:?} activation failed: {error}"));
+            assert_eq!(
+                scenario.host_mut().application_mut().take_effects(),
+                [ControlAction::ToggleShowDesktop],
+                "{via:?} must route the same typed production action"
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_interactive_targets_are_touch_sized_and_do_not_overlap() {
+        let host = ControlCenterHost::new(
+            ControlCenterApp::new(
+                NetworkStatus {
+                    available: true,
+                    enabled: true,
+                    ..NetworkStatus::default()
+                },
+                BluetoothStatus {
+                    available: true,
+                    powered: true,
+                    ..BluetoothStatus::default()
+                },
+                AudioStatus {
+                    available: true,
+                    ..AudioStatus::default()
+                },
+                (1..=4)
+                    .map(|id| WorkspaceSummary {
+                        id,
+                        active: id == 1,
+                    })
+                    .collect(),
+            ),
+            400,
+            720,
+        );
+        let interactive = host
+            .semantic_nodes()
+            .into_iter()
+            .filter(|node| matches!(node.role, Some(SemanticRole::Button | SemanticRole::Switch)))
+            .collect::<Vec<_>>();
+
+        for node in &interactive {
+            assert!(
+                node.bounds.size.width >= 44.0 && node.bounds.size.height >= 44.0,
+                "touch target {:?} is undersized: {:?}",
+                node.id,
+                node.bounds
+            );
+        }
+        for (index, first) in interactive.iter().enumerate() {
+            for second in &interactive[index + 1..] {
+                let overlap_width = (first.bounds.origin.x + first.bounds.size.width)
+                    .min(second.bounds.origin.x + second.bounds.size.width)
+                    - first.bounds.origin.x.max(second.bounds.origin.x);
+                let overlap_height = (first.bounds.origin.y + first.bounds.size.height)
+                    .min(second.bounds.origin.y + second.bounds.size.height)
+                    - first.bounds.origin.y.max(second.bounds.origin.y);
+                assert!(
+                    overlap_width <= 0.0 || overlap_height <= 0.0,
+                    "interactive targets {:?} and {:?} overlap",
+                    first.id,
+                    second.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn localized_empty_loading_failure_and_ordinary_states_remain_bounded() {
+        let states = [
+            (
+                NetworkStatus::default(),
+                BluetoothStatus::default(),
+                AudioStatus::default(),
+            ),
+            (
+                NetworkStatus {
+                    available: true,
+                    enabled: true,
+                    networks: vec![WifiNetworkStatus {
+                        id: "nearby".into(),
+                        name: "Nearby network".into(),
+                        signal_percent: 72,
+                        ..WifiNetworkStatus::default()
+                    }],
+                    ..NetworkStatus::default()
+                },
+                BluetoothStatus {
+                    available: true,
+                    powered: true,
+                    discovering: true,
+                    ..BluetoothStatus::default()
+                },
+                AudioStatus {
+                    available: true,
+                    volume_percent: 45,
+                    ..AudioStatus::default()
+                },
+            ),
+            (
+                NetworkStatus {
+                    available: true,
+                    enabled: true,
+                    connected: true,
+                    name: "Nickel network".into(),
+                    signal_percent: 91,
+                    ..NetworkStatus::default()
+                },
+                BluetoothStatus {
+                    available: true,
+                    powered: true,
+                    devices: vec![BluetoothDeviceStatus {
+                        id: "headphones".into(),
+                        name: "Headphones".into(),
+                        paired: true,
+                        connected: true,
+                    }],
+                    ..BluetoothStatus::default()
+                },
+                AudioStatus {
+                    available: true,
+                    volume_percent: 63,
+                    devices: vec![AudioDeviceStatus {
+                        id: "speakers".into(),
+                        name: "Speakers".into(),
+                        is_default: true,
+                    }],
+                    ..AudioStatus::default()
+                },
+            ),
+        ];
+
+        for locale in ["en-US", "de", "zh", "es", "ar"] {
+            for (network, bluetooth, audio) in &states {
+                let mut app = ControlCenterApp::new(
+                    network.clone(),
+                    bluetooth.clone(),
+                    audio.clone(),
+                    vec![WorkspaceSummary {
+                        id: 1,
+                        active: true,
+                    }],
+                );
+                app.set_locale(Some(locale));
+                let host = ControlCenterHost::new(app, 400, 720);
+                assert!(
+                    !host
+                        .scroll_extent(&ControlAction::ToggleWifiSection)
+                        .expect("top-level scroll")
+                        .can_scroll(),
+                    "collapsed locale/state combination must fit: {locale}"
+                );
+                assert!(host.semantic_nodes().iter().all(|node| {
+                    node.bounds.origin.x >= 0.0
+                        && node.bounds.origin.y >= 0.0
+                        && node.bounds.origin.x + node.bounds.size.width <= 400.0
+                        && node.bounds.origin.y + node.bounds.size.height <= 720.0
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn control_center_theme_direction_and_viewport_matrix_is_bounded() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            for direction in [ReadingDirection::LeftToRight, ReadingDirection::RightToLeft] {
+                for scale in [1.0, 1.25, 2.0] {
+                    for (width, height) in [(400, 720), (520, 640)] {
+                        let mut app = ControlCenterApp::new(
+                            NetworkStatus::default(),
+                            BluetoothStatus::default(),
+                            AudioStatus::default(),
+                            vec![WorkspaceSummary {
+                                id: 1,
+                                active: true,
+                            }],
+                        );
+                        app.set_palette(ThemePalette::from_appearance(Appearance {
+                            mode,
+                            ..Appearance::default()
+                        }));
+                        app.set_reading_direction(Some(direction));
+                        let mut host = ControlCenterHost::new(app, width, height);
+                        host.set_scale_factor(scale);
+                        for node in host.semantic_nodes() {
+                            assert!(node.bounds.origin.x.is_finite());
+                            assert!(node.bounds.origin.y.is_finite());
+                            assert!(node.bounds.size.width >= 0.0);
+                            assert!(node.bounds.size.height >= 0.0);
+                            assert!(node.bounds.origin.x + node.bounds.size.width <= width as f32);
+                        }
+                        assert!(
+                            host.semantic_targets_for_message(&ControlAction::SessionAction(
+                                SessionAction::Lock
+                            ))
+                            .iter()
+                            .any(|target| target.bounds.origin.y < height as f32)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn right_to_left_control_rows_mirror_disclosure_and_power_order() {
+        let positions = |direction| {
+            let mut app = ControlCenterApp::new(
+                NetworkStatus {
+                    available: true,
+                    enabled: true,
+                    ..NetworkStatus::default()
+                },
+                BluetoothStatus::default(),
+                AudioStatus::default(),
+                Vec::new(),
+            );
+            app.set_reading_direction(Some(direction));
+            let host = ControlCenterHost::new(app, 400, 720);
+            let disclosure = host
+                .semantic_targets_for_message(&ControlAction::ToggleWifiSection)
+                .into_iter()
+                .find(|target| target.id.as_str().ends_with("wifi-section"))
+                .expect("Wi-Fi disclosure");
+            let power = host
+                .unique_semantic_target_for_message(&ControlAction::SetWifiEnabled(false))
+                .expect("Wi-Fi power");
+            (disclosure.bounds.origin.x, power.bounds.origin.x)
+        };
+        let ltr = positions(ReadingDirection::LeftToRight);
+        let rtl = positions(ReadingDirection::RightToLeft);
+        assert!(ltr.0 < ltr.1, "LTR disclosure precedes power: {ltr:?}");
+        assert!(rtl.1 < rtl.0, "RTL power precedes disclosure: {rtl:?}");
+    }
+
+    #[test]
+    fn control_center_uses_localized_labels_and_locale_direction() {
+        let mut spanish = ControlCenterApp::new(
+            NetworkStatus::default(),
+            BluetoothStatus::default(),
+            AudioStatus::default(),
+            Vec::new(),
+        );
+        spanish.set_locale(Some("es"));
+        let spanish = ControlCenterHost::new(spanish, 400, 720);
+        assert!(
+            spanish
+                .semantic_nodes()
+                .iter()
+                .any(|node| node.name.as_deref() == Some("Mostrar escritorio"))
+        );
+
+        let positions = |locale| {
+            let mut app = ControlCenterApp::new(
+                NetworkStatus {
+                    available: true,
+                    enabled: true,
+                    ..NetworkStatus::default()
+                },
+                BluetoothStatus::default(),
+                AudioStatus::default(),
+                Vec::new(),
+            );
+            app.set_locale(Some(locale));
+            let host = ControlCenterHost::new(app, 400, 720);
+            let disclosure = host
+                .semantic_targets_for_message(&ControlAction::ToggleWifiSection)
+                .into_iter()
+                .find(|target| target.id.as_str().ends_with("wifi-section"))
+                .unwrap();
+            let power = host
+                .unique_semantic_target_for_message(&ControlAction::SetWifiEnabled(false))
+                .unwrap();
+            (disclosure.bounds.origin.x, power.bounds.origin.x)
+        };
+        assert!(positions("en-US").0 < positions("en-US").1);
+        assert!(positions("ar").1 < positions("ar").0);
     }
 }

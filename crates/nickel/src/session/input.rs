@@ -15,13 +15,23 @@ use nickel_core::{
 };
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        InputTime, KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
-        PointerMotionEvent, TouchEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
+        GestureEndEvent, GesturePinchUpdateEvent as BackendPinchUpdateEvent,
+        GestureSwipeUpdateEvent as BackendSwipeUpdateEvent, InputBackend, InputEvent, InputTime,
+        KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
+        PointerMotionEvent, ProximityState, TabletToolButtonEvent as BackendTabletButtonEvent,
+        TabletToolEvent, TabletToolProximityEvent as BackendTabletProximityEvent,
+        TabletToolTipEvent as BackendTabletTipEvent, TabletToolTipState, TouchEvent,
     },
     input::{
         keyboard::{FilterResult, Keysym, keysyms},
-        pointer::{AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, RelativeMotionEvent},
+        pointer::{
+            AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
+            GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
+            GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData,
+            MotionEvent, RelativeMotionEvent,
+        },
+        tablet::{TabletDescriptor, TabletSeatTrait, tool as tablet_tool},
         touch::{DownEvent, MotionEvent as TouchMotion, UpEvent},
     },
     reexports::wayland_server::Resource,
@@ -30,6 +40,7 @@ use smithay::{
 };
 
 use crate::session::{
+    focus::PointerFocusTarget,
     grabs::{
         MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeInternalSurfaceGrab,
         ResizeSurfaceGrab,
@@ -41,11 +52,107 @@ use crate::session::{
     window_frame::FramePart,
 };
 
+const INPUT_LATENCY_TELEMETRY_THRESHOLD_MICROS: u64 = 250_000;
+const KEYBOARD_LATENCY_TELEMETRY_ENV: &str = "NICKEL_KEYBOARD_LATENCY_TELEMETRY";
+const MOUSE_LATENCY_TELEMETRY_ENV: &str = "NICKEL_MOUSE_LATENCY_TELEMETRY";
+
+static KEYBOARD_LATENCY_TELEMETRY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    latency_telemetry_value_enabled(std::env::var_os(KEYBOARD_LATENCY_TELEMETRY_ENV).as_deref())
+});
+static MOUSE_LATENCY_TELEMETRY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    latency_telemetry_value_enabled(std::env::var_os(MOUSE_LATENCY_TELEMETRY_ENV).as_deref())
+});
+
+fn latency_telemetry_value_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|value| {
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
+}
+
+fn input_dispatch_latency_micros(event_time: InputTime) -> u64 {
+    InputTime::now()
+        .micros()
+        .saturating_sub(event_time.micros())
+}
+
+fn tablet_axis_frame<I, E>(event: &E) -> Option<tablet_tool::AxisFrame>
+where
+    I: InputBackend,
+    E: TabletToolEvent<I>,
+{
+    let mut frame = tablet_tool::AxisFrame::new();
+    let mut changed = false;
+    if event.pressure_has_changed() {
+        frame = frame.pressure(event.pressure().clamp(0.0, 1.0));
+        changed = true;
+    }
+    if event.distance_has_changed() {
+        frame = frame.distance(event.distance().max(0.0));
+        changed = true;
+    }
+    if event.tilt_has_changed() {
+        let (x, y) = event.tilt();
+        frame = frame.tilt(x, y);
+        changed = true;
+    }
+    if event.rotation_has_changed() {
+        frame = frame.rotation(event.rotation());
+        changed = true;
+    }
+    if event.slider_has_changed() {
+        frame = frame.slider(event.slider_position().clamp(-1.0, 1.0));
+        changed = true;
+    }
+    if event.wheel_has_changed() {
+        frame = frame.wheel(event.wheel_delta(), event.wheel_delta_discrete());
+        changed = true;
+    }
+    changed.then_some(frame)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ClientTouchContact {
     device: String,
     generation: u64,
     contact: i32,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ClientPointerGestures {
+    swipe: bool,
+    pinch: bool,
+    hold: bool,
+}
+
+impl ClientPointerGestures {
+    fn begin_swipe(&mut self) {
+        self.swipe = true;
+    }
+
+    fn end_swipe(&mut self) -> bool {
+        std::mem::take(&mut self.swipe)
+    }
+
+    fn begin_pinch(&mut self) {
+        self.pinch = true;
+    }
+
+    fn end_pinch(&mut self) -> bool {
+        std::mem::take(&mut self.pinch)
+    }
+
+    fn begin_hold(&mut self) {
+        self.hold = true;
+    }
+
+    fn end_hold(&mut self) -> bool {
+        std::mem::take(&mut self.hold)
+    }
 }
 
 /// Translates backend-local touch slots into one collision-free Smithay seat domain.
@@ -379,6 +486,40 @@ pub(super) fn internal_virtual_key(
 }
 
 impl NickelSession {
+    pub(crate) fn cancel_client_pointer_gestures(&mut self, time: InputTime) {
+        let pointer = self.seat.get_pointer().unwrap();
+        if self.client_pointer_gestures.end_swipe() {
+            pointer.gesture_swipe_end(
+                self,
+                &GestureSwipeEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    cancelled: true,
+                },
+            );
+        }
+        if self.client_pointer_gestures.end_pinch() {
+            pointer.gesture_pinch_end(
+                self,
+                &GesturePinchEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    cancelled: true,
+                },
+            );
+        }
+        if self.client_pointer_gestures.end_hold() {
+            pointer.gesture_hold_end(
+                self,
+                &GestureHoldEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    cancelled: true,
+                },
+            );
+        }
+    }
+
     fn compositor_pointer_binding(
         button: u32,
         serial: smithay::utils::Serial,
@@ -814,6 +955,13 @@ impl NickelSession {
         }
         match &event {
             InputEvent::DeviceAdded { device }
+                if device.has_capability(DeviceCapability::TabletTool) =>
+            {
+                self.seat
+                    .tablet_seat()
+                    .add_tablet(&TabletDescriptor::from(device));
+            }
+            InputEvent::DeviceAdded { device }
                 if device.has_capability(DeviceCapability::Touch) =>
             {
                 let device_id = device.id();
@@ -828,8 +976,25 @@ impl NickelSession {
             }
             InputEvent::DeviceRemoved { device } => {
                 let device_id = device.id();
+                if device.has_capability(DeviceCapability::TabletTool) {
+                    let tablet_seat = self.seat.tablet_seat();
+                    let descriptor = TabletDescriptor::from(device);
+                    tablet_seat.remove_tablet(&descriptor);
+                    if let Some(tools) = self.tablet_tools.remove(&descriptor) {
+                        for tool in tools {
+                            if !self
+                                .tablet_tools
+                                .values()
+                                .any(|remaining| remaining.contains(&tool))
+                            {
+                                tablet_seat.remove_tool(&tool);
+                            }
+                        }
+                    }
+                }
                 self.on_screen_keyboard.touchscreens.remove(&device_id);
                 self.internal_ui.remove_desktop_pointer_device(&device_id);
+                self.cancel_client_pointer_gestures(InputTime::now());
                 // Smithay exposes seat-wide cancellation, not per-device cancellation. If this
                 // device owned any client contact, close the whole native domain atomically.
                 if self.client_touch_slots.device_removed(&device_id) {
@@ -954,6 +1119,19 @@ impl NickelSession {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = event.time();
                 let state = event.state();
+                if *KEYBOARD_LATENCY_TELEMETRY {
+                    let dispatch_latency = input_dispatch_latency_micros(time);
+                    if dispatch_latency >= INPUT_LATENCY_TELEMETRY_THRESHOLD_MICROS {
+                        tracing::warn!(
+                            device = %event.device().id(),
+                            keycode = event.key_code().raw(),
+                            ?state,
+                            seat_key_count = event.count(),
+                            dispatch_latency_ms = dispatch_latency / 1_000,
+                            "physical keyboard event was delayed before compositor dispatch"
+                        );
+                    }
+                }
                 // Recognize the two physical positions before XKB layout/remapping or client
                 // dispatch. Synthetic backends and virtual devices cannot participate, including
                 // releases that could otherwise reset the physical recognizer's held state.
@@ -1340,6 +1518,18 @@ impl NickelSession {
                 self.record_interaction_output(pos);
             }
             InputEvent::PointerButton { event, .. } => {
+                if *MOUSE_LATENCY_TELEMETRY {
+                    let dispatch_latency = input_dispatch_latency_micros(event.time());
+                    if dispatch_latency >= INPUT_LATENCY_TELEMETRY_THRESHOLD_MICROS {
+                        tracing::warn!(
+                            device = %event.device().id(),
+                            button = event.button_code(),
+                            state = ?event.state(),
+                            dispatch_latency_ms = dispatch_latency / 1_000,
+                            "physical mouse button event was delayed before compositor dispatch"
+                        );
+                    }
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 let keyboard = self.seat.get_keyboard().unwrap();
 
@@ -2117,6 +2307,267 @@ impl NickelSession {
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }
+            InputEvent::TabletToolProximity { event, .. } => {
+                let tablet_seat = self.seat.tablet_seat();
+                let tool_descriptor = event.tool();
+                match event.state() {
+                    ProximityState::In if !self.locked => {
+                        let geometry = self.touch_output_geometry(output_name)?;
+                        let location =
+                            event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                        let tablet_descriptor = TabletDescriptor::from(&event.device());
+                        self.tablet_tools
+                            .entry(tablet_descriptor.clone())
+                            .or_default()
+                            .insert(tool_descriptor.clone());
+                        let tablet = tablet_seat
+                            .get_tablet(&tablet_descriptor)
+                            .unwrap_or_else(|| tablet_seat.add_tablet(&tablet_descriptor));
+                        let tool = tablet_seat
+                            .get_tool(&tool_descriptor)
+                            .unwrap_or_else(|| tablet_seat.add_tool(&tool_descriptor));
+                        let focus =
+                            self.pointer_surface_under(location)
+                                .and_then(|(target, origin)| match target {
+                                    PointerFocusTarget::Wayland(surface) => Some((surface, origin)),
+                                    PointerFocusTarget::X11(_) => None,
+                                });
+                        tool.proximity_in(
+                            self,
+                            focus,
+                            tablet,
+                            &tablet_tool::ProximityInEvent {
+                                location,
+                                axis: tablet_axis_frame::<I, _>(&event),
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time(),
+                            },
+                        );
+                        tool.frame(self, event.time());
+                    }
+                    ProximityState::Out | ProximityState::In => {
+                        if let Some(tool) = tablet_seat.get_tool(&tool_descriptor) {
+                            tool.proximity_out(
+                                self,
+                                &tablet_tool::ProximityOutEvent {
+                                    serial: SERIAL_COUNTER.next_serial(),
+                                    time: event.time(),
+                                },
+                            );
+                            tool.frame(self, event.time());
+                        }
+                    }
+                }
+            }
+            InputEvent::TabletToolAxis { event, .. } => {
+                let tablet_seat = self.seat.tablet_seat();
+                let descriptor = event.tool();
+                let tool = tablet_seat.get_tool(&descriptor)?;
+                if self.locked {
+                    tool.proximity_out(
+                        self,
+                        &tablet_tool::ProximityOutEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                        },
+                    );
+                    tool.frame(self, event.time());
+                    return None;
+                }
+                let geometry = self.touch_output_geometry(output_name)?;
+                let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                let focus = self
+                    .pointer_surface_under(location)
+                    .and_then(|(target, origin)| match target {
+                        PointerFocusTarget::Wayland(surface) => Some((surface, origin)),
+                        PointerFocusTarget::X11(_) => None,
+                    });
+                tool.motion(
+                    self,
+                    focus,
+                    &tablet_tool::MotionEvent {
+                        location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time(),
+                    },
+                );
+                if let Some(frame) = tablet_axis_frame::<I, _>(&event) {
+                    tool.axis(self, frame);
+                }
+                tool.frame(self, event.time());
+            }
+            InputEvent::TabletToolTip { event, .. } => {
+                let tablet_seat = self.seat.tablet_seat();
+                let descriptor = event.tool();
+                let tool = tablet_seat.get_tool(&descriptor)?;
+                if self.locked {
+                    tool.proximity_out(
+                        self,
+                        &tablet_tool::ProximityOutEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                        },
+                    );
+                    tool.frame(self, event.time());
+                    return None;
+                }
+                let geometry = self.touch_output_geometry(output_name)?;
+                let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                let focus = self
+                    .pointer_surface_under(location)
+                    .and_then(|(target, origin)| match target {
+                        PointerFocusTarget::Wayland(surface) => Some((surface, origin)),
+                        PointerFocusTarget::X11(_) => None,
+                    });
+                tool.motion(
+                    self,
+                    focus,
+                    &tablet_tool::MotionEvent {
+                        location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time(),
+                    },
+                );
+                if let Some(frame) = tablet_axis_frame::<I, _>(&event) {
+                    tool.axis(self, frame);
+                }
+                match event.tip_state() {
+                    TabletToolTipState::Down => tool.down(
+                        self,
+                        &tablet_tool::DownEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                        },
+                    ),
+                    TabletToolTipState::Up => tool.up(
+                        self,
+                        &tablet_tool::UpEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                        },
+                    ),
+                }
+                tool.frame(self, event.time());
+            }
+            InputEvent::TabletToolButton { event, .. } => {
+                let tablet_seat = self.seat.tablet_seat();
+                let descriptor = event.tool();
+                let tool = tablet_seat.get_tool(&descriptor)?;
+                if !self.locked {
+                    tool.button(
+                        self,
+                        &tablet_tool::ButtonEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            button: event.button(),
+                            state: event.button_state(),
+                            time: event.time(),
+                        },
+                    );
+                    tool.frame(self, event.time());
+                }
+            }
+            InputEvent::GestureSwipeBegin { event, .. } => {
+                if !self.locked {
+                    self.refresh_stationary_pointer_focus(event.time());
+                    self.seat.get_pointer().unwrap().gesture_swipe_begin(
+                        self,
+                        &GestureSwipeBeginEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                            fingers: event.fingers(),
+                        },
+                    );
+                    self.client_pointer_gestures.begin_swipe();
+                }
+            }
+            InputEvent::GestureSwipeUpdate { event, .. } => {
+                if !self.locked && self.client_pointer_gestures.swipe {
+                    self.seat.get_pointer().unwrap().gesture_swipe_update(
+                        self,
+                        &GestureSwipeUpdateEvent {
+                            time: event.time(),
+                            delta: event.delta(),
+                        },
+                    );
+                }
+            }
+            InputEvent::GestureSwipeEnd { event, .. } => {
+                if self.client_pointer_gestures.end_swipe() {
+                    self.seat.get_pointer().unwrap().gesture_swipe_end(
+                        self,
+                        &GestureSwipeEndEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                            cancelled: event.cancelled() || self.locked,
+                        },
+                    );
+                }
+            }
+            InputEvent::GesturePinchBegin { event, .. } => {
+                if !self.locked {
+                    self.refresh_stationary_pointer_focus(event.time());
+                    self.seat.get_pointer().unwrap().gesture_pinch_begin(
+                        self,
+                        &GesturePinchBeginEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                            fingers: event.fingers(),
+                        },
+                    );
+                    self.client_pointer_gestures.begin_pinch();
+                }
+            }
+            InputEvent::GesturePinchUpdate { event, .. } => {
+                if !self.locked && self.client_pointer_gestures.pinch {
+                    self.seat.get_pointer().unwrap().gesture_pinch_update(
+                        self,
+                        &GesturePinchUpdateEvent {
+                            time: event.time(),
+                            delta: event.delta(),
+                            scale: event.scale(),
+                            rotation: event.rotation(),
+                        },
+                    );
+                }
+            }
+            InputEvent::GesturePinchEnd { event, .. } => {
+                if self.client_pointer_gestures.end_pinch() {
+                    self.seat.get_pointer().unwrap().gesture_pinch_end(
+                        self,
+                        &GesturePinchEndEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                            cancelled: event.cancelled() || self.locked,
+                        },
+                    );
+                }
+            }
+            InputEvent::GestureHoldBegin { event, .. } => {
+                if !self.locked {
+                    self.refresh_stationary_pointer_focus(event.time());
+                    self.seat.get_pointer().unwrap().gesture_hold_begin(
+                        self,
+                        &GestureHoldBeginEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                            fingers: event.fingers(),
+                        },
+                    );
+                    self.client_pointer_gestures.begin_hold();
+                }
+            }
+            InputEvent::GestureHoldEnd { event, .. } => {
+                if self.client_pointer_gestures.end_hold() {
+                    self.seat.get_pointer().unwrap().gesture_hold_end(
+                        self,
+                        &GestureHoldEndEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                            cancelled: event.cancelled() || self.locked,
+                        },
+                    );
+                }
+            }
             InputEvent::TouchDown { event, .. } => {
                 let mapped_output_name = output_name
                     .map(str::to_owned)
@@ -2489,6 +2940,39 @@ fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<nickel_ui::Shortcut> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_latency_telemetry_requires_an_explicit_true_value() {
+        use std::ffi::OsStr;
+
+        for value in ["1", "true", "TRUE", "yes", "On"] {
+            assert!(super::latency_telemetry_value_enabled(Some(OsStr::new(
+                value
+            ))));
+        }
+        for value in ["", "0", "false", "no", "off", "anything"] {
+            assert!(!super::latency_telemetry_value_enabled(Some(OsStr::new(
+                value
+            ))));
+        }
+        assert!(!super::latency_telemetry_value_enabled(None));
+    }
+
+    #[test]
+    fn gesture_lifetimes_have_one_terminal_transition() {
+        let mut gestures = super::ClientPointerGestures::default();
+        assert!(!gestures.end_swipe());
+        gestures.begin_swipe();
+        assert!(gestures.end_swipe());
+        assert!(!gestures.end_swipe());
+
+        gestures.begin_pinch();
+        gestures.begin_hold();
+        assert!(gestures.end_pinch());
+        assert!(gestures.end_hold());
+        assert!(!gestures.end_pinch());
+        assert!(!gestures.end_hold());
+    }
+
     #[test]
     fn client_touch_slots_separate_equal_contacts_across_devices() {
         let mut slots = super::ClientTouchSlots::default();

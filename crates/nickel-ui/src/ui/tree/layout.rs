@@ -450,14 +450,38 @@ pub(super) fn layout_element<Message: Clone>(
         Kind::VerticalScroll { offset, .. } => {
             let requested_offset = *offset;
             let viewport = rect.inset(element.style.padding);
-            let clip = descendant_clip.map_or(viewport, |parent| {
+            let initial_size = element.children.first().map(|child| {
+                measure_element(
+                    child,
+                    Constraints::loose(Size::new(viewport.size.width, f32::INFINITY)),
+                )
+            });
+            let reserves_scrollbar =
+                initial_size.is_some_and(|content| content.height > viewport.size.height + 0.01);
+            let content_viewport = Rect::new(
+                viewport.origin.x,
+                viewport.origin.y,
+                (viewport.size.width
+                    - if reserves_scrollbar {
+                        SCROLLBAR_GUTTER
+                    } else {
+                        0.0
+                    })
+                .max(0.0),
+                viewport.size.height,
+            );
+            let content_clip = descendant_clip.map_or(content_viewport, |parent| {
+                intersection(parent, content_viewport)
+                    .unwrap_or_else(|| Rect::new(viewport.origin.x, viewport.origin.y, 0.0, 0.0))
+            });
+            let viewport_clip = descendant_clip.map_or(viewport, |parent| {
                 intersection(parent, viewport)
                     .unwrap_or_else(|| Rect::new(viewport.origin.x, viewport.origin.y, 0.0, 0.0))
             });
             if let Some(child) = element.children.first() {
                 let content_size = measure_element(
                     child,
-                    Constraints::loose(Size::new(viewport.size.width, f32::INFINITY)),
+                    Constraints::loose(Size::new(content_viewport.size.width, f32::INFINITY)),
                 );
                 let content_height = content_size.height.max(viewport.size.height);
                 let offset =
@@ -471,7 +495,10 @@ pub(super) fn layout_element<Message: Clone>(
                 }
                 let extent = ScrollExtent {
                     viewport: viewport.size,
-                    content: Size::new(content_size.width.max(viewport.size.width), content_height),
+                    content: Size::new(
+                        content_size.width.max(content_viewport.size.width),
+                        content_height,
+                    ),
                     offset_x: 0.0,
                     offset,
                 };
@@ -484,7 +511,7 @@ pub(super) fn layout_element<Message: Clone>(
                         offset_mapper: element.message_mapper,
                         extent_mapper: element.scroll_extent_mapper,
                         rect: viewport,
-                        clip,
+                        clip: viewport_clip,
                         extent,
                         scrollbar: element.style.scrollbar_palette,
                     });
@@ -495,11 +522,11 @@ pub(super) fn layout_element<Message: Clone>(
                     Rect::new(
                         viewport.origin.x,
                         viewport.origin.y - offset,
-                        viewport.size.width,
+                        content_viewport.size.width,
                         content_height,
                     ),
                     foreground,
-                    Some(clip),
+                    Some(content_clip),
                     tree,
                 ));
             }

@@ -2260,6 +2260,16 @@ impl<A: Application> UiHost<A> {
         })
         .changed
     }
+
+    /// Transfers the interaction modality that opened this host from another
+    /// surface without inventing an input event or changing semantic focus.
+    pub fn adopt_input_modality(&mut self, modality: InputModality) -> bool {
+        if self.state.set_input_modality(modality) == Invalidation::None {
+            return false;
+        }
+        self.rebuild();
+        true
+    }
     pub fn new(application: A, width: u32, height: u32) -> Self {
         Self::new_at(application, width, height, Instant::now())
     }
@@ -2440,6 +2450,15 @@ impl<A: Application> UiHost<A> {
 
     pub fn resolved_grid_columns(&self) -> Option<usize> {
         self.tree.resolved_grid_columns()
+    }
+
+    /// Reports the resolved content and viewport geometry for a typed scroll
+    /// owner. This is observational; scrolling authority remains in the host.
+    pub fn scroll_extent(&self, scroll: &A::Message) -> Option<crate::ScrollExtent>
+    where
+        A::Message: PartialEq,
+    {
+        self.tree.scroll_extent(scroll)
     }
 
     /// Scrolls the canonical view state just enough to reveal a message-bound
@@ -8482,6 +8501,11 @@ mod tests {
         assert_eq!(inspection.keyboard_focus, Some(target));
         assert_eq!(inspection.modality, crate::InputModality::Controller);
         assert_eq!(inspection.frame_generation, generation);
+
+        assert!(host.adopt_input_modality(crate::InputModality::Pointer));
+        assert_eq!(host.inspect().modality, crate::InputModality::Pointer);
+        assert_eq!(host.semantic_nodes()[0].name.as_deref(), Some("Narrow"));
+        assert!(!host.adopt_input_modality(crate::InputModality::Pointer));
     }
 
     #[test]

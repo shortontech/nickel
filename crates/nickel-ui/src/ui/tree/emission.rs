@@ -474,6 +474,7 @@ pub(super) fn emit_element<Message: Clone>(
             track,
             fill,
             thumb,
+            thumb_border,
         } => {
             let track_rect = Rect::new(
                 rect.origin.x,
@@ -506,13 +507,18 @@ pub(super) fn emit_element<Message: Clone>(
             );
             tree.commands.push(PaintCommand::RoundedFill {
                 rect: thumb_rect,
-                color: *thumb,
+                color: *thumb_border,
                 radius: 10.0,
             });
-            tree.commands.push(PaintCommand::Stroke {
-                rect: thumb_rect,
-                color: *fill,
-                width: 2.0,
+            tree.commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(
+                    thumb_rect.origin.x + 1.0,
+                    thumb_rect.origin.y + 1.0,
+                    thumb_rect.size.width - 2.0,
+                    thumb_rect.size.height - 2.0,
+                ),
+                color: *thumb,
+                radius: 9.0,
             });
         }
         Kind::Dropdown {
@@ -695,7 +701,13 @@ pub(super) fn emit_element<Message: Clone>(
             }
         }
         Kind::VerticalScroll { .. } => {
-            tree.commands.push(PaintCommand::PushClip(node.content));
+            let content_clip = node
+                .children
+                .first()
+                .and_then(|index| tree.resolved.nodes.get(*index))
+                .and_then(|child| child.clip)
+                .unwrap_or(node.content);
+            tree.commands.push(PaintCommand::PushClip(content_clip));
             for (&child_index, child) in node.children.iter().zip(&element.children) {
                 emit_element(child, child_index, foreground, tree);
             }

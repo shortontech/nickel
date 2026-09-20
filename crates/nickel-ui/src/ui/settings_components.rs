@@ -677,6 +677,10 @@ impl SwitchState {
     }
 }
 
+const fn translucent_switch_color(color: u32, alpha: u32) -> u32 {
+    (color & 0x00ff_ffff) | (alpha << 24)
+}
+
 /// A binary control that emits a request for the opposite value.
 pub struct Switch<Message = String>(Container<Message>);
 
@@ -714,42 +718,29 @@ impl<Message> Switch<Message> {
             .width(18.0)
             .height(18.0)
             .radius(9.0)
+            .border(translucent_switch_color(theme.borders.strong, 0x80), 1.0)
             .background(
                 if matches!(state, SwitchState::Mixed | SwitchState::MixedUnavailable) {
-                    theme.text.disabled
-                } else if value {
-                    theme.text.inverse
+                    theme.surfaces.hover
                 } else {
-                    theme.text.primary
+                    theme.surfaces.window
                 },
             );
-        let mut control = Container::new()
+        let track = Container::new()
             .width(42.0)
             .height(24.0)
-            .semantic_role(SemanticRole::Switch)
-            .accessibility_label("Switch")
             .radius(12.0)
+            .border(translucent_switch_color(theme.borders.strong, 0x60), 1.0)
             .padding(Insets::all(3.0))
             .background(
                 if matches!(state, SwitchState::Mixed | SwitchState::MixedUnavailable) {
                     theme.surfaces.selected
                 } else if value {
-                    theme.accent.ordinary
+                    theme.accent.soft
                 } else {
                     theme.surfaces.raised
                 },
             )
-            .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
-            .focus_background_tint(theme.borders.focus)
-            .controller_focus_background_tint(theme.borders.controller_focus)
-            .accessibility_state(match state {
-                SwitchState::Off => "off",
-                SwitchState::On => "on",
-                SwitchState::Mixed => "mixed",
-                SwitchState::MixedUnavailable => "mixed unavailable",
-                SwitchState::DisabledOff => "off disabled",
-                SwitchState::DisabledOn => "on disabled",
-            })
             .child(
                 Row::new()
                     .fill_width()
@@ -764,6 +755,26 @@ impl<Message> Switch<Message> {
                     )
                     .child(thumb),
             );
+        let mut control = Container::new()
+            .width(44.0)
+            .height(44.0)
+            .semantic_role(SemanticRole::Switch)
+            .accessibility_label("Switch")
+            .align_items(Align::Center)
+            .justify_content(Justify::Center)
+            .radius(12.0)
+            .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+            .focus_background_tint(theme.borders.focus)
+            .controller_focus_background_tint(theme.borders.controller_focus)
+            .accessibility_state(match state {
+                SwitchState::Off => "off",
+                SwitchState::On => "on",
+                SwitchState::Mixed => "mixed",
+                SwitchState::MixedUnavailable => "mixed unavailable",
+                SwitchState::DisabledOff => "off disabled",
+                SwitchState::DisabledOn => "on disabled",
+            })
+            .child(track);
         if state.interactive()
             && let Some(on_activate) = on_activate
         {
@@ -984,7 +995,8 @@ impl<Message> SettingsRow<Message> {
 
     /// Uses the single-line settings-row rhythm when no persistent supporting copy is needed.
     pub fn compact(mut self) -> Self {
-        self.0 = self.0.min_height(44.0).padding(Insets {
+        let density = crate::DesktopDensity::COMPACT;
+        self.0 = self.0.min_height(density.touch_target).padding(Insets {
             top: 4.0,
             right: 12.0,
             bottom: 4.0,
@@ -1592,28 +1604,31 @@ impl<Message> ColorSwatch<Message> {
             .radius(19.0)
             .border(
                 if selected {
-                    theme.accent.ordinary
+                    theme.text.primary
                 } else {
-                    theme.surfaces.raised
+                    theme.borders.subtle
                 },
-                if selected { 3.0 } else { 1.0 },
+                if selected { 2.0 } else { 1.0 },
             )
             .padding(Insets::all(4.0))
             .child(
                 Container::new()
                     .fill_width()
                     .fill_height()
-                    .radius(14.0)
+                    .radius(15.0)
                     .background(color),
             );
         Self(
             Container::new()
                 .width(42.0)
                 .height(42.0)
+                .radius(21.0)
                 .message(message)
                 .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
                 .focus_background_tint(theme.borders.focus)
                 .controller_focus_background_tint(theme.borders.controller_focus)
+                .align_items(Align::Center)
+                .justify_content(Justify::Center)
                 .semantic_role(SemanticRole::Radio)
                 .accessibility_label(label)
                 .accessibility_state(if selected { "selected" } else { "unselected" })

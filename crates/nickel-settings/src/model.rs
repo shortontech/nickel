@@ -365,13 +365,6 @@ impl SettingsApp {
             app.load_maintenance();
         } else if page == SettingsPage::PrintersStorage {
             app.load_peripherals();
-        } else if page == SettingsPage::BluetoothPair {
-            app.load_bluetooth();
-            if app.bluetooth.available && app.bluetooth.powered && !app.bluetooth.discovering {
-                app.start_bluetooth_operation(BluetoothOperation::SetDiscovery(true), || {
-                    set_bluetooth_adapter_property("Discovering", true)
-                });
-            }
         }
         app
     }

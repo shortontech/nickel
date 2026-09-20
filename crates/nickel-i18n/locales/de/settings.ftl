@@ -107,3 +107,7 @@ file-selection-summary = { $count } · { $size }
 file-selection-accessible-bytes = { $count } · { $bytes } Bytes
 launcher-discovery-empty = Keine Anwendungen gefunden.
 launcher-discovery-partial = Einige Anwendungseinträge konnten nicht erkannt werden.
+settings-bluetooth-pair-devices = Geräte koppeln
+settings-bluetooth-pair = Koppeln
+settings-bluetooth-pair-title = Bluetooth-Geräte koppeln
+settings-bluetooth-pair-subtitle = Ein Gerät in der Nähe suchen und verbinden

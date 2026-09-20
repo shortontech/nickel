@@ -107,3 +107,7 @@ file-selection-summary = { $count } · { $size }
 file-selection-accessible-bytes = { $count } · { $bytes } 字节
 launcher-discovery-empty = 未找到应用程序。
 launcher-discovery-partial = 部分应用程序条目无法识别。
+settings-bluetooth-pair-devices = 配对设备
+settings-bluetooth-pair = 配对
+settings-bluetooth-pair-title = 配对蓝牙设备
+settings-bluetooth-pair-subtitle = 查找并连接附近的设备

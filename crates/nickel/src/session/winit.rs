@@ -27,7 +27,7 @@ use smithay::{
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::EventLoop, wayland_server::Resource},
-    utils::{Buffer, Rectangle, Scale, Transform},
+    utils::{Buffer, Clock, Monotonic, Rectangle, Scale, Transform},
     wayland::seat::WaylandFocus,
 };
 
@@ -163,6 +163,7 @@ pub fn init_winit(
     let mut last_preview_highlight = None;
     let mut identification_cache = None;
     let mut pending_output_capture = None;
+    let mut presentation_sequence = 0_u64;
     let frame_icons = crate::session::window_frame::FrameIcons::load();
 
     // SAFETY: startup is single-threaded and no child process is spawned until
@@ -213,11 +214,25 @@ pub fn init_winit(
                 WinitEvent::Redraw => {
                     let trace_started = Instant::now();
                     state.flush_desktop_scenes_for_frame();
-                    backend
-                        .window()
-                        .set_cursor(smithay::reexports::winit::cursor::Cursor::Icon(
-                            frame_cursor_icon(state.frame_cursor),
-                        ));
+                    match state.effective_cursor_image() {
+                        smithay::input::pointer::CursorImageStatus::Hidden => {
+                            backend.window().set_cursor_visible(false);
+                        }
+                        smithay::input::pointer::CursorImageStatus::Named(icon) => {
+                            backend.window().set_cursor_visible(true);
+                            backend.window().set_cursor(
+                                smithay::reexports::winit::cursor::Cursor::Icon(icon),
+                            );
+                        }
+                        smithay::input::pointer::CursorImageStatus::Surface(_) => {
+                            backend.window().set_cursor_visible(true);
+                            backend.window().set_cursor(
+                                smithay::reexports::winit::cursor::Cursor::Icon(
+                                    ::winit::window::CursorIcon::Default,
+                                ),
+                            );
+                        }
+                    }
                     let size = backend.window_size();
                     let damage = Rectangle::from_size(size);
                     if state.preview_highlight.is_some()
@@ -271,7 +286,7 @@ pub fn init_winit(
                         identification_cache = None;
                     }
                     let ordinary_scene = state.ordinary_scene_order();
-                    let captured_frame = {
+                    let (captured_frame, render_states) = {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
                         let frame_palette = ThemePalette::from_appearance(
                             ShellSettings::load_default().resolve_appearance(Appearance::default()),
@@ -347,7 +362,7 @@ pub fn init_winit(
                         }
                         base_elements.extend(lower.into_iter().map(WinitBaseElement::from));
                         base_elements.extend(background_elements.map(WinitBaseElement::from));
-                        damage_tracker
+                        let render_result = damage_tracker
                             .render_output(
                                 renderer,
                                 &mut framebuffer,
@@ -569,7 +584,7 @@ pub fn init_winit(
                                 sync.wait().unwrap();
                             }
                         }
-                        capture_requested.then(|| {
+                        let captured = capture_requested.then(|| {
                             let mut frame = renderer
                                 .render(&mut framebuffer, size, output.current_transform())
                                 .map_err(|error| error.to_string())?;
@@ -611,9 +626,22 @@ pub fn init_winit(
                                 return Err(error.to_string());
                             }
                             captured
-                        })
+                        });
+                        (captured, render_result.states)
                     };
+                    state.update_output_primary_scanout(&output, &render_states);
+                    let mut presentation_feedback =
+                        state.take_output_presentation_feedback(&output, Some(&render_states));
                     backend.submit(Some(&[damage])).unwrap();
+                    presentation_sequence = presentation_sequence.wrapping_add(1);
+                    presentation_feedback.presented(
+                        Clock::<Monotonic>::new().now(),
+                        smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(
+                            1_000_000_000_000_u64 / 60_000,
+                        )),
+                        presentation_sequence,
+                        smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                    );
 
                     if image_copy_requested
                         && captured_frame
@@ -737,25 +765,6 @@ pub fn init_winit(
     Ok(())
 }
 
-fn frame_cursor_icon(
-    cursor: crate::session::window_frame::FrameCursor,
-) -> ::winit::window::CursorIcon {
-    use crate::session::window_frame::FrameCursor;
-    use ::winit::window::CursorIcon;
-
-    match cursor {
-        FrameCursor::Arrow => CursorIcon::Default,
-        FrameCursor::North => CursorIcon::NResize,
-        FrameCursor::NorthEast => CursorIcon::NeResize,
-        FrameCursor::East => CursorIcon::EResize,
-        FrameCursor::SouthEast => CursorIcon::SeResize,
-        FrameCursor::South => CursorIcon::SResize,
-        FrameCursor::SouthWest => CursorIcon::SwResize,
-        FrameCursor::West => CursorIcon::WResize,
-        FrameCursor::NorthWest => CursorIcon::NwResize,
-    }
-}
-
 struct WinitWindowFrameGroup {
     window: Window,
     foreground: Vec<WinitFrameElement<GlesRenderer>>,
@@ -811,12 +820,10 @@ fn window_frame_groups(
         let Some(surface) = window.wl_surface() else {
             continue;
         };
-        if shell_surfaces.contains(&surface.id())
-            || state.is_fullscreen_window(window)
-            || !state.is_server_decorated(window)
-        {
+        if shell_surfaces.contains(&surface.id()) || state.is_fullscreen_window(window) {
             continue;
         }
+        let server_decorated = state.is_server_decorated(window);
         let registry_id = state.surface_windows.get(&surface.id()).copied();
         let active = registry_id.is_some_and(|id| state.windows.is_active(id));
         let title = registry_id
@@ -835,34 +842,46 @@ fn window_frame_groups(
                 height: frame_bounds.size.h,
             },
         );
-        if let Some(titlebar) = crate::session::window_frame::render_titlebar_for_state(
-            registry_id.map(|id| id.0),
-            titlebar_geometry.width,
-            title,
-            palette.panel,
-            foreground,
-            active,
-        ) && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
-            (
-                f64::from(titlebar_geometry.x - output_geometry.loc.x),
-                f64::from(titlebar_geometry.y - output_geometry.loc.y),
-            ),
-            &titlebar,
-            None,
-            None,
-            Some((titlebar_geometry.width, titlebar_geometry.height).into()),
-            Kind::Unspecified,
-        ) {
+        if server_decorated
+            && let Some(titlebar) = crate::session::window_frame::render_titlebar_for_state(
+                registry_id.map(|id| id.0),
+                titlebar_geometry.width,
+                title,
+                palette.panel,
+                foreground,
+                active,
+            )
+            && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                (
+                    f64::from(titlebar_geometry.x - output_geometry.loc.x),
+                    f64::from(titlebar_geometry.y - output_geometry.loc.y),
+                ),
+                &titlebar,
+                None,
+                None,
+                Some((titlebar_geometry.width, titlebar_geometry.height).into()),
+                Kind::Unspecified,
+            )
+        {
             frame.push(element.into());
         }
         let border_color =
             crate::session::window_frame::frame_border_color(palette.panel, foreground, active);
-        for border in crate::session::window_frame::content_border_layers(
-            frame_bounds.size.w,
-            frame_bounds.size.h,
-            border_color,
-        ) {
+        let border_layers = if server_decorated {
+            crate::session::window_frame::content_border_layers(
+                frame_bounds.size.w,
+                frame_bounds.size.h,
+                border_color,
+            )
+        } else {
+            crate::session::window_frame::client_border_layers(
+                frame_bounds.size.w,
+                frame_bounds.size.h,
+                border_color,
+            )
+        };
+        for border in border_layers {
             frame.push(
                 SolidColorRenderElement::from_buffer(
                     &border.buffer,
@@ -877,7 +896,7 @@ fn window_frame_groups(
                 .into(),
             );
         }
-        if let Some(icons) = icons {
+        if server_decorated && let Some(icons) = icons {
             let icon_y = crate::session::window_frame::frame_icon_y(
                 frame_bounds.loc.y
                     - output_geometry.loc.y
@@ -911,7 +930,12 @@ fn window_frame_groups(
             }
         }
         if !state.is_maximized_window(window) {
-            let frame_height = frame_bounds.size.h + crate::session::window_frame::TITLEBAR_HEIGHT;
+            let titlebar_height = if server_decorated {
+                crate::session::window_frame::TITLEBAR_HEIGHT
+            } else {
+                0
+            };
+            let frame_height = frame_bounds.size.h + titlebar_height;
             let shadows = crate::session::window_frame::shadow_layers(
                 frame_bounds.size.w,
                 frame_height,
@@ -923,9 +947,7 @@ fn window_frame_groups(
                     (
                         f64::from(frame_bounds.loc.x - output_geometry.loc.x + shadow.offset.0),
                         f64::from(
-                            frame_bounds.loc.y
-                                - output_geometry.loc.y
-                                - crate::session::window_frame::TITLEBAR_HEIGHT
+                            frame_bounds.loc.y - output_geometry.loc.y - titlebar_height
                                 + shadow.offset.1,
                         ),
                     ),

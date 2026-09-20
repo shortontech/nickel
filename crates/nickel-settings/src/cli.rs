@@ -117,6 +117,7 @@ mod tests {
             ("appearance", SettingsPage::Appearance),
             ("network", SettingsPage::Network),
             ("bluetooth", SettingsPage::Bluetooth),
+            ("bluetooth-pair", SettingsPage::BluetoothPair),
             ("printers-storage", SettingsPage::PrintersStorage),
             ("printers", SettingsPage::PrintersStorage),
             ("storage", SettingsPage::PrintersStorage),

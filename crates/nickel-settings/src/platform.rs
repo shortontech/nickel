@@ -11,6 +11,9 @@ type BluezObjects = HashMap<OwnedObjectPath, BluezInterfaces>;
 const NETWORK_MANAGER: &str = "org.freedesktop.NetworkManager";
 #[cfg(target_os = "linux")]
 const NETWORK_MANAGER_PATH: &str = "/org/freedesktop/NetworkManager";
+#[cfg(target_os = "linux")]
+static BLUEZ_DISCOVERY_CONNECTION: std::sync::OnceLock<std::sync::Mutex<Option<Connection>>> =
+    std::sync::OnceLock::new();
 
 #[cfg(target_os = "linux")]
 fn bluez_objects(connection: &Connection) -> zbus::Result<BluezObjects> {
@@ -61,6 +64,8 @@ pub(super) fn read_bluetooth_snapshot() -> Result<BluetoothSnapshot, String> {
                 paired: bluez_property::<bool>(properties, "Paired").unwrap_or(false),
                 connected: bluez_property::<bool>(properties, "Connected").unwrap_or(false),
                 battery_percent,
+                kind: bluez_property::<String>(properties, "Icon"),
+                signal_dbm: bluez_property::<i16>(properties, "RSSI"),
             })
         })
         .collect::<Vec<_>>();
@@ -69,6 +74,7 @@ pub(super) fn read_bluetooth_snapshot() -> Result<BluetoothSnapshot, String> {
             .connected
             .cmp(&left.connected)
             .then_with(|| right.paired.cmp(&left.paired))
+            .then_with(|| right.signal_dbm.cmp(&left.signal_dbm))
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
     Ok(BluetoothSnapshot {
@@ -97,17 +103,36 @@ pub(super) fn set_bluetooth_adapter_property(name: &str, value: bool) -> Result<
     )
     .map_err(|error| error.to_string())?;
     if name == "Discovering" {
-        proxy
-            .call_method(
-                if value {
-                    "StartDiscovery"
-                } else {
-                    "StopDiscovery"
-                },
-                &(),
+        let slot = BLUEZ_DISCOVERY_CONNECTION.get_or_init(|| std::sync::Mutex::new(None));
+        let mut active = slot
+            .lock()
+            .map_err(|_| "Bluetooth discovery state is unavailable".to_owned())?;
+        if value {
+            if active.is_some() {
+                return Ok(());
+            }
+            proxy
+                .call_method("StartDiscovery", &())
+                .map_err(|error| error.to_string())?;
+            // BlueZ tracks discovery by D-Bus client. Retain this exact connection
+            // until StopDiscovery or process exit instead of dropping it as soon as
+            // StartDiscovery returns (which immediately cancels the scan).
+            *active = Some(connection);
+            Ok(())
+        } else {
+            let Some(connection) = active.take() else {
+                return Ok(());
+            };
+            Proxy::new(
+                &connection,
+                "org.bluez",
+                path.as_str(),
+                "org.bluez.Adapter1",
             )
+            .and_then(|proxy| proxy.call_method("StopDiscovery", &()))
             .map(|_| ())
             .map_err(|error| error.to_string())
+        }
     } else {
         proxy
             .set_property(name, value)
@@ -365,17 +390,190 @@ pub(super) fn activate_linux_wifi(network: &WifiNetwork) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub(super) fn read_bluetooth_snapshot() -> Result<BluetoothSnapshot, String> {
+    use std::future::IntoFuture;
+    use windows::Devices::{
+        Bluetooth::{
+            BluetoothConnectionStatus, BluetoothDevice as WinBluetoothDevice, BluetoothLEDevice,
+        },
+        Enumeration::DeviceInformation,
+        Radios::{Radio, RadioKind, RadioState},
+    };
+
+    let radios = futures_lite::future::block_on(
+        Radio::GetRadiosAsync()
+            .map_err(|error| error.to_string())?
+            .into_future(),
+    )
+    .map_err(|error| error.to_string())?;
+    let bluetooth_radio = (0..radios.Size().map_err(|error| error.to_string())?)
+        .filter_map(|index| radios.GetAt(index).ok())
+        .find(|radio| radio.Kind().ok() == Some(RadioKind::Bluetooth));
+    let Some(radio) = bluetooth_radio else {
+        return Ok(BluetoothSnapshot::default());
+    };
+
+    let mut devices = HashMap::<String, BluetoothDevice>::new();
+    for selector in [
+        WinBluetoothDevice::GetDeviceSelector().map_err(|error| error.to_string())?,
+        BluetoothLEDevice::GetDeviceSelector().map_err(|error| error.to_string())?,
+    ] {
+        let found = futures_lite::future::block_on(
+            DeviceInformation::FindAllAsyncAqsFilter(&selector)
+                .map_err(|error| error.to_string())?
+                .into_future(),
+        )
+        .map_err(|error| error.to_string())?;
+        for index in 0..found.Size().map_err(|error| error.to_string())? {
+            let info = found.GetAt(index).map_err(|error| error.to_string())?;
+            let id = info.Id().map_err(|error| error.to_string())?.to_string();
+            let paired = info
+                .Pairing()
+                .and_then(|pairing| pairing.IsPaired())
+                .unwrap_or(false);
+            let connected = futures_lite::future::block_on(
+                WinBluetoothDevice::FromIdAsync(&id.clone().into())
+                    .map_err(|error| error.to_string())?
+                    .into_future(),
+            )
+            .ok()
+            .and_then(|device| device.ConnectionStatus().ok())
+            .is_some_and(|status| status == BluetoothConnectionStatus::Connected)
+                || futures_lite::future::block_on(
+                    BluetoothLEDevice::FromIdAsync(&id.clone().into())
+                        .map_err(|error| error.to_string())?
+                        .into_future(),
+                )
+                .ok()
+                .and_then(|device| device.ConnectionStatus().ok())
+                .is_some_and(|status| status == BluetoothConnectionStatus::Connected);
+            devices
+                .entry(id.clone())
+                .or_insert_with(|| BluetoothDevice {
+                    id,
+                    name: info
+                        .Name()
+                        .map(|name| name.to_string())
+                        .unwrap_or_else(|_| "Unknown device".into()),
+                    paired,
+                    connected,
+                    battery_percent: None,
+                    kind: None,
+                    signal_dbm: None,
+                });
+        }
+    }
+    let mut devices = devices.into_values().collect::<Vec<_>>();
+    devices.sort_by(|left, right| {
+        right
+            .connected
+            .cmp(&left.connected)
+            .then_with(|| right.paired.cmp(&left.paired))
+            .then_with(|| right.signal_dbm.cmp(&left.signal_dbm))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    Ok(BluetoothSnapshot {
+        available: true,
+        powered: radio.State().ok() == Some(RadioState::On),
+        discovering: false,
+        adapter_name: radio
+            .Name()
+            .map(|name| name.to_string())
+            .unwrap_or_default(),
+        devices,
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn set_bluetooth_adapter_property(name: &str, value: bool) -> Result<(), String> {
+    use std::future::IntoFuture;
+    use windows::Devices::Radios::{Radio, RadioAccessStatus, RadioKind, RadioState};
+    if name == "Discovering" {
+        // DeviceInformation queries drive discovery on Windows; there is no global
+        // adapter discovery switch corresponding to BlueZ's Discovering property.
+        return Ok(());
+    }
+    if name != "Powered" {
+        return Err("unsupported Bluetooth adapter property".into());
+    }
+    let radios = futures_lite::future::block_on(
+        Radio::GetRadiosAsync()
+            .map_err(|error| error.to_string())?
+            .into_future(),
+    )
+    .map_err(|error| error.to_string())?;
+    let radio = (0..radios.Size().map_err(|error| error.to_string())?)
+        .filter_map(|index| radios.GetAt(index).ok())
+        .find(|radio| radio.Kind().ok() == Some(RadioKind::Bluetooth))
+        .ok_or_else(|| "no Bluetooth adapter is available".to_owned())?;
+    let access = futures_lite::future::block_on(
+        radio
+            .SetStateAsync(if value {
+                RadioState::On
+            } else {
+                RadioState::Off
+            })
+            .map_err(|error| error.to_string())?
+            .into_future(),
+    )
+    .map_err(|error| error.to_string())?;
+    if access == RadioAccessStatus::Allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "Windows denied Bluetooth radio access ({})",
+            access.0
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn toggle_bluetooth_device(device: &BluetoothDevice) -> Result<(), String> {
+    use std::future::IntoFuture;
+    use windows::Devices::Enumeration::{DeviceInformation, DevicePairingResultStatus};
+    let info = futures_lite::future::block_on(
+        DeviceInformation::CreateFromIdAsync(&device.id.clone().into())
+            .map_err(|error| error.to_string())?
+            .into_future(),
+    )
+    .map_err(|error| error.to_string())?;
+    let pairing = info.Pairing().map_err(|error| error.to_string())?;
+    if device.connected {
+        // Do not silently turn Disconnect into Remove device. Windows exposes
+        // disconnect through profile-specific handles (or the privileged Bluetooth
+        // driver IOCTL), not DeviceInformationPairing.
+        return Err("Windows could not safely disconnect this Bluetooth profile".into());
+    }
+    let result = futures_lite::future::block_on(
+        pairing
+            .PairAsync()
+            .map_err(|error| error.to_string())?
+            .into_future(),
+    )
+    .map_err(|error| error.to_string())?;
+    let status = result.Status().map_err(|error| error.to_string())?;
+    if matches!(
+        status,
+        DevicePairingResultStatus::Paired | DevicePairingResultStatus::AlreadyPaired
+    ) {
+        Ok(())
+    } else {
+        Err(format!("Windows Bluetooth pairing failed ({})", status.0))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(super) fn read_bluetooth_snapshot() -> Result<BluetoothSnapshot, String> {
     Ok(BluetoothSnapshot::default())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(super) fn set_bluetooth_adapter_property(_name: &str, _value: bool) -> Result<(), String> {
     Err("Bluetooth settings are unavailable on this platform".into())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(super) fn toggle_bluetooth_device(_device: &BluetoothDevice) -> Result<(), String> {
     Err("Bluetooth settings are unavailable on this platform".into())
 }

@@ -21,9 +21,13 @@ use smithay::input::{
     Seat, SeatHandler, SeatState,
     dnd::{DnDGrab, DndGrabHandler, DndTarget, GrabType, Source},
     pointer::Focus,
+    tablet::TabletSeatHandler,
 };
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::wayland::foreign_toplevel_list::{
+    ForeignToplevelListHandler, ForeignToplevelListState,
+};
 use smithay::wayland::fractional_scale::FractionalScaleHandler;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::seat::WaylandFocus;
@@ -77,8 +81,10 @@ impl SeatHandler for NickelSession {
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
+        image: smithay::input::pointer::CursorImageStatus,
     ) {
+        self.client_cursor_image = image;
+        self.request_output_redraw();
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocusTarget>) {
@@ -95,6 +101,19 @@ impl SeatHandler for NickelSession {
         self.launcher_keyboard_focus_changed(focused_surface.as_deref());
         self.on_screen_keyboard_focus_changed();
         self.record_remote_focus_event(focused);
+    }
+}
+
+impl TabletSeatHandler for NickelSession {
+    type ToolFocus = WlSurface;
+
+    fn tablet_tool_image(
+        &mut self,
+        _tool: &smithay::backend::input::TabletToolDescriptor,
+        image: smithay::input::pointer::CursorImageStatus,
+    ) {
+        self.client_cursor_image = image;
+        self.request_output_redraw();
     }
 }
 
@@ -206,6 +225,7 @@ impl WaylandDndGrabHandler for NickelSession {
             return;
         }
         self.dnd_icon = icon;
+        self.dnd_active = true;
         self.request_output_redraw();
         match grab_type {
             GrabType::Pointer => {
@@ -246,6 +266,13 @@ impl DndGrabHandler for NickelSession {
         _location: Point<f64, Logical>,
     ) {
         self.dnd_icon = None;
+        self.dnd_active = false;
+        self.request_output_redraw();
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+        self.dnd_icon = None;
+        self.dnd_active = false;
         self.request_output_redraw();
     }
 }
@@ -281,6 +308,12 @@ impl OutputHandler for NickelSession {}
 impl FractionalScaleHandler for NickelSession {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
         self.refresh_new_surface_scale(&surface);
+    }
+}
+
+impl ForeignToplevelListHandler for NickelSession {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.foreign_toplevel_list_state
     }
 }
 

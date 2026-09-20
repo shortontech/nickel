@@ -423,6 +423,13 @@ impl WindowOperationReducer {
         self.invalid_acquisitions.len()
     }
 
+    /// Whether any interactive move/resize writer currently owns compositor
+    /// pointer authority.
+    #[must_use]
+    pub fn has_active_operation(&self) -> bool {
+        !self.operations.is_empty()
+    }
+
     #[must_use]
     pub fn retired_acquisition_watermark(&self) -> AcquisitionId {
         self.retired_acquisition_watermark
@@ -1589,5 +1596,15 @@ mod tests {
             }]
         );
         assert_eq!(reducer.retired_acquisition_watermark(), finished[2].1);
+    }
+
+    #[test]
+    fn active_operation_authority_ends_at_terminal_transition() {
+        let mut reducer = WindowOperationReducer::default();
+        assert!(!reducer.has_active_operation());
+        let (operation, _) = begin(&mut reducer, 1, 1);
+        assert!(reducer.has_active_operation());
+        reducer.cancel(operation, CancellationReason::UserCancelled);
+        assert!(!reducer.has_active_operation());
     }
 }

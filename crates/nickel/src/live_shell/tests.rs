@@ -37,6 +37,27 @@ include!("tests/panel_and_cache.rs");
 include!("tests/desktop_interactions.rs");
 
 #[test]
+fn pointer_opened_control_center_does_not_paint_initial_keyboard_focus() {
+    let mut shell = LiveShell::new().expect("live shell");
+    assert_eq!(
+        shell.control_host.inspect().modality,
+        InputModality::Keyboard
+    );
+    assert!(
+        shell
+            .panel_host
+            .adopt_input_modality(InputModality::Pointer)
+    );
+
+    shell.apply_panel_action(super::PanelAction::Control);
+
+    assert_eq!(
+        shell.control_host.inspect().modality,
+        InputModality::Pointer
+    );
+}
+
+#[test]
 fn codex_approval_notification_revises_in_place_and_retires_on_resolution() {
     use nickel_codex::{ApprovalContext, ServerRequestId, ThreadId};
     use nickel_codex_ui::{CodexApprovalNotification, PendingInteraction};

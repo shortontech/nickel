@@ -1055,7 +1055,8 @@ fn vertical_scroll_clips_painting_and_hit_regions() {
 
     assert!(matches!(
         tree.commands.first(),
-        Some(PaintCommand::PushClip(rect)) if *rect == Rect::new(0.0, 0.0, 200.0, 100.0)
+        Some(PaintCommand::PushClip(rect))
+            if *rect == Rect::new(0.0, 0.0, 200.0 - SCROLLBAR_GUTTER, 100.0)
     ));
     assert!(
         tree.commands
@@ -1072,7 +1073,7 @@ fn vertical_scroll_clips_painting_and_hit_regions() {
         tree.scroll_extent(&TestMessage::Named("scroll")),
         Some(ScrollExtent {
             viewport: Size::new(200.0, 100.0),
-            content: Size::new(200.0, 200.0),
+            content: Size::new(200.0 - SCROLLBAR_GUTTER, 200.0),
             offset_x: 0.0,
             offset: 50.0,
         })
@@ -1807,6 +1808,38 @@ fn rounded_solid_surface_keeps_its_border_on_the_same_curve() {
     assert_eq!(rounded[1].0, Rect::new(2.0, 2.0, 116.0, 44.0));
     assert_eq!(rounded[1].1, 0x101114);
     assert_eq!(rounded[1].2, 6.0);
+    assert!(
+        tree.commands()
+            .iter()
+            .all(|command| !matches!(command, PaintCommand::Stroke { .. }))
+    );
+}
+
+#[test]
+fn slider_thumb_uses_concentric_round_fills_without_a_square_stroke() {
+    let tree = UiFrame::<()>::layout(
+        Slider::new((), 0.5)
+            .colors(0x202630, 0xe93662, 0x202630)
+            .thumb_border(0x88a0a8b2)
+            .width(200.0),
+        Rect::new(0.0, 0.0, 200.0, 24.0),
+    );
+    let circles = tree
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            PaintCommand::RoundedFill { rect, radius, .. }
+                if (*radius - rect.size.width / 2.0).abs() < f32::EPSILON
+                    && (rect.size.width - rect.size.height).abs() < f32::EPSILON =>
+            {
+                Some((*rect, *radius))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(circles.len(), 2);
+    assert_eq!(circles[0], (Rect::new(90.0, 2.0, 20.0, 20.0), 10.0));
+    assert_eq!(circles[1], (Rect::new(91.0, 3.0, 18.0, 18.0), 9.0));
     assert!(
         tree.commands()
             .iter()

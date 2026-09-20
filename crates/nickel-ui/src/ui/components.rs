@@ -2827,6 +2827,7 @@ impl<Message> Slider<Message> {
                 track: 0x354158,
                 fill: 0x68b8ff,
                 thumb: 0xf4f7ff,
+                thumb_border: 0x8868b8ff,
             },
             style: Style::default(),
             message: Some(message),
@@ -2863,6 +2864,13 @@ impl<Message> Slider<Message> {
             *slider_track = track;
             *slider_fill = fill;
             *slider_thumb = thumb;
+        }
+        self
+    }
+
+    pub fn thumb_border(mut self, color: Color) -> Self {
+        if let Kind::Slider { thumb_border, .. } = &mut self.0.kind {
+            *thumb_border = color;
         }
         self
     }

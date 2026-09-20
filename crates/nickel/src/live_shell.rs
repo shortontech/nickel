@@ -3343,6 +3343,11 @@ impl LiveShell {
                 if self.launcher_visible {
                     self.set_launcher_visible(false);
                 }
+                if !self.control_visible {
+                    let _ = self
+                        .control_host
+                        .adopt_input_modality(self.panel_host.inspect().modality);
+                }
                 self.set_control_visible(!self.control_visible);
             }
         }
@@ -6807,7 +6812,7 @@ impl LiveShell {
 
     fn apply_control_action(&mut self, action: ControlAction) {
         match action {
-            ControlAction::ToggleWifiSection => {}
+            ControlAction::ToggleWifiSection | ControlAction::WifiScroll => {}
             ControlAction::SetWifiEnabled(enabled) => {
                 log_control_result("set-wifi-enabled", platform::set_wifi_enabled(enabled));
             }
@@ -6817,7 +6822,7 @@ impl LiveShell {
                     platform::activate_wifi_network(&id),
                 );
             }
-            ControlAction::ToggleBluetoothSection => {}
+            ControlAction::ToggleBluetoothSection | ControlAction::BluetoothScroll => {}
             ControlAction::SetBluetoothPowered(powered) => {
                 log_control_result(
                     "set-bluetooth-powered",
@@ -6836,7 +6841,7 @@ impl LiveShell {
                     platform::toggle_bluetooth_device(&id),
                 );
             }
-            ControlAction::ToggleAudioSection => {}
+            ControlAction::ToggleAudioSection | ControlAction::AudioScroll => {}
             ControlAction::SetAudioMuted(muted) => {
                 if platform::audio_status().muted != muted {
                     platform::handle_consumer_control(

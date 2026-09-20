@@ -116,6 +116,10 @@ fn modal_toplevel_may_focus(locked: bool, mapped: bool) -> bool {
     !locked && mapped
 }
 
+fn foreign_toplevel_is_publishable(locked: bool, shell_owned: bool, mapped: bool) -> bool {
+    !locked && !shell_owned && mapped
+}
+
 fn parent_relative_dialog_location(
     parent: Rectangle<i32, Logical>,
     child: (i32, i32),
@@ -239,6 +243,7 @@ impl XdgShellHandler for NickelSession {
         let surface_id = surface.wl_surface().id();
         let window_id = self.surface_windows.get(&surface_id).copied();
         if let Some(window_id) = window_id {
+            self.withdraw_foreign_toplevel(window_id);
             self.cancel_xdg_operation_for_mapping(window_id, true);
         }
         if let Some(window) = self.xdg_toplevel_windows.get(&surface_id).cloned() {
@@ -611,6 +616,63 @@ impl XdgDecorationHandler for NickelSession {
 }
 
 impl NickelSession {
+    fn publish_foreign_toplevel(&mut self, id: WindowId) {
+        let mapped = self.surface_windows.iter().any(|(surface, candidate)| {
+            *candidate == id && self.mapped_xdg_toplevels.contains(surface)
+        });
+        if !foreign_toplevel_is_publishable(
+            self.locked,
+            self.shell_owned_windows.contains(&id),
+            mapped,
+        ) || self.foreign_toplevel_handles.contains_key(&id)
+        {
+            return;
+        }
+        let title = self.windows.title(id).unwrap_or_default().to_owned();
+        let app_id = self.windows.app_id(id).unwrap_or_default().to_owned();
+        let handle = self
+            .foreign_toplevel_list_state
+            .new_toplevel::<Self>(title, app_id);
+        self.foreign_toplevel_handles.insert(id, handle);
+    }
+
+    fn update_foreign_toplevel(&mut self, id: WindowId) {
+        let Some(handle) = self.foreign_toplevel_handles.get(&id) else {
+            return;
+        };
+        handle.send_title(self.windows.title(id).unwrap_or_default());
+        handle.send_app_id(self.windows.app_id(id).unwrap_or_default());
+        handle.send_done();
+    }
+
+    fn withdraw_foreign_toplevel(&mut self, id: WindowId) {
+        if let Some(handle) = self.foreign_toplevel_handles.remove(&id) {
+            self.foreign_toplevel_list_state.remove_toplevel(&handle);
+        }
+    }
+
+    pub(crate) fn reconcile_foreign_toplevel_visibility(&mut self) {
+        if self.locked {
+            let ids = self
+                .foreign_toplevel_handles
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            for id in ids {
+                self.withdraw_foreign_toplevel(id);
+            }
+            return;
+        }
+        let ids = self
+            .mapped_xdg_toplevels
+            .iter()
+            .filter_map(|surface| self.surface_windows.get(surface).copied())
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.publish_foreign_toplevel(id);
+        }
+    }
+
     fn prefer_server_decoration(&mut self, toplevel: ToplevelSurface) {
         use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
         self.configure_decoration(toplevel, Mode::ServerSide);
@@ -889,6 +951,9 @@ impl NickelSession {
         }
         let registry_id = self.surface_windows.get(&surface_id).copied();
         if let Some(id) = registry_id {
+            self.publish_foreign_toplevel(id);
+        }
+        if let Some(id) = registry_id {
             self.observe_pending_launch_window(id);
         }
         if let Some(id) = registry_id.filter(|id| {
@@ -939,6 +1004,7 @@ impl NickelSession {
             });
         let registry_id = self.surface_windows.get(&surface_id).copied();
         if let Some(registry_id) = registry_id {
+            self.withdraw_foreign_toplevel(registry_id);
             self.cancel_xdg_operation_for_mapping(registry_id, false);
         }
         self.space.unmap_elem(&window);
@@ -1005,6 +1071,7 @@ impl NickelSession {
             let previous_app_id = self.windows.app_id(id).map(str::to_owned);
             self.windows
                 .update_metadata(id, WindowMetadataSource::Xdg, title, app_id.clone());
+            self.update_foreign_toplevel(id);
             if !authenticated
                 && previous_app_id.as_deref() != app_id.as_deref()
                 && let Some(pid) = client_pid
@@ -1124,6 +1191,14 @@ impl NickelSession {
             .contains(&surface.wl_surface().id())
         {
             return;
+        }
+        if let Some(id) = registry_id {
+            if self.shell_owned_windows.contains(&id) {
+                self.withdraw_foreign_toplevel(id);
+            } else {
+                self.publish_foreign_toplevel(id);
+                self.update_foreign_toplevel(id);
+            }
         }
         self.notify_protocol_snapshot();
         if is_launcher {
@@ -1301,9 +1376,9 @@ impl NickelSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_xdg_toplevel, is_codex_project_chat, modal_toplevel_may_focus,
-        new_toplevel_may_focus, parent_relative_dialog_location, popup_constraint_area,
-        popup_output_for_anchor, shell_owned_window_is_application,
+        admit_xdg_toplevel, foreign_toplevel_is_publishable, is_codex_project_chat,
+        modal_toplevel_may_focus, new_toplevel_may_focus, parent_relative_dialog_location,
+        popup_constraint_area, popup_output_for_anchor, shell_owned_window_is_application,
         unauthenticated_reserved_shell_role,
     };
     use nickel_session_protocol::ShellRole;
@@ -1391,6 +1466,14 @@ mod tests {
         assert!(!modal_toplevel_may_focus(true, true));
         assert!(!modal_toplevel_may_focus(false, false));
         assert!(!modal_toplevel_may_focus(true, false));
+    }
+
+    #[test]
+    fn foreign_toplevel_inventory_excludes_unmapped_shell_and_locked_windows() {
+        assert!(foreign_toplevel_is_publishable(false, false, true));
+        assert!(!foreign_toplevel_is_publishable(false, false, false));
+        assert!(!foreign_toplevel_is_publishable(false, true, true));
+        assert!(!foreign_toplevel_is_publishable(true, false, true));
     }
 
     #[test]

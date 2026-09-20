@@ -180,6 +180,36 @@ pub struct SpacingScale {
     pub section: f32,
 }
 
+/// Shared geometry contract for compact Nickel-owned desktop surfaces.
+///
+/// This is deliberately separate from the semantic theme scale: applications
+/// can retain comfortable or preview-oriented layouts while launcher,
+/// Settings, and Control Center agree on one compact desktop rhythm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DesktopDensity {
+    pub surface_inset: f32,
+    pub section_gap: f32,
+    pub related_gap: f32,
+    pub label_gap: f32,
+    pub compact_row_height: f32,
+    pub supporting_row_height: f32,
+    pub pointer_target: f32,
+    pub touch_target: f32,
+}
+
+impl DesktopDensity {
+    pub const COMPACT: Self = Self {
+        surface_inset: 12.0,
+        section_gap: 12.0,
+        related_gap: 6.0,
+        label_gap: 2.0,
+        compact_row_height: 40.0,
+        supporting_row_height: 52.0,
+        pointer_target: 40.0,
+        touch_target: 44.0,
+    };
+}
+
 impl Default for SpacingScale {
     fn default() -> Self {
         Self {

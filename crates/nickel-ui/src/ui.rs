@@ -1063,6 +1063,7 @@ enum Kind {
         track: Color,
         fill: Color,
         thumb: Color,
+        thumb_border: Color,
     },
     Dropdown {
         selected: String,

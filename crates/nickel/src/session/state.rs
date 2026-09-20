@@ -1846,7 +1846,10 @@ use nickel_session_protocol::{
 };
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType, find_popup_root_surface},
-    input::{Seat, SeatState},
+    input::{
+        Seat, SeatState,
+        tablet::{TabletDescriptor, TabletSeatTrait},
+    },
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale as OutputScale, Subpixel},
     reexports::{
         calloop::{
@@ -1865,7 +1868,9 @@ use smithay::{
         compositor::{
             CompositorClientState, CompositorState, get_parent, send_surface_state, with_states,
         },
+        cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufGlobal, DmabufState},
+        foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
         fractional_scale::{FractionalScaleManagerState, with_fractional_scale},
         idle_inhibit::IdleInhibitManagerState,
         image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState},
@@ -1873,6 +1878,8 @@ use smithay::{
         input_method::InputMethodManagerState,
         output::OutputManagerState,
         pointer_constraints::PointerConstraintsState,
+        pointer_gestures::PointerGesturesState,
+        presentation::PresentationState,
         relative_pointer::RelativePointerManagerState,
         seat::WaylandFocus,
         selection::{
@@ -1884,6 +1891,7 @@ use smithay::{
         },
         shm::ShmState,
         socket::ListeningSocketSource,
+        tablet_manager::TabletManagerState,
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
         xwayland_shell::XWaylandShellState,
@@ -3643,6 +3651,13 @@ fn clamp_window_location(
         .into()
 }
 
+fn mapped_surface_origin(
+    mapped_geometry_origin: Point<i32, Logical>,
+    client_window_geometry_offset: Point<i32, Logical>,
+) -> Point<i32, Logical> {
+    mapped_geometry_origin - client_window_geometry_offset
+}
+
 pub(crate) fn drag_icon_location(
     pointer: Point<f64, Logical>,
     output: Rectangle<i32, Logical>,
@@ -4197,7 +4212,16 @@ pub struct NickelSession {
     pub ext_data_control_state: DataControlState,
     pub primary_selection_state: PrimarySelectionState,
     pub dnd_icon: Option<WlSurface>,
+    pub(crate) dnd_active: bool,
     pub relative_pointer_state: RelativePointerManagerState,
+    pub pointer_gestures_state: PointerGesturesState,
+    pub cursor_shape_manager_state: CursorShapeManagerState,
+    pub tablet_manager_state: TabletManagerState,
+    pub presentation_state: PresentationState,
+    pub foreign_toplevel_list_state: ForeignToplevelListState,
+    pub(crate) foreign_toplevel_handles: HashMap<WindowId, ForeignToplevelHandle>,
+    pub(super) tablet_tools:
+        HashMap<TabletDescriptor, HashSet<smithay::backend::input::TabletToolDescriptor>>,
     pub pointer_constraints_state: PointerConstraintsState,
     pub(crate) pointer_lock_hints: HashMap<ObjectId, Point<f64, Logical>>,
     pub(crate) active_pointer_locks: HashSet<ObjectId>,
@@ -4398,9 +4422,11 @@ pub struct NickelSession {
     pub idle_inhibitors: HashMap<WlSurface, usize>,
     pub(crate) active_touch_slots: HashSet<smithay::backend::input::TouchSlot>,
     pub(super) client_touch_slots: super::input::ClientTouchSlots,
+    pub(super) client_pointer_gestures: super::input::ClientPointerGestures,
     idle_controller: IdleController,
     pub dimmed: bool,
     pub frame_cursor: crate::session::window_frame::FrameCursor,
+    pub(crate) client_cursor_image: smithay::input::pointer::CursorImageStatus,
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<SurfaceBufferCommit>>,
     pub identify_outputs_until: Option<std::time::Instant>,
     identify_outputs_generation: u64,
@@ -4465,6 +4491,32 @@ use preview::{
     admitted_preview_ids, advance_preview_content_generation, record_preview_capture_attempt,
 };
 impl NickelSession {
+    pub(crate) fn effective_cursor_image(&self) -> smithay::input::pointer::CursorImageStatus {
+        use smithay::input::pointer::CursorImageStatus;
+        if self.locked || self.remote_held_pointer.is_some() {
+            return CursorImageStatus::default_named();
+        }
+        if self.dnd_active {
+            return CursorImageStatus::Named(smithay::input::pointer::CursorIcon::Grabbing);
+        }
+        if self.window_operations.has_active_operation() {
+            return CursorImageStatus::Named(self.frame_cursor.cursor_icon());
+        }
+        if self.frame_cursor != crate::session::window_frame::FrameCursor::Arrow {
+            return CursorImageStatus::Named(self.frame_cursor.cursor_icon());
+        }
+        let client_focused = self
+            .seat
+            .get_pointer()
+            .and_then(|pointer| pointer.current_focus())
+            .and_then(|focus| focus.wl_surface().map(|_| ()))
+            .is_some();
+        if client_focused {
+            self.client_cursor_image.clone()
+        } else {
+            CursorImageStatus::default_named()
+        }
+    }
     pub(super) fn schedule_remote_window_identity(
         &mut self,
         id: WindowId,
@@ -7331,8 +7383,9 @@ impl NickelSession {
                     let Some(location) = self.space.element_location(&window) else {
                         continue;
                     };
+                    let surface_origin = mapped_surface_origin(location, window.geometry().loc);
                     if window
-                        .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                        .surface_under(pos - surface_origin.to_f64(), WindowSurfaceType::ALL)
                         .is_some()
                     {
                         return Some(OrdinarySceneWindow::Client(window));
@@ -7440,8 +7493,9 @@ impl NickelSession {
         // their real surface tree occupies the point.
         if window.x11_surface().is_none() {
             let location = self.space.element_location(&window)?;
+            let surface_origin = mapped_surface_origin(location, window.geometry().loc);
             let occupying_surface = window
-                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                .surface_under(pos - surface_origin.to_f64(), WindowSurfaceType::ALL)
                 .map(|(surface, _)| surface);
             if occupying_surface.is_some_and(|surface| {
                 window
@@ -9082,7 +9136,7 @@ impl NickelSession {
         let Some(drag) = self
             .internal_ui
             .application_mut::<nickel_file::FileApp>(id)
-            .and_then(|app| nickel_ui::Application::take_outbound_file_drag(app))
+            .and_then(nickel_ui::Application::take_outbound_file_drag)
         else {
             return;
         };
@@ -9192,6 +9246,29 @@ struct DisplacedWindow {
     relative_location: Point<i32, Logical>,
     rescue_location: Point<i32, Logical>,
     rescue_revision: nickel_core::geometry_authority::GeometryRevision,
+}
+
+fn output_layout_translation(
+    geometry: Geometry,
+    previous_outputs: &HashMap<String, Geometry>,
+    current_outputs: &HashMap<String, Geometry>,
+) -> Option<(i32, i32)> {
+    previous_outputs
+        .iter()
+        .filter_map(|(name, previous)| {
+            let overlap = geometry.intersection_area(*previous);
+            (overlap > 0).then_some((overlap, name, previous))
+        })
+        .max_by(|(left_area, left_name, _), (right_area, right_name, _)| {
+            left_area
+                .cmp(right_area)
+                .then_with(|| right_name.cmp(left_name))
+        })
+        .and_then(|(_, name, previous)| {
+            current_outputs
+                .get(name)
+                .map(|current| (current.x - previous.x, current.y - previous.y))
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9711,6 +9788,16 @@ impl NickelSession {
                     .is_some_and(|state| state.data_control_allowed)
             });
         let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
+        let pointer_gestures_state = PointerGesturesState::new::<Self>(&dh);
+        let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
+        let tablet_manager_state = TabletManagerState::new::<Self>(&dh);
+        let presentation_state = PresentationState::new::<Self>(&dh, libc::CLOCK_MONOTONIC as u32);
+        let foreign_toplevel_list_state =
+            ForeignToplevelListState::new_with_filter::<Self>(&dh, |client| {
+                client
+                    .get_data::<ClientState>()
+                    .is_some_and(|state| state.foreign_toplevel_allowed)
+            });
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
         let idle_inhibit_state = IdleInhibitManagerState::new::<Self>(&dh);
         // The protocol itself permits only one active input method per seat.
@@ -9743,6 +9830,9 @@ impl NickelSession {
         // Here we assume that there is always pointer plugged in
         seat.add_pointer();
         seat.add_touch();
+        // Create the tablet seat before clients can bind tablet-v2. Physical
+        // tablets and tools are attached as libinput reports their lifetimes.
+        let _ = seat.tablet_seat();
 
         // A space represents a two-dimensional plane. Windows and Outputs can be mapped onto it.
         //
@@ -9962,7 +10052,15 @@ impl NickelSession {
             ext_data_control_state,
             primary_selection_state,
             dnd_icon: None,
+            dnd_active: false,
             relative_pointer_state,
+            pointer_gestures_state,
+            cursor_shape_manager_state,
+            tablet_manager_state,
+            presentation_state,
+            foreign_toplevel_list_state,
+            foreign_toplevel_handles: HashMap::new(),
+            tablet_tools: HashMap::new(),
             pointer_constraints_state,
             pointer_lock_hints: HashMap::new(),
             active_pointer_locks: HashSet::new(),
@@ -10142,9 +10240,11 @@ impl NickelSession {
             idle_inhibitors: HashMap::new(),
             active_touch_slots: HashSet::new(),
             client_touch_slots: Default::default(),
+            client_pointer_gestures: Default::default(),
             idle_controller,
             dimmed: false,
             frame_cursor: crate::session::window_frame::FrameCursor::Arrow,
+            client_cursor_image: smithay::input::pointer::CursorImageStatus::default_named(),
             buffer_commit_tx: None,
             identify_outputs_until: None,
             identify_outputs_generation: 0,
@@ -10274,6 +10374,23 @@ impl NickelSession {
                     .map(|geometry| (output.name(), (output.clone(), geometry.size)))
             })
             .collect();
+        let previous_output_geometries = self
+            .space
+            .outputs()
+            .filter_map(|output| {
+                self.space.output_geometry(output).map(|geometry| {
+                    (
+                        output.name(),
+                        Geometry {
+                            x: geometry.loc.x,
+                            y: geometry.loc.y,
+                            width: geometry.size.w,
+                            height: geometry.size.h,
+                        },
+                    )
+                })
+            })
+            .collect::<HashMap<_, _>>();
         #[cfg(feature = "backend-udev")]
         let mut connected = connected;
         #[cfg(feature = "backend-udev")]
@@ -10429,6 +10546,7 @@ impl NickelSession {
                 nickel_core::dpi::Scale120::new(placement.scale_120).unwrap_or_default(),
             );
         }
+        self.rebase_windows_for_output_layout(&previous_output_geometries);
         if !self.test_control_enabled {
             self.output_scale_preferences
                 .save_default()
@@ -10444,6 +10562,115 @@ impl NickelSession {
         self.request_output_redraw();
         self.notify_protocol_snapshot();
         Ok(())
+    }
+
+    fn rebase_windows_for_output_layout(&mut self, previous_outputs: &HashMap<String, Geometry>) {
+        let current_outputs = self
+            .space
+            .outputs()
+            .filter_map(|output| {
+                self.space.output_geometry(output).map(|geometry| {
+                    (
+                        output.name(),
+                        Geometry {
+                            x: geometry.loc.x,
+                            y: geometry.loc.y,
+                            width: geometry.size.w,
+                            height: geometry.size.h,
+                        },
+                    )
+                })
+            })
+            .collect::<HashMap<_, _>>();
+        let translation_for =
+            |geometry| output_layout_translation(geometry, previous_outputs, &current_outputs);
+
+        let mapped = self
+            .space
+            .elements()
+            .filter(|window| !self.is_shell_owned_window(window))
+            .filter_map(|window| {
+                let bounds = self.space.element_bbox(window)?;
+                let location = self.space.element_location(window)?;
+                let geometry = Geometry {
+                    x: bounds.loc.x,
+                    y: bounds.loc.y,
+                    width: bounds.size.w,
+                    height: bounds.size.h,
+                };
+                let (dx, dy) = translation_for(geometry)?;
+                ((dx, dy) != (0, 0))
+                    .then_some((window.clone(), (location.x + dx, location.y + dy).into()))
+            })
+            .collect::<Vec<_>>();
+        for (window, location) in mapped {
+            self.map_compositor_moved_window(window, location, false);
+        }
+
+        let hidden = self
+            .minimized_windows
+            .iter()
+            .chain(self.workspace_hidden_windows.iter())
+            .filter_map(|(id, (window, location))| {
+                let size = window.geometry().size;
+                let geometry = Geometry {
+                    x: location.x,
+                    y: location.y,
+                    width: size.w,
+                    height: size.h,
+                };
+                let (dx, dy) = translation_for(geometry)?;
+                ((dx, dy) != (0, 0)).then_some((*id, (location.x + dx, location.y + dy).into()))
+            })
+            .collect::<Vec<_>>();
+        for (id, location) in hidden {
+            let entry = self
+                .minimized_windows
+                .get_mut(&id)
+                .or_else(|| self.workspace_hidden_windows.get_mut(&id));
+            let Some((window, stored_location)) = entry else {
+                continue;
+            };
+            *stored_location = location;
+            let geometry = Geometry {
+                x: location.x,
+                y: location.y,
+                width: window.geometry().size.w.max(1),
+                height: window.geometry().size.h.max(1),
+            };
+            self.record_desired_geometry(id, geometry);
+        }
+
+        let translate_geometry = |geometry: &mut Geometry| {
+            if let Some((dx, dy)) = translation_for(*geometry) {
+                geometry.x += dx;
+                geometry.y += dy;
+            }
+        };
+        for geometry in self.maximized_restore.values_mut() {
+            translate_geometry(geometry);
+        }
+        for geometry in self.fullscreen_restore.values_mut() {
+            translate_geometry(geometry);
+        }
+        let translate_rectangle = |geometry: &mut Rectangle<i32, Logical>| {
+            let bounds = Geometry {
+                x: geometry.loc.x,
+                y: geometry.loc.y,
+                width: geometry.size.w,
+                height: geometry.size.h,
+            };
+            if let Some((dx, dy)) = translation_for(bounds) {
+                geometry.loc.x += dx;
+                geometry.loc.y += dy;
+            }
+        };
+        for geometry in self.x11_maximized_restore.values_mut() {
+            translate_rectangle(geometry);
+        }
+        for geometry in self.x11_fullscreen_restore.values_mut() {
+            translate_rectangle(geometry);
+        }
     }
 
     fn rescue_stranded_windows(&mut self) {
@@ -13678,7 +13905,12 @@ impl NickelSession {
         self.cancel_window_interactions(nickel_core::window_operation::CancellationReason::Lock);
         self.cancel_remote_pointer();
         self.cancel_remote_keyboard();
+        self.cancel_client_pointer_gestures(smithay::backend::input::InputTime::now());
         self.cancel_all_touch_authority();
+        // Tablet tools may retain proximity, buttons, and an implicit tip grab.
+        // Retiring them at the lock boundary makes Smithay emit removal and
+        // prevents the pre-lock focus from surviving into protected UI.
+        self.seat.tablet_seat().clear_tools();
         self.revoke_controller_role_lease();
         if let Some((_, xwm)) = self.xwm.as_mut() {
             xwm.cancel_selection_transfers(&self.event_loop_handle);
@@ -13689,6 +13921,7 @@ impl NickelSession {
                 .supersede(&request, self.start_time.elapsed());
         }
         self.locked = true;
+        self.reconcile_foreign_toplevel_visibility();
         self.remote_control.lock();
         self.sync_remote_control_indicators();
         // The focus transition to the compositor-owned lock surface terminates any
@@ -13817,6 +14050,7 @@ impl NickelSession {
         }
         self.seat_focus_security_epoch = self.seat_focus_security_epoch.wrapping_add(1).max(1);
         self.locked = false;
+        self.reconcile_foreign_toplevel_visibility();
         self.hotkeys.reset_pressed_state();
         self.note_input_activity();
         if let Some(shell) = self.internal_shell.as_mut() {
@@ -16300,6 +16534,8 @@ impl NickelSession {
                             compositor_state: CompositorClientState::default(),
                             portal_capture_allowed,
                             data_control_allowed,
+                            foreign_toplevel_allowed: portal_capture_allowed
+                                || data_control_allowed,
                         }),
                     )
                     .unwrap();
@@ -16360,9 +16596,10 @@ impl NickelSession {
             return None;
         };
         let location = self.space.element_location(&window)?;
+        let surface_origin = mapped_surface_origin(location, window.geometry().loc);
         window
-            .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-            .map(|(surface, origin)| (surface, (origin + location).to_f64()))
+            .surface_under(pos - surface_origin.to_f64(), WindowSurfaceType::ALL)
+            .map(|(surface, origin)| (surface, (origin + surface_origin).to_f64()))
     }
 
     /// Whether the ordinary client scene occupies `pos`, including the
@@ -16410,15 +16647,84 @@ impl NickelSession {
             return None;
         };
         let location = self.space.element_location(&window)?;
+        let surface_origin = mapped_surface_origin(location, window.geometry().loc);
         window
-            .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+            .surface_under(pos - surface_origin.to_f64(), WindowSurfaceType::ALL)
             .map(|(surface, origin)| {
                 let target = window.x11_surface().map_or_else(
                     || crate::session::focus::PointerFocusTarget::Wayland(surface),
                     |x11| crate::session::focus::PointerFocusTarget::X11(x11.clone()),
                 );
-                (target, (origin + location).to_f64())
+                (target, (origin + surface_origin).to_f64())
             })
+    }
+
+    /// Move committed feedback for mapped client trees on this output into a
+    /// backend-owned batch. The batch's destructor is the failure path: unless
+    /// the backend explicitly confirms presentation, every callback is
+    /// discarded exactly once.
+    pub(crate) fn take_output_presentation_feedback(
+        &self,
+        output: &Output,
+        render_states: Option<&smithay::backend::renderer::element::RenderElementStates>,
+    ) -> smithay::desktop::utils::OutputPresentationFeedback {
+        let mut feedback = smithay::desktop::utils::OutputPresentationFeedback::new(output);
+        let Some(output_geometry) = self.space.output_geometry(output) else {
+            return feedback;
+        };
+        if self.locked {
+            return feedback;
+        }
+        for window in self.space.elements() {
+            if self
+                .space
+                .element_geometry(window)
+                .is_none_or(|geometry| !output_geometry.overlaps(geometry))
+            {
+                continue;
+            }
+            if let Some(render_states) = render_states {
+                window.take_presentation_feedback(
+                    &mut feedback,
+                    smithay::desktop::utils::surface_primary_scanout_output,
+                    |surface, _| {
+                        smithay::desktop::utils::surface_presentation_feedback_flags_from_states(
+                            surface,
+                            None,
+                            render_states,
+                        )
+                    },
+                );
+            } else {
+                window.take_presentation_feedback(
+                    &mut feedback,
+                    |_, _| Some(output.clone()),
+                    |_, _| {
+                        smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty()
+                    },
+                );
+            }
+        }
+        feedback
+    }
+
+    pub(crate) fn update_output_primary_scanout(
+        &self,
+        output: &Output,
+        render_states: &smithay::backend::renderer::element::RenderElementStates,
+    ) {
+        for window in self.space.elements() {
+            window.with_surfaces(|surface, data| {
+                smithay::desktop::utils::update_surface_primary_scanout_output(
+                    surface,
+                    output,
+                    data,
+                    None,
+                    render_states,
+                    smithay::backend::renderer::element::default_primary_scanout_output_compare,
+                );
+            });
+        }
     }
 }
 
@@ -16812,6 +17118,7 @@ pub struct ClientState {
     pub compositor_state: CompositorClientState,
     pub portal_capture_allowed: bool,
     pub data_control_allowed: bool,
+    pub foreign_toplevel_allowed: bool,
 }
 
 impl ClientData for ClientState {
@@ -16831,19 +17138,30 @@ mod protocol_tests {
         clamp_decorated_content_to_work_area, clamp_window_location, clamped_restore_geometry,
         command_requires_shell_identity, drag_icon_location, external_controller_surface_changed,
         fail_x11_settlement_on_timer_registration, identification_expiry_is_current,
-        internal_restore_is_current, maximized_content_geometry, output_contains_logical_point,
-        output_index_for_shell_surface, output_rescue_revision_is_current,
-        pending_launch_window_disposition, placement_restore_is_current,
-        prepare_shell_behavior_update, preview_mapping_has_exact_size,
-        protocol_preview_from_cached, record_preview_capture_attempt,
-        restored_drag_content_geometry, retain_live_idle_inhibitors,
-        retain_superseded_xdg_settlement, retire_displaced_window, retire_pointer_surface,
-        retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
+        internal_restore_is_current, mapped_surface_origin, maximized_content_geometry,
+        output_contains_logical_point, output_index_for_shell_surface,
+        output_rescue_revision_is_current, pending_launch_window_disposition,
+        placement_restore_is_current, prepare_shell_behavior_update,
+        preview_mapping_has_exact_size, protocol_preview_from_cached,
+        record_preview_capture_attempt, restored_drag_content_geometry,
+        retain_live_idle_inhibitors, retain_superseded_xdg_settlement, retire_displaced_window,
+        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         test_control_may_invoke, xdg_configure_extends_existing_request,
         xdg_configure_matches_existing_desired, xdg_settlement_requires_resize_cleanup,
     };
+
+    #[test]
+    fn mapped_client_surface_origin_accounts_for_nonzero_window_geometry() {
+        let mapped = smithay::utils::Point::from((120, 80));
+        let client_geometry = smithay::utils::Point::from((7, 40));
+
+        assert_eq!(
+            mapped_surface_origin(mapped, client_geometry),
+            (113, 40).into()
+        );
+    }
 
     #[test]
     fn x11_timer_registration_failure_is_terminal_and_preserves_observed_fact() {
@@ -25248,6 +25566,45 @@ mod protocol_tests {
             .find(|output| output.name == "right")
             .unwrap();
         assert_eq!((right.geometry.x, right.geometry.y), (800, 175));
+    }
+
+    #[test]
+    fn swapped_outputs_translate_windows_with_their_physical_output() {
+        let geometry = |x| Geometry {
+            x,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        let previous = HashMap::from([
+            ("left".to_owned(), geometry(0)),
+            ("right".to_owned(), geometry(800)),
+        ]);
+        let current = HashMap::from([
+            ("left".to_owned(), geometry(800)),
+            ("right".to_owned(), geometry(0)),
+        ]);
+        let window_on_left = Geometry {
+            x: 120,
+            y: 75,
+            width: 500,
+            height: 400,
+        };
+        let window_on_right = Geometry {
+            x: 940,
+            y: 90,
+            width: 500,
+            height: 400,
+        };
+
+        assert_eq!(
+            super::output_layout_translation(window_on_left, &previous, &current),
+            Some((800, 0))
+        );
+        assert_eq!(
+            super::output_layout_translation(window_on_right, &previous, &current),
+            Some((-800, 0))
+        );
     }
 
     #[cfg(not(feature = "backend-udev"))]

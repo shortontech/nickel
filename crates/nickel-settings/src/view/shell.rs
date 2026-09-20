@@ -21,6 +21,9 @@ impl SettingsApp {
         height: f32,
         modality: InputModality,
     ) -> AnyView<SettingsMessage> {
+        if self.page == SettingsPage::BluetoothPair {
+            return self.bluetooth_pairing_view();
+        }
         let theme = self.ui_theme();
         let destination_header = |page| {
             let (title, subtitle) = match page {

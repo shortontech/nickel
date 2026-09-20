@@ -189,6 +189,7 @@ impl SettingsApp {
                 }
             })
             .collect();
+        separate_overlapping_display_cards(&mut self.displays);
         center_display_rects(&mut self.displays, self.display_plane);
         self.selected = self
             .displays

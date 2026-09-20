@@ -59,7 +59,10 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::{Resource, backend::GlobalId},
     },
-    utils::{Buffer, DeviceFd, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
+    utils::{
+        Buffer, Clock, DeviceFd, Logical, Monotonic, Physical, Point, Rectangle, Scale, Size,
+        Transform,
+    },
     wayland::seat::WaylandFocus,
 };
 use thiserror::Error;
@@ -523,6 +526,8 @@ struct SurfaceData {
     render_path_logged: bool,
     invalidate_pending: bool,
     modes: Vec<DrmMode>,
+    pending_presentation: Option<smithay::desktop::utils::OutputPresentationFeedback>,
+    presentation_sequence: u64,
 }
 
 struct DisabledOutput<N = DrmNode, T = Output> {
@@ -707,7 +712,7 @@ pub struct UdevData {
     layout: OutputLayout,
     bootstrap_render_until: Instant,
     client_bootstrap_started: bool,
-    cursors: HashMap<crate::session::window_frame::FrameCursor, CursorBuffer>,
+    cursors: HashMap<smithay::input::pointer::CursorIcon, CursorBuffer>,
     frame_icons: Option<crate::session::window_frame::FrameIcons>,
     identify_badges: IdentifyBadgeCache,
     task_switcher_cache: Option<TaskSwitcherBufferCache>,
@@ -1182,7 +1187,6 @@ pub fn init_udev(
             data.schedule_render(node, Duration::ZERO);
         }
     })?;
-
     event_loop
         .handle()
         .insert_source(notifier, move |event, _, data| {
@@ -1948,6 +1952,8 @@ impl NickelSession {
                 render_path_logged: false,
                 invalidate_pending: is_evdi,
                 modes,
+                pending_presentation: None,
+                presentation_sequence: 0,
             },
         );
         self.restore_output_windows(&output);
@@ -2456,16 +2462,29 @@ impl NickelSession {
             let device = native.devices.get_mut(&node)?;
             let surface = device.surfaces.get_mut(&crtc)?;
             let output = surface.output.clone();
-            let cursor = native
-                .cursors
-                .get(&self.frame_cursor)
-                .or_else(|| {
+            let cursor_image = self.effective_cursor_image();
+            let cursor = match cursor_image {
+                smithay::input::pointer::CursorImageStatus::Hidden => None,
+                smithay::input::pointer::CursorImageStatus::Named(icon) => Some(
                     native
                         .cursors
-                        .get(&crate::session::window_frame::FrameCursor::Arrow)
-                })
-                .cloned()
-                .unwrap_or_else(fallback_arrow_cursor);
+                        .get(&icon)
+                        .or_else(|| {
+                            native
+                                .cursors
+                                .get(&smithay::input::pointer::CursorIcon::Default)
+                        })
+                        .cloned()
+                        .unwrap_or_else(fallback_arrow_cursor),
+                ),
+                smithay::input::pointer::CursorImageStatus::Surface(_) => Some(
+                    native
+                        .cursors
+                        .get(&smithay::input::pointer::CursorIcon::Default)
+                        .cloned()
+                        .unwrap_or_else(fallback_arrow_cursor),
+                ),
+            };
             let frame_icons = native.frame_icons.clone();
             let background = surface.background.clone();
             let identify_badge = identify_index.map(|index| native.identify_badges.get(index));
@@ -2589,10 +2608,10 @@ impl NickelSession {
                     if !has_content
                         || shell_surfaces.contains(&surface.id())
                         || self.is_fullscreen_window(window)
-                        || !self.is_server_decorated(window)
                     {
                         continue;
                     }
+                    let server_decorated = self.is_server_decorated(window);
                     let registry_id = self.surface_windows.get(&surface.id()).copied();
                     let active = registry_id.is_some_and(|id| self.windows.is_active(id));
                     let title = registry_id
@@ -2617,25 +2636,29 @@ impl NickelSession {
                             height: frame_bounds.size.h,
                         },
                     );
-                    if let Some(titlebar) = crate::session::window_frame::render_titlebar_for_state(
-                        registry_id.map(|id| id.0),
-                        titlebar_geometry.width,
-                        title,
-                        frame_palette.panel,
-                        foreground,
-                        active,
-                    ) && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
-                        &mut renderer,
-                        (
-                            f64::from(titlebar_geometry.x - output_geometry.loc.x),
-                            f64::from(titlebar_geometry.y - output_geometry.loc.y),
-                        ),
-                        &titlebar,
-                        None,
-                        None,
-                        Some((titlebar_geometry.width, titlebar_geometry.height).into()),
-                        Kind::Unspecified,
-                    ) {
+                    if server_decorated
+                        && let Some(titlebar) =
+                            crate::session::window_frame::render_titlebar_for_state(
+                                registry_id.map(|id| id.0),
+                                titlebar_geometry.width,
+                                title,
+                                frame_palette.panel,
+                                foreground,
+                                active,
+                            )
+                        && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                            &mut renderer,
+                            (
+                                f64::from(titlebar_geometry.x - output_geometry.loc.x),
+                                f64::from(titlebar_geometry.y - output_geometry.loc.y),
+                            ),
+                            &titlebar,
+                            None,
+                            None,
+                            Some((titlebar_geometry.width, titlebar_geometry.height).into()),
+                            Kind::Unspecified,
+                        )
+                    {
                         elements.insert(client_start, NativeCustomElement::from(element).into());
                     }
                     let border_color = crate::session::window_frame::frame_border_color(
@@ -2643,11 +2666,20 @@ impl NickelSession {
                         foreground,
                         active,
                     );
-                    for border in crate::session::window_frame::content_border_layers(
-                        frame_bounds.size.w,
-                        frame_bounds.size.h,
-                        border_color,
-                    ) {
+                    let border_layers = if server_decorated {
+                        crate::session::window_frame::content_border_layers(
+                            frame_bounds.size.w,
+                            frame_bounds.size.h,
+                            border_color,
+                        )
+                    } else {
+                        crate::session::window_frame::client_border_layers(
+                            frame_bounds.size.w,
+                            frame_bounds.size.h,
+                            border_color,
+                        )
+                    };
+                    for border in border_layers {
                         elements.insert(
                             client_start,
                             NativeCustomElement::from(SolidColorRenderElement::from_buffer(
@@ -2663,8 +2695,12 @@ impl NickelSession {
                             .into(),
                         );
                     }
-                    let frame_height =
-                        frame_bounds.size.h + crate::session::window_frame::TITLEBAR_HEIGHT;
+                    let titlebar_height = if server_decorated {
+                        crate::session::window_frame::TITLEBAR_HEIGHT
+                    } else {
+                        0
+                    };
+                    let frame_height = frame_bounds.size.h + titlebar_height;
                     if !maximized {
                         let shadows = crate::session::window_frame::shadow_layers(
                             frame_bounds.size.w,
@@ -2682,7 +2718,7 @@ impl NickelSession {
                                     f64::from(
                                         frame_bounds.loc.y
                                             - output_geometry.loc.y
-                                            - crate::session::window_frame::TITLEBAR_HEIGHT
+                                            - titlebar_height
                                             + shadow.offset.1,
                                     ),
                                 ),
@@ -2696,7 +2732,7 @@ impl NickelSession {
                             }
                         }
                     }
-                    if let Some(icons) = &frame_icons {
+                    if server_decorated && let Some(icons) = &frame_icons {
                         let icon_y = crate::session::window_frame::frame_icon_y(
                             frame_bounds.loc.y
                                 - output_geometry.loc.y
@@ -3064,7 +3100,9 @@ impl NickelSession {
                     elements.splice(0..0, icon_elements);
                 }
             }
-            if let Some(geometry) = self.space.output_geometry(&output) {
+            if let (Some(geometry), Some(cursor)) =
+                (self.space.output_geometry(&output), cursor.as_ref())
+            {
                 let pointer = self.seat.get_pointer().unwrap().current_location();
                 if geometry.to_f64().contains(pointer) {
                     let location = (pointer - geometry.loc.to_f64())
@@ -3143,6 +3181,16 @@ impl NickelSession {
                     self.complete_output_capture(&path, response);
                 }
             }
+            let refresh = output
+                .current_mode()
+                .map(|mode| mode.refresh)
+                .filter(|refresh| *refresh > 0)
+                .map(|refresh| {
+                    smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(
+                        1_000_000_000_000_u64 / refresh as u64,
+                    ))
+                })
+                .unwrap_or_else(|| smithay::wayland::presentation::Refresh::fixed(Duration::ZERO));
             let retry = match &mut surface.drm {
                 OutputDrm::Gbm(drm) => match drm.render_frame(
                     &mut renderer,
@@ -3151,6 +3199,9 @@ impl NickelSession {
                     frame_flags,
                 ) {
                     Ok(frame) if !frame.is_empty => {
+                        self.update_output_primary_scanout(&output, &frame.states);
+                        let presentation_feedback =
+                            self.take_output_presentation_feedback(&output, Some(&frame.states));
                         let synchronized = if frame.needs_sync()
                             && let PrimaryPlaneElement::Swapchain(element) = frame.primary_element
                         {
@@ -3178,14 +3229,19 @@ impl NickelSession {
                             );
                             true
                         } else {
+                            // This batch now belongs to the queued page flip and is completed
+                            // only by the matching DRM vblank notification.
+                            surface.pending_presentation = Some(presentation_feedback);
                             false
                         }
                     }
                     Ok(_) => {
+                        drop(self.take_output_presentation_feedback(&output, None));
                         tracing::trace!(output = %output.name(), "DRM frame contained no damage");
                         bootstrapping
                     }
                     Err(error) => {
+                        drop(self.take_output_presentation_feedback(&output, None));
                         tracing::warn!(
                             output = %output.name(),
                             render_gpu = %native.primary_gpu,
@@ -3197,6 +3253,8 @@ impl NickelSession {
                     }
                 },
                 OutputDrm::Evdi(drm) => {
+                    let mut presentation_feedback =
+                        self.take_output_presentation_feedback(&output, None);
                     let presented = drm.render_and_present(&mut renderer, &elements);
                     if let Err(error) = presented {
                         // Damage tracking advances when primary-GPU rendering
@@ -3208,7 +3266,19 @@ impl NickelSession {
                         true
                     } else {
                         match presented.expect("checked successful EVDI presentation") {
-                            true => false,
+                            true => {
+                                surface.presentation_sequence =
+                                    surface.presentation_sequence.wrapping_add(1);
+                                presentation_feedback.presented(
+                                    Clock::<Monotonic>::new().now(),
+                                    refresh,
+                                    surface.presentation_sequence,
+                                    // EVDI confirms its synchronous atomic commit but does
+                                    // not provide a trustworthy vblank/hardware-clock signal.
+                                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                                );
+                                false
+                            }
                             false => bootstrapping,
                         }
                     }
@@ -3267,6 +3337,30 @@ impl NickelSession {
         };
         if let Err(error) = surface.drm.frame_submitted() {
             tracing::warn!(%node, ?crtc, ?error, "failed to complete DRM frame");
+            // Dropping the batch sends `discarded`; a failed page-flip completion must
+            // never be reported to clients as presented.
+            surface.pending_presentation = None;
+        } else {
+            surface.presentation_sequence = surface.presentation_sequence.wrapping_add(1);
+            let refresh = surface
+                .output
+                .current_mode()
+                .map(|mode| mode.refresh)
+                .filter(|refresh| *refresh > 0)
+                .map(|refresh| {
+                    smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(
+                        1_000_000_000_000_u64 / refresh as u64,
+                    ))
+                })
+                .unwrap_or_else(|| smithay::wayland::presentation::Refresh::fixed(Duration::ZERO));
+            if let Some(mut feedback) = surface.pending_presentation.take() {
+                feedback.presented(
+                    Clock::<Monotonic>::new().now(),
+                    refresh,
+                    surface.presentation_sequence,
+                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
+                );
+            }
         }
         // Surface commits, input, output changes, and explicit capture requests schedule their own
         // renders. Scheduling unconditionally at every vblank turns a static desktop into a
@@ -3367,32 +3461,68 @@ fn themed_arrow_cursor() -> CursorBuffer {
     themed_cursor(&["default", "left_ptr"]).unwrap_or_else(fallback_arrow_cursor)
 }
 
-fn themed_cursors() -> HashMap<crate::session::window_frame::FrameCursor, CursorBuffer> {
-    use crate::session::window_frame::FrameCursor;
+fn themed_cursors() -> HashMap<smithay::input::pointer::CursorIcon, CursorBuffer> {
+    use smithay::input::pointer::CursorIcon;
 
     let arrow = themed_arrow_cursor();
-    let mut cursors = HashMap::from([(FrameCursor::Arrow, arrow.clone())]);
+    let mut cursors = HashMap::from([(CursorIcon::Default, arrow.clone())]);
     for (kind, names) in [
-        (FrameCursor::North, &["n-resize", "top_side"][..]),
+        (CursorIcon::ContextMenu, &["context-menu"][..]),
+        (CursorIcon::Help, &["help", "question_arrow"][..]),
+        (CursorIcon::Pointer, &["pointer", "hand2"][..]),
+        (CursorIcon::Progress, &["progress", "left_ptr_watch"][..]),
+        (CursorIcon::Wait, &["wait", "watch"][..]),
+        (CursorIcon::Cell, &["cell", "plus"][..]),
+        (CursorIcon::Crosshair, &["crosshair", "cross"][..]),
+        (CursorIcon::Text, &["text", "xterm"][..]),
+        (CursorIcon::VerticalText, &["vertical-text"][..]),
+        (CursorIcon::Alias, &["alias", "link"][..]),
+        (CursorIcon::Copy, &["copy", "dnd-copy"][..]),
+        (CursorIcon::Move, &["move", "fleur"][..]),
+        (CursorIcon::NoDrop, &["no-drop", "dnd-none"][..]),
         (
-            FrameCursor::NorthEast,
-            &["ne-resize", "top_right_corner"][..],
+            CursorIcon::NotAllowed,
+            &["not-allowed", "crossed_circle"][..],
         ),
-        (FrameCursor::East, &["e-resize", "right_side"][..]),
+        (CursorIcon::Grab, &["grab", "openhand"][..]),
+        (CursorIcon::Grabbing, &["grabbing", "closedhand"][..]),
+        (CursorIcon::NResize, &["n-resize", "top_side"][..]),
+        (CursorIcon::NeResize, &["ne-resize", "top_right_corner"][..]),
+        (CursorIcon::EResize, &["e-resize", "right_side"][..]),
         (
-            FrameCursor::SouthEast,
+            CursorIcon::SeResize,
             &["se-resize", "bottom_right_corner"][..],
         ),
-        (FrameCursor::South, &["s-resize", "bottom_side"][..]),
+        (CursorIcon::SResize, &["s-resize", "bottom_side"][..]),
         (
-            FrameCursor::SouthWest,
+            CursorIcon::SwResize,
             &["sw-resize", "bottom_left_corner"][..],
         ),
-        (FrameCursor::West, &["w-resize", "left_side"][..]),
+        (CursorIcon::WResize, &["w-resize", "left_side"][..]),
+        (CursorIcon::NwResize, &["nw-resize", "top_left_corner"][..]),
         (
-            FrameCursor::NorthWest,
-            &["nw-resize", "top_left_corner"][..],
+            CursorIcon::EwResize,
+            &["ew-resize", "sb_h_double_arrow"][..],
         ),
+        (
+            CursorIcon::NsResize,
+            &["ns-resize", "sb_v_double_arrow"][..],
+        ),
+        (
+            CursorIcon::NeswResize,
+            &["nesw-resize", "fd_double_arrow"][..],
+        ),
+        (
+            CursorIcon::NwseResize,
+            &["nwse-resize", "bd_double_arrow"][..],
+        ),
+        (CursorIcon::ColResize, &["col-resize", "split_h"][..]),
+        (CursorIcon::RowResize, &["row-resize", "split_v"][..]),
+        (CursorIcon::AllScroll, &["all-scroll", "fleur"][..]),
+        (CursorIcon::ZoomIn, &["zoom-in"][..]),
+        (CursorIcon::ZoomOut, &["zoom-out"][..]),
+        (CursorIcon::DndAsk, &["dnd-ask", "question_arrow"][..]),
+        (CursorIcon::AllResize, &["all-resize", "fleur"][..]),
     ] {
         cursors.insert(kind, themed_cursor(names).unwrap_or_else(|| arrow.clone()));
     }

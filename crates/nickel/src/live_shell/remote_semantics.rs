@@ -102,6 +102,9 @@ fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
         | ControlAction::RequestSessionAction(_)
         | ControlAction::CancelSessionAction => RemoteActionDisposition::Guarded,
         ControlAction::SwitchWorkspace(_)
+        | ControlAction::WifiScroll
+        | ControlAction::BluetoothScroll
+        | ControlAction::AudioScroll
         | ControlAction::CreateWorkspace
         | ControlAction::ToggleShowDesktop
         | ControlAction::ShowNotifications

@@ -193,6 +193,20 @@ pub fn content_border_layers(width: i32, height: i32, color: u32) -> Vec<FrameSo
     ]
 }
 
+/// Border for client-decorated windows. Their own title chrome supplies no
+/// compositor-owned top edge, so retain all four sides without adding a second
+/// titlebar.
+pub fn client_border_layers(width: i32, height: i32, color: u32) -> Vec<FrameSolidLayer> {
+    let width = width.max(1);
+    let border = FRAME_METRICS.visual_border.max(1);
+    let mut layers = content_border_layers(width, height, color);
+    layers.push(FrameSolidLayer {
+        buffer: SolidColorBuffer::new((width, border), solid_color(color, 1.0)),
+        offset: (0, 0),
+    });
+    layers
+}
+
 pub fn shadow_layers(width: i32, height: i32, active: bool) -> FrameShadowLayers {
     let extent = FRAME_METRICS.shadow_extent;
     let width = width.max(1);
@@ -868,6 +882,23 @@ pub enum FrameCursor {
     NorthWest,
 }
 
+impl FrameCursor {
+    pub const fn cursor_icon(self) -> smithay::input::pointer::CursorIcon {
+        use smithay::input::pointer::CursorIcon;
+        match self {
+            Self::Arrow => CursorIcon::Default,
+            Self::North => CursorIcon::NResize,
+            Self::NorthEast => CursorIcon::NeResize,
+            Self::East => CursorIcon::EResize,
+            Self::SouthEast => CursorIcon::SeResize,
+            Self::South => CursorIcon::SResize,
+            Self::SouthWest => CursorIcon::SwResize,
+            Self::West => CursorIcon::WResize,
+            Self::NorthWest => CursorIcon::NwResize,
+        }
+    }
+}
+
 impl FramePart {
     pub const fn is_resize(self) -> bool {
         matches!(
@@ -996,10 +1027,11 @@ mod tests {
     use super::{
         BUTTON_WIDTH, FramePart, RESIZE_BORDER, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
         TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, TitlebarCacheMode,
-        cached_titlebar_pixel_digest, client_scene_occupies, frame_border_color, hit_test,
-        outer_geometry, render_task_switcher_label, render_titlebar, render_titlebar_for,
-        render_titlebar_pixels, render_titlebar_with_mode, retain_titlebars_for_windows,
-        task_switcher_label_text, titlebar_cache_diagnostics, titlebar_geometry,
+        cached_titlebar_pixel_digest, client_border_layers, client_scene_occupies,
+        frame_border_color, hit_test, outer_geometry, render_task_switcher_label, render_titlebar,
+        render_titlebar_for, render_titlebar_pixels, render_titlebar_with_mode,
+        retain_titlebars_for_windows, task_switcher_label_text, titlebar_cache_diagnostics,
+        titlebar_geometry,
     };
     use crate::session::shell_layout::Geometry;
 
@@ -1040,6 +1072,19 @@ mod tests {
         assert_eq!(titlebar.y + titlebar.height, CONTENT.y);
         assert_eq!(outer.x, titlebar.x - RESIZE_BORDER);
         assert_eq!(outer.width, titlebar.width + RESIZE_BORDER * 2);
+    }
+
+    #[test]
+    fn client_decorated_windows_receive_all_four_compositor_border_edges() {
+        let layers = client_border_layers(320, 180, 0x445566);
+        assert_eq!(layers.len(), 4);
+        assert_eq!(
+            layers.iter().filter(|layer| layer.offset == (0, 0)).count(),
+            2,
+            "left and top edges share the origin"
+        );
+        assert!(layers.iter().any(|layer| layer.offset == (319, 0)));
+        assert!(layers.iter().any(|layer| layer.offset == (0, 179)));
     }
 
     #[test]
@@ -1382,6 +1427,18 @@ mod tests {
         );
         assert_eq!(FramePart::ResizeEast.cursor(), super::FrameCursor::East);
         assert_eq!(FramePart::Titlebar.cursor(), super::FrameCursor::Arrow);
+        assert_eq!(
+            FramePart::ResizeNorthWest.cursor().cursor_icon(),
+            smithay::input::pointer::CursorIcon::NwResize
+        );
+        assert_eq!(
+            FramePart::ResizeSouth.cursor().cursor_icon(),
+            smithay::input::pointer::CursorIcon::SResize
+        );
+        assert_eq!(
+            FramePart::Titlebar.cursor().cursor_icon(),
+            smithay::input::pointer::CursorIcon::Default
+        );
     }
 
     #[test]

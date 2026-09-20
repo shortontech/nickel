@@ -3349,6 +3349,7 @@ dependencies = [
 name = "nickel-settings"
 version = "0.1.0"
 dependencies = [
+ "futures-lite",
  "image",
  "nickel-build-support",
  "nickel-codex",

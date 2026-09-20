@@ -276,7 +276,6 @@ enum SidebarIconKind {
     Appearance,
     Network,
     Bluetooth,
-    BluetoothPair,
     PrintersStorage,
     Security,
     DefaultApps,
@@ -422,6 +421,8 @@ struct BluetoothDevice {
     paired: bool,
     connected: bool,
     battery_percent: Option<u8>,
+    kind: Option<String>,
+    signal_dbm: Option<i16>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -447,6 +448,7 @@ enum SettingsPage {
     Appearance,
     Network,
     Bluetooth,
+    BluetoothPair,
     PrintersStorage,
     Security,
     DefaultApps,
@@ -2651,8 +2653,10 @@ impl SettingsApp {
                 self.persist_shell_behavior(previous);
             }
         }
-        if matches!(self.page, SettingsPage::Bluetooth | SettingsPage::BluetoothPair)
-            && now >= self.next_bluetooth_refresh
+        if matches!(
+            self.page,
+            SettingsPage::Bluetooth | SettingsPage::BluetoothPair
+        ) && now >= self.next_bluetooth_refresh
         {
             self.load_bluetooth();
         }
@@ -2865,6 +2869,44 @@ fn center_display_rects(displays: &mut [DisplayCard], plane: Rect) {
     }
 }
 
+fn separate_overlapping_display_cards(displays: &mut [DisplayCard]) {
+    for _ in 0..displays.len() {
+        let mut changed = false;
+        for left_index in 0..displays.len() {
+            for right_index in left_index + 1..displays.len() {
+                let (left, right) = displays.split_at_mut(right_index);
+                let first = &mut left[left_index];
+                let second = &mut right[0];
+                let overlaps_x = first.rect.x < second.rect.x + second.rect.w
+                    && second.rect.x < first.rect.x + first.rect.w;
+                let overlaps_y = first.rect.y < second.rect.y + second.rect.h
+                    && second.rect.y < first.rect.y + first.rect.h;
+                if !overlaps_x || !overlaps_y {
+                    continue;
+                }
+
+                let logical_dx = second.logical_x - first.logical_x;
+                let logical_dy = second.logical_y - first.logical_y;
+                if logical_dx.abs() >= logical_dy.abs() {
+                    if logical_dx >= 0 {
+                        second.rect.x = first.rect.x + first.rect.w;
+                    } else {
+                        first.rect.x = second.rect.x + second.rect.w;
+                    }
+                } else if logical_dy >= 0 {
+                    second.rect.y = first.rect.y + first.rect.h;
+                } else {
+                    first.rect.y = second.rect.y + second.rect.h;
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 fn logical_placements(displays: &[DisplayCard]) -> Vec<(i32, i32)> {
     if displays.is_empty() {
         return Vec::new();
@@ -3008,7 +3050,10 @@ impl Application for SettingsApp {
                 .as_ref()
                 .map(|(deadline, _)| *deadline),
         );
-        if matches!(self.page, SettingsPage::Bluetooth | SettingsPage::BluetoothPair) {
+        if matches!(
+            self.page,
+            SettingsPage::Bluetooth | SettingsPage::BluetoothPair
+        ) {
             deadlines.push(self.next_bluetooth_refresh);
         }
         if self.page == SettingsPage::Network {
@@ -3059,11 +3104,19 @@ impl Application for SettingsApp {
     }
 
     fn title(&self) -> &str {
-        "Nickel Settings"
+        if self.page == SettingsPage::BluetoothPair {
+            "Pair Bluetooth devices"
+        } else {
+            "Nickel Settings"
+        }
     }
 
     fn initial_size(&self) -> (u32, u32) {
-        (850, 580)
+        if self.page == SettingsPage::BluetoothPair {
+            (620, 520)
+        } else {
+            (850, 580)
+        }
     }
 }
 
@@ -3239,6 +3292,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     nickel_ui::run_with_adapter(
         {
             let mut app = SettingsApp::with_initial_page(initial_page);
+            if initial_page == SettingsPage::BluetoothPair {
+                app.load_bluetooth();
+                if app.bluetooth.available && app.bluetooth.powered && !app.bluetooth.discovering {
+                    app.start_bluetooth_operation(BluetoothOperation::SetDiscovery(true), || {
+                        set_bluetooth_adapter_property("Discovering", true)
+                    });
+                }
+            }
             if let Some(output) = initial_output
                 && let Some(index) = app
                     .displays
@@ -3271,8 +3332,8 @@ mod tests {
         OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
         SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
         WallpaperSettings, WifiNetwork, codex_feature_state, constrain_center,
-        resolve_codex_feature_state, shell_behavior_transaction, show_pending_maintenance_phase,
-        snap_rect,
+        resolve_codex_feature_state, separate_overlapping_display_cards,
+        shell_behavior_transaction, show_pending_maintenance_phase, snap_rect,
     };
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
@@ -3357,6 +3418,40 @@ mod tests {
             node.label.as_deref() == Some("Leave unchanged")
                 && node.state.as_deref() == Some("selected")
         }));
+    }
+
+    #[test]
+    fn compact_application_scale_form_stays_within_three_hundred_pixels() {
+        let app = SettingsApp::with_initial_page(SettingsPage::Display);
+        let tree = app.build_ui(900.0, 720.0);
+        let nodes = tree.accessibility_nodes();
+        let relevant = nodes
+            .iter()
+            .filter(|node| {
+                node.semantic_role == Some(SemanticRole::Radio)
+                    || node.id.as_str().ends_with("application-custom-scale")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            relevant
+                .iter()
+                .filter(|node| node.semantic_role == Some(SemanticRole::Radio))
+                .count(),
+            3
+        );
+        let top = relevant
+            .iter()
+            .map(|node| node.rect.origin.y)
+            .fold(f32::INFINITY, f32::min);
+        let bottom = relevant
+            .iter()
+            .map(|node| node.rect.origin.y + node.rect.size.height)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            bottom - top <= 300.0,
+            "application scale form consumed {} px",
+            bottom - top
+        );
     }
 
     #[test]
@@ -3448,6 +3543,31 @@ mod tests {
         let snapped = snap_rect(moving, fixed, 42);
         assert_eq!(snapped.x + snapped.w, fixed.x);
         assert_eq!(snapped.y, fixed.y);
+    }
+
+    #[test]
+    fn visual_monitor_cards_do_not_overlap_when_logical_outputs_are_adjacent() {
+        let mut displays = SettingsApp::with_initial_page(SettingsPage::Display).displays;
+        displays[0].logical_x = 0;
+        displays[0].logical_y = 0;
+        displays[0].rect = Rect {
+            x: 100,
+            y: 100,
+            w: 250,
+            h: 140,
+        };
+        displays[1].logical_x = displays[0].logical_width;
+        displays[1].logical_y = 0;
+        displays[1].rect = Rect {
+            x: 330,
+            y: 100,
+            w: 280,
+            h: 160,
+        };
+
+        separate_overlapping_display_cards(&mut displays);
+
+        assert_eq!(displays[1].rect.x, displays[0].rect.x + displays[0].rect.w);
     }
 
     #[test]
@@ -3608,6 +3728,8 @@ mod tests {
                 paired: true,
                 connected: index == 0,
                 battery_percent: Some(80),
+                kind: None,
+                signal_dbm: None,
             })
             .collect();
         let compact = app.build_ui(560.0, 360.0);
@@ -4327,6 +4449,74 @@ mod tests {
     }
 
     #[test]
+    fn bluetooth_pairing_is_a_separate_surface_with_unpaired_device_actions() {
+        let mut settings = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
+        settings.bluetooth.available = true;
+        settings.bluetooth.powered = true;
+        settings.bluetooth.devices.push(BluetoothDevice {
+            id: "/test/unpaired".into(),
+            name: "New keyboard".into(),
+            paired: false,
+            connected: false,
+            battery_percent: None,
+            kind: Some("input-keyboard".into()),
+            signal_dbm: Some(-42),
+        });
+        settings.bluetooth.devices.push(BluetoothDevice {
+            id: "/test/already-paired".into(),
+            name: "Existing headphones".into(),
+            paired: true,
+            connected: true,
+            battery_percent: Some(80),
+            kind: Some("audio-headphones".into()),
+            signal_dbm: Some(-30),
+        });
+        let settings_tree = settings.build_ui(850.0, 900.0);
+        assert_eq!(
+            settings_tree
+                .semantic_targets_for_message(&SettingsMessage::OpenBluetoothPairing)
+                .len(),
+            1
+        );
+        assert!(
+            settings_tree
+                .semantic_targets_for_message(&SettingsMessage::BluetoothDevice(0))
+                .is_empty(),
+            "unpaired devices belong to the pairing surface"
+        );
+
+        let mut pairing = SettingsApp::with_initial_page(SettingsPage::BluetoothPair);
+        pairing.bluetooth = settings.bluetooth;
+        let pairing_tree = pairing.build_ui(850.0, 900.0);
+        let action = pairing_tree
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("bluetooth-device-0-action"))
+            .expect("pair action");
+        assert_eq!(action.label.as_deref(), Some("Pair"));
+        assert_eq!(
+            pairing_tree
+                .semantic_targets_for_message(&SettingsMessage::BluetoothDevice(0))
+                .len(),
+            1
+        );
+        assert!(
+            pairing_tree
+                .semantic_targets_for_message(&SettingsMessage::BluetoothDevice(1))
+                .is_empty(),
+            "already paired devices must not be repeated in the pairing picker"
+        );
+        assert!(
+            pairing_tree
+                .accessibility_nodes()
+                .iter()
+                .all(|node| !node.id.as_str().ends_with("settings-sidebar-search")),
+            "the pairing picker must not duplicate the Settings shell"
+        );
+        assert_eq!(pairing.initial_size(), (620, 520));
+    }
+
+    #[test]
     fn pending_bluetooth_operation_preserves_confirmed_state_and_disables_commands() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
         app.bluetooth.available = true;
@@ -4338,6 +4528,8 @@ mod tests {
             paired: true,
             connected: false,
             battery_percent: Some(80),
+            kind: None,
+            signal_dbm: None,
         });
         let (_sender, receiver) = std::sync::mpsc::channel();
         app.bluetooth_operation = Some(BluetoothOperation::SetPower(false));
@@ -4407,6 +4599,7 @@ mod tests {
             SettingsPage::Appearance,
             SettingsPage::Network,
             SettingsPage::Bluetooth,
+            SettingsPage::BluetoothPair,
             SettingsPage::DefaultApps,
             SettingsPage::OptionalFeatures,
             SettingsPage::KeyboardShortcuts,
@@ -4490,6 +4683,8 @@ mod tests {
             paired: true,
             connected: false,
             battery_percent: Some(75),
+            kind: None,
+            signal_dbm: None,
         });
         let bluetooth = bluetooth.build_ui(850.0, 900.0);
         let device = bluetooth
