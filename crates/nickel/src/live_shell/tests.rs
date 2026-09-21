@@ -1202,6 +1202,32 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
         }
     )));
 
+    // Session actions share this platform-neutral shell path on Windows and
+    // Linux. They must retire a pending switch (and its delayed peek) before
+    // the platform begins locking, logging out, suspending, or restarting.
+    shell.task_switcher = TaskSwitcher::default();
+    shell
+        .task_switcher
+        .apply(HotkeyAction::SwitchNext, &switch_windows);
+    session.0.lock().unwrap().clear();
+    shell.apply_control_action(ControlAction::SessionAction(
+        crate::platform::SessionAction::Lock,
+    ));
+    assert!(shell.task_switcher.session().is_none());
+    let commands = session.0.lock().unwrap();
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        crate::platform::ShellCommand::SessionAction(crate::platform::SessionAction::Lock)
+    )));
+    assert!(!commands.iter().any(|command| matches!(
+        command,
+        crate::platform::ShellCommand::WindowAction {
+            action: crate::platform::WindowAction::Activate,
+            ..
+        }
+    )));
+    drop(commands);
+
     let path = PathBuf::from("/tmp/internal-file-scenario");
     shell.launch_application(crate::model::Application::new(
         "place:test".into(),

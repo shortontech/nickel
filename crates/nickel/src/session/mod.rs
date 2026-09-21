@@ -24,6 +24,7 @@ pub(crate) use crate::remote_indicator;
 mod session_services;
 mod shell_layout;
 mod state;
+mod task_switcher_render;
 mod test_input;
 mod window_frame;
 mod window_registry;

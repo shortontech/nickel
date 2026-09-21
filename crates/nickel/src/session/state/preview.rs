@@ -200,7 +200,6 @@ impl NickelSession {
                 .sum::<usize>()
     }
 
-    #[cfg(feature = "backend-udev")]
     pub(crate) fn preview_generation(&self) -> u64 {
         self.preview_counters.presentation_generation
     }

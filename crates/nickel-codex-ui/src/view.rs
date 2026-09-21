@@ -86,6 +86,10 @@ pub enum ChatMessage {
     ConfirmDiscardDraft,
     CancelDiscardDraft,
     Interrupt,
+    QueueMessage,
+    InterruptAndSend,
+    CancelQueuedMessage(u64),
+    EditQueuedMessage(u64),
     RespondApproval(ServerRequestId, String, CodexApprovalChoice),
     InteractionAnswerChanged(String),
     SubmitInput(ServerRequestId, Vec<String>),
@@ -375,6 +379,8 @@ pub struct ChatApplication {
     pub(crate) resume_picker_open: bool,
     pub(crate) resume_picker_loading: bool,
     pub(crate) resume_picker_pending: Option<nickel_codex::ThreadId>,
+    resume_request_started: Option<std::time::Instant>,
+    resume_first_view: std::cell::Cell<Option<(std::time::Instant, usize)>>,
     new_chat_pending: bool,
     pending_new_chat_title: Option<String>,
     pending_navigation: Option<PendingNavigation>,
@@ -390,6 +396,37 @@ pub struct ChatApplication {
     theme: SemanticTheme,
     clipboard_write: Option<String>,
     clipboard_write_purpose: Option<ClipboardWritePurpose>,
+    queued_messages: std::collections::VecDeque<QueuedMessage>,
+    editing_queued_message: Option<QueuedMessage>,
+    next_queued_message_id: u64,
+    queued_interrupt_deadline: Option<std::time::Instant>,
+}
+
+const QUEUED_MESSAGE_CAPACITY: usize = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueuedMessagePhase {
+    Waiting,
+    InterruptRequested,
+    BoundaryPending,
+    InterruptTimedOut,
+    Dispatching,
+    Unconfirmed,
+}
+
+#[derive(Clone, Debug)]
+struct QueuedMessage {
+    id: u64,
+    generation: u64,
+    thread_id: nickel_codex::ThreadId,
+    text: String,
+    images: Vec<nickel_codex::TurnImage>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    approval_policy: ApprovalPolicy,
+    sandbox_policy: Option<SandboxPolicy>,
+    plan_mode: bool,
+    phase: QueuedMessagePhase,
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +464,8 @@ struct ChatOverlays<'a> {
     diagnostic_copy_result: Option<&'a Result<(), String>>,
     project_root: Option<&'a std::path::Path>,
     project_id: Option<&'a str>,
+    queued_messages: Option<&'a std::collections::VecDeque<QueuedMessage>>,
+    editing_queued_message: bool,
 }
 
 impl RemoteHostEditor {
@@ -464,6 +503,157 @@ impl RemoteHostEditor {
 }
 
 impl ChatApplication {
+    fn mark_queued_messages_for_review(&mut self, reason: &str) {
+        if self.queued_messages.is_empty() {
+            return;
+        }
+        self.queued_interrupt_deadline = None;
+        for queued in &mut self.queued_messages {
+            if queued.phase != QueuedMessagePhase::Dispatching {
+                queued.phase = QueuedMessagePhase::Unconfirmed;
+            }
+        }
+        self.state.command_feedback = Some(format!(
+            "Queued messages were not sent and require review after {reason}"
+        ));
+    }
+
+    fn queue_current_draft(&mut self) {
+        if (self.state.active_turn.is_none() && self.editing_queued_message.is_none())
+            || self.state.status != ConnectionStatus::Ready
+            || !self.state.account.authenticated
+            || self.state.recovery_pending
+            || self.state.unconfirmed_work
+        {
+            return;
+        }
+        if self.editing_queued_message.is_none()
+            && self.queued_messages.len() >= QUEUED_MESSAGE_CAPACITY
+        {
+            self.state.command_feedback = Some(format!(
+                "Message queue is full ({QUEUED_MESSAGE_CAPACITY}); cancel a queued message first"
+            ));
+            return;
+        }
+        let Some(thread_id) = self.state.selected_thread.clone() else {
+            self.state.command_feedback =
+                Some("Wait for the conversation to finish loading".into());
+            return;
+        };
+        if self.state.draft.trim().is_empty() && self.state.attachments.is_empty() {
+            return;
+        }
+        let replacement = self.editing_queued_message.take();
+        self.next_queued_message_id = if replacement.is_some() {
+            self.next_queued_message_id
+        } else {
+            self.next_queued_message_id.wrapping_add(1).max(1)
+        };
+        let replacement_images = replacement
+            .as_ref()
+            .map(|queued| queued.images.clone())
+            .unwrap_or_default();
+        let queued = QueuedMessage {
+            id: replacement
+                .as_ref()
+                .map_or(self.next_queued_message_id, |queued| queued.id),
+            generation: self.state.generation,
+            thread_id,
+            text: std::mem::take(&mut self.state.draft),
+            images: if self.state.attachments.is_empty() {
+                replacement_images
+            } else {
+                self.state
+                    .attachments
+                    .iter()
+                    .map(crate::PendingAttachment::turn_image)
+                    .collect()
+            },
+            model: self.state.selected_model.clone(),
+            reasoning_effort: self.state.selected_reasoning_effort.clone(),
+            approval_policy: self.state.selected_approval_policy,
+            sandbox_policy: self.state.selected_sandbox_policy,
+            plan_mode: self.plan_mode,
+            phase: QueuedMessagePhase::Waiting,
+        };
+        if replacement.is_some() {
+            self.queued_messages.push_front(queued);
+        } else {
+            self.queued_messages.push_back(queued);
+        }
+        self.state.attachments.clear();
+        self.state.command_feedback = Some(format!(
+            "Queued message {} of {QUEUED_MESSAGE_CAPACITY}",
+            self.queued_messages.len()
+        ));
+        if self.state.active_turn.is_none() {
+            self.dispatch_queued_after_boundary();
+        }
+    }
+
+    fn request_queued_interrupt(&mut self) {
+        let Some(queued) = self.queued_messages.front_mut() else {
+            return;
+        };
+        if !matches!(
+            queued.phase,
+            QueuedMessagePhase::Waiting | QueuedMessagePhase::InterruptTimedOut
+        ) || self.state.active_turn.is_none()
+            || self.state.interrupt_requested
+        {
+            return;
+        }
+        queued.phase = QueuedMessagePhase::InterruptRequested;
+        self.queued_interrupt_deadline =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        self.state.interrupt_requested = true;
+        if !self.controller.send(ControllerCommand::Interrupt) {
+            queued.phase = QueuedMessagePhase::Waiting;
+            self.queued_interrupt_deadline = None;
+            self.state.interrupt_requested = false;
+            self.state.command_feedback = Some("Could not queue the interrupt request".into());
+        }
+    }
+
+    fn dispatch_queued_after_boundary(&mut self) {
+        let Some(queued) = self.queued_messages.front_mut() else {
+            return;
+        };
+        if !matches!(
+            queued.phase,
+            QueuedMessagePhase::Waiting
+                | QueuedMessagePhase::InterruptRequested
+                | QueuedMessagePhase::BoundaryPending
+        ) || self.state.active_turn.is_some()
+        {
+            return;
+        }
+        if queued.generation != self.state.generation
+            || self.state.selected_thread.as_ref() != Some(&queued.thread_id)
+            || !self.state.begin_queued_send(&queued.text)
+        {
+            queued.phase = QueuedMessagePhase::Unconfirmed;
+            self.state.command_feedback =
+                Some("Queued message requires review before it can be sent".into());
+            return;
+        }
+        queued.phase = QueuedMessagePhase::Dispatching;
+        if !self.controller.send(ControllerCommand::Send {
+            text: queued.text.clone(),
+            images: queued.images.clone(),
+            model: queued.model.clone(),
+            reasoning_effort: queued.reasoning_effort.clone(),
+            approval_policy: queued.approval_policy,
+            sandbox_policy: queued.sandbox_policy,
+            plan_mode: queued.plan_mode,
+        }) {
+            queued.phase = QueuedMessagePhase::Unconfirmed;
+            self.state.unconfirmed_work = true;
+            self.state.command_feedback =
+                Some("Queued message delivery is unconfirmed; reconnect before retrying".into());
+        }
+    }
+
     fn current_project_root(&self) -> PathBuf {
         self.shell_project
             .as_ref()
@@ -595,6 +785,8 @@ impl ChatApplication {
             resume_picker_open: false,
             resume_picker_loading: false,
             resume_picker_pending: None,
+            resume_request_started: None,
+            resume_first_view: std::cell::Cell::new(None),
             new_chat_pending: false,
             pending_new_chat_title: None,
             pending_navigation: None,
@@ -610,6 +802,10 @@ impl ChatApplication {
             theme: semantic_theme(),
             clipboard_write: None,
             clipboard_write_purpose: None,
+            queued_messages: std::collections::VecDeque::new(),
+            editing_queued_message: None,
+            next_queued_message_id: 0,
+            queued_interrupt_deadline: None,
         }
     }
 
@@ -642,12 +838,14 @@ impl ChatApplication {
 
     pub fn resume_thread(&mut self, id: nickel_codex::ThreadId) -> Result<(), String> {
         self.controller_poll_interval = CONTROLLER_POLL_MIN;
+        self.resume_request_started = Some(std::time::Instant::now());
         self.pending_initial_resume = Some(id.clone());
         self.pending_previous_writer = self.shell_writer_thread.replace(id.clone());
         if self.controller.send(ControllerCommand::SelectThread(id)) {
             Ok(())
         } else {
             self.pending_initial_resume = None;
+            self.resume_request_started = None;
             self.shell_writer_thread = self.pending_previous_writer.take();
             Err("Codex controller stopped before thread resume".into())
         }
@@ -805,6 +1003,13 @@ impl ChatApplication {
             let Some((generation, event)) = self.controller.try_recv() else {
                 break;
             };
+            let turn_boundary = matches!(
+                &event,
+                ControllerEvent::Protocol(nickel_codex::CodexEvent {
+                    kind: nickel_codex::EventKind::TurnCompleted { turn_id, .. },
+                    ..
+                }) if self.state.active_turn.as_ref() == Some(turn_id)
+            );
             let mut recovery_attachments = None;
             if generation == self.state.generation {
                 if let ControllerEvent::ThreadSelected(thread) = &event
@@ -876,7 +1081,45 @@ impl ChatApplication {
                             self.pending_previous_writer = None;
                         }
                     }
+                    ControllerEvent::InterruptAccepted => {
+                        self.queued_interrupt_deadline = None;
+                        if let Some(queued) = self.queued_messages.front_mut()
+                            && queued.phase == QueuedMessagePhase::InterruptRequested
+                        {
+                            queued.phase = QueuedMessagePhase::BoundaryPending;
+                        }
+                    }
+                    ControllerEvent::InterruptFailed(_) => {
+                        self.queued_interrupt_deadline = None;
+                        if let Some(queued) = self.queued_messages.front_mut()
+                            && matches!(
+                                queued.phase,
+                                QueuedMessagePhase::InterruptRequested
+                                    | QueuedMessagePhase::BoundaryPending
+                            )
+                        {
+                            queued.phase = QueuedMessagePhase::Waiting;
+                        }
+                    }
+                    ControllerEvent::TurnAccepted => {
+                        if self
+                            .queued_messages
+                            .front()
+                            .is_some_and(|queued| queued.phase == QueuedMessagePhase::Dispatching)
+                        {
+                            self.queued_messages.pop_front();
+                        }
+                    }
+                    ControllerEvent::TurnStartFailed(_) => {
+                        if let Some(queued) = self.queued_messages.front_mut()
+                            && queued.phase == QueuedMessagePhase::Dispatching
+                        {
+                            queued.phase = QueuedMessagePhase::Unconfirmed;
+                            self.state.unconfirmed_work = true;
+                        }
+                    }
                     ControllerEvent::OperationFailed(_) => {
+                        self.resume_request_started = None;
                         if self.recovery_thread.take().is_some() {
                             self.state.recovery_failed = true;
                             self.state.report_diagnostic("The selected conversation could not be reloaded. Reconnect to retry; no prompt or approval was replayed.");
@@ -934,12 +1177,53 @@ impl ChatApplication {
                     }
                 }
             }
+            let resume_hydration =
+                matches!(&event, ControllerEvent::ThreadSelected(_)).then(std::time::Instant::now);
             changed |= self.state.apply(generation, event);
+            if let Some(started) = resume_hydration {
+                if crate::controller::codex_resume_timing_enabled() {
+                    eprintln!(
+                        "nickel: Codex resumed transcript hydration projection completed in {} ms ({} visible items)",
+                        started.elapsed().as_millis(),
+                        self.state.items.len()
+                    );
+                    self.resume_first_view.set(Some((
+                        self.resume_request_started.take().unwrap_or(started),
+                        self.state.items.len(),
+                    )));
+                } else {
+                    self.resume_request_started = None;
+                }
+            }
+            if turn_boundary {
+                self.queued_interrupt_deadline = None;
+                self.dispatch_queued_after_boundary();
+                changed = true;
+            }
             if let Some(attachments) = recovery_attachments {
                 self.state.attachments = attachments;
             }
             if self.project_menu_mode {
                 self.state.thread_error = None;
+            }
+        }
+        if self
+            .queued_interrupt_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            self.queued_interrupt_deadline = None;
+            if let Some(queued) = self.queued_messages.front_mut()
+                && matches!(
+                    queued.phase,
+                    QueuedMessagePhase::InterruptRequested | QueuedMessagePhase::BoundaryPending
+                )
+            {
+                queued.phase = QueuedMessagePhase::InterruptTimedOut;
+                self.state.interrupt_requested = false;
+                self.state.command_feedback = Some(
+                    "Interrupt outcome is still unknown; the queued message was not sent".into(),
+                );
+                changed = true;
             }
         }
         self.controller_poll_interval = if changed {
@@ -953,6 +1237,9 @@ impl ChatApplication {
     }
 
     fn reconnect_controller(&mut self) {
+        self.resume_request_started = None;
+        self.resume_first_view.set(None);
+        self.queued_interrupt_deadline = None;
         self.new_chat_pending = false;
         self.pending_new_chat_title = None;
         if let Some(pending) = self.pending_initial_resume.take() {
@@ -964,6 +1251,9 @@ impl ChatApplication {
         self.recovery_project_configuration_pending = self.shell_project.is_some();
         self.state.recovery_pending = true;
         self.state.recovery_failed = false;
+        for queued in &mut self.queued_messages {
+            queued.phase = QueuedMessagePhase::Unconfirmed;
+        }
         self.state.generation = self.state.generation.saturating_add(1);
         self.state.status = ConnectionStatus::Loading;
         self.state.backend_source = None;
@@ -1519,6 +1809,7 @@ impl Application for ChatApplication {
                         Some("Choose + beside a project for a new conversation".into());
                     return;
                 }
+                self.mark_queued_messages_for_review("changing conversation");
                 if let Some(reason) = self.state.replacement_block_reason() {
                     self.state.report_diagnostic(reason);
                     return;
@@ -1570,6 +1861,7 @@ impl Application for ChatApplication {
                     });
                     return;
                 }
+                self.mark_queued_messages_for_review("changing conversation");
                 if let Some(reason) = self.state.replacement_block_reason() {
                     self.state.report_diagnostic(reason);
                     return;
@@ -1615,6 +1907,7 @@ impl Application for ChatApplication {
                 if self.resume_picker_pending.is_some() {
                     return;
                 }
+                self.mark_queued_messages_for_review("changing conversation");
                 if !self.shell_host {
                     if let Some(reason) = self.state.replacement_block_reason() {
                         self.state.report_diagnostic(reason);
@@ -1637,7 +1930,9 @@ impl Application for ChatApplication {
                     return;
                 }
                 self.resume_picker_pending = Some(id.clone());
+                self.resume_request_started = Some(std::time::Instant::now());
                 if !self.controller.send(ControllerCommand::SelectThread(id)) {
+                    self.resume_request_started = None;
                     self.resume_picker_pending = None;
                     self.confirmed_thread_discard = None;
                     self.state.report_diagnostic(
@@ -1649,6 +1944,41 @@ impl Application for ChatApplication {
                 if self.state.active_turn.is_some() && !self.state.interrupt_requested {
                     self.state.interrupt_requested = true;
                     self.controller.send(ControllerCommand::Interrupt);
+                }
+            }
+            ChatMessage::QueueMessage => self.queue_current_draft(),
+            ChatMessage::InterruptAndSend => self.request_queued_interrupt(),
+            ChatMessage::CancelQueuedMessage(id) => {
+                if self.queued_messages.front().is_some_and(|queued| {
+                    queued.id == id && queued.phase != QueuedMessagePhase::Dispatching
+                }) {
+                    self.queued_messages.pop_front();
+                    self.queued_interrupt_deadline = None;
+                    self.state.command_feedback = Some("Queued message cancelled".into());
+                }
+            }
+            ChatMessage::EditQueuedMessage(id) => {
+                if !self.state.draft.is_empty() || !self.state.attachments.is_empty() {
+                    self.state.command_feedback =
+                        Some("Clear or queue the current draft before editing this message".into());
+                    return;
+                }
+                if self.queued_messages.front().is_some_and(|queued| {
+                    queued.id == id
+                        && matches!(
+                            queued.phase,
+                            QueuedMessagePhase::Waiting
+                                | QueuedMessagePhase::InterruptTimedOut
+                                | QueuedMessagePhase::Unconfirmed
+                        )
+                }) && let Some(queued) = self.queued_messages.pop_front()
+                {
+                    self.state.draft = queued.text.clone();
+                    self.editing_queued_message = Some(queued);
+                    self.state.command_feedback = Some(
+                        "Queued message returned to the composer; its attachments remain preserved"
+                            .into(),
+                    );
                 }
             }
             ChatMessage::RespondApproval(request_id, approval_type, choice) => {
@@ -1954,6 +2284,15 @@ impl Application for ChatApplication {
                 self.update(ChatMessage::SelectCommand(selected.command.to_owned()));
                 true
             }
+            Shortcut::Submit
+                if self.state.active_turn.is_some()
+                    && self.queued_messages.len() < QUEUED_MESSAGE_CAPACITY
+                    && (!self.state.draft.trim().is_empty()
+                        || !self.state.attachments.is_empty()) =>
+            {
+                self.update(ChatMessage::QueueMessage);
+                true
+            }
             Shortcut::Submit if self.state.can_send() => {
                 self.update(ChatMessage::Send);
                 true
@@ -1996,6 +2335,15 @@ impl Application for ChatApplication {
     }
 
     fn view(&self, context: nickel_ui::ViewContext) -> impl View<Self::Message> {
+        if crate::controller::codex_resume_timing_enabled()
+            && let Some((started, visible_items)) = self.resume_first_view.take()
+        {
+            eprintln!(
+                "nickel: Codex first resumed view built in {} ms ({} visible items)",
+                started.elapsed().as_millis(),
+                visible_items
+            );
+        }
         let project_root = self
             .shell_project
             .as_ref()
@@ -2052,6 +2400,8 @@ impl Application for ChatApplication {
                         .shell_project
                         .as_ref()
                         .and_then(|(_, id)| id.as_deref()),
+                    queued_messages: Some(&self.queued_messages),
+                    editing_queued_message: self.editing_queued_message.is_some(),
                 },
                 self.theme,
                 context.viewport.size.width,
@@ -3552,7 +3902,10 @@ fn configured_chat_view(
         diagnostic_copy_result,
         project_root,
         project_id,
+        queued_messages,
+        editing_queued_message,
     } = overlays;
+    let queued_count = queued_messages.map_or(0, std::collections::VecDeque::len);
     let narrow = viewport_width < 720.0;
     let settings_stacked = viewport_width < 900.0;
     let available_slash_commands = available_slash_commands(&state.draft);
@@ -3825,6 +4178,51 @@ fn configured_chat_view(
                     {state.command_feedback.as_ref().map(|feedback| ui! {
                         <Text color={theme.text.secondary} wrap={true}>{feedback}</Text>
                     })}
+                    {queued_messages.into_iter().flat_map(|messages| messages.iter()).enumerate().map(|(index, queued)| {
+                        let phase = match queued.phase {
+                            QueuedMessagePhase::Waiting => "Queued",
+                            QueuedMessagePhase::InterruptRequested => "Requesting interrupt…",
+                            QueuedMessagePhase::BoundaryPending => "Waiting for turn boundary…",
+                            QueuedMessagePhase::InterruptTimedOut => {
+                                "Interrupt unconfirmed — not sent"
+                            }
+                            QueuedMessagePhase::Dispatching => "Sending…",
+                            QueuedMessagePhase::Unconfirmed => "Delivery unconfirmed — review required",
+                        };
+                        let target = if state.selected_thread.as_ref() == Some(&queued.thread_id) {
+                            "Current conversation"
+                        } else {
+                            "Previous conversation — review before retry"
+                        };
+                        ui! {
+                            <Row fill_width gap={8.0}
+                                padding={Insets::all(8.0)} background={theme.surfaces.raised}
+                                border={Border::new(theme.borders.ordinary, 1.0)} radius={8.0}>
+                                <Column grow={1.0} min_width={0.0} gap={3.0}>
+                                    <Text color={theme.text.primary} wrap={true}>{queued.text.clone()}</Text>
+                                    <Text color={theme.text.secondary} scale={0.85}>{format!("{} of {} · {target} · {phase}", index + 1, queued_count)}</Text>
+                                </Column>
+                                {[()].into_iter().filter(|_| index == 0 && matches!(queued.phase, QueuedMessagePhase::Waiting | QueuedMessagePhase::InterruptTimedOut) && state.active_turn.is_some()).map(|_| ui! {
+                                    <Button on_press={ChatMessage::InterruptAndSend}
+                                        background={theme.accent.ordinary} color={theme.accent.on_accent}>
+                                        {"Interrupt and send"}
+                                    </Button>
+                                })}
+                                {[()].into_iter().filter(|_| index == 0 && queued.phase != QueuedMessagePhase::Dispatching).map(|_| ui! {
+                                    <Button on_press={ChatMessage::CancelQueuedMessage(queued.id)}
+                                        background={theme.surfaces.hover} color={theme.text.primary}>
+                                        {"Cancel"}
+                                    </Button>
+                                })}
+                                {[()].into_iter().filter(|_| index == 0 && matches!(queued.phase, QueuedMessagePhase::Waiting | QueuedMessagePhase::InterruptTimedOut | QueuedMessagePhase::Unconfirmed)).map(|_| ui! {
+                                    <Button on_press={ChatMessage::EditQueuedMessage(queued.id)}
+                                        background={theme.surfaces.hover} color={theme.text.primary}>
+                                        {"Edit"}
+                                    </Button>
+                                })}
+                            </Row>
+                        }
+                    })}
                     <Row id={id!(composer_status)} fill_width shrink={0.0} gap={8.0} align_items={Align::End}>
                         <Container id={id!(composer_viewport)} accessibility_label={"Message composer"}
                             semantic_role={SemanticRole::Group}
@@ -3838,8 +4236,21 @@ fn configured_chat_view(
                         </Container>
                         {if state.interrupt_requested {
                             ui! { <Text color={theme.text.secondary}>{"Interrupting…"}</Text> }
+                        } else if editing_queued_message {
+                            ui! { <Button on_press={ChatMessage::QueueMessage}
+                                background={theme.accent.ordinary} color={theme.accent.on_accent}
+                                enabled={!state.draft.trim().is_empty() || !state.attachments.is_empty()}>{"Save queued message"}</Button> }
                         } else if state.active_turn.is_some() {
-                            ui! { <Button on_press={ChatMessage::Interrupt} background={theme.surfaces.hover} color={theme.text.danger}>{"Interrupt"}</Button> }
+                            ui! {
+                                <Row gap={8.0} align_items={Align::End}>
+                                    <Button on_press={ChatMessage::QueueMessage}
+                                        background={theme.accent.ordinary} color={theme.accent.on_accent}
+                                        enabled={(!state.draft.trim().is_empty() || !state.attachments.is_empty()) && queued_count < QUEUED_MESSAGE_CAPACITY}>
+                                        {"Queue"}
+                                    </Button>
+                                    <Button on_press={ChatMessage::Interrupt} background={theme.surfaces.hover} color={theme.text.danger}>{"Interrupt"}</Button>
+                                </Row>
+                            }
                         } else if state.account.authenticated {
                             ui! { <Button id={id!(send_button)} on_press={ChatMessage::Send}
                                 background={theme.accent.ordinary} color={theme.accent.on_accent}
@@ -6367,5 +6778,150 @@ mod tests {
         assert!(app.settings_error.is_some());
         assert!(app.settings.hosts.is_empty());
         assert_eq!(std::fs::read_to_string(path).unwrap(), before);
+    }
+
+    fn active_turn_app() -> ChatApplication {
+        let backend = ReplayBackend::from_json(r#"{"name":"queue","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.controller = ChatController::fixture_idle(app.state.generation);
+        app.state.status = ConnectionStatus::Ready;
+        app.state.account.authenticated = true;
+        app.state.selected_thread = Some(ThreadId("thread".into()));
+        app.state.apply(
+            app.state.generation,
+            ControllerEvent::Protocol(nickel_codex::CodexEvent {
+                sequence: 1,
+                kind: nickel_codex::EventKind::TurnStarted {
+                    thread_id: ThreadId("thread".into()),
+                    turn_id: nickel_codex::TurnId("turn".into()),
+                },
+            }),
+        );
+        app
+    }
+
+    #[test]
+    fn queued_message_is_bounded_and_rejection_preserves_the_draft() {
+        let mut app = active_turn_app();
+        for index in 0..QUEUED_MESSAGE_CAPACITY {
+            app.state.draft = format!("queued {index}");
+            app.update(ChatMessage::QueueMessage);
+        }
+        assert_eq!(app.queued_messages.len(), QUEUED_MESSAGE_CAPACITY);
+        app.state.draft = "keep this draft".into();
+        app.update(ChatMessage::QueueMessage);
+        assert_eq!(app.state.draft, "keep this draft");
+        assert_eq!(app.queued_messages.len(), QUEUED_MESSAGE_CAPACITY);
+    }
+
+    #[test]
+    fn queued_message_dispatches_once_only_after_matching_boundary() {
+        let mut app = active_turn_app();
+        let (controller, commands) = ChatController::fixture_with_commands(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "follow up".into();
+        app.update(ChatMessage::QueueMessage);
+        assert!(
+            commands.try_recv().is_err(),
+            "queueing must not start a turn"
+        );
+
+        app.update(ChatMessage::InterruptAndSend);
+        assert!(app.controller.fixture_interrupt_requested());
+        app.state.apply(
+            app.state.generation,
+            ControllerEvent::Protocol(nickel_codex::CodexEvent {
+                sequence: 2,
+                kind: nickel_codex::EventKind::TurnCompleted {
+                    thread_id: ThreadId("thread".into()),
+                    turn_id: nickel_codex::TurnId("turn".into()),
+                    status: "interrupted".into(),
+                },
+            }),
+        );
+        app.dispatch_queued_after_boundary();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ControllerCommand::Send { ref text, .. }) if text == "follow up"
+        ));
+        app.dispatch_queued_after_boundary();
+        assert!(
+            commands.try_recv().is_err(),
+            "a boundary cannot double-send"
+        );
+    }
+
+    #[test]
+    fn timed_out_interrupt_never_sends_the_queued_message() {
+        let mut app = active_turn_app();
+        let (controller, commands) = ChatController::fixture_with_commands(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "do not send without a boundary".into();
+        app.update(ChatMessage::QueueMessage);
+        app.update(ChatMessage::InterruptAndSend);
+        app.queued_interrupt_deadline = Some(std::time::Instant::now());
+
+        assert!(app.poll_controller());
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::InterruptTimedOut)
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn conversation_change_preserves_queue_for_explicit_review() {
+        let mut app = active_turn_app();
+        app.state.draft = "keep this for the old conversation".into();
+        app.update(ChatMessage::QueueMessage);
+
+        app.mark_queued_messages_for_review("changing conversation");
+
+        let queued = app.queued_messages.front().unwrap();
+        assert_eq!(queued.phase, QueuedMessagePhase::Unconfirmed);
+        assert_eq!(queued.thread_id, ThreadId("thread".into()));
+        assert_eq!(queued.text, "keep this for the old conversation");
+    }
+
+    #[test]
+    fn stale_generation_never_dispatches_a_queued_message() {
+        let mut app = active_turn_app();
+        let (controller, commands) = ChatController::fixture_with_commands(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "generation-bound".into();
+        app.update(ChatMessage::QueueMessage);
+        app.state.active_turn = None;
+        app.state.generation = app.state.generation.saturating_add(1);
+
+        app.dispatch_queued_after_boundary();
+
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::Unconfirmed)
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn repeated_interrupt_and_send_emits_only_one_interrupt() {
+        let mut app = active_turn_app();
+        let (controller, _commands) = ChatController::fixture_with_commands(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "one interrupt".into();
+        app.update(ChatMessage::QueueMessage);
+
+        app.update(ChatMessage::InterruptAndSend);
+        let first_deadline = app.queued_interrupt_deadline;
+        app.update(ChatMessage::InterruptAndSend);
+
+        assert!(app.controller.fixture_interrupt_requested());
+        assert_eq!(app.queued_interrupt_deadline, first_deadline);
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::InterruptRequested)
+        );
     }
 }

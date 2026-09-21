@@ -192,6 +192,7 @@ fn task_switcher_overlay_key_reuses_only_unchanged_composition() {
         selected: 0,
         output_size: (1920, 1080),
         preview_generation: 3,
+        theme_colors: [1, 2, 3, 4, 5, 6],
     };
     assert_eq!(key, key.clone());
     assert_ne!(

@@ -518,12 +518,16 @@ impl XwmHandler for NickelSession {
             client_side_decorated = window.is_decorated(),
             "diagnostic: X11 configure requested"
         );
-        if let Some(mapped) = self.x11_window(&window)
-            && self.is_maximized_window(&mapped)
-        {
-            self.apply_maximized_x11_geometry(&mapped, &window, false);
-            self.request_output_redraw();
-            return;
+        if let Some(mapped) = self.x11_window(&window) {
+            if self.is_fullscreen_window(&mapped) {
+                self.fullscreen_x11(&window);
+                return;
+            }
+            if self.is_maximized_window(&mapped) {
+                self.apply_maximized_x11_geometry(&mapped, &window, false);
+                self.request_output_redraw();
+                return;
+            }
         }
         let geometry = Rectangle::new(
             (x.unwrap_or(old.loc.x), y.unwrap_or(old.loc.y)).into(),

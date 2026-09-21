@@ -2156,6 +2156,13 @@ fn mapped_surface_origin(
     mapped_geometry_origin - client_window_geometry_offset
 }
 
+fn x11_fullscreen_restore_geometry(
+    mapped_location: Point<i32, Logical>,
+    client_geometry: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    Rectangle::new(mapped_location, client_geometry.size)
+}
+
 pub(crate) fn drag_icon_location(
     pointer: Point<f64, Logical>,
     output: Rectangle<i32, Logical>,
@@ -6108,15 +6115,37 @@ impl NickelSession {
             return;
         };
         self.internal_ui.remove(popup);
+        let mut copy_path = None;
         if let Some(app) = self
             .internal_ui
             .application_mut::<nickel_file::FileApp>(parent)
         {
             if let Some(action) = action.clone() {
-                app.apply_context_popup_action(action);
+                if action == nickel_file::FileMessage::ContextCopyPath {
+                    copy_path = app.context_copy_path_text();
+                } else {
+                    app.apply_context_popup_action(action);
+                }
             } else {
                 app.close_context_popup();
             }
+        }
+        if let Some(text) = copy_path {
+            let result = self
+                .publish_native_text_selection(text)
+                .map_err(str::to_owned);
+            if let Some(app) = self
+                .internal_ui
+                .application_mut::<nickel_file::FileApp>(parent)
+            {
+                app.complete_context_copy_path(result);
+            }
+        }
+        if self
+            .internal_ui
+            .application::<nickel_file::FileApp>(parent)
+            .is_some()
+        {
             self.internal_ui.step(
                 parent,
                 nickel_ui::HostBatch {
@@ -11208,6 +11237,19 @@ impl NickelSession {
         })
     }
 
+    fn sync_fullscreen_panel_suppression(&mut self) {
+        let outputs = self
+            .space
+            .elements()
+            .filter(|window| self.is_fullscreen_window(window))
+            .filter_map(|window| self.space.outputs_for_element(window).first().cloned())
+            .map(|output| output.name())
+            .collect();
+        if self.internal_ui.set_panel_suppressed_outputs(outputs) {
+            self.request_output_redraw();
+        }
+    }
+
     pub fn is_maximized_window(&self, window: &Window) -> bool {
         let has_restore = window.x11_surface().is_some_and(|surface| {
             self.x11_maximized_restore
@@ -12399,6 +12441,9 @@ impl NickelSession {
         if self.locked {
             return;
         }
+        if self.task_switcher.session().is_some() {
+            self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
+        }
         self.seat_focus_security_epoch = self.seat_focus_security_epoch.wrapping_add(1).max(1);
         self.cancel_window_interactions(nickel_core::window_operation::CancellationReason::Lock);
         self.cancel_remote_pointer();
@@ -13282,15 +13327,42 @@ impl NickelSession {
                 TaskSwitchEffect::ActivateWindow(id) => self.activate_window(id),
                 TaskSwitchEffect::ShowFlip { .. } => {}
                 TaskSwitchEffect::SelectPreview(_) => {
+                    self.preview_highlight = None;
                     let ids = bounded_preview_ids(
                         self.task_switcher.candidates().to_vec(),
                         self.task_switcher.selected_index(),
                     );
                     self.set_switcher_preview_interest(ids);
+                    let _ = self.event_loop_handle.insert_source(
+                        smithay::reexports::calloop::timer::Timer::from_duration(
+                            nickel_core::task_switcher::TASK_SWITCHER_PEEK_DWELL,
+                        ),
+                        |_, _, state| {
+                            if state.poll_task_switcher_peek(std::time::Instant::now()) {
+                                state.schedule_internal_ui_frame();
+                                state.request_output_redraw();
+                            }
+                            smithay::reexports::calloop::timer::TimeoutAction::Drop
+                        },
+                    );
                 }
-                TaskSwitchEffect::HideFlip { .. } => self.clear_switcher_preview_interest(),
+                TaskSwitchEffect::HideFlip { .. } => {
+                    self.preview_highlight = None;
+                    self.clear_switcher_preview_interest();
+                }
             }
         }
+    }
+
+    pub(crate) fn poll_task_switcher_peek(&mut self, now: std::time::Instant) -> bool {
+        let Some(window) = self.task_switcher.poll_peek(now) else {
+            return false;
+        };
+        if !self.registry_window_is_mapped(window) {
+            return false;
+        }
+        self.preview_highlight = Some(window);
+        true
     }
 
     pub fn minimize_window(&mut self, id: WindowId) {
@@ -13800,7 +13872,7 @@ impl NickelSession {
         let Some(window) = self.window_for_surface(surface.wl_surface()) else {
             return false;
         };
-        if !self.is_maximized_window(&window) {
+        if self.is_fullscreen_window(&window) || !self.is_maximized_window(&window) {
             return false;
         }
         let Some(output) = self.output_geometry_for_window(&window) else {
@@ -13925,6 +13997,7 @@ impl NickelSession {
         });
         window.override_z_index(45);
         self.map_buffered_window(window, (output.x, output.y), true);
+        self.sync_fullscreen_panel_suppression();
         self.send_tracked_xdg_configure(surface);
     }
 
@@ -13946,36 +14019,37 @@ impl NickelSession {
             .fullscreen_restore
             .remove(&surface.wl_surface().id())
             .expect("fullscreen restore checked before resize supersession");
-        let restore_is_current = window_id.is_some_and(|id| {
-            self.presentation_restore_is_current(
-                id,
-                nickel_core::geometry_authority::Presentation::Fullscreen,
-            )
-        });
         if let Some(id) = window_id {
             self.presentation_restore_revisions.remove(&(
                 id,
                 nickel_core::geometry_authority::Presentation::Fullscreen,
             ));
-            self.record_normal_presentation(id);
-            if restore_is_current {
-                self.record_desired_geometry(id, restore);
+            self.record_desired_geometry(id, restore);
+            let restored_presentation = if self
+                .maximized_restore
+                .contains_key(&surface.wl_surface().id())
+            {
+                nickel_core::geometry_authority::Presentation::Maximized
+            } else {
+                nickel_core::geometry_authority::Presentation::Normal
+            };
+            if let Some(authority) = self.geometry_authorities.get_mut(&id)
+                && authority.presentation.value != restored_presentation
+            {
+                authority.set_presentation(restored_presentation);
             }
         }
         surface.with_pending_state(|state| {
             state
                 .states
                 .unset(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen);
-            if restore_is_current {
-                state.size = Some(Size::from((restore.width, restore.height)));
-            }
+            state.size = Some(Size::from((restore.width, restore.height)));
         });
         if let Some(window) = self.window_for_surface(surface.wl_surface()) {
             window.override_z_index(30);
-            if restore_is_current {
-                self.map_buffered_window(window, (restore.x, restore.y), true);
-            }
+            self.map_buffered_window(window, (restore.x, restore.y), true);
         }
+        self.sync_fullscreen_panel_suppression();
         self.raise_panels();
         self.send_tracked_xdg_configure(surface);
     }
@@ -13999,9 +14073,14 @@ impl NickelSession {
         if let Some(id) = authority_id {
             self.supersede_interactive_resize_for_presentation(id);
         }
+        let restore_location = self
+            .space
+            .element_location(&window)
+            .unwrap_or_else(|| surface.geometry().loc);
+        let client_geometry = surface.geometry();
         self.x11_fullscreen_restore
             .entry(surface.window_id())
-            .or_insert_with(|| surface.geometry());
+            .or_insert_with(|| x11_fullscreen_restore_geometry(restore_location, client_geometry));
         let bounds = Geometry {
             x: geometry.loc.x,
             y: geometry.loc.y,
@@ -14028,6 +14107,7 @@ impl NickelSession {
         let _ = surface.configure(geometry);
         window.override_z_index(45);
         self.map_buffered_window(window, geometry.loc, true);
+        self.sync_fullscreen_panel_suppression();
         self.request_output_redraw();
         self.notify_protocol_snapshot();
     }
@@ -14048,33 +14128,33 @@ impl NickelSession {
             .remove(&surface.window_id())
             .expect("X11 fullscreen restore checked before resize supersession");
         let _ = surface.set_fullscreen(false);
-        let restore_is_current = window_id.is_some_and(|id| {
-            self.presentation_restore_is_current(
-                id,
-                nickel_core::geometry_authority::Presentation::Fullscreen,
-            )
-        });
         if let Some(id) = window_id {
             self.presentation_restore_revisions.remove(&(
                 id,
                 nickel_core::geometry_authority::Presentation::Fullscreen,
             ));
-            self.record_normal_presentation(id);
-            if restore_is_current {
-                self.record_desired_geometry(
-                    id,
-                    Geometry {
-                        x: restore.loc.x,
-                        y: restore.loc.y,
-                        width: restore.size.w,
-                        height: restore.size.h,
-                    },
-                );
+            let restore = Geometry {
+                x: restore.loc.x,
+                y: restore.loc.y,
+                width: restore.size.w,
+                height: restore.size.h,
+            };
+            self.admit_managed_x11_geometry(id, restore);
+            let restored_presentation = if self
+                .x11_maximized_restore
+                .contains_key(&surface.window_id())
+            {
+                nickel_core::geometry_authority::Presentation::Maximized
+            } else {
+                nickel_core::geometry_authority::Presentation::Normal
+            };
+            if let Some(authority) = self.geometry_authorities.get_mut(&id)
+                && authority.presentation.value != restored_presentation
+            {
+                authority.set_presentation(restored_presentation);
             }
         }
-        if restore_is_current {
-            let _ = surface.configure(restore);
-        }
+        let _ = surface.configure(restore);
         let window = {
             self.space
                 .elements()
@@ -14083,10 +14163,9 @@ impl NickelSession {
         };
         if let Some(window) = window {
             window.override_z_index(30);
-            if restore_is_current {
-                self.map_buffered_window(window, restore.loc, true);
-            }
+            self.map_buffered_window(window, restore.loc, true);
         }
+        self.sync_fullscreen_panel_suppression();
         self.raise_panels();
         self.request_output_redraw();
         self.notify_protocol_snapshot();
@@ -14102,6 +14181,7 @@ impl NickelSession {
             self.presentation_restore_revisions
                 .retain(|(window, _), _| *window != id);
         }
+        self.sync_fullscreen_panel_suppression();
     }
 
     pub(crate) fn forget_all_x11_geometry(&mut self) {
@@ -14109,6 +14189,7 @@ impl NickelSession {
         self.x11_maximized_restore.shrink_to_fit();
         self.x11_fullscreen_restore.clear();
         self.x11_fullscreen_restore.shrink_to_fit();
+        self.sync_fullscreen_panel_suppression();
         self.x11_geometry_settlements.clear();
         let ids = self
             .x11_issued_geometry_requests
@@ -14144,6 +14225,7 @@ impl NickelSession {
             self.presentation_restore_revisions
                 .retain(|(window, _), _| *window != id);
         }
+        self.sync_fullscreen_panel_suppression();
     }
 
     pub(crate) fn relayout_maximized_windows(&mut self) {
@@ -14152,7 +14234,7 @@ impl NickelSession {
             .elements()
             .filter_map(|window| {
                 window.toplevel()?;
-                self.is_maximized_window(window)
+                (!self.is_fullscreen_window(window) && self.is_maximized_window(window))
                     .then_some((window.clone(), window.toplevel()?.clone()))
             })
             .collect();
@@ -14186,7 +14268,7 @@ impl NickelSession {
             .elements()
             .filter_map(|window| {
                 let surface = window.x11_surface()?;
-                self.is_maximized_window(window)
+                (!self.is_fullscreen_window(window) && self.is_maximized_window(window))
                     .then_some((window.clone(), surface.clone()))
             })
             .collect::<Vec<_>>();
@@ -14202,6 +14284,9 @@ impl NickelSession {
         surface: &smithay::xwayland::X11Surface,
         preserve_restore: bool,
     ) {
+        if self.is_fullscreen_window(window) {
+            return;
+        }
         let Some(output) = self.output_geometry_for_window(window) else {
             return;
         };
@@ -14468,6 +14553,7 @@ impl NickelSession {
                     .map_element(window.clone(), (output.x, output.y), true);
             }
         }
+        self.sync_fullscreen_panel_suppression();
         self.raise_panels();
         self.request_output_redraw();
     }

@@ -341,6 +341,7 @@ pub struct ChatState {
     pub attachments: Vec<PendingAttachment>,
     next_attachment_id: u64,
     send_pending: bool,
+    preserve_draft_on_turn_accept: bool,
     pub interaction_answer: String,
     pub pending: Vec<PendingInteraction>,
     pending_thread_ids: HashMap<ServerRequestId, ThreadId>,
@@ -440,6 +441,7 @@ impl Default for ChatState {
             attachments: Vec::new(),
             next_attachment_id: 1,
             send_pending: false,
+            preserve_draft_on_turn_accept: false,
             interaction_answer: String::new(),
             pending: Vec::new(),
             pending_thread_ids: HashMap::new(),
@@ -725,6 +727,7 @@ impl ChatState {
         }
         let text = self.draft.clone();
         self.send_pending = true;
+        self.preserve_draft_on_turn_accept = false;
         self.local_sequence += 1;
         self.push_item(ChatItem {
             id: format!("local-user-{}", self.local_sequence),
@@ -738,6 +741,28 @@ impl ChatState {
             .map(PendingAttachment::turn_image)
             .collect();
         Some((text, images))
+    }
+
+    pub fn begin_queued_send(&mut self, text: &str) -> bool {
+        if self.status != ConnectionStatus::Ready
+            || !self.account.authenticated
+            || self.recovery_pending
+            || self.unconfirmed_work
+            || self.active_turn.is_some()
+            || self.send_pending
+        {
+            return false;
+        }
+        self.send_pending = true;
+        self.preserve_draft_on_turn_accept = true;
+        self.local_sequence = self.local_sequence.wrapping_add(1);
+        self.push_item(ChatItem {
+            id: format!("local-user-{}", self.local_sequence),
+            kind: ChatItemKind::User,
+            text: text.to_owned(),
+            complete: true,
+        });
+        true
     }
 
     pub fn attach_image(&mut self, bytes: &[u8]) -> Result<AttachmentId, AttachmentError> {
@@ -1053,10 +1078,23 @@ impl ChatState {
             ControllerEvent::NewChatFailed(message) => self.push_diagnostic(message),
             ControllerEvent::TurnAccepted => {
                 if self.send_pending {
-                    self.draft.clear();
-                    self.attachments.clear();
+                    if !self.preserve_draft_on_turn_accept {
+                        self.draft.clear();
+                        self.attachments.clear();
+                    }
                     self.send_pending = false;
+                    self.preserve_draft_on_turn_accept = false;
                 }
+            }
+            ControllerEvent::TurnStartFailed(message) => {
+                self.send_pending = false;
+                self.preserve_draft_on_turn_accept = false;
+                self.push_diagnostic(format!("Message could not be sent: {message}"));
+            }
+            ControllerEvent::InterruptAccepted => {}
+            ControllerEvent::InterruptFailed(message) => {
+                self.interrupt_requested = false;
+                self.push_diagnostic(format!("Interrupt failed: {message}"));
             }
             ControllerEvent::CompactionAccepted => {
                 self.command_feedback = Some("Compaction started".into());
@@ -1367,10 +1405,22 @@ impl ChatState {
         self.conversation_scroll = 0.0;
         self.conversation_pinned = true;
         self.new_content_while_unpinned = false;
+        // Resume responses can contain the entire server transcript. Project only the
+        // newest locally retainable suffix instead of constructing and then evicting
+        // every historical item on the UI thread. The authoritative server history is
+        // unchanged and remains available through a later resume.
+        let total_items = thread
+            .turns
+            .iter()
+            .map(|turn| turn.items.len())
+            .sum::<usize>();
+        let mut items_to_skip = total_items.saturating_sub(MAX_ITEMS);
         for turn in &thread.turns {
             self.clear_exploration();
             let mut turn_agent_id: Option<String> = None;
-            for item in &turn.items {
+            let skip = items_to_skip.min(turn.items.len());
+            items_to_skip -= skip;
+            for item in turn.items.iter().skip(skip) {
                 let kind = chat_item_kind(&item.item_type);
                 if kind == ChatItemKind::Command
                     && !item.command_actions.is_empty()

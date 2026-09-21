@@ -26,6 +26,7 @@ const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const OUTBOUND_BACKLOG: usize = 16;
 const MAX_OUTBOUND_BYTES: usize = 160 * 1024 * 1024;
 const MAX_HISTORY_ITEM_TEXT_BYTES: usize = 256 * 1024;
+const MAX_THREAD_PREVIEW_BYTES: usize = 512;
 const HISTORY_OMISSION_MARKER: &str =
     "\n\n[Further history detail omitted from this local view; server history is unchanged.]";
 
@@ -910,7 +911,14 @@ impl CodexClient {
         let received = rx.recv_timeout(self.inner.request_timeout);
         self.inner.pending.lock().unwrap().remove(&key);
         let result = received.map_err(|_| CodexError::Timeout(format!("{method} timed out")))?;
-        if std::env::var_os("NICKEL_CODEX_TIMING").is_some() {
+        let resume_timing = method == "thread/resume"
+            && std::env::var_os("NICKEL_CODEX_RESUME_TIMING").is_some_and(|value| {
+                matches!(
+                    value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        if std::env::var_os("NICKEL_CODEX_TIMING").is_some() || resume_timing {
             eprintln!(
                 "nickel-codex timing: method={method} elapsed_ms={:.3} success={}",
                 started.elapsed().as_secs_f64() * 1_000.0,
@@ -2218,7 +2226,7 @@ impl CodexBackend for CodexClient {
             .into_iter()
             .flatten()
         {
-            if let Some(thread) = parse_thread(value) {
+            if let Some(thread) = parse_thread_summary(value) {
                 runtime.insert(thread.id.clone(), parse_thread_runtime(value));
                 threads.push(thread);
             }
@@ -2466,6 +2474,83 @@ fn parse_thread(value: &Value) -> Option<Thread> {
             .and_then(Value::as_str)
             .map(Into::into),
     })
+}
+
+fn parse_thread_summary(value: &Value) -> Option<Thread> {
+    let mut thread = parse_thread_metadata(value)?;
+    let preview = value
+        .get("turns")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .take(16)
+        .flat_map(|turn| {
+            turn.get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .rev()
+                .take(32)
+        })
+        .find_map(|item| {
+            let item_type = item.get("type").and_then(Value::as_str)?;
+            matches!(item_type, "userMessage" | "agentMessage" | "plan")
+                .then(|| bounded_thread_preview(history_item_text(item_type, item)))
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| ThreadHistoryItem {
+                    id: item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("list-preview")
+                        .into(),
+                    item_type: item_type.into(),
+                    text,
+                    ..ThreadHistoryItem::default()
+                })
+        });
+    if let Some(preview) = preview {
+        thread.turns.push(ThreadHistoryTurn {
+            id: TurnId("list-preview".into()),
+            status: "preview".into(),
+            items: vec![preview],
+        });
+    }
+    Some(thread)
+}
+
+fn parse_thread_metadata(value: &Value) -> Option<Thread> {
+    Some(Thread {
+        id: ThreadId(value.get("id")?.as_str()?.into()),
+        title: value
+            .get("name")
+            .or_else(|| value.get("title"))
+            .and_then(Value::as_str)
+            .map(Into::into),
+        cwd: value.get("cwd").and_then(Value::as_str).map(Into::into),
+        last_used_at: value
+            .get("recencyAt")
+            .and_then(Value::as_i64)
+            .or_else(|| value.get("updatedAt").and_then(Value::as_i64)),
+        turns: Vec::new(),
+        model: value.get("model").and_then(Value::as_str).map(Into::into),
+        reasoning_effort: value
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .map(Into::into),
+    })
+}
+
+fn bounded_thread_preview(mut text: String) -> String {
+    if text.len() > MAX_THREAD_PREVIEW_BYTES {
+        let mut end = MAX_THREAD_PREVIEW_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text.shrink_to_fit();
+    text
 }
 
 fn parse_history_turn(value: &Value) -> Option<ThreadHistoryTurn> {
@@ -2771,6 +2856,36 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn thread_list_projection_keeps_only_one_bounded_preview() {
+        let turns = (0..40)
+            .map(|turn| {
+                json!({
+                    "id": format!("turn-{turn}"),
+                    "status": "completed",
+                    "items": (0..40).map(|item| json!({
+                        "id": format!("item-{turn}-{item}"),
+                        "type": "userMessage",
+                        "content": [{"type":"text", "text":"界".repeat(800)}]
+                    })).collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let summary = parse_thread_summary(&json!({
+            "id":"thread",
+            "name":"Large conversation",
+            "cwd":"/projects/nickel",
+            "turns":turns
+        }))
+        .unwrap();
+
+        assert_eq!(summary.turns.len(), 1);
+        assert_eq!(summary.turns[0].items.len(), 1);
+        assert!(summary.turns[0].items[0].text.len() <= MAX_THREAD_PREVIEW_BYTES);
+        assert!(std::str::from_utf8(summary.turns[0].items[0].text.as_bytes()).is_ok());
+        assert_eq!(summary.turns[0].items[0].command_actions, Vec::new());
+    }
 
     #[test]
     fn approval_decision_set_distinguishes_missing_empty_and_malformed() {

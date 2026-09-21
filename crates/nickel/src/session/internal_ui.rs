@@ -1551,6 +1551,9 @@ pub struct InternalUiRuntime {
     surfaces: InternalSurfaceSet,
     surfaces_retired: bool,
     presentation: BTreeMap<InternalSurfaceId, PresentedSurface>,
+    /// Outputs whose ordinary panel is occluded by a fullscreen client.
+    /// Trusted controls and explicit overlays remain visible and interactive.
+    panel_suppressed_outputs: std::collections::HashSet<String>,
     focused: Option<InternalSurfaceId>,
     hovered: Option<InternalSurfaceId>,
     /// Generic hosted touch capture. The empty source is the explicitly aggregate semantic path;
@@ -1582,6 +1585,7 @@ impl Default for InternalUiRuntime {
             surfaces: InternalSurfaceSet::default(),
             surfaces_retired: false,
             presentation: BTreeMap::new(),
+            panel_suppressed_outputs: std::collections::HashSet::new(),
             focused: None,
             hovered: None,
             touches: BTreeMap::new(),
@@ -1598,6 +1602,43 @@ impl Default for InternalUiRuntime {
 }
 
 impl InternalUiRuntime {
+    fn panel_is_suppressed(&self, surface: &PresentedSurface) -> bool {
+        surface.placement.role == InternalSurfaceRole::Panel
+            && surface
+                .placement
+                .output
+                .as_deref()
+                .is_some_and(|output| self.panel_suppressed_outputs.contains(output))
+    }
+
+    fn presented_surface_is_visible(&self, surface: &PresentedSurface) -> bool {
+        surface.visible && !self.panel_is_suppressed(surface)
+    }
+
+    pub(crate) fn set_panel_suppressed_outputs(
+        &mut self,
+        outputs: std::collections::HashSet<String>,
+    ) -> bool {
+        if self.panel_suppressed_outputs == outputs {
+            return false;
+        }
+        self.panel_suppressed_outputs = outputs;
+        let suppressed = self
+            .presentation
+            .iter()
+            .filter_map(|(id, surface)| self.panel_is_suppressed(surface).then_some(*id))
+            .collect::<std::collections::HashSet<_>>();
+        if self.focused.is_some_and(|id| suppressed.contains(&id)) {
+            self.clear_focus();
+        }
+        if self.hovered.is_some_and(|id| suppressed.contains(&id)) {
+            self.hovered = None;
+        }
+        self.touches
+            .retain(|_, (target, _)| !suppressed.contains(target));
+        true
+    }
+
     /// Rasterize one visible application into a bounded preview without
     /// allocating a full-size compatibility framebuffer. Preview consumers
     /// share the same resolved display list as on-screen presentation.
@@ -2537,7 +2578,7 @@ impl InternalUiRuntime {
     pub fn has_damage(&self) -> bool {
         self.presentation
             .values()
-            .any(|surface| surface.visible && surface.dirty)
+            .any(|surface| self.presented_surface_is_visible(surface) && surface.dirty)
     }
 
     pub fn focused(&self) -> Option<InternalSurfaceId> {
@@ -2597,7 +2638,7 @@ impl InternalUiRuntime {
             .iter()
             .filter_map(|(id, surface)| {
                 let (x, y, width, height) = surface.placement.geometry;
-                (surface.visible
+                (self.presented_surface_is_visible(surface)
                     && surface.placement.role != InternalSurfaceRole::PassiveOverlay
                     && !(client_present
                         && matches!(
@@ -2954,7 +2995,7 @@ impl InternalUiRuntime {
         output: &'a str,
     ) -> impl Iterator<Item = InternalSurfaceId> + 'a {
         self.presentation.iter().filter_map(move |(id, surface)| {
-            (surface.visible
+            (self.presented_surface_is_visible(surface)
                 && (surface.placement.role == InternalSurfaceRole::Application
                     || surface
                         .placement
@@ -3864,6 +3905,64 @@ mod tests {
         // through the desktop and reach the frame dispatcher.
         assert!(runtime.surface_at((50.0, 80.0), true).is_none());
         assert_eq!(runtime.surface_at((50.0, 16.0), true).unwrap().0, panel);
+    }
+
+    #[test]
+    fn fullscreen_output_suppresses_only_its_panel_rendering_and_input() {
+        let mut runtime = InternalUiRuntime::default();
+        let left_panel = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Panel,
+                geometry: (0, 0, 100, 32),
+                output: Some("left".into()),
+            },
+            1.0,
+        );
+        let right_panel = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Panel,
+                geometry: (100, 0, 100, 32),
+                output: Some("right".into()),
+            },
+            1.0,
+        );
+        let overlay = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Overlay,
+                geometry: (0, 0, 100, 32),
+                output: Some("left".into()),
+            },
+            1.0,
+        );
+
+        runtime.set_panel_suppressed_outputs(std::collections::HashSet::from(["left".into()]));
+
+        assert_eq!(
+            runtime.ordered_ids_for_layer("left", Some(InternalSurfaceLayer::Overlay)),
+            vec![overlay]
+        );
+        assert_eq!(
+            runtime.ordered_ids_for_layer("right", Some(InternalSurfaceLayer::Overlay)),
+            vec![right_panel]
+        );
+        assert_eq!(runtime.surface_at((10.0, 10.0), true).unwrap().0, overlay);
+        assert_eq!(
+            runtime.surface_at((110.0, 10.0), true).unwrap().0,
+            right_panel
+        );
+
+        runtime.set_visible(overlay, false);
+        assert!(runtime.surface_at((10.0, 10.0), true).is_none());
+        assert!(runtime.is_visible(left_panel));
+
+        runtime.set_panel_suppressed_outputs(std::collections::HashSet::new());
+        assert_eq!(
+            runtime.surface_at((10.0, 10.0), true).unwrap().0,
+            left_panel
+        );
     }
 
     #[test]

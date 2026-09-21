@@ -16,7 +16,7 @@ use super::{
     retain_live_idle_inhibitors, retain_superseded_xdg_settlement, retire_displaced_window,
     retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
     shell_registration_is_active, shell_registration_rejection, shell_registration_role_changed,
-    shell_role_accepts_ordinary_focus, test_control_may_invoke,
+    shell_role_accepts_ordinary_focus, test_control_may_invoke, x11_fullscreen_restore_geometry,
     xdg_configure_extends_existing_request, xdg_configure_matches_existing_desired,
     xdg_settlement_requires_resize_cleanup,
 };
@@ -29,6 +29,16 @@ fn mapped_client_surface_origin_accounts_for_nonzero_window_geometry() {
     assert_eq!(
         mapped_surface_origin(mapped, client_geometry),
         (113, 40).into()
+    );
+}
+
+#[test]
+fn x11_fullscreen_restore_uses_global_mapping_and_client_size() {
+    let client_geometry = smithay::utils::Rectangle::new((0, 0).into(), (484, 316).into());
+
+    assert_eq!(
+        x11_fullscreen_restore_geometry((390, 230).into(), client_geometry),
+        smithay::utils::Rectangle::new((390, 230).into(), (484, 316).into())
     );
 }
 
@@ -3784,6 +3794,37 @@ fn semantic_window_click_raises_only_the_exposed_internal_target() {
         closed_order.as_slice(),
         [super::OrdinarySceneWindow::Internal(id)] if *id == second
     ));
+}
+
+#[test]
+fn lock_retires_pending_and_visible_task_switch_peek() {
+    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+    let (_event_loop, mut session) = internal_shell_test_session();
+    for x in [200, 500] {
+        let surface = session.internal_ui.insert(
+            InternalHitTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (x, 150, 250, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        session.register_internal_application(surface).unwrap();
+    }
+
+    session.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchNext);
+    assert!(session.task_switcher.session().is_some());
+    assert!(session.task_switcher.peek_deadline().is_some());
+    assert!(session.poll_task_switcher_peek(Instant::now() + Duration::from_secs(1)));
+    assert!(session.preview_highlight.is_some());
+
+    session.lock_session();
+
+    assert!(session.task_switcher.session().is_none());
+    assert!(session.task_switcher.peek_deadline().is_none());
+    assert!(session.task_switcher.peeked().is_none());
+    assert!(session.preview_highlight.is_none());
 }
 
 #[test]

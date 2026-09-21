@@ -781,20 +781,7 @@ impl IdentifyBadgeCache {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TaskSwitcherBufferKey {
-    candidates: Vec<crate::session::window_registry::WindowId>,
-    selected: usize,
-    output_size: (i32, i32),
-    // Source dirtiness alone must not resize and upload unchanged thumbnails.
-    preview_generation: u64,
-}
-
-struct TaskSwitcherBufferCache {
-    key: TaskSwitcherBufferKey,
-    buffer: MemoryRenderBuffer,
-    size: smithay::utils::Size<i32, Physical>,
-}
+type TaskSwitcherBufferCache = crate::session::task_switcher_render::BufferCache;
 
 impl UdevData {
     pub(crate) fn import_dmabuf(
@@ -2420,6 +2407,7 @@ impl NickelSession {
     }
 
     fn render_output_inner(&mut self, node: DrmNode, crtc: crtc::Handle, _wave: u64) {
+        self.poll_task_switcher_peek(Instant::now());
         self.flush_desktop_scenes_for_frame();
         let shell_bootstrapping = self.launcher_window.is_none();
         let mut identified_outputs = self.space.outputs().cloned().collect::<Vec<_>>();
@@ -2835,15 +2823,7 @@ impl NickelSession {
                 );
             }
             if !self.locked
-                && let Some(highlighted) = self.preview_highlight.and_then(|highlight| {
-                    self.space.elements().find(|window| {
-                        window
-                            .wl_surface()
-                            .and_then(|surface| self.surface_windows.get(&surface.id()))
-                            .copied()
-                            == Some(highlight)
-                    })
-                })
+                && let Some(highlight) = self.preview_highlight
                 && let Some(output_geometry) = self.space.output_geometry(&output)
             {
                 // Peek is a single front-to-back composition: shell overlays
@@ -2875,7 +2855,14 @@ impl NickelSession {
                             .map(|element| NativeElement::from(NativeCustomElement::from(element))),
                     );
                 }
-                if let Some(location) = self.space.element_location(highlighted) {
+                if let Some(highlighted) = self.space.elements().find(|window| {
+                    window
+                        .wl_surface()
+                        .and_then(|surface| self.surface_windows.get(&surface.id()))
+                        .copied()
+                        == Some(highlight)
+                }) && let Some(location) = self.space.element_location(highlighted)
+                {
                     let render_location =
                         location - highlighted.geometry().loc - output_geometry.loc;
                     peek_elements.extend(
@@ -2885,6 +2872,17 @@ impl NickelSession {
                                 render_location.to_physical_precise_round(Scale::from(1.0)),
                                 Scale::from(1.0),
                                 1.0,
+                            )
+                            .into_iter()
+                            .map(|element| NativeElement::from(NativeCustomElement::from(element))),
+                    );
+                } else if let Some(surface) = self.internal_surface_for_window(highlight) {
+                    peek_elements.extend(
+                        self.internal_ui
+                            .render_application_elements(
+                                &mut renderer,
+                                output_geometry.loc,
+                                surface,
                             )
                             .into_iter()
                             .map(|element| NativeElement::from(NativeCustomElement::from(element))),
@@ -3006,12 +3004,7 @@ impl NickelSession {
                 .then_some(mode_size)
                 .flatten()
                 .and_then(|mode_size| {
-                    let key = TaskSwitcherBufferKey {
-                        candidates: self.task_switcher.candidates().to_vec(),
-                        selected: self.task_switcher.selected_index(),
-                        output_size: (mode_size.w, mode_size.h),
-                        preview_generation: self.preview_generation(),
-                    };
+                    let key = crate::session::task_switcher_render::key(self, mode_size);
                     if key.candidates.len() < 2 {
                         native.task_switcher_cache = None;
                         return None;
@@ -3738,6 +3731,7 @@ fn task_switcher_buffer(
     state: &NickelSession,
     output_size: smithay::utils::Size<i32, Physical>,
 ) -> Option<(MemoryRenderBuffer, smithay::utils::Size<i32, Physical>)> {
+    let theme = task_switcher_theme(state);
     let candidates = state.task_switcher.candidates();
     let selected_index = state.task_switcher.selected_index();
     if candidates.len() < 2 {
@@ -3763,17 +3757,17 @@ fn task_switcher_buffer(
         let mut image =
             image::ImageBuffer::<image::Rgba<u8>, &mut [u8]>::from_raw(width, height, pixels)
                 .expect("memory render buffer has the requested RGBA dimensions");
-        image.pixels_mut().for_each(|pixel| {
-            *pixel = image::Rgba([17, 24, 39, 244]);
-        });
+        image
+            .pixels_mut()
+            .for_each(|pixel| *pixel = rgba(theme.surfaces.sidebar, 244));
 
         for (slot, index) in range.enumerate() {
             let x = padding + slot as u32 * (card_width + gap);
             let selected = index == selected_index;
             let border = if selected {
-                image::Rgba([101, 184, 255, 255])
+                rgba(theme.accent.ordinary, 255)
             } else {
-                image::Rgba([66, 81, 108, 255])
+                rgba(theme.borders.ordinary, 255)
             };
             fill_rgba_rect(&mut image, x, padding, card_width, card_height, border);
             fill_rgba_rect(
@@ -3782,7 +3776,7 @@ fn task_switcher_buffer(
                 padding + 4,
                 card_width - 8,
                 card_height - 8,
-                image::Rgba([43, 56, 82, 255]),
+                rgba(theme.surfaces.card, 255),
             );
             let id = candidates[index];
             if let Some(frame) = state.preview_frames.get(&id)
@@ -3807,13 +3801,19 @@ fn task_switcher_buffer(
                 .windows
                 .title(id)
                 .filter(|title| !title.trim().is_empty())
+                .or_else(|| {
+                    state
+                        .windows
+                        .app_id(id)
+                        .filter(|application| !application.trim().is_empty())
+                })
                 .unwrap_or("Untitled window");
             if let Some(label) = crate::session::window_frame::render_task_switcher_label(
                 card_width - 16,
                 label_height,
                 title,
-                0x002b3852,
-                0x00e8edf4,
+                theme.surfaces.card,
+                theme.text.primary,
             ) && let Some(label) = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
                 card_width - 16,
                 label_height,
@@ -3829,6 +3829,27 @@ fn task_switcher_buffer(
         }
     });
     Some((buffer, size.into()))
+}
+
+fn task_switcher_theme(state: &NickelSession) -> nickel_ui::SemanticTheme {
+    state
+        .internal_shell
+        .as_ref()
+        .map(crate::internal_shell::InternalShellCoordinator::semantic_theme)
+        .unwrap_or_else(|| {
+            crate::window_preview::semantic_theme_from_palette(
+                nickel_core::theme::ThemePalette::from_appearance(Default::default()),
+            )
+        })
+}
+
+fn rgba(color: u32, alpha: u8) -> image::Rgba<u8> {
+    image::Rgba([
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        alpha,
+    ])
 }
 
 fn draw_memory_render_buffer(

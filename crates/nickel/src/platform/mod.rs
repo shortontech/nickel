@@ -768,6 +768,10 @@ pub enum ShellCommand {
         height: i32,
         windows: Vec<WindowId>,
     },
+    #[cfg(target_os = "windows")]
+    ShowTaskSwitcherPeek {
+        window: Option<WindowId>,
+    },
     #[cfg(target_os = "linux")]
     FocusControlCenter,
     #[cfg(target_os = "linux")]

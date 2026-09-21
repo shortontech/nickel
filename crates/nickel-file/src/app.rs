@@ -441,6 +441,24 @@ impl FileApp {
         self.update_message(action);
     }
 
+    /// Resolve the current context target for an embedding host that owns the
+    /// system clipboard. Embedded compositors must not call a platform
+    /// clipboard client synchronously from their own dispatch thread.
+    pub fn context_copy_path_text(&mut self) -> Option<String> {
+        self.close_context_popup();
+        self.context_target
+            .as_ref()
+            .map(|path| path.display().to_string())
+    }
+
+    /// Complete a clipboard publication performed by an embedding host.
+    pub fn complete_context_copy_path(&mut self, result: Result<(), String>) {
+        self.status = match result {
+            Ok(()) => "Copied path".into(),
+            Err(error) => format!("Could not copy path: {error}"),
+        };
+    }
+
     pub fn rename_in_progress(&self) -> bool {
         self.rename_editor.is_some()
     }

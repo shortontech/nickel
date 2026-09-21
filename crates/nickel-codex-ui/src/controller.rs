@@ -166,6 +166,9 @@ pub enum ControllerEvent {
     NewChatPrepared,
     NewChatFailed(String),
     TurnAccepted,
+    TurnStartFailed(String),
+    InterruptAccepted,
+    InterruptFailed(String),
     CompactionAccepted,
     CompactionFailed(String),
     ReviewAccepted,
@@ -397,6 +400,11 @@ impl ChatController {
         metrics
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture_interrupt_requested(&self) -> bool {
+        self.interrupt.load(Ordering::Acquire)
+    }
+
     pub fn send(&self, command: ControllerCommand) -> bool {
         if matches!(command, ControllerCommand::Shutdown) {
             self.shutdown.store(true, Ordering::Release);
@@ -554,7 +562,14 @@ fn run_worker(
         SnapshotScope::ProjectsOnly => project_snapshot(&*backend, provenance.clone()),
         SnapshotScope::NewProjectChat => new_project_chat_snapshot(&*backend, provenance.clone()),
     };
-    if !send(current_snapshot()) {
+    let mut thread_runtime_cache = HashMap::new();
+    let mut thread_runtime_cached_at = None;
+    let initial_snapshot = current_snapshot();
+    if let ControllerEvent::Ready { runtime, .. } = &initial_snapshot {
+        thread_runtime_cache.clone_from(runtime);
+        thread_runtime_cached_at = Some(Instant::now());
+    }
+    if !send(initial_snapshot) {
         return;
     }
     let mut selected_thread = None;
@@ -728,9 +743,16 @@ fn run_worker(
                     let _ = send(ControllerEvent::RemoteClients(clients));
                 })
                 .map_err(|error| error.to_string()),
-            ControllerCommand::LoadThreads => send(snapshot(&*backend, provenance.clone()))
-                .then_some(())
-                .ok_or_else(|| "UI disconnected".to_owned()),
+            ControllerCommand::LoadThreads => {
+                let event = snapshot(&*backend, provenance.clone());
+                if let ControllerEvent::Ready { runtime, .. } = &event {
+                    thread_runtime_cache.clone_from(runtime);
+                    thread_runtime_cached_at = Some(Instant::now());
+                }
+                send(event)
+                    .then_some(())
+                    .ok_or_else(|| "UI disconnected".to_owned())
+            }
             ControllerCommand::LoadMoreThreads { cursor, request } => {
                 // The opaque cursor is correlated with the view's current page; a stale reply
                 // cannot overwrite a newer refresh or project selection.
@@ -746,6 +768,8 @@ fn run_worker(
                         limit: Some(100),
                     }) {
                         Ok(page) => {
+                            thread_runtime_cache.extend(page.runtime.clone());
+                            thread_runtime_cached_at = Some(Instant::now());
                             let _ = send(ControllerEvent::ThreadPageLoaded {
                                 request,
                                 cursor,
@@ -798,10 +822,27 @@ fn run_worker(
                 Ok(())
             }
             ControllerCommand::SelectThread(id) => {
-                match verify_thread_is_resumable(&*backend, &id)
-                    .and_then(|()| backend.resume_thread(id))
-                {
+                let resume_started = Instant::now();
+                let cache_is_current = thread_runtime_cached_at
+                    .is_some_and(|cached| cached.elapsed() <= Duration::from_secs(30));
+                let resumable = if cache_is_current && thread_runtime_cache.contains_key(&id) {
+                    verify_cached_thread_is_resumable(&thread_runtime_cache, &id)
+                } else {
+                    list_threads(&*backend).and_then(|page| {
+                        thread_runtime_cache = page.runtime;
+                        thread_runtime_cached_at = Some(Instant::now());
+                        verify_cached_thread_is_resumable(&thread_runtime_cache, &id)
+                    })
+                };
+                match resumable.and_then(|()| backend.resume_thread(id)) {
                     Ok(thread) => {
+                        if codex_resume_timing_enabled() {
+                            eprintln!(
+                                "nickel: Codex resume RPC, JSON decode, and projection completed in {} ms ({} turns)",
+                                resume_started.elapsed().as_millis(),
+                                thread.turns.len()
+                            );
+                        }
                         selected_thread = Some(thread.id.clone());
                         let _ = send(ControllerEvent::ThreadSelected(thread));
                     }
@@ -868,7 +909,8 @@ fn run_worker(
                             let _ = send(ControllerEvent::ModelRejected { model, message });
                             Ok(())
                         } else {
-                            Err(message)
+                            let _ = send(ControllerEvent::TurnStartFailed(message));
+                            Ok(())
                         }
                     }
                 }
@@ -1030,10 +1072,22 @@ fn run_worker(
                 Ok(())
             }
             ControllerCommand::Interrupt => match (selected_thread.clone(), active_turn.clone()) {
-                (Some(thread), Some(turn)) => backend
-                    .interrupt_turn(thread, turn)
-                    .map_err(|error| error.to_string()),
-                _ => Err("there is no active turn to interrupt".into()),
+                (Some(thread), Some(turn)) => match backend.interrupt_turn(thread, turn) {
+                    Ok(()) => {
+                        let _ = send(ControllerEvent::InterruptAccepted);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = send(ControllerEvent::InterruptFailed(error.to_string()));
+                        Ok(())
+                    }
+                },
+                _ => {
+                    let _ = send(ControllerEvent::InterruptFailed(
+                        "there is no active turn to interrupt".into(),
+                    ));
+                    Ok(())
+                }
             },
             ControllerCommand::CommandApproval {
                 request_id,
@@ -1093,6 +1147,15 @@ fn run_worker(
     }
 }
 
+pub(crate) fn codex_resume_timing_enabled() -> bool {
+    std::env::var_os("NICKEL_CODEX_RESUME_TIMING").is_some_and(|value| {
+        matches!(
+            value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 fn error_indicates_model_rejection(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("model")
@@ -1136,12 +1199,20 @@ fn selection_failure_event(no_candidates: bool, reason: String) -> ControllerEve
     }
 }
 
+#[cfg(test)]
 fn verify_thread_is_resumable(
     backend: &dyn CodexBackend,
     id: &ThreadId,
 ) -> Result<(), nickel_codex::CodexError> {
     let page = list_threads(backend)?;
-    let status = page.runtime.get(id).map(|runtime| &runtime.status);
+    verify_cached_thread_is_resumable(&page.runtime, id)
+}
+
+fn verify_cached_thread_is_resumable(
+    runtime: &HashMap<ThreadId, nickel_codex::ThreadRuntime>,
+    id: &ThreadId,
+) -> Result<(), nickel_codex::CodexError> {
+    let status = runtime.get(id).map(|runtime| &runtime.status);
     if matches!(
         status,
         Some(nickel_codex::ThreadRuntimeStatus::Idle)

@@ -165,6 +165,7 @@ pub fn init_winit(
     let mut pending_output_capture = None;
     let mut presentation_sequence = 0_u64;
     let frame_icons = crate::session::window_frame::FrameIcons::load();
+    let mut task_switcher_cache: Option<crate::session::task_switcher_render::BufferCache> = None;
 
     // SAFETY: startup is single-threaded and no child process is spawned until
     // after this function returns.
@@ -213,6 +214,7 @@ pub fn init_winit(
                 WinitEvent::Focus(true) => {}
                 WinitEvent::Redraw => {
                     let trace_started = Instant::now();
+                    state.poll_task_switcher_peek(trace_started);
                     state.flush_desktop_scenes_for_frame();
                     match state.effective_cursor_image() {
                         smithay::input::pointer::CursorImageStatus::Hidden => {
@@ -386,17 +388,7 @@ pub fn init_winit(
                                 .map(WinitFrameElement::from),
                         );
                         if !state.locked
-                            && let Some(window) = state.preview_highlight.and_then(|highlight| {
-                                state.space.elements().find(|window| {
-                                    window
-                                        .wl_surface()
-                                        .and_then(|surface| {
-                                            state.surface_windows.get(&surface.id())
-                                        })
-                                        .copied()
-                                        == Some(highlight)
-                                })
-                            })
+                            && let Some(highlight) = state.preview_highlight
                         {
                             let shell_surfaces = state
                                 .shell_windows()
@@ -435,19 +427,44 @@ pub fn init_winit(
                                     .map(WinitFrameElement::from),
                                 );
                             }
-                            let location = state.space.element_location(window).unwrap_or_default();
-                            let render_location = location - window.geometry().loc;
-                            overlay_elements.extend(
+                            if let Some(window) = state.space.elements().find(|window| {
                                 window
-                                    .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                                        renderer,
-                                        render_location.to_physical_precise_round(1),
-                                        Scale::from(1.0),
-                                        1.0,
-                                    )
-                                    .into_iter()
-                                    .map(WinitFrameElement::from),
-                            );
+                                    .wl_surface()
+                                    .and_then(|surface| state.surface_windows.get(&surface.id()))
+                                    .copied()
+                                    == Some(highlight)
+                            }) {
+                                let location =
+                                    state.space.element_location(window).unwrap_or_default();
+                                let render_location = location - window.geometry().loc;
+                                overlay_elements.extend(
+                                    window
+                                        .render_elements::<
+                                            WaylandSurfaceRenderElement<GlesRenderer>,
+                                        >(
+                                            renderer,
+                                            render_location.to_physical_precise_round(1),
+                                            Scale::from(1.0),
+                                            1.0,
+                                        )
+                                        .into_iter()
+                                        .map(WinitFrameElement::from),
+                                );
+                            } else if let Some(surface) =
+                                state.internal_surface_for_window(highlight)
+                            {
+                                overlay_elements.extend(
+                                    state
+                                        .internal_ui
+                                        .render_application_elements(
+                                            renderer,
+                                            (0, 0).into(),
+                                            surface,
+                                        )
+                                        .into_iter()
+                                        .map(WinitFrameElement::from),
+                                );
+                            }
                             let dim_buffer =
                                 SolidColorBuffer::new(
                                     size.to_logical(1),
@@ -479,6 +496,51 @@ pub fn init_winit(
                                     Kind::Unspecified,
                                 )),
                             );
+                        }
+                        let owns_switcher = state
+                            .task_switcher_output_name()
+                            .is_some_and(|name| name == output.name());
+                        if !state.locked && owns_switcher {
+                            let key = crate::session::task_switcher_render::key(state, size);
+                            let stale = task_switcher_cache
+                                .as_ref()
+                                .is_none_or(|cached| cached.key != key);
+                            if stale {
+                                task_switcher_cache =
+                                    crate::session::task_switcher_render::buffer(state, size).map(
+                                        |(buffer, size)| {
+                                            crate::session::task_switcher_render::BufferCache {
+                                                key,
+                                                buffer,
+                                                size,
+                                            }
+                                        },
+                                    );
+                            }
+                            if let Some(cached) = task_switcher_cache.as_ref() {
+                                let location = (
+                                    (size.w - cached.size.w).max(0) / 2,
+                                    (size.h - cached.size.h).max(0) / 2,
+                                );
+                                match MemoryRenderBufferRenderElement::from_buffer(
+                                    renderer,
+                                    (f64::from(location.0), f64::from(location.1)),
+                                    &cached.buffer,
+                                    None,
+                                    None,
+                                    None,
+                                    Kind::Unspecified,
+                                ) {
+                                    Ok(element) => overlay_elements
+                                        .insert(0, WinitFrameElement::from(element)),
+                                    Err(error) => tracing::warn!(
+                                        ?error,
+                                        "failed to upload nested task switcher"
+                                    ),
+                                }
+                            }
+                        } else {
+                            task_switcher_cache = None;
                         }
                         if state.locked {
                             let cover = SolidColorBuffer::new(

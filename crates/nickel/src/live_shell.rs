@@ -133,8 +133,8 @@ use crate::{
         ApplicationMenuAction, ApplicationMenuApp, ApplicationMenuTarget, MENU_WIDTH, MenuAction,
         PreviewAction, TaskbarPreviewAnchor, WindowMenuApp, WindowPreviewFrame,
         application_menu_entries, build_preview_frame, menu_height, menu_height_for_rows,
-        preview_dimensions, semantic_theme_from_palette, validated_application_close_targets,
-        window_menu_action_is_current, window_menu_max_rows,
+        preview_dimensions, semantic_theme_from_palette, task_switcher_dimensions,
+        validated_application_close_targets, window_menu_action_is_current, window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
 };
@@ -2490,6 +2490,7 @@ impl LiveShell {
             self.preview_pending.map(|(_, deadline)| deadline),
         );
         push("window-preview-close", self.preview_leave_deadline);
+        push("task-switcher-peek", self.task_switcher.peek_deadline());
         push("volume-osd", self.volume_osd_until);
         sources
     }
@@ -2793,6 +2794,16 @@ impl LiveShell {
             if self.preview_group.is_some() {
                 outcome.redraw.push(SurfaceRole::WindowPreview);
             }
+        }
+        if let Some(_window) = self.task_switcher.poll_peek(now) {
+            #[cfg(target_os = "windows")]
+            let _ = self.send_session_command(
+                "task-switcher-peek",
+                ShellCommand::ShowTaskSwitcherPeek {
+                    window: Some(_window),
+                },
+            );
+            outcome.visibility_changed = true;
         }
         if self
             .preview_leave_deadline
@@ -4283,7 +4294,7 @@ impl LiveShell {
                 .iter()
                 .map(|window| window.id)
                 .collect::<Vec<_>>();
-            let (width, height) = preview_dimensions(windows.len());
+            let (width, height) = task_switcher_dimensions(windows.len());
             let _ = self.send_session_command(
                 "show-task-switcher",
                 ShellCommand::ShowTaskSwitcher {
@@ -4738,13 +4749,23 @@ impl LiveShell {
                     );
                 }
                 TaskSwitchEffect::HideFlip { .. } => {
+                    #[cfg(target_os = "windows")]
+                    let _ = self.send_session_command(
+                        "task-switcher-peek-clear",
+                        ShellCommand::ShowTaskSwitcherPeek { window: None },
+                    );
                     self.task_switcher_group = None;
                     self.preview_frame = None;
                     self.preview_images.clear();
                 }
-                TaskSwitchEffect::ShowFlip { .. }
-                | TaskSwitchEffect::RequestPreviews(_)
-                | TaskSwitchEffect::SelectPreview(_) => {}
+                TaskSwitchEffect::SelectPreview(_) => {
+                    #[cfg(target_os = "windows")]
+                    let _ = self.send_session_command(
+                        "task-switcher-peek-clear",
+                        ShellCommand::ShowTaskSwitcherPeek { window: None },
+                    );
+                }
+                TaskSwitchEffect::ShowFlip { .. } | TaskSwitchEffect::RequestPreviews(_) => {}
             }
         }
         if self.task_switcher.session().is_some() {
@@ -6894,6 +6915,9 @@ impl LiveShell {
             | ControlAction::CancelSessionAction
             | ControlAction::ConfirmSessionAction => {}
             ControlAction::SessionAction(action) => {
+                if self.task_switcher.session().is_some() {
+                    self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
+                }
                 let _ = self
                     .send_session_command("session-action", ShellCommand::SessionAction(action));
             }

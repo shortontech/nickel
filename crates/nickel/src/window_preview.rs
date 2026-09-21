@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub const CARD_WIDTH: f32 = 276.0;
+pub const TASK_SWITCHER_CARD_WIDTH: f32 = 220.0;
 pub const PREVIEW_HEIGHT: f32 = 214.0;
 const GAP: f32 = 10.0;
 const PADDING: f32 = 12.0;
@@ -752,7 +753,7 @@ impl WindowPreviewFrame {
         hovered: Option<WindowId>,
         theme: SemanticTheme,
     ) -> HostEventOutcome {
-        let (width, height) = preview_dimensions(group.windows.len());
+        let (width, height) = group_preview_dimensions(group);
         let app = self.host.application_mut();
         app.group = group.clone();
         app.previews = previews.clone();
@@ -798,6 +799,26 @@ pub fn preview_dimensions(window_count: usize) -> (u32, u32) {
     )
 }
 
+pub fn task_switcher_dimensions(window_count: usize) -> (u32, u32) {
+    let count = window_count.clamp(1, 5) as f32;
+    (
+        (PADDING * 2.0 + count * TASK_SWITCHER_CARD_WIDTH + (count - 1.0) * GAP).round() as u32,
+        PREVIEW_HEIGHT.round() as u32,
+    )
+}
+
+fn is_task_switcher_group(group: &WindowGroup) -> bool {
+    group.application_id.is_none() && group.application_name == "Open windows"
+}
+
+fn group_preview_dimensions(group: &WindowGroup) -> (u32, u32) {
+    if is_task_switcher_group(group) {
+        task_switcher_dimensions(group.windows.len())
+    } else {
+        preview_dimensions(group.windows.len())
+    }
+}
+
 #[cfg(any(test, target_os = "windows"))]
 pub fn native_thumbnail_bounds(index: usize) -> (i32, i32, i32, i32) {
     let left = PADDING + index as f32 * (CARD_WIDTH + GAP) + CARD_PADDING;
@@ -810,13 +831,25 @@ pub fn native_thumbnail_bounds(index: usize) -> (i32, i32, i32, i32) {
     )
 }
 
+#[cfg(any(test, target_os = "windows"))]
+pub fn native_task_switcher_thumbnail_bounds(index: usize) -> (i32, i32, i32, i32) {
+    let left = PADDING + index as f32 * (TASK_SWITCHER_CARD_WIDTH + GAP) + CARD_PADDING;
+    let top = PADDING + CARD_PADDING + CLOSE_SIZE + CARD_GAP;
+    (
+        left.round() as i32,
+        top.round() as i32,
+        (left + TASK_SWITCHER_CARD_WIDTH - CARD_PADDING * 2.0).round() as i32,
+        (top + THUMBNAIL_HEIGHT).round() as i32,
+    )
+}
+
 pub fn build_preview_frame(
     group: &WindowGroup,
     previews: &HashMap<WindowId, Arc<image::RgbaImage>>,
     hovered: Option<WindowId>,
     theme: SemanticTheme,
 ) -> WindowPreviewFrame {
-    let (width, height) = preview_dimensions(group.windows.len());
+    let (width, height) = group_preview_dimensions(group);
     WindowPreviewFrame {
         host: UiHost::new(
             WindowPreviewApp {
@@ -841,29 +874,39 @@ fn preview_view(
     hovered: Option<WindowId>,
     theme: SemanticTheme,
 ) -> impl nickel_ui::View<PreviewAction> {
-    let (width, height) = preview_dimensions(group.windows.len());
+    let (width, height) = group_preview_dimensions(group);
+    let card_width = if is_task_switcher_group(group) {
+        TASK_SWITCHER_CARD_WIDTH
+    } else {
+        CARD_WIDTH
+    };
     let windows = group.windows.iter().collect::<Vec<_>>();
     let window_ids = windows.iter().map(|window| window.id).collect::<Vec<_>>();
+    let task_switcher = is_task_switcher_group(group);
+    let total = windows.len();
     let cards = windows
         .into_iter()
-        .map(|window| {
+        .enumerate()
+        .map(|(index, window)| {
             let image = previews.get(&window.id).cloned();
-            (
-                window.id,
-                window_title(&window.title, &group.application_name).to_owned(),
-                image,
-            )
+            let title = window_title(&window.title, &group.application_name).to_owned();
+            let accessible_name = if task_switcher {
+                format!("{title}, {} of {total}", index + 1)
+            } else {
+                title.clone()
+            };
+            (window.id, title, accessible_name, image)
         })
         .collect::<Vec<_>>();
     let collection = Collection::try_new(
         CollectionState::Ready(cards),
-        |(window, _, _)| window.0,
-        move |(window, title, image)| {
+        |(window, _, _, _)| window.0,
+        move |(window, title, accessible_name, image)| {
             let preview: AnyView<PreviewAction> = image.map_or_else(
                 || {
                     AnyView::new(
                         Container::new()
-                            .width(CARD_WIDTH - CARD_PADDING * 2.0)
+                            .width(card_width - CARD_PADDING * 2.0)
                             .height(THUMBNAIL_HEIGHT)
                             .background(theme.surfaces.window)
                             .radius(6.0),
@@ -873,13 +916,13 @@ fn preview_view(
                     AnyView::new(
                         Image::new(preview_image_id(window), image)
                             .presentation(preview_image_presentation())
-                            .width(CARD_WIDTH - CARD_PADDING * 2.0)
+                            .width(card_width - CARD_PADDING * 2.0)
                             .height(THUMBNAIL_HEIGHT),
                     )
                 },
             );
             let card = Container::new()
-                .width(CARD_WIDTH)
+                .width(card_width)
                 .height(PREVIEW_HEIGHT - PADDING * 2.0)
                 .padding(Insets::all(CARD_PADDING))
                 .gap(CARD_GAP)
@@ -930,7 +973,7 @@ fn preview_view(
                         .message(PreviewAction::Activate(window))
                         .context_message(PreviewAction::OpenMenu(window))
                         .semantic_role(SemanticRole::Button)
-                        .accessibility_label(title.clone())
+                        .accessibility_label(accessible_name)
                         .child(preview),
                 );
             Container::new().child(card)
@@ -1005,6 +1048,16 @@ mod tests {
     fn native_thumbnails_follow_card_geometry() {
         assert_eq!(native_thumbnail_bounds(0), (20, 50, 280, 166));
         assert_eq!(native_thumbnail_bounds(1), (306, 50, 566, 166));
+    }
+
+    #[test]
+    fn five_task_switcher_cards_fit_a_1280_pixel_output() {
+        let (width, _) = task_switcher_dimensions(5);
+        assert!(width <= 1_200);
+        assert_eq!(
+            native_task_switcher_thumbnail_bounds(1).0,
+            native_task_switcher_thumbnail_bounds(0).0 + 230
+        );
     }
 
     #[test]

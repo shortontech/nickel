@@ -24,9 +24,9 @@ use windows::{
         Graphics::Dwm::{
             DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
             DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE, DWM_WINDOW_CORNER_PREFERENCE,
-            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmQueryThumbnailSourceSize,
-            DwmRegisterThumbnail, DwmSetWindowAttribute, DwmUnregisterThumbnail,
-            DwmUpdateThumbnailProperties,
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
+            DwmQueryThumbnailSourceSize, DwmRegisterThumbnail, DwmSetWindowAttribute,
+            DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
         },
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
@@ -60,6 +60,7 @@ use windows::{
         },
         UI::{
             Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
+            Controls::MARGINS,
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, SetFocus,
@@ -95,7 +96,8 @@ use windows::{
                 WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP,
                 WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
                 WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
-                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
+                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+                WindowFromPoint,
             },
         },
     },
@@ -1350,6 +1352,9 @@ static NICKEL_WINDOW_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static PREVIEW_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
+static TASK_SWITCHER_PEEK_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+static TASK_SWITCHER_PEEK_THUMBNAIL: Mutex<Option<isize>> = Mutex::new(None);
 static CONTEXT_MENU_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 #[derive(Default)]
@@ -4826,7 +4831,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 }
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
-            return show_dwm_previews(&windows);
+            return show_dwm_previews(&windows, false);
         }
         ShellCommand::ShowTaskSwitcher {
             width,
@@ -4867,7 +4872,10 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 }
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
-            return show_dwm_previews(&windows);
+            return show_dwm_previews(&windows, true);
+        }
+        ShellCommand::ShowTaskSwitcherPeek { window } => {
+            return show_task_switcher_peek(window);
         }
         ShellCommand::HideContextMenu => {
             clear_dwm_thumbnails();
@@ -4996,7 +5004,7 @@ fn show_context_window(x: i32, width: i32, height: i32) -> bool {
     true
 }
 
-fn show_dwm_previews(windows: &[WindowId]) -> bool {
+fn show_dwm_previews(windows: &[WindowId], task_switcher: bool) -> bool {
     use std::sync::atomic::Ordering;
 
     clear_dwm_thumbnails();
@@ -5012,7 +5020,11 @@ fn show_dwm_previews(windows: &[WindowId]) -> bool {
         let Ok(thumbnail) = (unsafe { DwmRegisterThumbnail(destination, source) }) else {
             continue;
         };
-        let (left, top, right, bottom) = crate::window_preview::native_thumbnail_bounds(index);
+        let (left, top, right, bottom) = if task_switcher {
+            crate::window_preview::native_task_switcher_thumbnail_bounds(index)
+        } else {
+            crate::window_preview::native_thumbnail_bounds(index)
+        };
         let bounds = RECT {
             left,
             top,
@@ -5052,6 +5064,158 @@ fn show_dwm_previews(windows: &[WindowId]) -> bool {
         state.presentation_generation = state.presentation_generation.saturating_add(1);
     }
     success
+}
+
+fn show_task_switcher_peek(window: Option<WindowId>) -> bool {
+    use std::sync::atomic::Ordering;
+
+    if let Ok(mut thumbnail) = TASK_SWITCHER_PEEK_THUMBNAIL.lock()
+        && let Some(thumbnail) = thumbnail.take()
+    {
+        unsafe {
+            let _ = DwmUnregisterThumbnail(thumbnail);
+        }
+    }
+    let existing = TASK_SWITCHER_PEEK_WINDOW_HANDLE.load(Ordering::Relaxed);
+    if window.is_none() {
+        if existing != 0 {
+            unsafe {
+                let _ = ShowWindow(HWND(existing as *mut c_void), SW_HIDE);
+            }
+        }
+        return true;
+    }
+    let Some(window) = window else {
+        return true;
+    };
+    let source = hwnd(window);
+    if unsafe { !IsWindow(Some(source)).as_bool() } {
+        return false;
+    }
+    let destination = if existing != 0 {
+        HWND(existing as *mut c_void)
+    } else {
+        let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
+            return false;
+        };
+        let class = WNDCLASSW {
+            hInstance: windows::Win32::Foundation::HINSTANCE(module.0),
+            lpszClassName: w!("NickelTaskSwitcherPeek"),
+            lpfnWndProc: Some(task_switcher_peek_window_proc),
+            ..Default::default()
+        };
+        if unsafe { RegisterClassW(&raw const class) } == 0 {
+            return false;
+        }
+        let Ok(destination) = (unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(
+                    WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0 | WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0,
+                ),
+                class.lpszClassName,
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(class.hInstance),
+                None,
+            )
+        }) else {
+            return false;
+        };
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        if unsafe { DwmExtendFrameIntoClientArea(destination, &margins) }.is_err() {
+            return false;
+        }
+        TASK_SWITCHER_PEEK_WINDOW_HANDLE.store(destination.0 as isize, Ordering::Relaxed);
+        destination
+    };
+    let monitor = unsafe { MonitorFromWindow(source, MONITOR_DEFAULTTONEAREST) };
+    let mut monitor_info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut monitor_info) }.as_bool() {
+        return false;
+    }
+    let mut source_rect = RECT::default();
+    if unsafe { GetWindowRect(source, &mut source_rect) }.is_err() {
+        return false;
+    }
+    let monitor_rect = monitor_info.rcMonitor;
+    if unsafe {
+        SetWindowPos(
+            destination,
+            Some(HWND_TOPMOST),
+            monitor_rect.left,
+            monitor_rect.top,
+            monitor_rect.right - monitor_rect.left,
+            monitor_rect.bottom - monitor_rect.top,
+            SWP_NOACTIVATE,
+        )
+    }
+    .is_err()
+    {
+        return false;
+    }
+    let Ok(thumbnail) = (unsafe { DwmRegisterThumbnail(destination, source) }) else {
+        return false;
+    };
+    let properties = DWM_THUMBNAIL_PROPERTIES {
+        dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY | DWM_TNP_VISIBLE,
+        rcDestination: RECT {
+            left: source_rect.left - monitor_rect.left,
+            top: source_rect.top - monitor_rect.top,
+            right: source_rect.right - monitor_rect.left,
+            bottom: source_rect.bottom - monitor_rect.top,
+        },
+        opacity: 255,
+        fVisible: BOOL(1),
+        ..Default::default()
+    };
+    if unsafe { DwmUpdateThumbnailProperties(thumbnail, &properties) }.is_err() {
+        unsafe {
+            let _ = DwmUnregisterThumbnail(thumbnail);
+        }
+        return false;
+    }
+    if let Ok(mut retained) = TASK_SWITCHER_PEEK_THUMBNAIL.lock() {
+        *retained = Some(thumbnail);
+    }
+    unsafe {
+        let _ = ShowWindow(destination, SW_SHOWNOACTIVATE);
+        let preview = PREVIEW_WINDOW_HANDLE.load(Ordering::Relaxed);
+        if preview != 0 {
+            let _ = SetWindowPos(
+                HWND(preview as *mut c_void),
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+    true
+}
+
+unsafe extern "system" fn task_switcher_peek_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
 fn record_dwm_preview_failures(count: u64) {

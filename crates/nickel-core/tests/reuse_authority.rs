@@ -166,7 +166,7 @@ fn geometry_effect_entrypoints_publish_desired_state_before_writing() {
 
     let mapped = section(
         "pub(crate) fn map_compositor_moved_window",
-        "fn apply_compositor_moved_window_effect",
+        "pub(crate) fn admit_managed_window_placement",
     );
     assert!(
         mapped.find("try_authorize_desired_geometry").unwrap()
@@ -180,7 +180,7 @@ fn geometry_effect_entrypoints_publish_desired_state_before_writing() {
     );
     assert!(
         internal.find("authorize_placement").unwrap()
-            < internal.find("internal_ui.relocate").unwrap(),
+            < internal.find(".configure_surface").unwrap(),
         "internal movement must be authorized before relocation"
     );
     assert!(
