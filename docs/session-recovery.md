@@ -1,7 +1,7 @@
 # Session recovery
 
-The `nickel` executable owns both the Linux compositor session and the user-facing shell. Normal
-`nickel --backend udev` and `nickel --backend winit` launches host shell surfaces inside the
+The `nickel` executable owns both the native Linux compositor session and the user-facing shell;
+`nickel-nested` provides the winit development session. Both launch host shell surfaces inside the
 compositor process and communicate through typed in-process authority.
 
 There is no independently restartable shell process, PID registration barrier, or `--role shell`

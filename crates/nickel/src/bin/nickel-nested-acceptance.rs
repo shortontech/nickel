@@ -41,7 +41,7 @@ fn run() -> Result<(), String> {
     let directory = harness
         .parent()
         .ok_or("acceptance harness has no parent directory")?;
-    let nickel = sibling(directory, "nickel")?;
+    let nickel = sibling(directory, "nickel-nested")?;
     let test_input = sibling(directory, "nickel-test-input")?;
     let runtime = env::temp_dir().join(format!(
         "nickel-nested-acceptance-{}-{}",
@@ -58,7 +58,7 @@ fn run() -> Result<(), String> {
 
     let mut command = Command::new(&nickel);
     command
-        .args(["--backend", "winit", "--test-control"])
+        .arg("--test-control")
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("NICKEL_TEST_CONTROL_ENV_FILE", &capability_file)
         .env("NICKEL_NESTED_SIZE", "960x640")
@@ -354,7 +354,7 @@ fn sibling(directory: &Path, name: &str) -> Result<PathBuf, String> {
     let path = directory.join(name);
     path.is_file().then_some(path).ok_or_else(|| {
         format!(
-            "missing {}; build nickel, nickel-test-input, and nickel-nested-acceptance together",
+            "missing {}; build nickel-nested, nickel-test-input, and nickel-nested-acceptance together",
             name
         )
     })

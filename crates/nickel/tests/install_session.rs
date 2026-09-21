@@ -2,6 +2,31 @@
 
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
+#[test]
+fn native_and_nested_sessions_use_distinct_feature_gated_executables() {
+    let manifest_text =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("read Nickel manifest");
+    let manifest: toml::Value = toml::from_str(&manifest_text).expect("parse Nickel manifest");
+    let binaries = manifest["bin"].as_array().expect("binary targets");
+    let required_features = |name: &str| {
+        binaries
+            .iter()
+            .find(|binary| binary["name"].as_str() == Some(name))
+            .and_then(|binary| binary["required-features"].as_array())
+            .map(|features| {
+                features
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    assert_eq!(required_features("nickel"), ["backend-udev"]);
+    assert_eq!(required_features("nickel-nested"), ["backend-winit"]);
+}
+
 fn executable(path: &Path) {
     fs::write(path, b"fixture").expect("write fixture executable");
     let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();

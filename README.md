@@ -133,10 +133,10 @@ cargo run -p nickel-markdown-ui -- README.md
 Run Nickel inside an existing Linux desktop:
 
 ```bash
-cargo run -p nickel --no-default-features --features backend-winit -- --backend winit
+cargo run -p nickel --no-default-features --features backend-winit --bin nickel-nested
 ```
 
-Live compositor tests may add `--test-control` alongside `--backend winit`. This explicitly enables the
+Live compositor tests may add `--test-control`. This explicitly enables the
 capability-authenticated `TestInput` protocol command for the nested backend, allowing tests to
 inject semantic keyboard and pointer events through the same Smithay input path as physical
 devices. The direct backend additionally requires `NICKEL_ALLOW_NATIVE_TEST_CONTROL=1`; test

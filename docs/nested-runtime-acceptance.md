@@ -4,12 +4,12 @@ Build and run the bounded live nested-session check with:
 
 ```sh
 cargo build -p nickel --no-default-features --features backend-winit \
-  --bin nickel --bin nickel-test-input --bin nickel-nested-acceptance
+  --bin nickel-nested --bin nickel-test-input --bin nickel-nested-acceptance
 ./target/debug/nickel-nested-acceptance
 ```
 
-The harness creates a private `XDG_RUNTIME_DIR`, starts the unified `nickel`
-binary with the winit backend and explicit test control, then waits for
+The harness creates a private `XDG_RUNTIME_DIR`, starts the dedicated `nickel-nested`
+binary with explicit test control, then waits for
 compositor-owned shell readiness. It asserts that no
 shell PID is expected or authenticated and no `--role shell` child exists,
 checks the internal surface inventory, injects Meta and verifies that the

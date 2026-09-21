@@ -128,7 +128,24 @@ fn native_controller_generation_exhausted(generation: u64) -> bool {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--available-backends")) {
+    run_with_arguments(std::env::args_os().skip(1))
+}
+
+pub fn run_nested() -> Result<(), Box<dyn std::error::Error>> {
+    run_with_arguments(std::env::args_os().skip(1).chain([
+        std::ffi::OsString::from("--backend"),
+        std::ffi::OsString::from("winit"),
+    ]))
+}
+
+fn run_with_arguments(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--available-backends")
+    {
         if cfg!(feature = "backend-winit") {
             println!("winit");
         }
@@ -144,7 +161,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::platform::prepare_audio_environment();
     nickel_logging::init("nickel")?;
 
-    let arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
+    let arguments = backend::SessionArguments::parse(arguments)?;
     if !test_control_allowed(
         arguments.backend == backend::BackendKind::Udev,
         arguments.test_control,
