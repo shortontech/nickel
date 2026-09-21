@@ -1735,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn enabled_switch_uses_inverse_thumb() {
+    fn enabled_switch_uses_window_surface_thumb() {
         let theme = theme();
         let tree = UiFrame::layout(
             Switch::new(true, toggle, theme).id("switch"),
@@ -1746,7 +1746,7 @@ mod tests {
             matches!(
                 command,
                 PaintCommand::RoundedFill { color, radius, .. }
-                    if *color == theme.text.inverse && *radius == 9.0
+                    if *color == theme.surfaces.window && *radius == 8.0
             )
         }));
     }

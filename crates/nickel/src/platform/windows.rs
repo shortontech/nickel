@@ -5077,12 +5077,15 @@ fn show_task_switcher_peek(window: Option<WindowId>) -> bool {
         }
     }
     let existing = TASK_SWITCHER_PEEK_WINDOW_HANDLE.load(Ordering::Relaxed);
-    if window.is_none() {
-        if existing != 0 {
-            unsafe {
-                let _ = ShowWindow(HWND(existing as *mut c_void), SW_HIDE);
-            }
+    if existing != 0 {
+        // Retire the previous presentation before validating a replacement.
+        // A destroyed source or failed DWM registration must not leave the
+        // old topmost host visible without a live thumbnail.
+        unsafe {
+            let _ = ShowWindow(HWND(existing as *mut c_void), SW_HIDE);
         }
+    }
+    if window.is_none() {
         return true;
     }
     let Some(window) = window else {

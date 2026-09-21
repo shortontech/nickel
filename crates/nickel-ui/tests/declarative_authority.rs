@@ -197,9 +197,18 @@ fn consumers_cannot_grow_or_create_display_list_authority() {
         match exceptions.get(&relative) {
             Some(exception) if references == exception.maximum => {
                 if exception.category == "test_only_inspection" {
+                    let separate_test_module = relative
+                        == "crates/nickel/src/session/state/protocol_tests.rs"
+                        && fs::read_to_string(root.join("crates/nickel/src/session/state.rs"))
+                            .is_ok_and(|owner| {
+                                owner.contains(
+                                    "#[cfg(test)]\n#[path = \"state/protocol_tests.rs\"]\nmod protocol_tests;",
+                                )
+                            });
                     let production = source.split_once("\n#[cfg(test)]\nmod tests {")
                         .or_else(|| source.split_once("\n#[cfg(test)]\nmod protocol_tests {"))
-                        .map(|(production, _)| production);
+                        .map(|(production, _)| production)
+                        .or(separate_test_module.then_some(""));
                     if production.is_none_or(|source| display_list_references(source) != 0) {
                         violations.push(format!("{relative}: test-only inspection exception cannot admit production display-list authority"));
                     }

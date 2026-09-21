@@ -102,7 +102,7 @@ fn run() -> Result<Outcome, String> {
     let directory = executable
         .parent()
         .ok_or("acceptance harness has no parent directory")?;
-    let nickel = sibling(directory, "nickel")?;
+    let nickel = sibling(directory, "nickel-nested")?;
     let runtime = RuntimeDirectory::create()?;
     if ordinary_scopes::movement_enabled() {
         ordinary_scopes::prepare_movement_catalog(runtime.path(), directory)?;
@@ -112,7 +112,7 @@ fn run() -> Result<Outcome, String> {
 
     let mut command = ProcessCommand::new(nickel);
     command
-        .args(["--backend", "winit", "--test-control"])
+        .arg("--test-control")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("XDG_CONFIG_HOME", runtime.path().join("config"))
         .env("XDG_STATE_HOME", runtime.path().join("state"))
@@ -194,8 +194,8 @@ fn validate_physical_environment(
     }
 }
 
-fn physical_child_arguments() -> [&'static str; 2] {
-    ["--backend", "winit"]
+fn physical_child_arguments() -> [&'static str; 0] {
+    []
 }
 
 fn physical_emergency_round(order: &str, instruction: &str) -> Result<(), String> {
@@ -206,7 +206,7 @@ fn physical_emergency_round(order: &str, instruction: &str) -> Result<(), String
     let directory = executable
         .parent()
         .ok_or("acceptance harness has no parent directory")?;
-    let nickel = sibling(directory, "nickel")?;
+    let nickel = sibling(directory, "nickel-nested")?;
     let runtime = RuntimeDirectory::create()?;
     let address = reserve_loopback_address()?;
     let mut command = ProcessCommand::new(nickel);
@@ -4043,9 +4043,12 @@ fn reserve_loopback_address() -> Result<SocketAddr, String> {
 
 fn sibling(directory: &Path, name: &str) -> Result<PathBuf, String> {
     let path = directory.join(name);
-    path.is_file()
-        .then_some(path)
-        .ok_or_else(|| format!("missing {}; build nickel and this harness together", name))
+    path.is_file().then_some(path).ok_or_else(|| {
+        format!(
+            "missing {}; build nickel-nested and this harness together",
+            name
+        )
+    })
 }
 
 #[cfg(test)]
@@ -4061,7 +4064,7 @@ mod tests {
         assert!(validate_physical_environment(false, false).is_ok());
         assert!(validate_physical_environment(true, false).is_err());
         assert!(validate_physical_environment(false, true).is_err());
-        assert_eq!(physical_child_arguments(), ["--backend", "winit"]);
+        assert!(physical_child_arguments().is_empty());
         assert!(!physical_child_arguments().contains(&"--test-control"));
     }
     use nickel_session_protocol::{ServerMessage, ShellReadinessSnapshot};

@@ -1,15 +1,17 @@
 use super::{
     DisabledOutput, DrmRenderStrategy, IDENTIFY_BADGE_BYTES, IdentifyBadgeCache,
-    RendererLifecycleLedger, RendererRetainedReason, TaskSwitcherBufferKey,
-    consume_pending_dependent, contained_preview_bounds, copy_capture_damage,
-    copy_mapped_damage_to_strided, copy_mapped_region_to_strided, damage_bounding_box,
-    dependent_renderers_after_primary_removal, device_activation_priority, draw_contained_preview,
-    draw_memory_render_buffer, drm_render_strategy, mapped_damage_rows,
-    mark_disabled_outputs_absent, no_usable_drm_device_error, normalize_capture_rows,
-    paced_render_delay, parse_kde_cursor_settings, pending_recovery_devices,
-    primary_dependency_to_activate, published_disabled_outputs, render_primary_available,
-    renderer_retained_reason, should_attempt_scanned_connector, switcher_visible_range,
-    union_rectangles,
+    RendererLifecycleLedger, RendererRetainedReason, consume_pending_dependent,
+    copy_capture_damage, copy_mapped_damage_to_strided, copy_mapped_region_to_strided,
+    damage_bounding_box, dependent_renderers_after_primary_removal, device_activation_priority,
+    drm_render_strategy, mapped_damage_rows, mark_disabled_outputs_absent,
+    no_usable_drm_device_error, normalize_capture_rows, paced_render_delay,
+    parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
+    published_disabled_outputs, render_primary_available, renderer_retained_reason,
+    should_attempt_scanned_connector, union_rectangles,
+};
+use crate::session::task_switcher_render::{
+    BufferKey as TaskSwitcherBufferKey, contained_preview_bounds, draw_contained_preview,
+    draw_memory_render_buffer, visible_range,
 };
 
 #[test]
@@ -478,10 +480,10 @@ fn renderer_retention_requires_active_output_or_cross_gpu_primary_dependency() {
 
 #[test]
 fn task_switcher_keeps_the_selection_in_a_centered_bounded_window() {
-    assert_eq!(switcher_visible_range(3, 1), 0..3);
-    assert_eq!(switcher_visible_range(9, 0), 0..5);
-    assert_eq!(switcher_visible_range(9, 4), 2..7);
-    assert_eq!(switcher_visible_range(9, 8), 4..9);
+    assert_eq!(visible_range(3, 1), 0..3);
+    assert_eq!(visible_range(9, 0), 0..5);
+    assert_eq!(visible_range(9, 4), 2..7);
+    assert_eq!(visible_range(9, 8), 4..9);
 }
 
 #[test]

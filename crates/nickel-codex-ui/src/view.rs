@@ -20,6 +20,10 @@ use crate::{
 
 const TRANSCRIPT_GAP: f32 = 10.0;
 const TRANSCRIPT_OVERSCAN: f32 = 900.0;
+// Height estimates are deliberately cheap, not layout-exact. For a modest
+// transcript, drawing every row is inexpensive and avoids a false leading
+// spacer when rich Markdown renders much shorter than its text estimate.
+const TRANSCRIPT_VIRTUALIZATION_THRESHOLD: usize = 64;
 static EMPTY_ACTIVITY_OUTCOME: std::sync::LazyLock<ActivityOutcome> =
     std::sync::LazyLock::new(ActivityOutcome::default);
 
@@ -90,6 +94,7 @@ pub enum ChatMessage {
     InterruptAndSend,
     CancelQueuedMessage(u64),
     EditQueuedMessage(u64),
+    RetryQueuedMessage(u64),
     RespondApproval(ServerRequestId, String, CodexApprovalChoice),
     InteractionAnswerChanged(String),
     SubmitInput(ServerRequestId, Vec<String>),
@@ -294,6 +299,44 @@ fn transcript_heights(state: &ChatState) -> Vec<f32> {
     state.estimated_item_heights()
 }
 
+fn transcript_window(state: &ChatState) -> VirtualWindow {
+    if state.items.len() <= TRANSCRIPT_VIRTUALIZATION_THRESHOLD {
+        return VirtualWindow {
+            range: 0..state.items.len(),
+            leading: 0.0,
+            trailing: 0.0,
+            total: 0.0,
+        };
+    }
+    let heights = transcript_heights(state);
+    let offset = if state.conversation_pinned {
+        f32::MAX
+    } else {
+        state.conversation_scroll
+    };
+    let mut window = VirtualWindow::from_heights(
+        &heights,
+        TRANSCRIPT_GAP,
+        offset,
+        state.conversation_viewport_height,
+        TRANSCRIPT_OVERSCAN,
+    );
+    if state.conversation_pinned {
+        // A long Markdown source can estimate much taller than its rendered
+        // card. Keep a bounded tail mounted so a pinned transcript cannot
+        // collapse into an apparent blank viewport above its last message.
+        let earliest_tail = heights
+            .len()
+            .saturating_sub(TRANSCRIPT_VIRTUALIZATION_THRESHOLD);
+        if window.range.start > earliest_tail {
+            window.range.start = earliest_tail;
+            window.leading = heights[..earliest_tail].iter().sum::<f32>()
+                + TRANSCRIPT_GAP * earliest_tail as f32;
+        }
+    }
+    window
+}
+
 fn project_window_title(path: &std::path::Path) -> String {
     format!("Codex — {}", project_window_name(path))
 }
@@ -466,6 +509,7 @@ struct ChatOverlays<'a> {
     project_id: Option<&'a str>,
     queued_messages: Option<&'a std::collections::VecDeque<QueuedMessage>>,
     editing_queued_message: bool,
+    editing_unconfirmed_message: bool,
 }
 
 impl RemoteHostEditor {
@@ -509,9 +553,7 @@ impl ChatApplication {
         }
         self.queued_interrupt_deadline = None;
         for queued in &mut self.queued_messages {
-            if queued.phase != QueuedMessagePhase::Dispatching {
-                queued.phase = QueuedMessagePhase::Unconfirmed;
-            }
+            queued.phase = QueuedMessagePhase::Unconfirmed;
         }
         self.state.command_feedback = Some(format!(
             "Queued messages were not sent and require review after {reason}"
@@ -549,6 +591,10 @@ impl ChatApplication {
         } else {
             self.next_queued_message_id.wrapping_add(1).max(1)
         };
+        let replacement_phase = replacement
+            .as_ref()
+            .map(|queued| queued.phase)
+            .unwrap_or(QueuedMessagePhase::Waiting);
         let replacement_images = replacement
             .as_ref()
             .map(|queued| queued.images.clone())
@@ -574,7 +620,11 @@ impl ChatApplication {
             approval_policy: self.state.selected_approval_policy,
             sandbox_policy: self.state.selected_sandbox_policy,
             plan_mode: self.plan_mode,
-            phase: QueuedMessagePhase::Waiting,
+            phase: if replacement_phase == QueuedMessagePhase::Unconfirmed {
+                QueuedMessagePhase::Unconfirmed
+            } else {
+                QueuedMessagePhase::Waiting
+            },
         };
         if replacement.is_some() {
             self.queued_messages.push_front(queued);
@@ -582,11 +632,18 @@ impl ChatApplication {
             self.queued_messages.push_back(queued);
         }
         self.state.attachments.clear();
-        self.state.command_feedback = Some(format!(
-            "Queued message {} of {QUEUED_MESSAGE_CAPACITY}",
-            self.queued_messages.len()
-        ));
-        if self.state.active_turn.is_none() {
+        self.state.command_feedback =
+            Some(if replacement_phase == QueuedMessagePhase::Unconfirmed {
+                "Reviewed message saved without sending; retrying may duplicate a previous delivery"
+                    .into()
+            } else {
+                format!(
+                    "Queued message {} of {QUEUED_MESSAGE_CAPACITY}",
+                    self.queued_messages.len()
+                )
+            });
+        if self.state.active_turn.is_none() && replacement_phase != QueuedMessagePhase::Unconfirmed
+        {
             self.dispatch_queued_after_boundary();
         }
     }
@@ -1152,6 +1209,7 @@ impl ChatApplication {
                     ControllerEvent::Failure(_)
                     | ControllerEvent::Incompatible(_)
                     | ControllerEvent::Unavailable(_) => {
+                        self.mark_queued_messages_for_review("connection loss");
                         self.new_chat_pending = false;
                         self.pending_new_chat_title = None;
                         self.pending_initial_resume = None;
@@ -1981,6 +2039,31 @@ impl Application for ChatApplication {
                     );
                 }
             }
+            ChatMessage::RetryQueuedMessage(id) => {
+                if self.editing_queued_message.is_some() {
+                    return;
+                }
+                let Some(queued) = self.queued_messages.front_mut() else {
+                    return;
+                };
+                if queued.id != id || queued.phase != QueuedMessagePhase::Unconfirmed {
+                    return;
+                }
+                if self.state.selected_thread.as_ref() != Some(&queued.thread_id)
+                    || self.state.status != ConnectionStatus::Ready
+                    || self.state.unconfirmed_work
+                    || self.state.recovery_pending
+                    || self.state.active_turn.is_some()
+                {
+                    self.state.command_feedback = Some(
+                        "Reconnect and review the original conversation before retrying; sending again may duplicate the message".into(),
+                    );
+                    return;
+                }
+                queued.generation = self.state.generation;
+                queued.phase = QueuedMessagePhase::Waiting;
+                self.dispatch_queued_after_boundary();
+            }
             ChatMessage::RespondApproval(request_id, approval_type, choice) => {
                 // Validate the exact live source decision before marking the
                 // request submitting; a stale button cannot broaden authority.
@@ -2335,15 +2418,6 @@ impl Application for ChatApplication {
     }
 
     fn view(&self, context: nickel_ui::ViewContext) -> impl View<Self::Message> {
-        if crate::controller::codex_resume_timing_enabled()
-            && let Some((started, visible_items)) = self.resume_first_view.take()
-        {
-            eprintln!(
-                "nickel: Codex first resumed view built in {} ms ({} visible items)",
-                started.elapsed().as_millis(),
-                visible_items
-            );
-        }
         let project_root = self
             .shell_project
             .as_ref()
@@ -2358,7 +2432,7 @@ impl Application for ChatApplication {
                     BackendMode::Remote { host } => Some(std::path::Path::new(&host.default_cwd)),
                 }
             });
-        if self.project_menu_mode {
+        let view = if self.project_menu_mode {
             AnyView::new(project_menu_view(
                 &self.state,
                 self.settings_error.as_deref(),
@@ -2402,11 +2476,25 @@ impl Application for ChatApplication {
                         .and_then(|(_, id)| id.as_deref()),
                     queued_messages: Some(&self.queued_messages),
                     editing_queued_message: self.editing_queued_message.is_some(),
+                    editing_unconfirmed_message: self
+                        .editing_queued_message
+                        .as_ref()
+                        .is_some_and(|queued| queued.phase == QueuedMessagePhase::Unconfirmed),
                 },
                 self.theme,
                 context.viewport.size.width,
             ))
+        };
+        if crate::controller::codex_resume_timing_enabled()
+            && let Some((started, visible_items)) = self.resume_first_view.take()
+        {
+            eprintln!(
+                "nickel: Codex first resumed view constructed in {} ms ({} visible items)",
+                started.elapsed().as_millis(),
+                visible_items
+            );
         }
+        view
     }
 
     fn frame_overlays(
@@ -3904,6 +3992,7 @@ fn configured_chat_view(
         project_id,
         queued_messages,
         editing_queued_message,
+        editing_unconfirmed_message,
     } = overlays;
     let queued_count = queued_messages.map_or(0, std::collections::VecDeque::len);
     let narrow = viewport_width < 720.0;
@@ -3917,19 +4006,7 @@ fn configured_chat_view(
             .path
             .as_str()
     });
-    let transcript_heights = transcript_heights(state);
-    let transcript_offset = if state.conversation_pinned {
-        f32::MAX
-    } else {
-        state.conversation_scroll
-    };
-    let transcript_window = VirtualWindow::from_heights(
-        &transcript_heights,
-        TRANSCRIPT_GAP,
-        transcript_offset,
-        state.conversation_viewport_height,
-        TRANSCRIPT_OVERSCAN,
-    );
+    let transcript_window = transcript_window(state);
     let transcript_range = transcript_window.range.clone();
     let transcript_document = state.transcript_selection_document();
     ui! {
@@ -4187,7 +4264,7 @@ fn configured_chat_view(
                                 "Interrupt unconfirmed — not sent"
                             }
                             QueuedMessagePhase::Dispatching => "Sending…",
-                            QueuedMessagePhase::Unconfirmed => "Delivery unconfirmed — review required",
+                            QueuedMessagePhase::Unconfirmed => "Delivery unconfirmed — review before retry; a second send may duplicate it",
                         };
                         let target = if state.selected_thread.as_ref() == Some(&queued.thread_id) {
                             "Current conversation"
@@ -4217,7 +4294,13 @@ fn configured_chat_view(
                                 {[()].into_iter().filter(|_| index == 0 && matches!(queued.phase, QueuedMessagePhase::Waiting | QueuedMessagePhase::InterruptTimedOut | QueuedMessagePhase::Unconfirmed)).map(|_| ui! {
                                     <Button on_press={ChatMessage::EditQueuedMessage(queued.id)}
                                         background={theme.surfaces.hover} color={theme.text.primary}>
-                                        {"Edit"}
+                                        {if queued.phase == QueuedMessagePhase::Unconfirmed { "Review" } else { "Edit" }}
+                                    </Button>
+                                })}
+                                {[()].into_iter().filter(|_| index == 0 && queued.phase == QueuedMessagePhase::Unconfirmed).map(|_| ui! {
+                                    <Button on_press={ChatMessage::RetryQueuedMessage(queued.id)}
+                                        background={theme.surfaces.hover} color={theme.text.danger}>
+                                        {"Retry"}
                                     </Button>
                                 })}
                             </Row>
@@ -4239,7 +4322,7 @@ fn configured_chat_view(
                         } else if editing_queued_message {
                             ui! { <Button on_press={ChatMessage::QueueMessage}
                                 background={theme.accent.ordinary} color={theme.accent.on_accent}
-                                enabled={!state.draft.trim().is_empty() || !state.attachments.is_empty()}>{"Save queued message"}</Button> }
+                                enabled={!state.draft.trim().is_empty() || !state.attachments.is_empty()}>{if editing_unconfirmed_message { "Save for review" } else { "Save queued message" }}</Button> }
                         } else if state.active_turn.is_some() {
                             ui! {
                                 <Row gap={8.0} align_items={Align::End}>
@@ -4460,6 +4543,70 @@ mod tests {
     use nickel_ui_testkit::Scenario;
 
     use super::*;
+
+    #[test]
+    fn resumed_medium_transcript_has_no_estimated_blank_spacer() {
+        let mut state = ChatState::default();
+        state.conversation_pinned = true;
+        state.conversation_viewport_height = 650.0;
+        for index in 0..22 {
+            state.items.push_back(ChatItem {
+                id: format!("resumed-{index}"),
+                kind: if index % 2 == 0 {
+                    ChatItemKind::User
+                } else {
+                    ChatItemKind::Agent
+                },
+                // The estimate treats this as tall, while rich Markdown can
+                // lay it out much shorter. Every row must still be present.
+                text: "A long resumed message ".repeat(100),
+                complete: true,
+            });
+        }
+
+        let window = transcript_window(&state);
+        assert_eq!(window.range, 0..22);
+        assert_eq!(window.leading, 0.0);
+        assert_eq!(window.trailing, 0.0);
+
+        for index in 22..=TRANSCRIPT_VIRTUALIZATION_THRESHOLD {
+            state.items.push_back(ChatItem {
+                id: format!("resumed-{index}"),
+                kind: ChatItemKind::Agent,
+                text: "Short".into(),
+                complete: true,
+            });
+        }
+        let large_window = transcript_window(&state);
+        assert!(large_window.range.start > 0);
+        assert_eq!(large_window.range.end, state.items.len());
+    }
+
+    #[test]
+    fn pinned_large_transcript_mounts_bounded_tail_despite_height_overestimates() {
+        let mut state = ChatState::default();
+        state.conversation_pinned = true;
+        state.conversation_viewport_height = 650.0;
+        for index in 0..200 {
+            state.items.push_back(ChatItem {
+                id: format!("long-{index}"),
+                kind: ChatItemKind::Agent,
+                text: "Markdown source much taller than its rendered card ".repeat(300),
+                complete: true,
+            });
+        }
+
+        let window = transcript_window(&state);
+        assert_eq!(window.range, 136..200);
+        assert_eq!(window.trailing, 0.0);
+        assert!(window.leading > 0.0);
+
+        state.conversation_pinned = false;
+        state.conversation_scroll = 0.0;
+        let unpinned = transcript_window(&state);
+        assert_eq!(unpinned.range.start, 0);
+        assert!(unpinned.range.end < 200);
+    }
 
     #[test]
     fn run_settings_close_icon_has_a_legible_raster_footprint() {
@@ -6818,6 +6965,63 @@ mod tests {
     }
 
     #[test]
+    fn queued_message_dispatch_uses_captured_image_and_run_settings() {
+        let mut app = active_turn_app();
+        let (controller, commands) = ChatController::fixture_with_commands(app.state.generation);
+        app.controller = controller;
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([20, 40, 60, 255]),
+        ))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+        app.state.attach_image(encoded.get_ref()).unwrap();
+        app.state.draft = "captured payload".into();
+        app.state.selected_model = Some("original-model".into());
+        app.state.selected_reasoning_effort = Some("high".into());
+        app.state.selected_approval_policy = ApprovalPolicy::Never;
+        app.state.selected_sandbox_policy = Some(SandboxPolicy::DangerFullAccess);
+        app.plan_mode = true;
+
+        app.update(ChatMessage::QueueMessage);
+        assert!(commands.try_recv().is_err(), "queueing is not sending");
+        assert!(app.state.attachments.is_empty());
+        assert!(app.state.draft.is_empty());
+        app.state.draft = "next draft".into();
+        app.state.selected_model = Some("later-model".into());
+        app.state.selected_reasoning_effort = Some("low".into());
+        app.state.selected_approval_policy = ApprovalPolicy::OnRequest;
+        app.state.selected_sandbox_policy = Some(SandboxPolicy::ReadOnly);
+        app.plan_mode = false;
+        app.state.active_turn = None;
+
+        app.dispatch_queued_after_boundary();
+        let Ok(ControllerCommand::Send {
+            text,
+            images,
+            model,
+            reasoning_effort,
+            approval_policy,
+            sandbox_policy,
+            plan_mode,
+        }) = commands.try_recv()
+        else {
+            panic!("expected one queued send");
+        };
+        assert_eq!(text, "captured payload");
+        assert_eq!(images.len(), 1);
+        assert!(images[0].data_url.starts_with("data:image/png;base64,"));
+        assert_eq!(model.as_deref(), Some("original-model"));
+        assert_eq!(reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(approval_policy, ApprovalPolicy::Never);
+        assert_eq!(sandbox_policy, Some(SandboxPolicy::DangerFullAccess));
+        assert!(plan_mode);
+        assert_eq!(app.state.draft, "next draft");
+    }
+
+    #[test]
     fn queued_message_dispatches_once_only_after_matching_boundary() {
         let mut app = active_turn_app();
         let (controller, commands) = ChatController::fixture_with_commands(app.state.generation);
@@ -6887,6 +7091,76 @@ mod tests {
     }
 
     #[test]
+    fn conversation_change_keeps_uncertain_dispatched_message_for_review() {
+        let mut app = active_turn_app();
+        app.state.draft = "delivery may already be in flight".into();
+        app.update(ChatMessage::QueueMessage);
+        app.queued_messages.front_mut().unwrap().phase = QueuedMessagePhase::Dispatching;
+
+        app.mark_queued_messages_for_review("changing conversation");
+
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::Unconfirmed)
+        );
+        assert_eq!(
+            app.queued_messages
+                .front()
+                .map(|queued| queued.text.as_str()),
+            Some("delivery may already be in flight")
+        );
+    }
+
+    #[test]
+    fn saving_an_unconfirmed_message_does_not_retry_until_explicit_action() {
+        let mut app = active_turn_app();
+        let (controller, commands) = ChatController::fixture_with_commands(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "possibly delivered".into();
+        app.update(ChatMessage::QueueMessage);
+        let id = app.queued_messages.front().unwrap().id;
+        app.mark_queued_messages_for_review("connection loss");
+        app.state.active_turn = None;
+
+        app.update(ChatMessage::EditQueuedMessage(id));
+        app.state.draft = "reviewed text".into();
+        app.update(ChatMessage::QueueMessage);
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::Unconfirmed)
+        );
+        assert!(commands.try_recv().is_err(), "saving is not a retry");
+
+        app.update(ChatMessage::RetryQueuedMessage(id));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ControllerCommand::Send { ref text, .. }) if text == "reviewed text"
+        ));
+        app.update(ChatMessage::RetryQueuedMessage(id));
+        assert!(commands.try_recv().is_err(), "retry cannot double-send");
+    }
+
+    #[test]
+    fn retry_rejects_a_different_conversation_without_sending() {
+        let mut app = active_turn_app();
+        let (controller, commands) = ChatController::fixture_with_commands(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "old conversation".into();
+        app.update(ChatMessage::QueueMessage);
+        let id = app.queued_messages.front().unwrap().id;
+        app.mark_queued_messages_for_review("changing conversation");
+        app.state.active_turn = None;
+        app.state.selected_thread = Some(ThreadId("other".into()));
+
+        app.update(ChatMessage::RetryQueuedMessage(id));
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::Unconfirmed)
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
     fn stale_generation_never_dispatches_a_queued_message() {
         let mut app = active_turn_app();
         let (controller, commands) = ChatController::fixture_with_commands(app.state.generation);
@@ -6923,5 +7197,120 @@ mod tests {
             app.queued_messages.front().map(|queued| queued.phase),
             Some(QueuedMessagePhase::InterruptRequested)
         );
+    }
+
+    #[test]
+    fn natural_completion_racing_interrupt_acknowledgement_sends_once() {
+        let mut app = active_turn_app();
+        let (controller, commands, events) =
+            ChatController::fixture_with_commands_and_events(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "send after the natural boundary".into();
+        app.update(ChatMessage::QueueMessage);
+        app.update(ChatMessage::InterruptAndSend);
+
+        events
+            .send((
+                app.state.generation,
+                ControllerEvent::Protocol(nickel_codex::CodexEvent {
+                    sequence: 2,
+                    kind: nickel_codex::EventKind::TurnCompleted {
+                        thread_id: ThreadId("thread".into()),
+                        turn_id: nickel_codex::TurnId("turn".into()),
+                        status: "completed".into(),
+                    },
+                }),
+            ))
+            .unwrap();
+        assert!(app.poll_controller());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ControllerCommand::Send { ref text, .. })
+                if text == "send after the natural boundary"
+        ));
+
+        events
+            .send((app.state.generation, ControllerEvent::InterruptAccepted))
+            .unwrap();
+        app.poll_controller();
+        assert!(commands.try_recv().is_err());
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::Dispatching)
+        );
+    }
+
+    #[test]
+    fn rejected_interrupt_keeps_the_queued_message_without_sending() {
+        let mut app = active_turn_app();
+        let (controller, commands, events) =
+            ChatController::fixture_with_commands_and_events(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "wait for review".into();
+        app.update(ChatMessage::QueueMessage);
+        app.update(ChatMessage::InterruptAndSend);
+
+        events
+            .send((
+                app.state.generation,
+                ControllerEvent::InterruptFailed("backend rejected interrupt".into()),
+            ))
+            .unwrap();
+        assert!(app.poll_controller());
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::Waiting)
+        );
+        assert_eq!(app.queued_interrupt_deadline, None);
+        assert!(!app.state.interrupt_requested);
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn disconnect_during_interrupt_requires_review_and_ignores_late_boundary() {
+        let mut app = active_turn_app();
+        let (controller, commands, events) =
+            ChatController::fixture_with_commands_and_events(app.state.generation);
+        app.controller = controller;
+        app.state.draft = "preserve on disconnect".into();
+        app.update(ChatMessage::QueueMessage);
+        app.update(ChatMessage::InterruptAndSend);
+        let generation = app.state.generation;
+
+        events
+            .send((
+                generation,
+                ControllerEvent::Failure("connection closed".into()),
+            ))
+            .unwrap();
+        assert!(app.poll_controller());
+        assert_eq!(app.state.status, ConnectionStatus::Disconnected);
+        assert_eq!(app.queued_interrupt_deadline, None);
+        assert_eq!(
+            app.queued_messages.front().map(|queued| queued.phase),
+            Some(QueuedMessagePhase::Unconfirmed)
+        );
+        assert_eq!(
+            app.queued_messages
+                .front()
+                .map(|queued| queued.text.as_str()),
+            Some("preserve on disconnect")
+        );
+
+        events
+            .send((
+                generation,
+                ControllerEvent::Protocol(nickel_codex::CodexEvent {
+                    sequence: 2,
+                    kind: nickel_codex::EventKind::TurnCompleted {
+                        thread_id: ThreadId("thread".into()),
+                        turn_id: nickel_codex::TurnId("turn".into()),
+                        status: "interrupted".into(),
+                    },
+                }),
+            ))
+            .unwrap();
+        app.poll_controller();
+        assert!(commands.try_recv().is_err());
     }
 }

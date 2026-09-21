@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufRead, BufReader, ErrorKind, Read, Write},
     path::Path,
     process::{Child, ChildStdin, Stdio},
@@ -22,13 +22,25 @@ use url::Url;
 use crate::process::command;
 use crate::protocol::*;
 
-const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+// A thread/resume response can contain the complete history of a long-running
+// conversation, including tool output. Keep the inbound allocation bounded
+// independently of the outbound backlog budget.
+const MAX_INBOUND_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const OUTBOUND_BACKLOG: usize = 16;
 const MAX_OUTBOUND_BYTES: usize = 160 * 1024 * 1024;
 const MAX_HISTORY_ITEM_TEXT_BYTES: usize = 256 * 1024;
 const MAX_THREAD_PREVIEW_BYTES: usize = 512;
 const HISTORY_OMISSION_MARKER: &str =
     "\n\n[Further history detail omitted from this local view; server history is unchanged.]";
+
+fn resume_timing_enabled() -> bool {
+    std::env::var_os("NICKEL_CODEX_RESUME_TIMING").is_some_and(|value| {
+        matches!(
+            value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
 
 fn bound_history_item_text(mut text: String) -> String {
     if text.len() > MAX_HISTORY_ITEM_TEXT_BYTES {
@@ -430,6 +442,7 @@ struct Inner {
     writer: RpcWriter,
     next_id: Mutex<u64>,
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, CodexError>>>>,
+    timed_resume_requests: Mutex<HashSet<String>>,
     subscribers: Mutex<Vec<crate::delivery::DeliverySender<CodexEvent>>>,
     outstanding: Mutex<HashMap<String, PendingInteraction>>,
     projection: Mutex<Projection>,
@@ -629,6 +642,7 @@ impl CodexClient {
             writer: RpcWriter::Stdio(Mutex::new(stdin)),
             next_id: Mutex::new(1),
             pending: Mutex::new(HashMap::new()),
+            timed_resume_requests: Mutex::new(HashSet::new()),
             subscribers: Mutex::new(Vec::new()),
             outstanding: Mutex::new(HashMap::new()),
             projection: Mutex::new(Projection::default()),
@@ -672,8 +686,8 @@ impl CodexClient {
             CodexError::Unavailable(format!("remote app-server connection failed: {error}"))
         })?;
         socket.set_config(|config| {
-            config.max_message_size = Some(MAX_FRAME_BYTES);
-            config.max_frame_size = Some(MAX_FRAME_BYTES);
+            config.max_message_size = Some(MAX_INBOUND_FRAME_BYTES);
+            config.max_frame_size = Some(MAX_INBOUND_FRAME_BYTES);
         });
         let (writer, outbound) = RemoteWriter::channel();
         let outbound_closed = writer.closed.clone();
@@ -682,6 +696,7 @@ impl CodexClient {
             writer: RpcWriter::WebSocket(writer),
             next_id: Mutex::new(1),
             pending: Mutex::new(HashMap::new()),
+            timed_resume_requests: Mutex::new(HashSet::new()),
             subscribers: Mutex::new(Vec::new()),
             outstanding: Mutex::new(HashMap::new()),
             projection: Mutex::new(Projection::default()),
@@ -733,7 +748,7 @@ impl CodexClient {
             loop {
                 let mut line = String::new();
                 match std::io::Read::by_ref(&mut reader)
-                    .take((MAX_FRAME_BYTES + 1) as u64)
+                    .take((MAX_INBOUND_FRAME_BYTES + 1) as u64)
                     .read_line(&mut line)
                 {
                     Ok(0) => {
@@ -742,24 +757,30 @@ impl CodexClient {
                         }
                         break;
                     }
-                    Ok(_) if line.len() > MAX_FRAME_BYTES => {
+                    Ok(_) if line.len() > MAX_INBOUND_FRAME_BYTES => {
                         if let Some(inner) = inner.upgrade() {
                             Self { inner }.fail("app-server frame exceeded limit");
                         }
                         break;
                     }
-                    Ok(_) => match serde_json::from_str::<Value>(line.trim_end()) {
-                        Ok(value) => {
-                            let Some(inner) = inner.upgrade() else { break };
-                            Self { inner }.handle(value)
-                        }
-                        Err(error) => {
-                            if let Some(inner) = inner.upgrade() {
-                                Self { inner }.fail(&format!("malformed app-server JSON: {error}"));
+                    Ok(_) => {
+                        let decode_started = std::time::Instant::now();
+                        match serde_json::from_str::<Value>(line.trim_end()) {
+                            Ok(value) => {
+                                let Some(inner) = inner.upgrade() else { break };
+                                let client = Self { inner };
+                                client.record_resume_decode(&value, decode_started.elapsed());
+                                client.handle(value)
                             }
-                            break;
+                            Err(error) => {
+                                if let Some(inner) = inner.upgrade() {
+                                    Self { inner }
+                                        .fail(&format!("malformed app-server JSON: {error}"));
+                                }
+                                break;
+                            }
                         }
-                    },
+                    }
                     Err(error) => {
                         if let Some(inner) = inner.upgrade() {
                             Self { inner }.fail(&format!("app-server read failed: {error}"));
@@ -821,27 +842,33 @@ impl CodexClient {
                     }
                 }
                 match socket.read() {
-                    Ok(Message::Text(text)) if text.len() > MAX_FRAME_BYTES => {
+                    Ok(Message::Text(text)) if text.len() > MAX_INBOUND_FRAME_BYTES => {
                         if let Some(inner) = inner.upgrade() {
                             Self { inner }.fail("remote app-server frame exceeded limit");
                         }
                         return;
                     }
-                    Ok(Message::Text(text)) => match serde_json::from_str::<Value>(text.as_ref()) {
-                        Ok(value) => {
-                            let Some(inner) = inner.upgrade() else {
-                                return;
-                            };
-                            Self { inner }.handle(value);
-                        }
-                        Err(error) => {
-                            if let Some(inner) = inner.upgrade() {
-                                Self { inner }
-                                    .fail(&format!("malformed remote app-server JSON: {error}"));
+                    Ok(Message::Text(text)) => {
+                        let decode_started = std::time::Instant::now();
+                        match serde_json::from_str::<Value>(text.as_ref()) {
+                            Ok(value) => {
+                                let Some(inner) = inner.upgrade() else {
+                                    return;
+                                };
+                                let client = Self { inner };
+                                client.record_resume_decode(&value, decode_started.elapsed());
+                                client.handle(value);
                             }
-                            return;
+                            Err(error) => {
+                                if let Some(inner) = inner.upgrade() {
+                                    Self { inner }.fail(&format!(
+                                        "malformed remote app-server JSON: {error}"
+                                    ));
+                                }
+                                return;
+                            }
                         }
-                    },
+                    }
                     Ok(Message::Binary(_)) => {
                         if let Some(inner) = inner.upgrade() {
                             Self { inner }.fail("remote app-server sent a binary protocol message");
@@ -889,6 +916,7 @@ impl CodexClient {
             id
         };
         let key = id.to_string();
+        let resume_timing = method == "thread/resume" && resume_timing_enabled();
         let (tx, rx) = mpsc::channel();
         {
             let mut pending = self.inner.pending.lock().unwrap();
@@ -899,6 +927,13 @@ impl CodexClient {
             }
             pending.insert(key.clone(), tx);
         }
+        if resume_timing {
+            self.inner
+                .timed_resume_requests
+                .lock()
+                .unwrap()
+                .insert(key.clone());
+        }
         let message = if params.is_null() {
             json!({"id": id, "method": method})
         } else {
@@ -906,18 +941,21 @@ impl CodexClient {
         };
         if let Err(error) = self.write(&message) {
             self.inner.pending.lock().unwrap().remove(&key);
+            self.inner
+                .timed_resume_requests
+                .lock()
+                .unwrap()
+                .remove(&key);
             return Err(error);
         }
         let received = rx.recv_timeout(self.inner.request_timeout);
         self.inner.pending.lock().unwrap().remove(&key);
+        self.inner
+            .timed_resume_requests
+            .lock()
+            .unwrap()
+            .remove(&key);
         let result = received.map_err(|_| CodexError::Timeout(format!("{method} timed out")))?;
-        let resume_timing = method == "thread/resume"
-            && std::env::var_os("NICKEL_CODEX_RESUME_TIMING").is_some_and(|value| {
-                matches!(
-                    value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            });
         if std::env::var_os("NICKEL_CODEX_TIMING").is_some() || resume_timing {
             eprintln!(
                 "nickel-codex timing: method={method} elapsed_ms={:.3} success={}",
@@ -926,6 +964,24 @@ impl CodexClient {
             );
         }
         result
+    }
+
+    fn record_resume_decode(&self, value: &Value, elapsed: Duration) {
+        let Some(id) = value.get("id").and_then(request_id) else {
+            return;
+        };
+        if self
+            .inner
+            .timed_resume_requests
+            .lock()
+            .unwrap()
+            .contains(&id)
+        {
+            eprintln!(
+                "nickel-codex timing: method=thread/resume json_decode_ms={:.3}",
+                elapsed.as_secs_f64() * 1_000.0
+            );
+        }
     }
 
     fn notify(&self, method: &str, params: Value) -> Result<(), CodexError> {
@@ -963,7 +1019,7 @@ impl CodexClient {
         }
     }
 
-    fn handle(&self, value: Value) {
+    fn handle(&self, mut value: Value) {
         if matches!(
             self.state(),
             ConnectionState::Failed | ConnectionState::Stopped
@@ -974,10 +1030,14 @@ impl CodexClient {
             if value.get("method").is_some() {
                 self.handle_server_request(id, &value);
             } else if let Some(sender) = self.inner.pending.lock().unwrap().remove(&id) {
-                let result = value.get("error").map_or_else(
-                    || Ok(value.get("result").cloned().unwrap_or(Value::Null)),
-                    |error| Err(CodexError::Protocol(error.to_string())),
-                );
+                let result = if let Some(error) = value.get("error") {
+                    Err(CodexError::Protocol(error.to_string()))
+                } else {
+                    Ok(value
+                        .get_mut("result")
+                        .map(Value::take)
+                        .unwrap_or(Value::Null))
+                };
                 let _ = sender.send(result);
             } else {
                 self.publish(EventKind::Inconsistency {
@@ -2253,8 +2313,16 @@ impl CodexBackend for CodexClient {
     }
     fn resume_thread(&self, id: ThreadId) -> Result<Thread, CodexError> {
         let value = self.request("thread/resume", json!({"threadId": id.0}))?;
-        parse_thread(value.get("thread").unwrap_or(&value))
-            .ok_or_else(|| CodexError::Protocol("thread/resume omitted thread".into()))
+        let projection_started = std::time::Instant::now();
+        let thread = parse_thread(value.get("thread").unwrap_or(&value))
+            .ok_or_else(|| CodexError::Protocol("thread/resume omitted thread".into()));
+        if resume_timing_enabled() {
+            eprintln!(
+                "nickel-codex timing: method=thread/resume projection_ms={:.3}",
+                projection_started.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
+        thread
     }
     fn start_turn(&self, request: StartTurn) -> Result<Turn, CodexError> {
         let thread_id = request.thread_id.clone();
@@ -3753,7 +3821,7 @@ mod tests {
         assert!(rejected(Some(Message::Text("not json".into()))).contains("malformed"));
         let oversized = serde_json::json!({
             "id": 1,
-            "result": {"padding": "x".repeat(8_388_609)},
+            "result": {"padding": "x".repeat(MAX_INBOUND_FRAME_BYTES)},
         })
         .to_string();
         assert!(rejected(Some(Message::Text(oversized.into()))).contains("frame exceeded limit"));

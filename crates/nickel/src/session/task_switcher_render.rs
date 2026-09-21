@@ -10,10 +10,10 @@ const MAX_CARDS: usize = 5;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BufferKey {
     pub(crate) candidates: Vec<WindowId>,
-    selected: usize,
-    output_size: (i32, i32),
-    preview_generation: u64,
-    theme_colors: [u32; 6],
+    pub(crate) selected: usize,
+    pub(crate) output_size: (i32, i32),
+    pub(crate) preview_generation: u64,
+    pub(crate) theme_colors: [u32; 6],
 }
 
 pub(crate) struct BufferCache {
@@ -136,7 +136,7 @@ pub(crate) fn buffer(
     Some((buffer, size.into()))
 }
 
-fn visible_range(count: usize, selected: usize) -> std::ops::Range<usize> {
+pub(crate) fn visible_range(count: usize, selected: usize) -> std::ops::Range<usize> {
     let visible = count.min(MAX_CARDS);
     let start = selected
         .saturating_sub(visible / 2)
@@ -144,27 +144,47 @@ fn visible_range(count: usize, selected: usize) -> std::ops::Range<usize> {
     start..start + visible
 }
 
-fn draw_contained_preview<D, S>(destination: &mut D, source: &S, viewport: (u32, u32, u32, u32))
-where
+pub(crate) fn contained_preview_bounds(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> (u32, u32, u32, u32) {
+    let bounds = nickel_ui::ImagePresentation::default().bounds(
+        nickel_ui::Rect::new(x as f32, y as f32, width as f32, height as f32),
+        nickel_ui::Size::new(source_width as f32, source_height as f32),
+    );
+    let fitted_width = bounds.size.width.round().clamp(0.0, width as f32) as u32;
+    let fitted_height = bounds.size.height.round().clamp(0.0, height as f32) as u32;
+    (
+        x + (width - fitted_width) / 2,
+        y + (height - fitted_height) / 2,
+        fitted_width,
+        fitted_height,
+    )
+}
+
+pub(crate) fn draw_contained_preview<D, S>(
+    destination: &mut D,
+    source: &S,
+    viewport: (u32, u32, u32, u32),
+) where
     D: image::GenericImage<Pixel = image::Rgba<u8>>,
     S: image::GenericImageView<Pixel = image::Rgba<u8>>,
 {
-    let bounds = nickel_ui::ImagePresentation::default().bounds(
-        nickel_ui::Rect::new(
-            viewport.0 as f32,
-            viewport.1 as f32,
-            viewport.2 as f32,
-            viewport.3 as f32,
-        ),
-        nickel_ui::Size::new(source.width() as f32, source.height() as f32),
+    let (x, y, width, height) = contained_preview_bounds(
+        viewport.0,
+        viewport.1,
+        viewport.2,
+        viewport.3,
+        source.width(),
+        source.height(),
     );
-    let width = bounds.size.width.round().clamp(0.0, viewport.2 as f32) as u32;
-    let height = bounds.size.height.round().clamp(0.0, viewport.3 as f32) as u32;
     if width == 0 || height == 0 {
         return;
     }
-    let x = viewport.0 + (viewport.2 - width) / 2;
-    let y = viewport.1 + (viewport.3 - height) / 2;
     let thumbnail =
         image::imageops::resize(source, width, height, image::imageops::FilterType::Triangle);
     image::imageops::overlay(destination, &thumbnail, i64::from(x), i64::from(y));
@@ -203,7 +223,7 @@ fn rgba(color: u32, alpha: u8) -> image::Rgba<u8> {
     ])
 }
 
-fn draw_memory_render_buffer(
+pub(crate) fn draw_memory_render_buffer(
     width: u32,
     height: u32,
     draw: impl FnOnce(&mut [u8]),

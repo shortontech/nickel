@@ -341,6 +341,31 @@ impl ChatController {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture_with_commands_and_events(
+        generation: u64,
+    ) -> (
+        Self,
+        nickel_codex::delivery::DeliveryReceiver<ControllerCommand>,
+        nickel_codex::delivery::DeliverySender<(u64, ControllerEvent)>,
+    ) {
+        let (commands, command_receiver) = nickel_codex::delivery::channel();
+        let (event_sender, events) = nickel_codex::delivery::channel();
+        (
+            Self {
+                generation,
+                commands,
+                events,
+                shutdown: Arc::new(AtomicBool::new(false)),
+                interrupt: Arc::new(AtomicBool::new(false)),
+                command_rejected: AtomicBool::new(false),
+                worker: None,
+            },
+            command_receiver,
+            event_sender,
+        )
+    }
+
     pub fn spawn(mode: BackendMode) -> Self {
         Self::spawn_generation_with_scope(mode, 1, SnapshotScope::Full)
     }
