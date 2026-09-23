@@ -145,17 +145,7 @@ impl LauncherApplication {
     }
 
     pub(crate) fn preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
-        if self.launcher.mode() != LauncherMode::Dashboard {
-            return maximum;
-        }
-        let applications = dashboard_applications(&self.launcher);
-        let geometry = dashboard_geometry(
-            &self.launcher,
-            &applications,
-            &launcher_semantic_theme(self.palette),
-            maximum,
-        );
-        (geometry.width.ceil() as u32, geometry.height.ceil() as u32)
+        preferred_launcher_surface_size(&self.launcher, self.palette, maximum)
     }
 
     pub fn sync(&mut self, launcher: &Launcher, palette: ThemePalette, status: Option<String>) {
@@ -176,6 +166,24 @@ impl LauncherApplication {
         self.reading_direction = Some(direction);
         self.dirty = true;
     }
+}
+
+pub(crate) fn preferred_launcher_surface_size(
+    launcher: &Launcher,
+    palette: ThemePalette,
+    maximum: (u32, u32),
+) -> (u32, u32) {
+    if launcher.mode() != LauncherMode::Dashboard {
+        return maximum;
+    }
+    let applications = dashboard_applications(launcher);
+    let geometry = dashboard_geometry(
+        launcher,
+        &applications,
+        &launcher_semantic_theme(palette),
+        maximum,
+    );
+    (geometry.width.ceil() as u32, geometry.height.ceil() as u32)
 }
 
 impl UiApplication for LauncherApplication {

@@ -53,6 +53,8 @@ pub use overlay::{
 pub use primitives::{
     ActionRegion, ArtworkPresentation, ItemPresentation, StatusRegion, SurfaceScaffold, ToolRegion,
 };
+#[cfg(target_os = "windows")]
+pub use runtime::run_with_adapter_on_any_thread;
 pub use runtime::{
     AdapterOutcome, Application, BoundedSemanticActionError, Completion, CompletionFailure,
     CompletionFailureKind, ControllerExecutionDisposition, ControllerExecutionEvidence,

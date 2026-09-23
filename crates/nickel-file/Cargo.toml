@@ -6,10 +6,6 @@ autobins = false
 license.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "nickel-file"
-path = "src/bin/nickel-file.rs"
-
 [dependencies]
 image.workspace = true
 nickel-ui = { path = "../nickel-ui" }

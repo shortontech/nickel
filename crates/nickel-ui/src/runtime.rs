@@ -3973,6 +3973,26 @@ pub fn run_with_adapter<A: Application>(
     adapter: impl HostAdapter<A>,
 ) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
+    run_with_event_loop(application, adapter, event_loop)
+}
+
+#[cfg(target_os = "windows")]
+pub fn run_with_adapter_on_any_thread<A: Application>(
+    application: A,
+    adapter: impl HostAdapter<A>,
+) -> Result<(), Box<dyn Error>> {
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+
+    let mut builder = EventLoop::builder();
+    builder.with_any_thread(true);
+    run_with_event_loop(application, adapter, builder.build()?)
+}
+
+fn run_with_event_loop<A: Application>(
+    application: A,
+    adapter: impl HostAdapter<A>,
+    event_loop: EventLoop<()>,
+) -> Result<(), Box<dyn Error>> {
     let display = event_loop.owned_display_handle();
     let mut runtime = ApplicationRuntime::new(application, adapter, display);
     event_loop.run_app(&mut runtime)?;

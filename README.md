@@ -116,11 +116,7 @@ Launch Nickel Settings:
 cargo run -p nickel-settings
 ```
 
-Launch Nickel File:
-
-```bash
-cargo run -p nickel-file
-```
+Open Nickel File from the launcher or with `Windows` + `E` on Windows.
 
 Open a local Markdown document:
 

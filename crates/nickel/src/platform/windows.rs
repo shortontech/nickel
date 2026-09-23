@@ -92,12 +92,11 @@ use windows::{
                 SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SendNotifyMessageW, SetForegroundWindow,
                 SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
                 SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-                WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
-                WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
-                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
-                WindowFromPoint,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE,
+                WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
+                WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -1343,6 +1342,8 @@ static LAUNCHER_FOREGROUND_WINDOW: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static LAUNCHER_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
+static INTERNAL_WINDOW_THREADS: LazyLock<Mutex<HashSet<u32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 static SUPER_HOOK_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static NICKEL_WINDOW_SUPER_SIDES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -1412,7 +1413,7 @@ impl NativeMoveSizeHook {
                 Some(native_move_size_event),
                 0,
                 0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                WINEVENT_OUTOFCONTEXT,
             )
         };
         if move_size.is_invalid() {
@@ -1426,7 +1427,7 @@ impl NativeMoveSizeHook {
                 Some(native_window_destroyed),
                 0,
                 0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                WINEVENT_OUTOFCONTEXT,
             )
         };
         if window_destroy.is_invalid() {
@@ -2454,7 +2455,7 @@ fn handle_native_keyboard_hook(
     if matches!(
         key,
         Some(KeyCode::Tab | KeyCode::Backquote | KeyCode::PrintScreen)
-    ) && event.edge == KeyEdge::Pressed
+    ) && (event.edge == KeyEdge::Pressed || key == Some(KeyCode::PrintScreen))
         && alt_physically_held
         && let Ok(mut adapter) = windows_input_adapter().lock()
         && !adapter.modifier_held(AggregateModifier::Alt)
@@ -2475,6 +2476,19 @@ fn handle_native_keyboard_hook(
             if !super_edge && unsafe { GetAsyncKeyState(0x5b) >= 0 && GetAsyncKeyState(0x5c) >= 0 }
             {
                 outcomes.extend(adapter.reconcile_modifier_release(AggregateModifier::Super));
+            }
+            // Windows can deliver Print Screen as a release without a press. Recover the
+            // pressed shortcut edge here, where the hook sees every foreground window.
+            if key == Some(KeyCode::PrintScreen)
+                && event.edge == KeyEdge::Released
+                && !event.injected
+                && !adapter.key_held(KeyCode::PrintScreen)
+            {
+                outcomes.extend(
+                    adapter
+                        .handle_key_code(KeyCode::PrintScreen, KeyEdge::Pressed)
+                        .outcomes,
+                );
             }
             outcomes.extend(
                 adapter
@@ -2674,6 +2688,35 @@ struct ForeignWindowAtPoint {
     found: HWND,
 }
 
+pub struct InternalWindowThreadGuard(u32);
+
+pub fn register_internal_window_thread() -> InternalWindowThreadGuard {
+    let thread_id = unsafe { GetCurrentThreadId() };
+    if let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
+        threads.insert(thread_id);
+    }
+    InternalWindowThreadGuard(thread_id)
+}
+
+impl Drop for InternalWindowThreadGuard {
+    fn drop(&mut self) {
+        if let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
+            threads.remove(&self.0);
+        }
+    }
+}
+
+fn draggable_window_owner(window: HWND, nickel_process: u32) -> bool {
+    let mut process_id = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
+    process_id != 0
+        && thread_id != 0
+        && (process_id != nickel_process
+            || INTERNAL_WINDOW_THREADS
+                .lock()
+                .is_ok_and(|threads| threads.contains(&thread_id)))
+}
+
 unsafe extern "system" fn find_foreign_window_at_point(window: HWND, state: LPARAM) -> BOOL {
     let state = unsafe { &mut *(state.0 as *mut ForeignWindowAtPoint) };
     if !unsafe { IsWindowVisible(window).as_bool() }
@@ -2681,9 +2724,7 @@ unsafe extern "system" fn find_foreign_window_at_point(window: HWND, state: LPAR
     {
         return BOOL(1);
     }
-    let mut process_id = 0;
-    unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
-    if process_id == 0 || process_id == state.nickel_process {
+    if !draggable_window_owner(window, state.nickel_process) {
         return BOOL(1);
     }
     let mut rectangle = RECT::default();
@@ -2702,12 +2743,8 @@ unsafe extern "system" fn find_foreign_window_at_point(window: HWND, state: LPAR
 fn foreign_window_at_point(point: POINT) -> Option<HWND> {
     let nickel_process = unsafe { GetCurrentProcessId() };
     let direct = unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) };
-    if !direct.is_invalid() {
-        let mut process_id = 0;
-        unsafe { GetWindowThreadProcessId(direct, Some(&mut process_id)) };
-        if process_id != 0 && process_id != nickel_process {
-            return Some(direct);
-        }
+    if !direct.is_invalid() && draggable_window_owner(direct, nickel_process) {
+        return Some(direct);
     }
     let mut state = ForeignWindowAtPoint {
         point,
@@ -2821,6 +2858,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         return HookDisposition::Forward;
     }
     let physical_super = event.super_physically_held;
+    let physical_alt = unsafe { GetAsyncKeyState(0x12) < 0 };
     let (super_held, gesture, reconciled) = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
@@ -2842,17 +2880,25 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         })
         .unwrap_or_default();
     send_hotkey_outcomes(reconciled);
+    let gesture = gesture.or_else(|| {
+        physical_alt.then_some(match event.kind {
+            NativePointerKind::PrimaryPressed => SuperPointerGesture::Move,
+            NativePointerKind::SecondaryPressed => SuperPointerGesture::Resize,
+            _ => unreachable!("a pointer gesture starts on a button press"),
+        })
+    });
     let chord_started = gesture.is_some();
     tracing::debug!(
         super_held,
         physical_super,
+        physical_alt,
         chord_started,
         button = if event.kind == NativePointerKind::PrimaryPressed {
             "left"
         } else {
             "right"
         },
-        "Super mouse gesture candidate"
+        "modifier mouse gesture candidate"
     );
     if !chord_started {
         return HookDisposition::Forward;
@@ -2865,14 +2911,6 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     let Some(target) = foreign_window_at_point(point) else {
         return HookDisposition::Forward;
     };
-    let mut process_id = 0;
-    unsafe {
-        GetWindowThreadProcessId(target, Some(&mut process_id));
-    }
-    if process_id == unsafe { GetCurrentProcessId() } {
-        return HookDisposition::Forward;
-    }
-
     let Some(fingerprint) = native_window_fingerprint(target.0 as isize) else {
         return HookDisposition::Forward;
     };
@@ -3823,12 +3861,12 @@ pub fn configure_screenshot_window(window: &impl raw_window_handle::HasWindowHan
         );
         SetWindowPos(
             hwnd,
-            None,
+            Some(HWND_TOPMOST),
             0,
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
         .is_ok()
     }

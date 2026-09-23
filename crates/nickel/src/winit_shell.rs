@@ -514,6 +514,8 @@ pub struct WinitShell {
     options: ShellOptions,
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
+    #[cfg(target_os = "windows")]
+    launcher_surface_size: Option<(u32, u32)>,
     next_surface_diagnostic_generation: u64,
     #[cfg(target_os = "windows")]
     shortcut_diagnostics: Option<crate::platform::WindowsShortcutDiagnosticSource>,
@@ -566,6 +568,8 @@ impl WinitShell {
             options,
             primary_output_name: None,
             active_output_name: None,
+            #[cfg(target_os = "windows")]
+            launcher_surface_size: None,
             next_surface_diagnostic_generation: 0,
             #[cfg(target_os = "windows")]
             shortcut_diagnostics: None,
@@ -941,6 +945,10 @@ impl WinitShell {
     }
 
     pub fn configure_launcher_surface(&mut self, compact_size: Option<(u32, u32)>) {
+        #[cfg(target_os = "windows")]
+        {
+            self.launcher_surface_size = compact_size;
+        }
         let launchers = self
             .surfaces
             .iter()
@@ -951,8 +959,13 @@ impl WinitShell {
             })
             .collect::<Vec<_>>();
         for index in launchers {
-            if let Some((width, height)) = compact_size {
-                if self.surfaces[index].window.size() != (width, height) {
+            if compact_size.is_some() {
+                #[cfg(target_os = "windows")]
+                self.relocate_to_active_output(index);
+                #[cfg(not(target_os = "windows"))]
+                if let Some((width, height)) = compact_size
+                    && self.surfaces[index].window.size() != (width, height)
+                {
                     let _ = self.surfaces[index]
                         .window
                         .request_inner_size(LogicalSize::new(width, height));
@@ -961,6 +974,16 @@ impl WinitShell {
                 self.relocate_to_active_output(index);
             }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn launcher_maximum_size(&self) -> Option<(u32, u32)> {
+        let index = self.active_output_index()?;
+        let geometry = self.displays.get(index)?.0;
+        Some((
+            920.min(geometry.width),
+            680.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
+        ))
     }
 
     fn active_output_index(&self) -> Option<usize> {
@@ -989,6 +1012,22 @@ impl WinitShell {
             return;
         }
         let (_, x, y, width, height, _) = surface_geometry(role, geometry, self.options.panel_edge);
+        #[cfg(target_os = "windows")]
+        let (x, y, width, height) = if role == SurfaceRole::Launcher
+            && let Some((preferred_width, preferred_height)) = self.launcher_surface_size
+        {
+            let width = preferred_width.min(width);
+            let height = preferred_height.min(height);
+            let y = match self.options.panel_edge {
+                PanelEdge::Top => geometry.y + PANEL_HEIGHT as i32 + 8,
+                PanelEdge::Bottom => {
+                    geometry.y + geometry.height as i32 - PANEL_HEIGHT as i32 - height as i32 - 8
+                }
+            };
+            (geometry.x + 18, y, width, height)
+        } else {
+            (x, y, width, height)
+        };
         let surface = &mut self.surfaces[index];
         surface.display_index = display_index;
         surface.output_name = output_name;
@@ -1874,6 +1913,21 @@ impl WinitShell {
                     let surface = surfaces[index].id;
                     #[cfg(target_os = "windows")]
                     if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+                        if key.physical_key
+                            == winit::keyboard::PhysicalKey::Code(
+                                winit::keyboard::KeyCode::PrintScreen,
+                            )
+                            && !key.repeat
+                        {
+                            crate::platform::handle_focused_shortcut(
+                                nickel_input::KeyCode::PrintScreen,
+                                if key.state == winit::event::ElementState::Pressed {
+                                    nickel_input::KeyEdge::Pressed
+                                } else {
+                                    nickel_input::KeyEdge::Released
+                                },
+                            );
+                        }
                         let super_side = match key.physical_key {
                             winit::keyboard::PhysicalKey::Code(
                                 winit::keyboard::KeyCode::SuperLeft,

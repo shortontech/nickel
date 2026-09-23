@@ -39,6 +39,19 @@ fn set_nickel_file_icon(window: &Window) {
 pub struct FileHostAdapter {
     sync_requested: bool,
     drop_hover_deadline: Option<Instant>,
+    #[cfg(target_os = "windows")]
+    focused_shortcut: Option<std::sync::Arc<dyn Fn(KeyCode, KeyEdge) + Send + Sync>>,
+}
+
+#[cfg(target_os = "windows")]
+impl FileHostAdapter {
+    pub fn with_focused_shortcut_handler(
+        mut self,
+        shortcut: impl Fn(KeyCode, KeyEdge) + Send + Sync + 'static,
+    ) -> Self {
+        self.focused_shortcut = Some(std::sync::Arc::new(shortcut));
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -575,11 +588,43 @@ impl Default for FileHostAdapter {
         Self {
             sync_requested: true,
             drop_hover_deadline: None,
+            #[cfg(target_os = "windows")]
+            focused_shortcut: None,
         }
     }
 }
 
 impl HostAdapter<FileApp> for FileHostAdapter {
+    #[cfg(target_os = "windows")]
+    fn event(
+        &mut self,
+        _host: &mut UiHost<FileApp>,
+        event: &winit::event::WindowEvent,
+        _services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+        if let winit::event::WindowEvent::KeyboardInput { event: key, .. } = event
+            && let winit::keyboard::PhysicalKey::Code(physical_key) = key.physical_key
+            && let Some(key_code) = match physical_key {
+                winit::keyboard::KeyCode::PrintScreen => Some(KeyCode::PrintScreen),
+                winit::keyboard::KeyCode::SuperLeft => Some(KeyCode::SuperLeft),
+                winit::keyboard::KeyCode::SuperRight => Some(KeyCode::SuperRight),
+                _ => None,
+            }
+            && !key.repeat
+            && let Some(shortcut) = &self.focused_shortcut
+        {
+            shortcut(
+                key_code,
+                if key.state == winit::event::ElementState::Pressed {
+                    KeyEdge::Pressed
+                } else {
+                    KeyEdge::Released
+                },
+            );
+        }
+        Ok(AdapterOutcome::default())
+    }
+
     fn controller_fence(&mut self, _services: HostServices<'_>) -> ControllerFence {
         session_controller_fence()
     }

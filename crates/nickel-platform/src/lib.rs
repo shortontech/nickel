@@ -221,10 +221,12 @@ fn nickel_terminal_command(path: &std::path::Path) -> std::process::Command {
 fn nickel_file_command(path: &std::path::Path) -> std::process::Command {
     let executable = std::env::current_exe().unwrap_or_else(|_| "nickel".into());
     #[cfg(target_os = "windows")]
-    let executable = executable.with_file_name("nickel-file.exe");
+    let executable = executable.with_file_name("nickel.exe");
     #[cfg(not(target_os = "windows"))]
     let executable = executable.with_file_name("nickel-file");
     let mut command = std::process::Command::new(executable);
+    #[cfg(target_os = "windows")]
+    command.arg("--nickel-file-window");
     command.arg(path);
     command
 }
@@ -284,8 +286,11 @@ mod external_url_tests {
     use super::{nickel_file_command, nickel_terminal_command};
 
     #[test]
-    fn directories_delegate_to_the_sibling_nickel_file() {
+    fn directories_delegate_to_the_platform_file_host() {
         let command = nickel_file_command(Path::new("/tmp/example folder"));
+        #[cfg(target_os = "windows")]
+        let expected_program = "nickel.exe".to_owned();
+        #[cfg(not(target_os = "windows"))]
         let expected_program = format!("nickel-file{}", std::env::consts::EXE_SUFFIX);
         assert_eq!(
             Path::new(command.get_program())
@@ -293,10 +298,14 @@ mod external_url_tests {
                 .and_then(|name| name.to_str()),
             Some(expected_program.as_str())
         );
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            [Path::new("/tmp/example folder").as_os_str()]
-        );
+        #[cfg(target_os = "windows")]
+        let expected_args = [
+            std::ffi::OsStr::new("--nickel-file-window"),
+            Path::new("/tmp/example folder").as_os_str(),
+        ];
+        #[cfg(not(target_os = "windows"))]
+        let expected_args = [Path::new("/tmp/example folder").as_os_str()];
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected_args);
     }
 
     #[test]

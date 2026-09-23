@@ -2433,14 +2433,8 @@ impl LiveShell {
             .then_some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT))
     }
 
-    pub(crate) fn launcher_preferred_surface_size(&mut self, maximum: (u32, u32)) -> (u32, u32) {
-        let status = self.launcher_status_text();
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, status);
-        self.launcher_host
-            .application()
-            .preferred_surface_size(maximum)
+    pub(crate) fn launcher_preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
+        crate::launcher_view::preferred_launcher_surface_size(&self.launcher, self.palette, maximum)
     }
 
     pub fn next_host_deadline(&self) -> Option<Instant> {

@@ -1427,6 +1427,14 @@ fn prewarm_role(
 }
 
 fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
+    #[cfg(target_os = "windows")]
+    if let Some(maximum) = shell.launcher_maximum_size() {
+        let size = state
+            .launcher_surface_size()
+            .unwrap_or_else(|| state.launcher_preferred_surface_size(maximum));
+        shell.configure_launcher_surface(Some(size));
+    }
+    #[cfg(not(target_os = "windows"))]
     shell.configure_launcher_surface(state.launcher_surface_size());
     let surfaces = shell
         .surfaces()
@@ -1506,11 +1514,11 @@ fn session_visibility_role(role: SurfaceRole) -> Option<nickel_session_protocol:
 fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
     for role in [
         SurfaceRole::Lock,
-        SurfaceRole::Screenshot,
         SurfaceRole::Launcher,
         SurfaceRole::ControlCenter,
         SurfaceRole::CodexProjectMenu,
         SurfaceRole::WindowPreview,
+        SurfaceRole::Screenshot,
     ] {
         #[cfg(target_os = "linux")]
         if role == SurfaceRole::Launcher {
@@ -2284,6 +2292,15 @@ pub fn run() -> Result<(), String> {
     {
         return windows_launch_broker::run_broker_child();
     }
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-file-window")) {
+        let launch = nickel_file::FileLaunch::from_args_os(std::env::args_os().skip(2));
+        return nickel_ui::run_with_adapter(
+            launch.into_app(),
+            nickel_file::FileHostAdapter::default(),
+        )
+        .map_err(|error| error.to_string());
+    }
     #[cfg(target_os = "linux")]
     platform::prepare_audio_environment();
     let command_line = CommandLineOptions::parse(std::env::args_os().skip(1))?;
@@ -2776,17 +2793,6 @@ pub fn run() -> Result<(), String> {
                 focused: false,
             }) if shell
                 .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
-            {
-                if state.hide_overlay(SurfaceRole::Screenshot) {
-                    sync_visibility(&mut shell, &state);
-                }
-            }
-            Some(ShellEvent::FocusChanged {
-                surface,
-                focused: false,
-            }) if shell
-                .surface(surface)
                 .is_some_and(|entry| entry.role() == SurfaceRole::Launcher) =>
             {
                 shell.stop_text_input(surface);
@@ -2931,10 +2937,18 @@ pub fn run() -> Result<(), String> {
         if deadline_outcome.visibility_changed {
             sync_visibility(&mut shell, &state);
         }
-        if deadline_outcome.capture_screenshot && state.capture_screenshot() {
-            sync_visibility(&mut shell, &state);
-            focus_visible_overlay(&mut shell, &state);
-            render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
+        if deadline_outcome.capture_screenshot {
+            let captured = state.capture_screenshot();
+            tracing::debug!(
+                captured,
+                visible = state.surface_visible(SurfaceRole::Screenshot),
+                "screenshot capture deadline handled"
+            );
+            if captured {
+                sync_visibility(&mut shell, &state);
+                focus_visible_overlay(&mut shell, &state);
+                render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
+            }
         }
         for role in deadline_outcome.redraw {
             if state.surface_visible(role) {

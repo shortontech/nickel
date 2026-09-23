@@ -49,7 +49,7 @@ fn home_directory() -> PathBuf {
 fn nickel_file_executable() -> PathBuf {
     let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from("nickel"));
     #[cfg(target_os = "windows")]
-    return executable.with_file_name("nickel-file.exe");
+    return executable.with_file_name("nickel.exe");
     #[cfg(not(target_os = "windows"))]
     executable.with_file_name("nickel-file")
 }
@@ -70,7 +70,7 @@ mod tests {
         #[cfg(target_os = "windows")]
         assert_eq!(
             executable.file_name().and_then(|name| name.to_str()),
-            Some("nickel-file.exe")
+            Some("nickel.exe")
         );
         #[cfg(not(target_os = "windows"))]
         assert_eq!(

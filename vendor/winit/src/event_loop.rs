@@ -10,7 +10,9 @@
 use std::marker::PhantomData;
 #[cfg(any(x11_platform, wayland_platform))]
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(not(windows_platform))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{error, fmt};
 
 #[cfg(not(web_platform))]
@@ -66,7 +68,15 @@ pub struct EventLoopBuilder<T: 'static> {
     _p: PhantomData<T>,
 }
 
+#[cfg(not(windows_platform))]
 static EVENT_LOOP_CREATED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows_platform)]
+thread_local! {
+    // Nickel owns shell and file windows on separate Windows UI threads. Win32
+    // message queues are thread-local, so each thread may own one event loop.
+    static EVENT_LOOP_CREATED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 impl EventLoopBuilder<()> {
     /// Start building a new event loop.
@@ -115,7 +125,11 @@ impl<T> EventLoopBuilder<T> {
     pub fn build(&mut self) -> Result<EventLoop<T>, EventLoopError> {
         let _span = tracing::debug_span!("winit::EventLoopBuilder::build").entered();
 
-        if EVENT_LOOP_CREATED.swap(true, Ordering::Relaxed) {
+        #[cfg(not(windows_platform))]
+        let already_created = EVENT_LOOP_CREATED.swap(true, Ordering::Relaxed);
+        #[cfg(windows_platform)]
+        let already_created = EVENT_LOOP_CREATED.with(|created| created.replace(true));
+        if already_created {
             return Err(EventLoopError::RecreationAttempt);
         }
 
