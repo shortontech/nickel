@@ -6645,32 +6645,39 @@ impl LiveShell {
                 self.codex_project_menu_visible = true;
             }
             LauncherShellEffect::OpenSettings(destination) => {
-                let preferred = match destination {
-                    crate::launcher::SettingsDestination::Nickel
-                    | crate::launcher::SettingsDestination::KeyboardShortcuts
-                    | crate::launcher::SettingsDestination::About => "Nickel Settings",
+                let screen = match destination {
+                    crate::launcher::SettingsDestination::Nickel => "appearance",
+                    crate::launcher::SettingsDestination::KeyboardShortcuts => "keyboard-shortcuts",
+                    crate::launcher::SettingsDestination::About => "about",
                 };
-                let id = self
-                    .launcher
-                    .applications()
-                    .find(|application| application.name() == preferred)
-                    .map(|application| application.id().to_owned());
-                if let Some(id) = id {
+                #[cfg(target_os = "windows")]
+                {
+                    let result = std::env::current_exe()
+                        .map(|path| path.with_file_name("nickel-settings.exe"))
+                        .and_then(|path| {
+                            std::process::Command::new(path)
+                                .args(["--screen", screen])
+                                .spawn()
+                        });
+                    match result {
+                        Ok(_) => self.set_launcher_visible(false),
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to launch Nickel Settings");
+                            self.launcher_status =
+                                Some(format!("Could not launch Nickel Settings: {error}"));
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
                     let application = self
                         .launcher
                         .applications()
-                        .find(|application| application.id() == id)
+                        .find(|application| application.name() == "Nickel Settings")
                         .cloned();
                     if let Some(application) = application {
-                        let screen = match destination {
-                            crate::launcher::SettingsDestination::Nickel => Some("appearance"),
-                            crate::launcher::SettingsDestination::KeyboardShortcuts => {
-                                Some("keyboard-shortcuts")
-                            }
-                            crate::launcher::SettingsDestination::About => Some("about"),
-                        };
-                        let application = match (screen, application.launch_command()) {
-                            (Some(screen), Some(command)) => {
+                        let application = match application.launch_command() {
+                            Some(command) => {
                                 let mut command = command.to_vec();
                                 command.extend(["--screen".into(), screen.into()]);
                                 Application::new(
