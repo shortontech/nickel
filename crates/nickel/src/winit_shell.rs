@@ -27,7 +27,11 @@ use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Window, WindowId};
 
-use crate::softbuffer_presenter::{PresentationGeometry, SharedGraphics, SoftbufferPresenter};
+use crate::softbuffer_presenter::PresentationGeometry;
+#[cfg(not(target_os = "windows"))]
+use crate::softbuffer_presenter::{SharedGraphics, SoftbufferPresenter};
+#[cfg(target_os = "windows")]
+use crate::wgpu_presenter::{SharedGraphics, SoftbufferPresenter};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -1498,7 +1502,18 @@ impl WinitShell {
                 .map_err(|error| error.to_string())?;
             // SAFETY: `WinitShell` drops all surfaces and shared graphics before
             // its winit event loop, which owns this display connection.
-            self.graphics = Some(unsafe { SharedGraphics::new(display) }?);
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.graphics = Some(unsafe { SharedGraphics::new(display) }?);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let window = self.surfaces[index]
+                    .window()
+                    .window_handle()
+                    .map_err(|error| error.to_string())?;
+                self.graphics = Some(unsafe { SharedGraphics::new(display, window) }?);
+            }
         }
         let graphics = self.graphics.as_ref().expect("shared renderer initialized");
         let entry = &mut self.surfaces[index];
