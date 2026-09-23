@@ -32,7 +32,10 @@ With Nickel running and Explorer absent, Armoury Crate SE's AUMID reached
 `CoCreateInstance` successfully in both local-server and in-process modes.
 `ActivateApplication` then blocked until the probe's 20-second timeout in both modes.
 Nickel remained responsive. This session was started before the Winlogon shell
-registry value was changed to Nickel; compare again after a new sign-in.
+registry value was changed to Nickel. After signing out and back in with Nickel
+as the Winlogon shell, the local-server call again reached `CoCreateInstance`
+and timed out in `ActivateApplication` after 20 seconds. Explorer remained absent
+and Nickel remained responsive. Changing the Winlogon shell did not fix activation.
 
 App activation can bring the selected app to the foreground. Use Calculator for the
 first comparison; close it before switching sessions.

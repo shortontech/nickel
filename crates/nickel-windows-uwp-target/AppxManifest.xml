@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  IgnorableNamespaces="uap">
+  <Identity Name="Shorton.NickelUwpTarget" Publisher="CN=Nickel Fixture" Version="1.0.0.0" />
+  <Properties>
+    <DisplayName>Nickel UWP Target</DisplayName>
+    <PublisherDisplayName>Nickel Fixture</PublisherDisplayName>
+    <Logo>Logo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="nickel-windows-uwp-target.exe" EntryPoint="NickelUwpTarget.App">
+      <uap:VisualElements
+        DisplayName="Nickel UWP Target"
+        Description="Packaged activation target for Nickel"
+        Square150x150Logo="Logo.png"
+        Square44x44Logo="Logo.png"
+        BackgroundColor="transparent">
+        <uap:SplashScreen Image="Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+</Package>

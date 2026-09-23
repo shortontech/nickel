@@ -11,6 +11,8 @@ members = [
     "crates/nickel-ui-testkit",
     "crates/nickel-ui-workbench",
     "crates/nickel-windows-app-probe",
+    "crates/nickel-windows-frame-probe",
+    "crates/nickel-windows-uwp-target",
     "crates/ui-declarative-macros",
     "crates/nickel",
     "crates/nickel-core",

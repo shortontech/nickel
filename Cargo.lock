@@ -3616,6 +3616,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-windows-frame-probe"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
+name = "nickel-windows-uwp-target"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
