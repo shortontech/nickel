@@ -3534,6 +3534,9 @@ pub fn launch_application(application: &Application) -> Result<Option<u32>, Laun
         .launch_command()
         .and_then(|command| command.split_first())
         .ok_or_else(|| LaunchError::MissingTarget(application.name().to_owned()))?;
+    if application.id().starts_with("windows-app:") {
+        return activate_packaged_application(target, arguments);
+    }
     if let Some(capture) =
         crate::windows_application_registry::native::LaunchCapture::prepare(application)
     {
@@ -3541,6 +3544,48 @@ pub fn launch_application(application: &Application) -> Result<Option<u32>, Laun
     }
     shell_execute(target, arguments)?;
     Ok(None)
+}
+
+fn activate_packaged_application(
+    app_user_model_id: &str,
+    arguments: &[String],
+) -> Result<Option<u32>, LaunchError> {
+    use windows::Win32::{
+        System::Com::CLSCTX_LOCAL_SERVER,
+        UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
+    };
+
+    // SAFETY: This thread uses COM only for the duration of the synchronous
+    // activation. If it already has an apartment, CoCreateInstance uses that
+    // apartment and only successful initialization is balanced below.
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| {
+        let manager: IApplicationActivationManager =
+            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
+                .map_err(|error| LaunchError::Platform(error.to_string()))?;
+        let app_id: Vec<u16> = app_user_model_id.encode_utf16().chain([0]).collect();
+        let argument_line = arguments
+            .iter()
+            .map(|argument| quote_windows_argument(argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let argument_line: Vec<u16> = argument_line.encode_utf16().chain([0]).collect();
+        let argument_pointer = if arguments.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(argument_line.as_ptr())
+        };
+        let process_id = unsafe {
+            manager.ActivateApplication(PCWSTR(app_id.as_ptr()), argument_pointer, AO_NONE)
+        }
+        .map_err(|error| LaunchError::Platform(error.to_string()))?;
+        Ok((process_id != 0).then_some(process_id))
+    })();
+    if initialized {
+        // SAFETY: Balances the successful CoInitializeEx call above.
+        unsafe { CoUninitialize() };
+    }
+    result
 }
 
 fn shell_execute_observed(
