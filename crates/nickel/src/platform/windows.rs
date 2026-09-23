@@ -85,18 +85,18 @@ use windows::{
                 HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON, IsIconic,
                 IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
                 NID_INTEGRATED_TOUCH, NID_READY, PostMessageW, RegisterClassW,
-                RegisterShellHookWindow, RegisterWindowMessageW, SC_MOVE, SC_SIZE, SM_CXICON,
-                SM_CYICON, SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE,
-                SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-                SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-                SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SendNotifyMessageW, SetForegroundWindow,
-                SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE,
-                WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
-                WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
+                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON, SM_CYICON,
+                SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
+                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE,
+                WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN,
+                WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+                WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -1393,6 +1393,16 @@ struct NativeSystemDrag {
     completion_posted: bool,
 }
 static NATIVE_SYSTEM_DRAG: Mutex<Option<NativeSystemDrag>> = Mutex::new(None);
+#[derive(Clone, Copy)]
+struct PointerWindowDrag {
+    fingerprint: NativeWindowFingerprint,
+    button: u16,
+    start: POINT,
+    rectangle: RECT,
+    resize_edge: Option<u32>,
+    placement_failed: bool,
+}
+static POINTER_WINDOW_DRAG: Mutex<Option<PointerWindowDrag>> = Mutex::new(None);
 static NATIVE_SYSTEM_DRAG_TOMBSTONES: LazyLock<Mutex<HashMap<isize, NativeSystemDrag>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE: std::sync::atomic::AtomicBool =
@@ -2653,7 +2663,7 @@ fn complete_native_system_drag(button: u16) -> bool {
     }
     drag.released = true;
     drag.released_at = unsafe { GetTickCount64() };
-    if drag.invalidated {
+    if drag.invalidated || !drag.active {
         delegated.take();
         return true;
     }
@@ -2760,6 +2770,106 @@ fn foreign_window_at_point(point: POINT) -> Option<HWND> {
     (!state.found.is_invalid()).then_some(state.found)
 }
 
+fn update_pointer_window_drag(event: NativePointerEvent, point: POINT) -> Option<HookDisposition> {
+    let mut pending = POINTER_WINDOW_DRAG.lock().ok()?;
+    let drag = pending.as_ref().copied()?;
+    if native_window_fingerprint(drag.fingerprint.window) != Some(drag.fingerprint) {
+        pending.take();
+        return Some(HookDisposition::Forward);
+    }
+    let released = matches!(
+        (drag.button, event.kind),
+        (1, NativePointerKind::PrimaryReleased) | (2, NativePointerKind::SecondaryReleased)
+    );
+    if released {
+        pending.take();
+        return Some(HookDisposition::Suppress);
+    }
+    let pressed_again = matches!(
+        (drag.button, event.kind),
+        (1, NativePointerKind::PrimaryPressed) | (2, NativePointerKind::SecondaryPressed)
+    );
+    if pressed_again {
+        // A second press proves the first release was missed. Let this press
+        // start a fresh gesture through the normal pointer path.
+        pending.take();
+        return None;
+    }
+    if event.kind != NativePointerKind::Moved {
+        return Some(HookDisposition::Forward);
+    }
+    if drag.placement_failed {
+        return Some(HookDisposition::Forward);
+    }
+    let rectangle = pointer_drag_rectangle(drag.rectangle, drag.start, point, drag.resize_edge);
+    let window = HWND(drag.fingerprint.window as *mut c_void);
+    // SAFETY: the target HWND is fingerprinted immediately above. A raced teardown returns an
+    // error, and the asynchronous flag prevents a stalled target thread from blocking the hook.
+    if unsafe {
+        SetWindowPos(
+            window,
+            None,
+            rectangle.left,
+            rectangle.top,
+            rectangle.right.saturating_sub(rectangle.left),
+            rectangle.bottom.saturating_sub(rectangle.top),
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        )
+    }
+    .is_err()
+    {
+        pending
+            .as_mut()
+            .expect("pointer drag remains active")
+            .placement_failed = true;
+        tracing::warn!(
+            window = drag.fingerprint.window,
+            "pointer window drag placement failed"
+        );
+    }
+    Some(HookDisposition::Forward)
+}
+
+fn pointer_drag_rectangle(
+    rectangle: RECT,
+    start: POINT,
+    point: POINT,
+    resize_edge: Option<u32>,
+) -> RECT {
+    let dx = point.x.saturating_sub(start.x);
+    let dy = point.y.saturating_sub(start.y);
+    let mut left = rectangle.left;
+    let mut top = rectangle.top;
+    let mut right = rectangle.right;
+    let mut bottom = rectangle.bottom;
+    match resize_edge {
+        None => {
+            left = left.saturating_add(dx);
+            top = top.saturating_add(dy);
+            right = right.saturating_add(dx);
+            bottom = bottom.saturating_add(dy);
+        }
+        Some(edge) => {
+            if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
+                left = left.saturating_add(dx).min(right.saturating_sub(120));
+            } else if matches!(edge, HTRIGHT | HTTOPRIGHT | HTBOTTOMRIGHT) {
+                right = right.saturating_add(dx).max(left.saturating_add(120));
+            }
+            if matches!(edge, HTTOP | HTTOPLEFT | HTTOPRIGHT) {
+                top = top.saturating_add(dy).min(bottom.saturating_sub(80));
+            } else if matches!(edge, HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT) {
+                bottom = bottom.saturating_add(dy).max(top.saturating_add(80));
+            }
+        }
+    }
+    RECT {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
 fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     crate::windows_remote_control::observe_physical_pointer(event);
     if matches!(
@@ -2772,12 +2882,21 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     // Injected hook traffic is not the physical Windows pointer source and may
     // neither start, update, nor complete its operation binding.
     if event.injected {
+        if matches!(
+            event.kind,
+            NativePointerKind::PrimaryPressed | NativePointerKind::SecondaryPressed
+        ) {
+            tracing::debug!("modifier mouse gesture ignored injected pointer press");
+        }
         return HookDisposition::Forward;
     }
     let point = POINT {
         x: event.x,
         y: event.y,
     };
+    if let Some(disposition) = update_pointer_window_drag(event, point) {
+        return disposition;
+    }
     let released_button = match event.kind {
         NativePointerKind::PrimaryReleased => Some(1),
         NativePointerKind::SecondaryReleased => Some(2),
@@ -2903,102 +3022,47 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     if !chord_started {
         return HookDisposition::Forward;
     }
-    if !NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE.load(Ordering::Acquire) {
-        return HookDisposition::Forward;
-    }
     let gesture = gesture.expect("a started pointer chord has a typed gesture");
 
     let Some(target) = foreign_window_at_point(point) else {
+        tracing::debug!("modifier mouse gesture has no eligible window at pointer");
         return HookDisposition::Forward;
     };
     let Some(fingerprint) = native_window_fingerprint(target.0 as isize) else {
+        tracing::debug!("modifier mouse gesture could not identify target window");
         return HookDisposition::Forward;
     };
-    if NATIVE_SYSTEM_DRAG_TOMBSTONES
-        .lock()
-        .map_or(true, |tombstones| {
-            tombstones.contains_key(&(target.0 as isize))
-        })
+    tracing::debug!(
+        window = fingerprint.window,
+        process_id = fingerprint.process_id,
+        thread_id = fingerprint.thread_id,
+        x = point.x,
+        y = point.y,
+        "modifier mouse gesture selected native window"
+    );
+    let mut rectangle = RECT::default();
+    if unsafe { GetWindowRect(target, &mut rectangle) }.is_ok()
+        && let Ok(mut pending) = POINTER_WINDOW_DRAG.lock()
+        && pending.is_none()
     {
-        return HookDisposition::Forward;
-    }
-    if NATIVE_SYSTEM_DRAG
-        .lock()
-        .map_or(true, |delegated| delegated.is_some())
-    {
-        return HookDisposition::Forward;
-    }
-    let resize_edge =
-        (gesture == SuperPointerGesture::Resize).then(|| resize_hit_test(target, point));
-    if native_window_fingerprint(target.0 as isize) != Some(fingerprint) {
-        return HookDisposition::Forward;
-    }
-    let hit = native_system_drag_hit(gesture, resize_edge);
-    let screen_point =
-        LPARAM((((point.y as u32 & 0xffff) << 16) | (point.x as u32 & 0xffff)) as isize);
-    let button = if gesture == SuperPointerGesture::Move {
-        1
-    } else {
-        2
-    };
-    if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock() {
-        *delegated = Some(NativeSystemDrag {
+        *pending = Some(PointerWindowDrag {
             fingerprint,
-            button,
-            active: false,
-            released: false,
-            released_at: 0,
-            invalidated: false,
-            completion_posted: false,
+            button: if gesture == SuperPointerGesture::Move {
+                1
+            } else {
+                2
+            },
+            start: point,
+            rectangle,
+            resize_edge: (gesture == SuperPointerGesture::Resize)
+                .then(|| resize_hit_test(target, point)),
+            placement_failed: false,
         });
-    } else {
-        return HookDisposition::Forward;
+        tracing::debug!(?gesture, "started pointer window drag");
+        return HookDisposition::Suppress;
     }
-    unsafe {
-        let _ = ReleaseCapture();
-        let _ = SetForegroundWindow(target);
-    }
-    let target_value = target.0 as isize;
-    let system_command = if gesture == SuperPointerGesture::Move {
-        SC_MOVE | 2
-    } else {
-        SC_SIZE | native_resize_command_edge(hit)
-    };
-    if std::thread::Builder::new()
-        .name("nickel-native-move-size".into())
-        .spawn(move || unsafe {
-            // Run the foreign window's native modal move/size loop away from the low-level hook
-            // thread. The WinEvent hook remains the authority for start/end observations, while
-            // the pointer hook provides bounded release and cancellation handling.
-            let _ = SendMessageW(
-                HWND(target_value as *mut c_void),
-                WM_SYSCOMMAND,
-                Some(WPARAM(system_command as usize)),
-                Some(screen_point),
-            );
-        })
-        .is_err()
-    {
-        if let Ok(mut delegated) = NATIVE_SYSTEM_DRAG.lock() {
-            delegated.take();
-        }
-        return HookDisposition::Forward;
-    }
-    HookDisposition::Suppress
-}
-
-fn native_resize_command_edge(hit: u32) -> u32 {
-    match hit {
-        HTLEFT => 1,
-        HTRIGHT => 2,
-        HTTOP => 3,
-        HTTOPLEFT => 4,
-        HTTOPRIGHT => 5,
-        HTBOTTOM => 6,
-        HTBOTTOMLEFT => 7,
-        HTBOTTOMRIGHT => 8,
-        _ => 8,
-    }
+    tracing::debug!("modifier mouse gesture could not begin pointer window drag");
+    HookDisposition::Forward
 }
 
 fn native_system_drag_hit(gesture: SuperPointerGesture, resize_edge: Option<u32>) -> u32 {
@@ -5898,9 +5962,9 @@ mod tests {
         contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
         is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
         native_system_drag_hit, parse_windows_command, permits_contested_workflow,
-        project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
-        restore_legacy_icon_alpha, should_observe_tokenless_geometry, should_restore_on_activation,
-        unknown_suspension_within_bound, windows_pid_descends_from,
+        pointer_drag_rectangle, project_native_preview_diagnostics, project_windows_shortcuts,
+        rectangle_covers, restore_legacy_icon_alpha, should_observe_tokenless_geometry,
+        should_restore_on_activation, unknown_suspension_within_bound, windows_pid_descends_from,
     };
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
@@ -6305,6 +6369,50 @@ mod tests {
                 Some(super::HTBOTTOMRIGHT)
             ),
             super::HTBOTTOMRIGHT
+        );
+    }
+
+    #[test]
+    fn pointer_window_move_tracks_the_original_pointer_offset() {
+        let rectangle = pointer_drag_rectangle(
+            RECT {
+                left: 100,
+                top: 200,
+                right: 500,
+                bottom: 500,
+            },
+            POINT { x: 200, y: 250 },
+            POINT { x: 230, y: 275 },
+            None,
+        );
+        assert_eq!(
+            (
+                rectangle.left,
+                rectangle.top,
+                rectangle.right,
+                rectangle.bottom
+            ),
+            (130, 225, 530, 525)
+        );
+    }
+
+    #[test]
+    fn pointer_window_resize_keeps_the_opposite_corner_and_minimum_size() {
+        let anchor = RECT {
+            left: 100,
+            top: 200,
+            right: 500,
+            bottom: 500,
+        };
+        let resized = pointer_drag_rectangle(
+            anchor,
+            POINT { x: 105, y: 205 },
+            POINT { x: 450, y: 480 },
+            Some(super::HTTOPLEFT),
+        );
+        assert_eq!(
+            (resized.left, resized.top, resized.right, resized.bottom),
+            (380, 420, 500, 500)
         );
     }
 
