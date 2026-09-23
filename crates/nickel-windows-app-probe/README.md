@@ -23,6 +23,16 @@ at the first failure. Run the same command in a session with Explorer as the she
 one with Nickel as the Winlogon shell to isolate session setup from Nickel's launcher.
 An activation success only confirms the API call; the app's window lifecycle must be
 observed separately.
+The probe kills only its own activation worker after 20 seconds if Windows does not
+return from the call.
+
+## Current session baseline (2026-09-23)
+
+With Nickel running and Explorer absent, Armoury Crate SE's AUMID reached
+`CoCreateInstance` successfully in both local-server and in-process modes.
+`ActivateApplication` then blocked until the probe's 20-second timeout in both modes.
+Nickel remained responsive. This session was started before the Winlogon shell
+registry value was changed to Nickel; compare again after a new sign-in.
 
 App activation can bring the selected app to the foreground. Use Calculator for the
 first comparison; close it before switching sessions.

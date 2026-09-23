@@ -8,6 +8,75 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "windows")]
 fn main() -> ExitCode {
+    use std::{
+        process::Command,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let mut arguments = std::env::args().skip(1);
+    let worker = arguments.next().as_deref() == Some("--worker");
+    let app_id = if worker {
+        arguments.next()
+    } else {
+        std::env::args().nth(1)
+    };
+    let Some(app_id) = app_id else {
+        eprintln!("usage: nickel-windows-app-probe AUMID [--inproc]");
+        return ExitCode::FAILURE;
+    };
+    let context = match (arguments.next().as_deref(), arguments.next()) {
+        (None, None) => "local-server",
+        (Some("--inproc"), None) => "inproc",
+        _ => {
+            eprintln!("usage: nickel-windows-app-probe AUMID [--inproc]");
+            return ExitCode::FAILURE;
+        }
+    };
+    if worker {
+        return activate(&app_id, context);
+    }
+
+    let mut command = Command::new(std::env::current_exe().expect("probe executable path"));
+    command.args(["--worker", &app_id]);
+    if context == "inproc" {
+        command.arg("--inproc");
+    }
+    let Ok(mut child) = command.spawn() else {
+        eprintln!("phase=worker result=spawn-failed");
+        return ExitCode::FAILURE;
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                };
+            }
+            Ok(None) if started.elapsed() < Duration::from_secs(20) => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("phase=worker result=timeout elapsed_seconds=20");
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("phase=worker result=wait-failed error={error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn activate(app_id: &str, context: &str) -> ExitCode {
     use windows::{
         Win32::{
             System::Com::{
@@ -19,18 +88,9 @@ fn main() -> ExitCode {
         core::PCWSTR,
     };
 
-    let mut arguments = std::env::args().skip(1);
-    let Some(app_id) = arguments.next() else {
-        eprintln!("usage: nickel-windows-app-probe AUMID [--inproc]");
-        return ExitCode::FAILURE;
-    };
-    let context = match (arguments.next().as_deref(), arguments.next()) {
-        (None, None) => CLSCTX_LOCAL_SERVER,
-        (Some("--inproc"), None) => CLSCTX_INPROC_SERVER,
-        _ => {
-            eprintln!("usage: nickel-windows-app-probe AUMID [--inproc]");
-            return ExitCode::FAILURE;
-        }
+    let context = match context {
+        "inproc" => CLSCTX_INPROC_SERVER,
+        _ => CLSCTX_LOCAL_SERVER,
     };
     println!(
         "pid={} app_id={} context={}",
