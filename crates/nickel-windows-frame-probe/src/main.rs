@@ -403,6 +403,18 @@ fn run_host(pump_messages: bool) -> ExitCode {
                 let _ = std::io::stdout().flush();
                 continue;
             }
+            if message.hwnd == shell_window.window && message.message == 0x806f {
+                let wrapper = message.wParam.0;
+                let hwnd = message.lParam.0 as usize;
+                match probe_window_layout(wrapper, hwnd) {
+                    Ok(()) => println!(
+                        "phase=host-window-layout wrapper={wrapper:#x} hwnd={hwnd:#x} result=called"
+                    ),
+                    Err(error) => println!("phase=host-window-layout error={error}"),
+                }
+                let _ = std::io::stdout().flush();
+                continue;
+            }
             unsafe {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -499,6 +511,55 @@ fn probe_window_visibility(wrapper: usize, hwnd: usize) -> Result<(), String> {
     // PDB and disassembly. The host's shell thread owns the controller.
     let visibility_changed: VisibilityChanged = unsafe { std::mem::transmute(address) };
     unsafe { visibility_changed(visibility_interface as *mut c_void, 1, 1) };
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn probe_window_layout(wrapper: usize, hwnd: usize) -> Result<(), String> {
+    use std::ffi::c_void;
+    use windows::Win32::{
+        Foundation::HWND, System::LibraryLoader::GetModuleHandleW,
+        UI::WindowsAndMessaging::IsWindow,
+    };
+
+    const LAYOUT_EVENT_RVA: usize = 0x1a36f0;
+    const PROLOGUE: [u8; 10] = [0x48, 0x89, 0x5c, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20];
+    let event_interface = wrapper
+        .checked_sub(0x20)
+        .ok_or("wrapper pointer is too small")?;
+    if wrapper == 0 || hwnd == 0 || !unsafe { IsWindow(Some(HWND(hwnd as *mut c_void))) }.as_bool()
+    {
+        return Err("invalid wrapper or HWND".into());
+    }
+    // SAFETY: The pointer comes from a live wrapper in this diagnostic host;
+    // this build's layout has its client HWND at interface +0x138.
+    let client_hwnd = unsafe { ((wrapper + 0x138) as *const usize).read() };
+    if client_hwnd != hwnd {
+        return Err(format!(
+            "wrapper client HWND {client_hwnd:#x} differs from {hwnd:#x}"
+        ));
+    }
+    // SAFETY: The controller loads this Windows DLL before pumping messages.
+    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
+        .map_err(|error| error.to_string())?;
+    let address = module.0 as usize + LAYOUT_EVENT_RVA;
+    // SAFETY: The PDB and prologue guard identify this private diagnostic
+    // method on the current Windows build.
+    let actual = unsafe { std::slice::from_raw_parts(address as *const u8, PROLOGUE.len()) };
+    if actual != PROLOGUE {
+        return Err(format!("unexpected layout event prologue at {address:#x}"));
+    }
+    type LayoutEvent = unsafe extern "system" fn(*mut c_void, u64);
+    // SAFETY: The live wrapper's HWND was checked above. This build's PDB and
+    // disassembly identify event 0x26 as clearing layout wait flag 2.
+    let layout_event: LayoutEvent = unsafe { std::mem::transmute(address) };
+    // SAFETY: On this build the readiness wait flags are immediately after
+    // the client HWND, whose value was checked above.
+    let flags = (wrapper + 0x140) as *const u32;
+    let before = unsafe { flags.read() };
+    unsafe { layout_event(event_interface as *mut c_void, 0x26) };
+    let after = unsafe { flags.read() };
+    println!("phase=layout-wait-flags before={before:#x} after={after:#x}");
     Ok(())
 }
 

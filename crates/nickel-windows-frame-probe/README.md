@@ -333,3 +333,45 @@ the HRESULT alone does not establish that the app is rendered. Restoring
 Settings resumes its `ApplicationView ASTA` thread from
 `PsmWaitForAppResume`, but its frame still shows only the splash. The
 remaining issue is the app view/content activation path, not frame creation.
+
+## Explorer-free Settings and Calculator UI (2026-09-23, later run)
+
+The remaining readiness flag was `2` for Calculator and Settings. This build's
+`UwpWindowReadyState::HandleShellHook(0x26)` clears that layout flag. The
+`post-window-layout WRAPPER HWND` diagnostic posts the call to the controller's
+shell thread and logs wait flags before and immediately after it. For each
+fresh app, the working order was:
+
+1. Activate its AUMID with `nickel-windows-app-probe` while `--host-pump` runs.
+2. Identify the live UWP wrapper and CoreWindow HWND in the host; call
+   `post-window-discovery WRAPPER HWND`.
+3. Call `post-window-visible WRAPPER HWND` and `post-window-layout WRAPPER HWND`.
+4. Call `switch-view AUMID --uncloak` to remove shell cloaking from the view.
+
+The wrapper must be matched to the app's live CoreWindow. The readiness event
+can briefly clear flag `2` and then have it set again; a second layout event
+cleared it in one Calculator run. The host logged `before=0x2 after=0x0` for
+both apps in the later run. Both CoreWindows and frames became uncloaked.
+
+With Explorer absent, Windows Settings rendered its populated Home screen and
+accepted input. The user confirmed it resizes and is usable. Calculator also
+rendered its controls and accepted number-button input. This establishes a
+working Explorer-free UI path for two installed packaged apps in addition to
+the Rust target. The host still requires manual wrapper identification and
+readiness callbacks; Nickel does not yet perform this sequence itself.
+
+Calculator's `ApplicationFrameWindow` initially measured about `336x509`,
+while its CoreWindow stayed `320x320`, leaving a colored strip beneath the
+content. Resizing the frame with `SetWindowPos` moved its title bar and input
+sink, but did not resize its CoreWindow. Resizing that CoreWindow separately
+filled the strip with the app's dark background; Calculator's controls remained
+at their original width. The user reported that Calculator's frame could not
+be dragged or resized by mouse, while Settings could be resized. Both frames
+have matching Win32 styles. Calculator's title area is partly covered by its
+CoreWindow, which reports `HTCLIENT`; the exposed title-bar child reports
+`HTCAPTION`, and the frame edges report resize hit zones. This leaves the
+Calculator-specific move/resize handoff unresolved.
+
+ApplicationFrameHost's `CApplicationFrameManager::EnableLayoutFrames` flag was
+observed off. Enabling it temporarily in the live diagnostic process did not
+make Calculator's CoreWindow follow a frame resize, so the flag was restored.
