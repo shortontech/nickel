@@ -2451,6 +2451,20 @@ fn handle_native_keyboard_hook(
         PhysicalKey::Native(_) => None,
     };
     let super_edge = matches!(key, Some(KeyCode::SuperLeft | KeyCode::SuperRight));
+    if super_edge {
+        let foreground = unsafe { GetForegroundWindow() };
+        let mut process_id = 0;
+        let thread_id = unsafe { GetWindowThreadProcessId(foreground, Some(&mut process_id)) };
+        tracing::debug!(
+            ?key,
+            ?event.edge,
+            injected = event.injected,
+            window = foreground.0 as isize,
+            process_id,
+            thread_id,
+            "Windows key at foreground surface"
+        );
+    }
     if key == Some(KeyCode::KeyR) && registered_hotkey_owned {
         if let Ok(mut adapter) = windows_input_adapter().lock() {
             // RegisterHotKey owns Super+R dispatch. The hook only records that another key joined
@@ -2976,7 +2990,11 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     ) {
         return HookDisposition::Forward;
     }
-    let physical_super = event.super_physically_held;
+    // A focused in-process window can report Super on its own event queue even
+    // when the low-level hook has not observed the corresponding key edge yet.
+    let file_window_super =
+        NICKEL_WINDOW_SUPER_SIDES.load(std::sync::atomic::Ordering::Acquire) != 0;
+    let physical_super = event.super_physically_held || file_window_super;
     let physical_alt = unsafe { GetAsyncKeyState(0x12) < 0 };
     let (super_held, gesture, reconciled) = windows_input_adapter()
         .lock()
@@ -3010,6 +3028,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     tracing::debug!(
         super_held,
         physical_super,
+        file_window_super,
         physical_alt,
         chord_started,
         button = if event.kind == NativePointerKind::PrimaryPressed {
