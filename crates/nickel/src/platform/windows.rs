@@ -1401,6 +1401,7 @@ struct PointerWindowDrag {
     rectangle: RECT,
     resize_edge: Option<u32>,
     placement_failed: bool,
+    last_placement_at: u64,
 }
 static POINTER_WINDOW_DRAG: Mutex<Option<PointerWindowDrag>> = Mutex::new(None);
 static NATIVE_SYSTEM_DRAG_TOMBSTONES: LazyLock<Mutex<HashMap<isize, NativeSystemDrag>>> =
@@ -2782,6 +2783,12 @@ fn update_pointer_window_drag(event: NativePointerEvent, point: POINT) -> Option
         (1, NativePointerKind::PrimaryReleased) | (2, NativePointerKind::SecondaryReleased)
     );
     if released {
+        if !drag.placement_failed && drag.resize_edge.is_some() {
+            // A throttled resize may have skipped the last pointer sample.
+            if let Err(error) = place_pointer_window_drag(drag, point) {
+                tracing::warn!(window = drag.fingerprint.window, %error, "final pointer resize failed");
+            }
+        }
         pending.take();
         return Some(HookDisposition::Suppress);
     }
@@ -2801,11 +2808,36 @@ fn update_pointer_window_drag(event: NativePointerEvent, point: POINT) -> Option
     if drag.placement_failed {
         return Some(HookDisposition::Forward);
     }
+    let now = unsafe { GetTickCount64() };
+    if drag.resize_edge.is_some() && now.saturating_sub(drag.last_placement_at) < 33 {
+        // Resize makes applications reflow and redraw. Bound the number of
+        // asynchronous placements instead of queueing one per mouse sample.
+        return Some(HookDisposition::Forward);
+    }
+    if place_pointer_window_drag(drag, point).is_err() {
+        pending
+            .as_mut()
+            .expect("pointer drag remains active")
+            .placement_failed = true;
+        tracing::warn!(
+            window = drag.fingerprint.window,
+            "pointer window drag placement failed"
+        );
+    } else {
+        pending
+            .as_mut()
+            .expect("pointer drag remains active")
+            .last_placement_at = now;
+    }
+    Some(HookDisposition::Forward)
+}
+
+fn place_pointer_window_drag(drag: PointerWindowDrag, point: POINT) -> windows::core::Result<()> {
     let rectangle = pointer_drag_rectangle(drag.rectangle, drag.start, point, drag.resize_edge);
     let window = HWND(drag.fingerprint.window as *mut c_void);
     // SAFETY: the target HWND is fingerprinted immediately above. A raced teardown returns an
     // error, and the asynchronous flag prevents a stalled target thread from blocking the hook.
-    if unsafe {
+    unsafe {
         SetWindowPos(
             window,
             None,
@@ -2816,18 +2848,6 @@ fn update_pointer_window_drag(event: NativePointerEvent, point: POINT) -> Option
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         )
     }
-    .is_err()
-    {
-        pending
-            .as_mut()
-            .expect("pointer drag remains active")
-            .placement_failed = true;
-        tracing::warn!(
-            window = drag.fingerprint.window,
-            "pointer window drag placement failed"
-        );
-    }
-    Some(HookDisposition::Forward)
 }
 
 fn pointer_drag_rectangle(
@@ -3062,6 +3082,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             resize_edge: (gesture == SuperPointerGesture::Resize)
                 .then(|| resize_hit_test(target, point)),
             placement_failed: false,
+            last_placement_at: 0,
         });
         tracing::debug!(?gesture, "started pointer window drag");
         return HookDisposition::Suppress;
