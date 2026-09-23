@@ -600,7 +600,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         &mut self,
         _host: &mut UiHost<FileApp>,
         event: &winit::event::WindowEvent,
-        services: HostServices<'_>,
+        _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         if let winit::event::WindowEvent::KeyboardInput { event: key, .. } = event
             && let winit::keyboard::PhysicalKey::Code(physical_key) = key.physical_key
@@ -613,14 +613,6 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             && !key.repeat
             && let Some(shortcut) = &self.focused_shortcut
         {
-            if matches!(key_code, KeyCode::SuperLeft | KeyCode::SuperRight) {
-                tracing::debug!(
-                    ?key_code,
-                    ?key.state,
-                    window_id = ?services.window().id(),
-                    "File surface received Windows key"
-                );
-            }
             shortcut(
                 key_code,
                 if key.state == winit::event::ElementState::Pressed {

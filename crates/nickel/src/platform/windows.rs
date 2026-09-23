@@ -2451,20 +2451,6 @@ fn handle_native_keyboard_hook(
         PhysicalKey::Native(_) => None,
     };
     let super_edge = matches!(key, Some(KeyCode::SuperLeft | KeyCode::SuperRight));
-    if super_edge {
-        let foreground = unsafe { GetForegroundWindow() };
-        let mut process_id = 0;
-        let thread_id = unsafe { GetWindowThreadProcessId(foreground, Some(&mut process_id)) };
-        tracing::debug!(
-            ?key,
-            ?event.edge,
-            injected = event.injected,
-            window = foreground.0 as isize,
-            process_id,
-            thread_id,
-            "Windows key at foreground surface"
-        );
-    }
     if key == Some(KeyCode::KeyR) && registered_hotkey_owned {
         if let Ok(mut adapter) = windows_input_adapter().lock() {
             // RegisterHotKey owns Super+R dispatch. The hook only records that another key joined
