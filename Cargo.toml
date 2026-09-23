@@ -10,6 +10,7 @@ members = [
     "crates/nickel-ui",
     "crates/nickel-ui-testkit",
     "crates/nickel-ui-workbench",
+    "crates/nickel-windows-app-probe",
     "crates/ui-declarative-macros",
     "crates/nickel",
     "crates/nickel-core",
