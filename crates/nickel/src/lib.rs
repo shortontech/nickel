@@ -1714,6 +1714,9 @@ fn handle_shell_input(
     surface: SurfaceId,
     event: InputEvent,
     hover_repaint: &mut Option<(SurfaceRole, Instant)>,
+    #[cfg(target_os = "windows")] desktop_context_popup: &mut Option<
+        std::sync::mpsc::Receiver<Option<live_shell::DesktopMessage>>,
+    >,
 ) -> Result<(), String> {
     let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
         return Ok(());
@@ -1726,6 +1729,15 @@ fn handle_shell_input(
         state.set_panel_output(output);
     }
     if role == SurfaceRole::Desktop {
+        #[cfg(target_os = "windows")]
+        let native_context_press = matches!(
+            &event,
+            InputEvent::Pointer(PointerEvent::Button {
+                button: PointerButton::Secondary,
+                edge: KeyEdge::Pressed,
+                ..
+            })
+        );
         let coalesce_motion = matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
         if let Some(entry) = shell.surface(surface) {
             let output = entry.output_name().to_owned();
@@ -1743,7 +1755,21 @@ fn handle_shell_input(
                 let _ = state.scene(SurfaceRole::Desktop, width, height);
             }
         }
-        if state.desktop_input(event) {
+        let changed = state.desktop_input(event);
+        #[cfg(target_os = "windows")]
+        if native_context_press && let Some(entry) = shell.surface(surface) {
+            let (width, height) = entry.window().size();
+            if let Some(menu) = state.desktop_native_context_menu(width, height) {
+                if let Some(receiver) = nickel_file::windows_popup_menu::start(menu, entry.window())
+                {
+                    *desktop_context_popup = Some(receiver);
+                    state.begin_desktop_native_context_menu();
+                }
+                render_role(shell, state, SurfaceRole::Desktop)?;
+                return Ok(());
+            }
+        }
+        if changed {
             if coalesce_motion {
                 *hover_repaint = Some((
                     SurfaceRole::Desktop,
@@ -2450,6 +2476,10 @@ pub fn run() -> Result<(), String> {
         Duration::from_secs(10),
     );
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
+    #[cfg(target_os = "windows")]
+    let mut desktop_context_popup: Option<
+        std::sync::mpsc::Receiver<Option<live_shell::DesktopMessage>>,
+    > = None;
     #[cfg(not(target_os = "windows"))]
     let mut controller = nickel_ui::ControllerInput::new();
     #[cfg(not(target_os = "windows"))]
@@ -2459,6 +2489,19 @@ pub fn run() -> Result<(), String> {
     let mut diagnostic_overdue_after_poll = Vec::new();
     let mut project_menu_changed_since_refresh = false;
     loop {
+        #[cfg(target_os = "windows")]
+        if let Some(receiver) = &desktop_context_popup {
+            let completion = match receiver.try_recv() {
+                Ok(action) => Some(action),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            };
+            if let Some(action) = completion {
+                desktop_context_popup = None;
+                state.finish_desktop_native_context_menu(action);
+                render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
+            }
+        }
         #[cfg(target_os = "windows")]
         uwu_supervisor.poll();
         #[cfg(target_os = "windows")]
@@ -2758,6 +2801,8 @@ pub fn run() -> Result<(), String> {
                     surface,
                     event,
                     &mut hover_repaint,
+                    #[cfg(target_os = "windows")]
+                    &mut desktop_context_popup,
                 );
                 shell.finish_input_observation();
                 result?;

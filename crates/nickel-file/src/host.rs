@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
@@ -39,6 +39,10 @@ fn set_nickel_file_icon(window: &Window) {
 pub struct FileHostAdapter {
     sync_requested: bool,
     drop_hover_deadline: Option<Instant>,
+    #[cfg(target_os = "windows")]
+    context_popup_rx: Option<std::sync::mpsc::Receiver<Option<FileMessage>>>,
+    #[cfg(target_os = "windows")]
+    context_popup_poll_at: Option<Instant>,
     #[cfg(target_os = "windows")]
     focused_shortcut: Option<std::sync::Arc<dyn Fn(KeyCode, KeyEdge) + Send + Sync>>,
 }
@@ -589,12 +593,38 @@ impl Default for FileHostAdapter {
             sync_requested: true,
             drop_hover_deadline: None,
             #[cfg(target_os = "windows")]
+            context_popup_rx: None,
+            #[cfg(target_os = "windows")]
+            context_popup_poll_at: None,
+            #[cfg(target_os = "windows")]
             focused_shortcut: None,
         }
     }
 }
 
 impl HostAdapter<FileApp> for FileHostAdapter {
+    #[cfg(target_os = "windows")]
+    fn normalized_input(
+        &mut self,
+        _host: &mut UiHost<FileApp>,
+        input: &InputEvent,
+        _services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+        if matches!(
+            input,
+            InputEvent::Pointer(PointerEvent::Button {
+                button: PointerButton::Secondary,
+                edge: KeyEdge::Pressed,
+                ..
+            })
+        ) {
+            // Poll after the UI host dispatches this press, when FileApp has
+            // produced its context menu request and target snapshot.
+            self.sync_requested = true;
+        }
+        Ok(AdapterOutcome::default())
+    }
+
     #[cfg(target_os = "windows")]
     fn event(
         &mut self,
@@ -638,6 +668,16 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             .then_some(now)
             .into_iter()
             .chain(self.drop_hover_deadline)
+            .chain({
+                #[cfg(target_os = "windows")]
+                {
+                    self.context_popup_poll_at
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    None
+                }
+            })
             .min()
     }
 
@@ -665,6 +705,51 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         let selected = host.application().selected_index();
         let scroll_offset = host.application().file_scroll_offset;
         let mut changed = false;
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(receiver) = &self.context_popup_rx {
+                match receiver.try_recv() {
+                    Ok(action) => {
+                        if let Some(action) = action {
+                            host.application_mut().apply_context_popup_action(action);
+                        } else {
+                            host.application_mut().close_context_popup();
+                        }
+                        self.context_popup_rx = None;
+                        self.context_popup_poll_at = None;
+                        changed = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        host.application_mut().close_context_popup();
+                        self.context_popup_rx = None;
+                        self.context_popup_poll_at = None;
+                        changed = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        self.context_popup_poll_at =
+                            Some(Instant::now() + Duration::from_millis(16));
+                    }
+                }
+            }
+            if self.context_popup_rx.is_none() {
+                let size = services.window().inner_size();
+                if let Some(spec) = host
+                    .application_mut()
+                    .take_context_popup_request(size.width, size.height)
+                {
+                    self.context_popup_rx =
+                        crate::windows_popup_menu::start(spec.menu, services.window());
+                    self.context_popup_poll_at = self
+                        .context_popup_rx
+                        .as_ref()
+                        .map(|_| Instant::now() + Duration::from_millis(16));
+                    if self.context_popup_rx.is_none() {
+                        host.application_mut().close_context_popup();
+                    }
+                    changed = true;
+                }
+            }
+        }
         changed |= open_drop_hover_target(host.application_mut(), Instant::now());
         self.drop_hover_deadline = host
             .application()

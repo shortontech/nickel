@@ -22,6 +22,7 @@ sys-locale.workspace = true
 icu_collator = "2.2.0"
 icu_locale = "2.2.0"
 winit.workspace = true
+raw-window-handle.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]

@@ -45,6 +45,8 @@ pub struct DesktopApplication {
     pub(super) last_click: Option<(DesktopEntryId, Instant)>,
     pub(super) modifiers: SelectionModifiers,
     pub(super) context_menu: Option<DesktopMenuContext>,
+    #[cfg(target_os = "windows")]
+    pub(super) context_popup_detached: bool,
     pub(super) last_menu_dismissal: Option<DesktopMenuDismissal>,
     pub(super) topology_generation: u64,
     pub(super) directory_generation: u64,
@@ -218,6 +220,8 @@ impl DesktopApplication {
             last_click: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
+            #[cfg(target_os = "windows")]
+            context_popup_detached: false,
             last_menu_dismissal: None,
             topology_generation: 0,
             directory_generation: 0,
@@ -1156,6 +1160,10 @@ impl nickel_ui::Application for DesktopApplication {
                 width: 1.0,
             }
         });
+        #[cfg(target_os = "windows")]
+        if self.context_popup_detached {
+            return selection_marquee.into_iter().collect();
+        }
         let Some(context) = &self.context_menu else {
             return selection_marquee.into_iter().collect();
         };

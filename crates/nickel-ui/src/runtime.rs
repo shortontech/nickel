@@ -1765,6 +1765,15 @@ impl<'a> HostServices<'a> {
 /// Injects platform-specific effects into the canonical Nickel UI runtime
 /// without creating an application-owned event loop.
 pub trait HostAdapter<A: Application> {
+    /// Adjust native window creation for hosts such as transient popups.
+    fn window_attributes(
+        &self,
+        _application: &A,
+        attributes: WindowAttributes,
+    ) -> WindowAttributes {
+        attributes
+    }
+
     /// Returns session-owned controller admission state. Session-aware adapters
     /// should fail closed when ownership cannot be established.
     fn controller_fence(&mut self, _services: HostServices<'_>) -> ControllerFence {
@@ -4701,6 +4710,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             .with_title(application.title())
             .with_inner_size(LogicalSize::new(width, height))
             .with_resizable(true);
+        let attributes = self.adapter.window_attributes(application, attributes);
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {

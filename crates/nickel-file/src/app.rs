@@ -3456,7 +3456,9 @@ impl Application for FileApp {
                 crate::components::properties_dialog(self, properties, palette),
             ));
         }
-        if self.context_popup_detached {
+        if self.context_popup_detached
+            || (cfg!(target_os = "windows") && self.context_popup_requested)
+        {
             overlays.retain(|overlay| !matches!(overlay, FrameOverlay::Menu(_)));
         }
         overlays

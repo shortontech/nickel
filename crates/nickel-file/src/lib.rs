@@ -24,6 +24,8 @@ pub mod properties;
 pub mod selection_summary;
 mod sidebar;
 pub mod watch;
+#[cfg(target_os = "windows")]
+pub mod windows_popup_menu;
 
 #[cfg(feature = "workbench-fixtures")]
 pub use app::FileFixtureProvider;

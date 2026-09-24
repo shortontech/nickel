@@ -3313,6 +3313,7 @@ dependencies = [
  "nickel-ui",
  "nickel-ui-testkit",
  "notify",
+ "raw-window-handle",
  "sha2",
  "sys-locale",
  "tempfile",

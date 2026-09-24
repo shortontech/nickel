@@ -2079,6 +2079,57 @@ impl LiveShell {
         self.desktop_host_event_authorized(ingress, Some(authority))
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn desktop_native_context_menu(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Option<nickel_ui::OverlayMenu<desktop::DesktopMessage>> {
+        self.desktop_host
+            .application()
+            .frame_overlays(nickel_ui::ViewContext::new(
+                nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
+                nickel_ui::InputModality::Pointer,
+            ))
+            .into_iter()
+            .find_map(|overlay| match overlay {
+                nickel_ui::FrameOverlay::Menu(menu) => Some(menu),
+                _ => None,
+            })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn begin_desktop_native_context_menu(&mut self) {
+        self.desktop_host.application_mut().context_popup_detached = true;
+        let outcome = self.desktop_host.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::Dismiss)],
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        self.desktop_change_token = outcome.change_token;
+        self.desktop_deadline = outcome.next_deadline;
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn finish_desktop_native_context_menu(&mut self, action: Option<desktop::DesktopMessage>) {
+        if let Some(action) = action {
+            self.desktop_host.application_mut().update(action);
+        } else {
+            self.desktop_host
+                .application_mut()
+                .dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
+        }
+        self.desktop_host.application_mut().context_popup_detached = false;
+        self.desktop_overlay_pointer_capture = None;
+        let outcome = self.desktop_host.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::Dismiss)],
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        self.desktop_change_token = outcome.change_token;
+        self.desktop_deadline = outcome.next_deadline;
+    }
+
     pub(crate) fn desktop_host_event_authorized(
         &mut self,
         ingress: HostEvent,
@@ -2087,6 +2138,18 @@ impl LiveShell {
         let event = normalized_input(&ingress)
             .expect("desktop host event must be normalized")
             .clone();
+        #[cfg(target_os = "windows")]
+        if self.desktop_host.application().context_popup_detached
+            && matches!(event, nickel_input::InputEvent::FocusLost { .. })
+        {
+            // The detached popup owns focus while the desktop action still
+            // needs its invocation snapshot. Its completion dismisses the menu.
+            self.desktop_host
+                .application_mut()
+                .cancel_pointer_transaction();
+            self.desktop_overlay_pointer_capture = None;
+            return true;
+        }
         if matches!(
             event,
             nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Leave { .. })
