@@ -467,6 +467,40 @@ reported the layout wait flag returning to `2` after the first layout call; a
 second layout call cleared it. The production lifecycle and resize path still
 need investigation.
 
+## Automatic presentation in the diagnostic host (2026-09-23)
+
+`--host-pump` now performs the previously manual discovery, visibility, layout,
+and uncloak sequence automatically. Its shell-thread timer checks every 250 ms
+for a frame and a new CoreWindow with matching application user model IDs. It
+uses the frame's property store and the CoreWindow process's package identity;
+it does not match by window title. The existing wrapper finder is shared with
+the host and retains its build-specific vtable checks. The discovery/readiness
+calls retain their function-prologue checks.
+
+Windows that existed before controller startup are excluded from discovery so
+orphan CoreWindows from earlier experiments cannot be attached to new frames.
+Ambiguous matches, including multiple frames or CoreWindows for the same app,
+are left untouched. This fixture therefore automates distinct apps, but does
+not yet resolve multiple simultaneous views of one app. Each matched frame has
+an independent 15-second retry budget. Success requires the CoreWindow to be
+parented to the selected frame after uncloaking. Completed pairs are not acted
+on again, and records are removed when their windows disappear. The manual
+diagnostic commands remain available.
+
+Validation on Windows build 26200: stopped the previous fixture and AFH, started
+the rebuilt host with Explorer absent, and activated fresh Calculator and
+Armoury Crate SE instances. Both reached `phase=auto-present result=ready` about
+512 ms after matching began, with no manual presentation commands. The user
+confirmed both appeared and worked. Calculator's CoreWindow also continued to
+follow a normal frame resize. The user then closed Armoury Crate independently.
+These timings measure presentation retries after matching, not total app launch
+or first-paint latency. This remains an isolated, build-specific fixture, not
+Nickel's production UWP integration.
+
+Formatting checks passed. Package Clippy passed with `too_many_arguments` and
+`collapsible_if` allowed for two existing warnings in the legacy manager path;
+the strict invocation still reports those warnings.
+
 ## Fresh Calculator resize comparison (2026-09-23)
 
 The `resize-inspect` diagnostic enumerates application frames and CoreWindows,

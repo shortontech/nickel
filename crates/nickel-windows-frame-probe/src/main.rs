@@ -5,6 +5,11 @@ mod fallback_band1;
 #[cfg(target_os = "windows")]
 mod frame_service_direct;
 
+#[cfg(target_os = "windows")]
+mod auto_present;
+#[cfg(target_os = "windows")]
+mod wrapper_inspect;
+
 #[cfg(not(target_os = "windows"))]
 fn main() -> ExitCode {
     eprintln!("nickel-windows-frame-probe supports Windows only");
@@ -317,13 +322,16 @@ fn run_host(pump_messages: bool) -> ExitCode {
     use std::io::Write;
     use windows::Win32::{
         System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
-        UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MSG, TranslateMessage},
+        UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, KillTimer, MSG, SetTimer, TranslateMessage, WM_TIMER,
+        },
     };
 
     if let Err(error) = configure_dpi_awareness() {
         eprintln!("phase=host-dpi error={error}");
         return ExitCode::FAILURE;
     }
+    let mut presenter = auto_present::AutoPresent::new();
     let Some(shell_window) = ShellWindowGuard::register(pump_messages) else {
         return ExitCode::FAILURE;
     };
@@ -367,11 +375,24 @@ fn run_host(pump_messages: bool) -> ExitCode {
     let _ = std::io::stdout().flush();
     let _keep_alive = (controller, redirect);
     if pump_messages {
+        // SAFETY: This thread owns the HWND and consumes its timer messages.
+        if unsafe { SetTimer(Some(shell_window.window), 0x71, 250, None) } == 0 {
+            eprintln!("phase=auto-present error=SetTimer-failed");
+            return ExitCode::FAILURE;
+        }
         println!("phase=host-message-loop");
         let mut message = MSG::default();
         // SAFETY: The shell window belongs to this thread, and the message
         // structure remains valid through each dispatch.
         while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
+            if message.hwnd == shell_window.window
+                && message.message == WM_TIMER
+                && message.wParam.0 == 0x71
+            {
+                presenter.tick();
+                let _ = std::io::stdout().flush();
+                continue;
+            }
             if message.hwnd == shell_window.window && message.message == 0x8070 {
                 // Forward only the documented top-level window lifecycle
                 // events while probing. Forwarding HSHELL_REDRAW (6) caused
@@ -440,6 +461,8 @@ fn run_host(pump_messages: bool) -> ExitCode {
                 DispatchMessageW(&message);
             }
         }
+        // SAFETY: Cancel the timer before the window guard destroys its HWND.
+        let _ = unsafe { KillTimer(Some(shell_window.window), 0x71) };
     } else {
         // The one-shot probe kept this thread blocked during activation.
         loop {
