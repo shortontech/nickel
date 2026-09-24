@@ -10,8 +10,9 @@ use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
 use windows::{
     Win32::{
         Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HGDIOBJ, ReleaseDC, SelectObject,
+            BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, GetObjectW, HGDIOBJ,
+            ReleaseDC, SelectObject,
         },
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
         System::Com::{
@@ -19,7 +20,11 @@ use windows::{
             CoUninitialize, IPersistFile, STGM_READ,
         },
         UI::{
-            Shell::{IShellLinkW, SHDefExtractIconW, SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW},
+            Shell::{
+                IShellItemImageFactory, IShellLinkW, SHCreateItemFromParsingName,
+                SHDefExtractIconW, SHFILEINFOW, SHGFI_ICON, SHGetFileInfoW, SIIGBF_BIGGERSIZEOK,
+                SIIGBF_ICONONLY,
+            },
             WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIconEx, HICON},
         },
     },
@@ -144,7 +149,11 @@ pub fn path_icon_at_size(path: &Path, physical_size: u32) -> Option<RgbaImage> {
             "executable",
         )
     } else {
-        (shell_path_icon(path, physical_size), "shell-path")
+        (
+            shell_path_icon(path, physical_size)
+                .or_else(|| shell_parsing_name_icon(path, physical_size)),
+            "shell-path",
+        )
     };
     if initialized {
         unsafe { CoUninitialize() };
@@ -252,6 +261,36 @@ fn shortcut_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
     Some(image)
 }
 
+/// Resolves the executable target recorded by a Windows shell shortcut.
+pub fn shortcut_target(path: &Path) -> Option<std::path::PathBuf> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+    {
+        return None;
+    }
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let target = shortcut_target_in_apartment(path);
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+    target
+}
+
+fn shortcut_target_in_apartment(path: &Path) -> Option<std::path::PathBuf> {
+    const CLSID_SHELL_LINK: GUID = GUID::from_u128(0x00021401_0000_0000_c000_000000000046);
+    let shortcut: IShellLinkW =
+        unsafe { CoCreateInstance(&CLSID_SHELL_LINK, None, CLSCTX_INPROC_SERVER) }.ok()?;
+    let persisted: IPersistFile = shortcut.cast().ok()?;
+    let wide = terminated(path);
+    unsafe { persisted.Load(PCWSTR(wide.as_ptr()), STGM_READ) }.ok()?;
+    let mut target = vec![0_u16; 32_768];
+    unsafe { shortcut.GetPath(&mut target, std::ptr::null_mut(), 0) }.ok()?;
+    let length = string_length(&target);
+    (length != 0)
+        .then(|| std::path::PathBuf::from(std::ffi::OsString::from_wide(&target[..length])))
+}
+
 fn extract_icon(path: &Path, index: i32, physical_size: u32) -> Option<RgbaImage> {
     let wide = terminated(path);
     let mut icon = HICON::default();
@@ -296,6 +335,89 @@ fn shell_path_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
         let _ = DestroyIcon(info.hIcon);
         image
     }
+}
+
+fn shell_parsing_name_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
+    let reference = path.as_os_str().to_string_lossy();
+    shell_parsing_name_icon_for(&reference, physical_size).or_else(|| {
+        reference.contains('!').then_some(())?;
+        shell_parsing_name_icon_for(&format!(r"shell:AppsFolder\{reference}"), physical_size)
+    })
+}
+
+fn shell_parsing_name_icon_for(reference: &str, physical_size: u32) -> Option<RgbaImage> {
+    let wide = reference.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let factory: IShellItemImageFactory =
+        unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }.ok()?;
+    let size = physical_size.clamp(16, 512) as i32;
+    let bitmap = unsafe {
+        factory.GetImage(
+            windows::Win32::Foundation::SIZE { cx: size, cy: size },
+            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+        )
+    }
+    .ok()?;
+    let image = render_bitmap(bitmap);
+    unsafe {
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+    }
+    image
+}
+
+fn render_bitmap(bitmap: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<RgbaImage> {
+    let mut object = BITMAP::default();
+    if unsafe {
+        GetObjectW(
+            HGDIOBJ(bitmap.0),
+            size_of::<BITMAP>() as i32,
+            Some((&raw mut object).cast()),
+        )
+    } == 0
+        || object.bmWidth <= 0
+        || object.bmHeight <= 0
+    {
+        return None;
+    }
+    let width = object.bmWidth as u32;
+    let height = object.bmHeight as u32;
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bgra = vec![0_u8; width as usize * height as usize * 4];
+    let screen = unsafe { GetDC(None) };
+    if screen.0.is_null() {
+        return None;
+    }
+    let rows = unsafe {
+        GetDIBits(
+            screen,
+            bitmap,
+            0,
+            height,
+            Some(bgra.as_mut_ptr().cast()),
+            &raw mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    unsafe {
+        ReleaseDC(None, screen);
+    }
+    if rows != height as i32 {
+        return None;
+    }
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    RgbaImage::from_raw(width, height, bgra)
 }
 
 fn render_icon(icon: HICON, physical_size: u32) -> Option<RgbaImage> {
@@ -377,7 +499,7 @@ fn string_length(value: &[u16]) -> usize {
 mod tests {
     use std::path::Path;
 
-    use super::{path_icon_at_size, string_length, terminated};
+    use super::{path_icon_at_size, shortcut_target, string_length, terminated};
 
     #[test]
     fn utf16_helpers_terminate_and_measure_paths() {
@@ -406,5 +528,9 @@ mod tests {
 
         let image = path_icon_at_size(&shortcut, 48).expect("resolve an installed shortcut icon");
         assert!(image.pixels().any(|pixel| pixel.0[3] != 0));
+        assert!(
+            shortcut_target(&shortcut).is_some_and(|target| target.is_absolute()),
+            "installed shortcut should expose an executable target"
+        );
     }
 }

@@ -4845,6 +4845,7 @@ impl LiveShell {
             self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
             return false;
         }
+        self.clear_launcher_visibility_error();
         self.apply_session_launcher_visibility(visible);
         platform::launcher_visibility_applied(visible);
         self.launcher_visible == visible
@@ -5008,12 +5009,19 @@ impl LiveShell {
             self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
             return;
         }
+        self.clear_launcher_visibility_error();
         if self.session_host.stages_effects() {
             return;
         }
         self.run_visible = false;
         self.apply_session_launcher_visibility(visible);
         platform::launcher_visibility_applied(visible);
+    }
+
+    fn clear_launcher_visibility_error(&mut self) {
+        if self.launcher_status.as_deref() == Some("Nickel could not update the launcher.") {
+            self.launcher_status = None;
+        }
     }
 
     fn set_run_visible(&mut self, visible: bool) -> bool {

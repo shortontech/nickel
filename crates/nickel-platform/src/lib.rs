@@ -99,7 +99,9 @@ mod windows;
 mod linux;
 
 #[cfg(target_os = "windows")]
-pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_files};
+pub use windows::{
+    appearance, apply_window_appearance, path_icon, shortcut_target, show_hidden_files,
+};
 
 #[cfg(target_os = "linux")]
 pub use linux::{

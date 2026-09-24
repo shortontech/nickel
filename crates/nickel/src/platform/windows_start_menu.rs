@@ -96,13 +96,19 @@ fn load_from_roots(roots: &[PathBuf]) -> (Vec<Application>, bool) {
             break;
         }
         let path = shortcut.to_string_lossy().into_owned();
-        let application = Application::new(
+        let mut application = Application::new(
             format!("windows-shortcut:{}", path.to_ascii_lowercase()),
             name.to_owned(),
             Some(path.clone()),
             None,
             Some(vec![path]),
         );
+        if let Some(target) = nickel_platform::shortcut_target(&shortcut) {
+            application = application.with_identity_alias(format!(
+                "windows-exe:{}",
+                target.to_string_lossy().to_ascii_lowercase()
+            ));
+        }
         let bytes = application.retained_metadata_bytes();
         if retained_metadata_bytes.saturating_add(bytes) > MAX_DISCOVERED_APPLICATION_METADATA_BYTES
         {
@@ -175,8 +181,9 @@ unsafe fn enumerate_apps_folder() -> windows::core::Result<(Vec<Application>, bo
             name,
             Some(target.clone()),
             None,
-            Some(vec![target]),
-        );
+            Some(vec![target.clone()]),
+        )
+        .with_identity_alias(target);
         let bytes = application.retained_metadata_bytes();
         if retained_metadata_bytes.saturating_add(bytes) > MAX_DISCOVERED_APPLICATION_METADATA_BYTES
         {
@@ -237,11 +244,11 @@ fn collect_shortcuts(directory: &Path, output: &mut Vec<PathBuf>, depth: usize) 
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use tempfile::tempdir;
 
-    use super::load_from_roots;
+    use super::{load_from_roots, load_packaged_applications};
 
     #[test]
     fn recursively_indexes_and_sorts_start_menu_shortcuts() {
@@ -294,5 +301,34 @@ mod tests {
         assert!(!truncated);
         assert_eq!(applications.len(), 1);
         assert_eq!(applications[0].name(), "Fortnite");
+    }
+
+    #[test]
+    fn installed_packaged_application_has_shell_artwork() {
+        let (applications, _) = load_packaged_applications();
+        let resolved = applications
+            .iter()
+            .filter(|application| {
+                application
+                    .icon()
+                    .is_some_and(|reference| reference.contains('!'))
+            })
+            .take(32)
+            .find_map(|application| {
+                let reference = application.icon()?;
+                nickel_platform::path_icon_with_theme_at_size(Path::new(reference), None, 48)
+                    .map(|image| (application.name(), image))
+            });
+        let (name, image) = resolved.expect("resolve artwork for an installed packaged app");
+        assert!(
+            image.pixels().any(|pixel| pixel.0[3] != 0),
+            "packaged app {name} returned transparent artwork"
+        );
+        let application = applications
+            .iter()
+            .find(|application| application.name() == name)
+            .expect("retain the packaged application");
+        let app_user_model_id = application.icon().expect("packaged app AUMID");
+        assert!(application.matches_native_id(app_user_model_id));
     }
 }

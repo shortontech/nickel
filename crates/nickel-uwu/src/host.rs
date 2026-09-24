@@ -12,6 +12,35 @@ use crate::{
 use std::process::ExitCode;
 
 #[cfg(target_os = "windows")]
+struct HostReadiness(Option<std::sync::mpsc::SyncSender<Result<(), String>>>);
+
+#[cfg(target_os = "windows")]
+impl HostReadiness {
+    fn ready(&mut self) {
+        if let Some(sender) = self.0.take() {
+            tracing::info!("embedded UWP shell host ready");
+            let _ = sender.send(Ok(()));
+        }
+    }
+
+    fn failed(&mut self, phase: &'static str, error: impl std::fmt::Display) {
+        tracing::warn!(phase, %error, "embedded UWP shell host failed to start");
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(Err(format!("{phase}: {error}")));
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for HostReadiness {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(Err("UWP shell host exited before ready".into()));
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn configure_dpi_awareness() -> Result<(), String> {
     use windows::Win32::UI::HiDpi::{
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -26,7 +55,21 @@ pub(crate) fn configure_dpi_awareness() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 pub fn run_host(pump_messages: bool) -> ExitCode {
-    run_host_with_parent(pump_messages, None)
+    run_host_with_parent(pump_messages, None, true, HostReadiness(None))
+}
+
+/// Runs the shell controller on an STA owned by the main Nickel process.
+#[cfg(target_os = "windows")]
+pub fn run_embedded_host(
+    ready: std::sync::mpsc::SyncSender<Result<(), String>>,
+    configure_process_dpi: bool,
+) -> ExitCode {
+    run_host_with_parent(
+        true,
+        None,
+        configure_process_dpi,
+        HostReadiness(Some(ready)),
+    )
 }
 
 /// Runs the shell controller for a Nickel process. The open process handle
@@ -48,7 +91,7 @@ pub fn run_managed_host(parent_pid: u32) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    run_host_with_parent(true, Some(parent))
+    run_host_with_parent(true, Some(parent), true, HostReadiness(None))
 }
 
 #[cfg(target_os = "windows")]
@@ -72,7 +115,12 @@ impl Drop for ParentHandle {
 }
 
 #[cfg(target_os = "windows")]
-fn run_host_with_parent(pump_messages: bool, parent: Option<ParentHandle>) -> ExitCode {
+fn run_host_with_parent(
+    pump_messages: bool,
+    parent: Option<ParentHandle>,
+    configure_process_dpi: bool,
+    mut readiness: HostReadiness,
+) -> ExitCode {
     use std::io::Write;
     use windows::Win32::{
         System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
@@ -81,23 +129,27 @@ fn run_host_with_parent(pump_messages: bool, parent: Option<ParentHandle>) -> Ex
         },
     };
 
-    if let Err(error) = configure_dpi_awareness() {
+    if configure_process_dpi && let Err(error) = configure_dpi_awareness() {
         eprintln!("phase=host-dpi error={error}");
+        readiness.failed("host-dpi", error);
         return ExitCode::FAILURE;
     }
     let mut presenter = auto_present::AutoPresent::new();
     let Some(shell_window) = ShellWindowGuard::register(pump_messages) else {
+        readiness.failed("host-shell-window", "shell window registration failed");
         return ExitCode::FAILURE;
     };
     // SAFETY: This thread balances successful COM initialization below.
     if let Err(error) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
         eprintln!("phase=host-com error={error}");
+        readiness.failed("host-com", error);
         return ExitCode::FAILURE;
     }
     let redirect = match fallback_band1::FallbackBandRedirect::install() {
         Ok(redirect) => redirect,
         Err(error) => {
             eprintln!("phase=host-band-redirect error={error}");
+            readiness.failed("host-band-redirect", error);
             unsafe { CoUninitialize() };
             return ExitCode::FAILURE;
         }
@@ -106,6 +158,7 @@ fn run_host_with_parent(pump_messages: bool, parent: Option<ParentHandle>) -> Ex
         Ok(controller) => controller,
         Err(error) => {
             eprintln!("phase=host-controller error={error}");
+            readiness.failed("host-controller", error);
             drop(redirect);
             unsafe { CoUninitialize() };
             return ExitCode::FAILURE;
@@ -116,6 +169,7 @@ fn run_host_with_parent(pump_messages: bool, parent: Option<ParentHandle>) -> Ex
             Ok(service) => Some(service),
             Err(error) => {
                 eprintln!("phase=host-shell-hook-service error={error}");
+                readiness.failed("host-shell-hook-service", error);
                 drop(controller);
                 drop(redirect);
                 unsafe { CoUninitialize() };
@@ -132,6 +186,7 @@ fn run_host_with_parent(pump_messages: bool, parent: Option<ParentHandle>) -> Ex
         // SAFETY: This thread owns the HWND and consumes its timer messages.
         if unsafe { SetTimer(Some(shell_window.window), 0x71, 250, None) } == 0 {
             eprintln!("phase=auto-present error=SetTimer-failed");
+            readiness.failed("auto-present", "SetTimer failed");
             drop(shell_hook_service);
             drop(keep_alive);
             // SAFETY: Balances this thread's successful CoInitializeEx.
@@ -139,6 +194,7 @@ fn run_host_with_parent(pump_messages: bool, parent: Option<ParentHandle>) -> Ex
             return ExitCode::FAILURE;
         }
         println!("phase=host-message-loop");
+        readiness.ready();
         let mut message = MSG::default();
         // SAFETY: The shell window belongs to this thread, and the message
         // structure remains valid through each dispatch.

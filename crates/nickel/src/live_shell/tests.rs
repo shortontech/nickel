@@ -569,6 +569,43 @@ fn rejected_launcher_focus_request_does_not_project_internal_focus() {
 }
 
 #[test]
+fn successful_launcher_retry_clears_transient_update_error() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct RecoveringHost {
+        reject: AtomicBool,
+    }
+
+    impl crate::session_host::SessionHost for RecoveringHost {
+        fn dispatch(
+            &self,
+            _: crate::platform::ShellCommand,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            if self.reject.swap(false, Ordering::AcqRel) {
+                Err(crate::platform::SessionRequestError::Send)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    let mut shell = LiveShell::new_with_session_host(Arc::new(RecoveringHost {
+        reject: AtomicBool::new(true),
+    }))
+    .expect("live shell");
+
+    assert!(!shell.request_launcher_toggle());
+    assert_eq!(
+        shell.launcher_status.as_deref(),
+        Some("Nickel could not update the launcher.")
+    );
+
+    assert!(shell.request_launcher_toggle());
+    assert!(shell.launcher_status.is_none());
+    assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
+}
+
+#[test]
 fn pending_remote_lease_becomes_persistent_shell_notification() {
     use nickel_session_protocol::{
         RemoteLeaseRequest, RemoteLeaseRequestChanges, RemotePendingLease, RemoteResourceScope,

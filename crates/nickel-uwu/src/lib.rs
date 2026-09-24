@@ -14,7 +14,7 @@ mod presentation_callbacks;
 #[cfg(target_os = "windows")]
 mod shell_window;
 #[cfg(target_os = "windows")]
-pub use host::{run_host, run_managed_host};
+pub use host::{run_embedded_host, run_host, run_managed_host};
 #[cfg(target_os = "windows")]
 mod wrapper_inspect;
 

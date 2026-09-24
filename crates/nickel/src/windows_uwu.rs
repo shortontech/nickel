@@ -1,15 +1,12 @@
-//! Owns the Windows UWP shell helper for the lifetime of Nickel.
+//! Owns the Windows UWP shell STA inside the Nickel process.
 
 use std::{
-    io::{BufRead, BufReader},
-    process::{Child, Command, Stdio},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 use windows::Win32::UI::WindowsAndMessaging::GetShellWindow;
 
-/// Keeps the helper alive without waiting for a restart on Nickel's UI thread.
 pub(crate) struct UwuSupervisor {
     host: Option<UwuHost>,
     starting: Option<Receiver<Result<Option<UwuHost>, String>>>,
@@ -18,11 +15,11 @@ pub(crate) struct UwuSupervisor {
 
 impl UwuSupervisor {
     pub(crate) fn start() -> Self {
-        let (host, retry_at) = match UwuHost::start() {
+        let (host, retry_at) = match UwuHost::start(true) {
             Ok(Some(host)) => (Some(host), None),
             Ok(None) => (None, Some(Instant::now() + Duration::from_secs(5))),
             Err(error) => {
-                tracing::warn!(%error, "Windows UWP shell host unavailable");
+                tracing::warn!(%error, "embedded Windows UWP shell host unavailable");
                 (None, Some(Instant::now() + Duration::from_secs(30)))
             }
         };
@@ -34,20 +31,10 @@ impl UwuSupervisor {
     }
 
     pub(crate) fn poll(&mut self) {
-        if let Some(host) = self.host.as_mut() {
-            match host.exited() {
-                Ok(false) => {}
-                Ok(true) => {
-                    tracing::warn!("Windows UWP shell host exited; retrying");
-                    self.host = None;
-                    self.retry_at = Some(Instant::now() + Duration::from_secs(5));
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Windows UWP shell host status unavailable");
-                    self.host = None;
-                    self.retry_at = Some(Instant::now() + Duration::from_secs(5));
-                }
-            }
+        if self.host.as_ref().is_some_and(UwuHost::exited) {
+            tracing::warn!("embedded Windows UWP shell host exited; retrying");
+            self.host = None;
+            self.retry_at = Some(Instant::now() + Duration::from_secs(5));
         }
         if let Some(starting) = self.starting.as_ref() {
             match starting.try_recv() {
@@ -61,13 +48,13 @@ impl UwuSupervisor {
                     self.retry_at = Some(Instant::now() + Duration::from_secs(5));
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(%error, "Windows UWP shell host restart failed");
+                    tracing::warn!(%error, "embedded Windows UWP shell host restart failed");
                     self.starting = None;
                     self.retry_at = Some(Instant::now() + Duration::from_secs(30));
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
-                    tracing::warn!("Windows UWP shell host restart task exited");
+                    tracing::warn!("embedded Windows UWP shell host restart task exited");
                     self.starting = None;
                     self.retry_at = Some(Instant::now() + Duration::from_secs(30));
                 }
@@ -81,16 +68,16 @@ impl UwuSupervisor {
         {
             let (sender, receiver) = mpsc::sync_channel(1);
             match thread::Builder::new()
-                .name("nickel-uwu-start".into())
+                .name("nickel-uwu-restart".into())
                 .spawn(move || {
-                    let _ = sender.send(UwuHost::start());
+                    let _ = sender.send(UwuHost::start(false));
                 }) {
                 Ok(_) => {
                     self.starting = Some(receiver);
                     self.retry_at = None;
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "Windows UWP shell host restart task failed");
+                    tracing::warn!(%error, "embedded Windows UWP shell host restart task failed");
                     self.retry_at = Some(Instant::now() + Duration::from_secs(30));
                 }
             }
@@ -99,119 +86,33 @@ impl UwuSupervisor {
 }
 
 pub(crate) struct UwuHost {
-    child: Child,
-    output: Option<JoinHandle<()>>,
-    errors: Option<JoinHandle<()>>,
+    thread: JoinHandle<()>,
 }
 
 impl UwuHost {
-    pub(crate) fn start() -> Result<Option<Self>, String> {
-        // The immersive controller is only needed when Nickel owns the shell
-        // session. Explorer and other registered shells already provide it.
+    fn start(configure_process_dpi: bool) -> Result<Option<Self>, String> {
+        // Explorer and other registered shells already provide this controller.
         if !unsafe { GetShellWindow() }.is_invalid() {
             return Ok(None);
         }
-        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-        let mut child = Command::new(executable)
-            .arg("--nickel-uwu-host")
-            .arg(std::process::id().to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("start UWP shell host: {error}"))?;
-        let stdout = child.stdout.take().expect("piped UWP shell host stdout");
-        let stderr = child.stderr.take().expect("piped UWP shell host stderr");
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        let output = thread::Builder::new()
-            .name("nickel-uwu-output".into())
+        let thread = thread::Builder::new()
+            .name("nickel-uwu-sta".into())
             .spawn(move || {
-                let mut ready = Some(ready_tx);
-                for line in BufReader::new(stdout).lines() {
-                    match line {
-                        Ok(line) => {
-                            if line == "phase=host-message-loop" {
-                                if let Some(sender) = ready.take() {
-                                    let _ = sender.send(Ok(()));
-                                }
-                            }
-                            if line == "phase=host-message-loop"
-                                || line.starts_with("phase=auto-present result=ready")
-                            {
-                                tracing::info!(message = %line, "UWP shell host");
-                            } else {
-                                tracing::debug!(message = %line, "UWP shell host");
-                            }
-                        }
-                        Err(error) => {
-                            if let Some(sender) = ready.take() {
-                                let _ = sender.send(Err(error.to_string()));
-                            }
-                            break;
-                        }
-                    }
-                }
-                if let Some(sender) = ready {
-                    let _ = sender.send(Err("UWP shell host exited before ready".into()));
+                let status = nickel_uwu::run_embedded_host(ready_tx, configure_process_dpi);
+                if status != std::process::ExitCode::SUCCESS {
+                    tracing::warn!(?status, "embedded Windows UWP shell host failed");
                 }
             })
-            .map_err(|error| {
-                let _ = child.kill();
-                let _ = child.wait();
-                format!("read UWP shell host output: {error}")
-            })?;
-        let errors = thread::Builder::new()
-            .name("nickel-uwu-errors".into())
-            .spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    match line {
-                        Ok(line) => tracing::warn!(message = %line, "UWP shell host"),
-                        Err(error) => {
-                            tracing::warn!(%error, "reading UWP shell host errors failed");
-                            break;
-                        }
-                    }
-                }
-            });
-        let errors = match errors {
-            Ok(errors) => errors,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output.join();
-                return Err(format!("read UWP shell host errors: {error}"));
-            }
-        };
-        let host = Self {
-            child,
-            output: Some(output),
-            errors: Some(errors),
-        };
+            .map_err(|error| format!("start embedded UWP shell host: {error}"))?;
         match ready_rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(Ok(())) => Ok(Some(host)),
+            Ok(Ok(())) => Ok(Some(Self { thread })),
             Ok(Err(error)) => Err(error),
-            Err(error) => Err(format!("waiting for UWP shell host: {error}")),
+            Err(error) => Err(format!("waiting for embedded UWP shell host: {error}")),
         }
     }
 
-    pub(crate) fn exited(&mut self) -> Result<bool, String> {
-        self.child
-            .try_wait()
-            .map(|status| status.is_some())
-            .map_err(|error| error.to_string())
-    }
-}
-
-impl Drop for UwuHost {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        // The pipes close when the child exits, so both readers can finish.
-        if let Some(output) = self.output.take() {
-            let _ = output.join();
-        }
-        if let Some(errors) = self.errors.take() {
-            let _ = errors.join();
-        }
+    fn exited(&self) -> bool {
+        self.thread.is_finished()
     }
 }

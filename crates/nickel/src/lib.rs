@@ -2292,19 +2292,6 @@ fn shell_event_ends_process(event: &ShellEvent) -> bool {
 /// Runs the Nickel desktop shell using process command-line arguments.
 pub fn run() -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-uwu-host")) {
-        let parent_pid = std::env::args()
-            .nth(2)
-            .ok_or("UWP shell host requires a parent process ID")?
-            .parse::<u32>()
-            .map_err(|error| format!("invalid UWP shell host parent ID: {error}"))?;
-        return if nickel_uwu::run_managed_host(parent_pid) == std::process::ExitCode::SUCCESS {
-            Ok(())
-        } else {
-            Err("UWP shell host failed".into())
-        };
-    }
-    #[cfg(target_os = "windows")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-launch-broker"))
     {
         return windows_launch_broker::run_broker_child();

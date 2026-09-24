@@ -375,7 +375,7 @@ impl Launcher {
     pub fn application(&self, id: &ApplicationId) -> Option<&Application> {
         self.applications
             .iter()
-            .find(|application| application.application_id() == id)
+            .find(|application| application.matches_native_id(id.as_str()))
     }
 
     pub fn applications(&self) -> impl Iterator<Item = &Application> {
@@ -549,7 +549,14 @@ impl Launcher {
     pub fn group_windows(&self, windows: &[OpenWindow]) -> Vec<WindowGroup> {
         let mut groups: Vec<WindowGroup> = Vec::new();
         for window in windows {
-            let existing = window.application_id.as_ref().and_then(|id| {
+            let application = window
+                .application_id
+                .as_ref()
+                .and_then(|id| self.application(id));
+            let canonical_id = application
+                .map(|application| application.application_id())
+                .or(window.application_id.as_ref());
+            let existing = canonical_id.and_then(|id| {
                 groups
                     .iter()
                     .position(|group| group.application_id.as_ref() == Some(id))
@@ -558,15 +565,12 @@ impl Launcher {
                 groups[index].windows.push(window.clone());
                 continue;
             }
-            let application_name = window
-                .application_id
-                .as_ref()
-                .and_then(|id| self.application(id))
+            let application_name = application
                 .map(|application| application.name().to_owned())
                 .or_else(|| (!window.title.is_empty()).then(|| window.title.clone()))
                 .unwrap_or_else(|| "Untitled window".into());
             groups.push(WindowGroup {
-                application_id: window.application_id.clone(),
+                application_id: canonical_id.cloned(),
                 application_name,
                 windows: vec![window.clone()],
             });
@@ -1580,6 +1584,30 @@ mod tests {
         assert_eq!(
             tasks[0].application_id.as_ref().map(ApplicationId::as_str),
             Some("org.example.Editor")
+        );
+    }
+
+    #[test]
+    fn unpinned_native_alias_uses_catalog_identity_and_name() {
+        let application = Application::new(
+            "windows-app:contoso.reader_123!app".into(),
+            "Contoso Reader".into(),
+            Some("Contoso.Reader_123!App".into()),
+            None,
+            Some(vec!["Contoso.Reader_123!App".into()]),
+        )
+        .with_identity_alias("Contoso.Reader_123!App");
+        let launcher = Launcher::new(vec![application]);
+
+        let tasks =
+            launcher.taskbar_applications(&[window(1, "contoso.reader_123!app", "A document")]);
+
+        assert_eq!(tasks.len(), 1);
+        assert!(!tasks[0].pinned);
+        assert_eq!(tasks[0].application_name, "Contoso Reader");
+        assert_eq!(
+            tasks[0].application_id.as_ref().map(ApplicationId::as_str),
+            Some("windows-app:contoso.reader_123!app")
         );
     }
 

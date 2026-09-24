@@ -135,7 +135,7 @@ impl FallbackBandRedirect {
             ));
         }
         ORIGINAL.store(original, Ordering::Release);
-        // SAFETY: This slot belongs to the DLL loaded in the dedicated host
+        // SAFETY: This slot belongs to the DLL loaded in the Nickel process
         // process. The original pointer is restored before either DLL unloads.
         unsafe { write_slot(slot, redirect_create_window_in_band as *const () as usize) }?;
         Ok(Self {

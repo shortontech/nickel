@@ -24,9 +24,10 @@ use windows::{
         Graphics::Dwm::{
             DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
             DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE, DWM_WINDOW_CORNER_PREFERENCE,
-            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
-            DwmQueryThumbnailSourceSize, DwmRegisterThumbnail, DwmSetWindowAttribute,
-            DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+            DWMWA_CLOAKED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+            DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmQueryThumbnailSourceSize,
+            DwmRegisterThumbnail, DwmSetWindowAttribute, DwmUnregisterThumbnail,
+            DwmUpdateThumbnailProperties,
         },
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
@@ -35,6 +36,7 @@ use windows::{
             MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow, ReleaseDC,
             SRCCOPY, SelectObject,
         },
+        Storage::EnhancedStorage::PKEY_AppUserModel_ID,
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
         System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -49,6 +51,7 @@ use windows::{
             QueryFullProcessImageNameW,
         },
         System::{
+            Com::StructuredStorage::PropVariantToStringAlloc,
             Com::{
                 CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
                 CoTaskMemFree, CoUninitialize,
@@ -63,8 +66,9 @@ use windows::{
             Controls::MARGINS,
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
             Input::KeyboardAndMouse::{
-                GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, SetFocus,
+                GetAsyncKeyState, GetCapture, ReleaseCapture, SetActiveWindow, SetCapture, SetFocus,
             },
+            Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
             Shell::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
                 CommandLineToArgvW, DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH,
@@ -673,7 +677,7 @@ pub(crate) fn prepare_application_discovery() -> ApplicationDiscovery {
 pub(crate) fn publish_application_discovery(_: &ApplicationDiscovery) {}
 
 pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
-    nickel_platform::path_icon(PathBuf::from(reference).as_path())
+    nickel_platform::path_icon_with_theme_at_size(PathBuf::from(reference).as_path(), None, 96)
 }
 
 pub fn network_status() -> super::NetworkStatus {
@@ -4846,6 +4850,9 @@ impl TrayFeed {
             } else {
                 NIN_SELECT
             };
+            if message == WM_CONTEXTMENU {
+                cursor = tray_context_anchor(cursor);
+            }
             let wparam = WPARAM(((cursor.y as u16 as usize) << 16) | cursor.x as u16 as usize);
             let lparam = LPARAM(((icon.id as u16 as isize) << 16) | message as isize);
             post_tray_callback(&icon, wparam, lparam);
@@ -4855,6 +4862,25 @@ impl TrayFeed {
             post_tray_callback(&icon, wparam, LPARAM(legacy_up as isize));
         }
     }
+}
+
+fn tray_context_anchor(mut cursor: POINT) -> POINT {
+    let panel = HWND(PANEL_WINDOW_HANDLE.load(Ordering::Relaxed) as *mut c_void);
+    let mut bounds = RECT::default();
+    if !panel.0.is_null()
+        && unsafe { GetWindowRect(panel, &mut bounds) }.is_ok()
+        && cursor.x >= bounds.left
+        && cursor.x < bounds.right
+        && cursor.y >= bounds.top
+        && cursor.y < bounds.bottom
+    {
+        // Version 4 notification icons receive this point in WM_CONTEXTMENU and commonly
+        // bottom-align their popup to it. The physical cursor is inside Nickel's panel, so
+        // forwarding that y coordinate makes the application-owned menu overlap the panel.
+        // Report the point just above the reserved strip, as a notification-area host should.
+        cursor.y = bounds.top.saturating_sub(1);
+    }
+    cursor
 }
 
 fn post_tray_callback(icon: &NativeTrayIcon, wparam: WPARAM, lparam: LPARAM) {
@@ -4891,15 +4917,24 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             // SAFETY: The handle belongs to Nickel's live launcher window.
             unsafe {
                 let foreground_thread = GetWindowThreadProcessId(foreground, None);
+                let launcher_thread = GetWindowThreadProcessId(hwnd, None);
                 let current_thread = GetCurrentThreadId();
-                let attached = foreground_thread != 0
+                let attached_foreground = foreground_thread != 0
                     && foreground_thread != current_thread
                     && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+                let attached_launcher = launcher_thread != 0
+                    && launcher_thread != current_thread
+                    && launcher_thread != foreground_thread
+                    && AttachThreadInput(current_thread, launcher_thread, true).as_bool();
                 let _ = ShowWindow(hwnd, SW_SHOW);
                 let _ = BringWindowToTop(hwnd);
+                let _ = SetActiveWindow(hwnd);
                 let focus_requested = SetForegroundWindow(hwnd).as_bool();
                 let _ = SetFocus(Some(hwnd));
-                if attached {
+                if attached_launcher {
+                    let _ = AttachThreadInput(current_thread, launcher_thread, false);
+                }
+                if attached_foreground {
                     let _ = AttachThreadInput(current_thread, foreground_thread, false);
                 }
                 // SetForegroundWindow reports request admission, not durable foreground
@@ -5123,17 +5158,14 @@ fn show_context_window(x: i32, width: i32, height: i32) -> bool {
         return false;
     }
     let hwnd = HWND(context as *mut c_void);
-    let mut work_area = RECT::default();
+    let panel = HWND(PANEL_WINDOW_HANDLE.load(Ordering::Relaxed) as *mut c_void);
+    let Some(mut work_area) = monitor_work_area(panel) else {
+        return false;
+    };
+    let mut panel_bounds = RECT::default();
     unsafe {
-        if SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some((&mut work_area as *mut RECT).cast()),
-            Default::default(),
-        )
-        .is_err()
-        {
-            return false;
+        if GetWindowRect(panel, &mut panel_bounds).is_ok() {
+            work_area = work_area_above_panel(work_area, panel_bounds);
         }
         let max_x = (work_area.right - width).max(work_area.left);
         let left = x.clamp(work_area.left, max_x);
@@ -5154,6 +5186,14 @@ fn show_context_window(x: i32, width: i32, height: i32) -> bool {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
     true
+}
+
+fn work_area_above_panel(mut work_area: RECT, panel: RECT) -> RECT {
+    let overlaps_horizontally = panel.right > work_area.left && panel.left < work_area.right;
+    if overlaps_horizontally && panel.top > work_area.top && panel.top < work_area.bottom {
+        work_area.bottom = panel.top;
+    }
+    work_area
 }
 
 fn show_dwm_previews(windows: &[WindowId], task_switcher: bool) -> bool {
@@ -5575,6 +5615,10 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
     }
     let application_id = Some(if is_nickel_host_terminal(&title) {
         ApplicationId::new("org.nickel.ShellTerminal")
+    } else if class.eq_ignore_ascii_case("ApplicationFrameWindow")
+        && let Some(app_id) = window_application_user_model_id(hwnd)
+    {
+        ApplicationId::new(app_id)
     } else {
         executable_path(hwnd)
             .map(|path| {
@@ -5614,6 +5658,25 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
     BOOL(1)
 }
 
+fn window_application_user_model_id(hwnd: HWND) -> Option<String> {
+    // Window properties distinguish packaged applications that share the
+    // ApplicationFrameHost process. The returned string uses the same AUMID
+    // exposed by the AppsFolder catalog.
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| unsafe {
+        let store: IPropertyStore = SHGetPropertyStoreForWindow(hwnd).ok()?;
+        let value = store.GetValue(&PKEY_AppUserModel_ID).ok()?;
+        let text = PropVariantToStringAlloc(&value).ok()?;
+        let result = text.to_string().ok();
+        CoTaskMemFree(Some(text.0.cast()));
+        result.filter(|value| !value.is_empty())
+    })();
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+    result
+}
+
 fn is_nickel_host_terminal(title: &str) -> bool {
     static EXECUTABLE_TITLE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     EXECUTABLE_TITLE
@@ -5644,7 +5707,7 @@ fn park_iconic_window(hwnd: HWND) {
 }
 
 fn is_bar_eligible_window(hwnd: HWND, class: &str) -> bool {
-    if is_shell_infrastructure(class) {
+    if is_shell_infrastructure(class) || window_is_cloaked(hwnd) {
         return false;
     }
     // SAFETY: hwnd is a top-level handle supplied by EnumWindows.
@@ -5652,6 +5715,20 @@ fn is_bar_eligible_window(hwnd: HWND, class: &str) -> bool {
     let explicitly_app = extended_style & WS_EX_APPWINDOW.0 != 0;
     let tool_window = extended_style & WS_EX_TOOLWINDOW.0 != 0;
     explicitly_app || (!tool_window && is_last_visible_owned_window(hwnd))
+}
+
+fn window_is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked = 0_u32;
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+        .is_ok()
+            && cloaked != 0
+    }
 }
 
 fn is_last_visible_owned_window(hwnd: HWND) -> bool {
@@ -6015,6 +6092,7 @@ mod tests {
         pointer_drag_rectangle, project_native_preview_diagnostics, project_windows_shortcuts,
         rectangle_covers, restore_legacy_icon_alpha, should_observe_tokenless_geometry,
         should_restore_on_activation, unknown_suspension_within_bound, windows_pid_descends_from,
+        work_area_above_panel,
     };
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
@@ -7056,6 +7134,24 @@ mod tests {
         assert_eq!(clamp_preview_x(1000, 300, work_area), 800);
         assert_eq!(clamp_preview_x(400, 300, work_area), 400);
         assert_eq!(clamp_preview_x(400, 1200, work_area), 100);
+    }
+
+    #[test]
+    fn context_menu_work_area_stops_above_nickel_panel() {
+        let work_area = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let panel = RECT {
+            left: 0,
+            top: 1032,
+            right: 1920,
+            bottom: 1080,
+        };
+
+        assert_eq!(work_area_above_panel(work_area, panel).bottom, 1032);
     }
 
     #[test]

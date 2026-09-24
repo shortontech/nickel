@@ -3614,6 +3614,7 @@ name = "nickel-uwu"
 version = "0.1.0"
 dependencies = [
  "libloading",
+ "tracing",
  "windows",
  "windows-core",
 ]
