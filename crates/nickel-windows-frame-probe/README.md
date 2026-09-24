@@ -375,6 +375,61 @@ CoreWindow, which reports `HTCLIENT`; the exposed title-bar child reports
 `HTCAPTION`, and the frame edges report resize hit zones. This leaves the
 Calculator-specific move/resize handoff unresolved.
 
+A later 90-second live poll sampled the cursor, frame rectangle, and CoreWindow
+rectangle every 5 ms during mouse resizing. The frame changed 169 times,
+including continuous changes during a drag, while the CoreWindow changed zero
+times, including after the drag ended. The frame ended at `545x756`; its
+CoreWindow remained `441x637`. Thus the visible size mismatch is a missing
+frame-to-CoreWindow layout update, independent of the initial pause before the
+frame starts moving. Clearing the wrapper's layout wait flag from `0x2` to
+`0x0` did not resize the CoreWindow; a subsequent one-pixel `SetWindowPos` on
+the frame also left the flag at `0x0` and the CoreWindow unchanged. The poll
+did not record mouse-button transitions, so it does not measure the reported
+delay between the first click and the first frame change.
+
+Maximizing and immediately restoring the same frame does update the child:
+before maximize the frame/CoreWindow were `546x757`/`441x637`; maximized they
+were `1936x1040`/`1920x1024`; restored they were `546x757`/`530x748`. The
+restored CoreWindow matches the frame's client area. The wrapper's layout wait
+flag was `0x2` afterward, so clearing that flag is not a prerequisite for this
+state-change layout path. A normal mouse resize and a one-pixel `SetWindowPos`
+do not exercise the same child-layout behavior as maximize/restore. Sending a
+bounded `WM_SIZE` with the frame's current client dimensions also left the
+CoreWindow unchanged, so replaying that message alone is insufficient.
+
+The reported first-drag pause may be an event handoff with a fallback rather
+than a literal sleep in Calculator. `ApplicationFrame.dll` queues position-change
+work, and `Windows.UI.dll` has a separate `WindowServer::OnWindowSizeEvent`
+path. The earlier trace proves the position-change task was queued and run,
+but does not yet prove whether the frame service delivered a matching size
+notification or whether a fallback completed the drag. Trace those transitions
+before attributing the pause to application code or a timeout.
+
+A targeted live breakpoint in Calculator's `Windows.UI.dll` confirmed the
+`WindowServer::OnWindowSizeEvent` distinction: a direct one-pixel frame resize
+did not enter the handler and left the CoreWindow unchanged; maximizing and
+restoring entered it twice and changed the CoreWindow to the matching bounds.
+`WindowServer::TriggerWindowSizeEvent` did not run in either case, so the
+working show-state transition uses another route into `OnWindowSizeEvent`.
+No ordinary mouse drag occurred during this breakpoint capture. A separate
+breakpoint on the shell's `CApplicationFrameService::OnPositionChanged` did not
+fire for the direct resize or maximize/restore, although it was armed at the
+symbolized address. These observations narrow the missing normal-resize
+notification, but do not identify the reported initial-drag fallback.
+
+The working maximize path was captured at `WindowServer::OnWindowSizeEvent`.
+Its stack starts with a `CoreMessaging` ALPC property-change delivery, then
+`CoreUIComponents!NavigationClient::PropertyChanged` calls
+`NavigationClient::UpdateBoundsOnCoreWindow` and
+`NavigationClientWindowClientAdapter::LegacyTransforms_UpdatePhysicalBounds`.
+`Windows.UI!WindowServer::OnPhysicalBoundsChanged` calls `NtUserSetWindowPos`
+on Calculator's CoreWindow. The resulting `WM_WINDOWPOSCHANGED` reaches
+`DefWindowProcW`, which sends `WM_SIZE` and enters
+`WindowServer::OnWindowSizeEvent`; XAML receives the new layout afterward.
+This is a concrete event path into the working resize. The direct frame resize
+does not produce that CoreWindow size event. The sender of the CoreMessaging
+property change and the precise normal-drag fallback are not yet identified.
+
 ApplicationFrameHost's `CApplicationFrameManager::EnableLayoutFrames` flag was
 observed off. Enabling it temporarily in the live diagnostic process did not
 make Calculator's CoreWindow follow a frame resize, so the flag was restored.
@@ -411,3 +466,51 @@ Calculator session it returned the same wrapper pointer found by CDB and
 reported the layout wait flag returning to `2` after the first layout call; a
 second layout call cleared it. The production lifecycle and resize path still
 need investigation.
+
+## Fresh Calculator resize comparison (2026-09-23)
+
+The `resize-inspect` diagnostic enumerates application frames and CoreWindows,
+including children, and prints their process/thread IDs, rectangles, client
+dimensions, and window data pointers. With an explicit frame HWND it can request
+a normal resize or a maximize/restore transition:
+
+```powershell
+cargo build --release -j 1 -p nickel-windows-frame-probe --bin resize-inspect
+.\target\release\resize-inspect.exe
+.\target\release\resize-inspect.exe FRAME_HWND_HEX 700 740
+.\target\release\resize-inspect.exe FRAME_HWND_HEX maximize
+.\target\release\resize-inspect.exe FRAME_HWND_HEX restore
+```
+
+A fresh Calculator under Explorer followed an ordinary frame resize correctly.
+Explorer and that ApplicationFrameHost process were then stopped. A fresh
+`--host-pump` fixture was started, the baseline Calculator process was stopped,
+and Calculator was activated again. The existing manual discovery, visibility,
+layout, and uncloak sequence was applied. No fixture behavior was changed.
+
+With Explorer absent, three ordinary frame resizes produced these dimensions:
+
+| Frame outer size | Frame client size | Calculator CoreWindow client size |
+| --- | --- | --- |
+| 700 x 740 | 684 x 732 | 684 x 731 |
+| 550 x 640 | 534 x 632 | 534 x 631 |
+| 800 x 760 | 784 x 752 | 784 x 751 |
+
+The CoreWindow followed each resize, with its top one pixel below the frame's
+client origin. The user also confirmed that both the initial mouse-resize pause
+and the stale controls were gone in this fixture session. The remaining reported
+rendering delay occurs when Calculator first opens. Startup still requires the
+manual readiness/uncloak calls, so this run does not establish an application
+timeout or measure an automatic startup delay.
+
+The Calculator frame reported band 1 in both the Explorer baseline and the
+working fixture. Always-on-top behavior under the fixture was not verified in
+this capture. These results do not establish the cause of the earlier failure:
+the successful fixture was tested after Explorer had run in the same login
+session, and both AFH and the tested Calculator instance had been replaced.
+Session initialization, app state, and stale process state remain possible
+differences. This is a successful fresh-process reproduction attempt, not a
+resize fix or proof that a cold login works.
+
+Validation: the new diagnostic built in release mode, passed targeted Clippy
+with warnings denied, and was exercised against live Windows build 26200 frames.
