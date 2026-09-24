@@ -820,22 +820,7 @@ fn lint_syntax(
 }
 
 fn main() -> ExitCode {
-    let mut arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    let print_baseline = arguments
-        .iter()
-        .any(|argument| argument == "--print-baseline");
-    arguments.retain(|argument| argument != "--print-baseline");
-    let baseline = arguments
-        .iter()
-        .position(|argument| argument == "--baseline")
-        .and_then(|index| {
-            (index + 1 < arguments.len()).then(|| {
-                let path = PathBuf::from(arguments.remove(index + 1));
-                arguments.remove(index);
-                path
-            })
-        });
-    let inputs = arguments.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    let inputs = env::args_os().skip(1).map(PathBuf::from).collect::<Vec<_>>();
     let inputs = if inputs.is_empty() {
         vec![PathBuf::from("crates")]
     } else {
@@ -883,48 +868,6 @@ fn main() -> ExitCode {
         for diagnostic in lint_syntax(source, syntax, &wrappers, &fields) {
             violations.push((file, diagnostic));
         }
-    }
-    let mut fingerprints = violations
-        .iter()
-        .map(|(file, diagnostic)| {
-            format!(
-                "{}\t{}\t{}",
-                file.display(),
-                diagnostic.sink,
-                diagnostic.literal
-            )
-        })
-        .collect::<Vec<_>>();
-    fingerprints.sort();
-    let fingerprint = fingerprints
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, value| {
-            value.as_bytes().iter().fold(hash, |hash, byte| {
-                (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-            })
-        });
-    if print_baseline {
-        println!("{}\t{fingerprint:016x}", violations.len());
-        return ExitCode::SUCCESS;
-    }
-    if let Some(path) = baseline {
-        let expected = match fs::read_to_string(&path) {
-            Ok(expected) => expected,
-            Err(error) => {
-                eprintln!("{}: {error}", path.display());
-                return ExitCode::from(2);
-            }
-        };
-        let actual = format!("{}\t{fingerprint:016x}", violations.len());
-        if expected.trim() == actual {
-            return ExitCode::SUCCESS;
-        }
-        eprintln!(
-            "{}: localization baseline changed (expected {:?}, found {:?}); review every finding and refresh deliberately",
-            path.display(),
-            expected.trim(),
-            actual
-        );
     }
     for (file, diagnostic) in &violations {
         eprintln!(

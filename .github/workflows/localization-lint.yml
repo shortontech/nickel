@@ -10,5 +10,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Reject new or changed untranslated UI strings
-        run: cargo run -p nickel-i18n-lint -- --baseline assets/i18n-lint-baseline.tsv crates
+      - name: Reject untranslated UI strings
+        run: cargo run -p nickel-i18n-lint -- crates
