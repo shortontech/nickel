@@ -136,5 +136,5 @@ Nickel is dual-licensed under the [MIT License](LICENSE-MIT) or the
 
 ## Similar projects
 
+- [Cairo Shell](https://github.com/cairoshell/cairoshell) - the most popular alternative shell
 - [GyroShell](https://github.com/Pdawg-bytes/GyroShell)
-- [Cairo Shell](https://github.com/cairoshell/cairoshel)
