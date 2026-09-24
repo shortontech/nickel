@@ -263,3 +263,257 @@ file-selection-summary = { $count } · { $size }
 file-selection-accessible-bytes = { $count } · { $bytes } bytes
 launcher-discovery-empty = No se encontraron aplicaciones.
 launcher-discovery-partial = No se pudieron detectar algunas entradas de aplicaciones.
+
+
+control-center-displays-unavailable = No hay modos de proyección de pantalla disponibles para la configuración actual.
+
+control-center-keep-display-settings = ¿Conservar esta configuración de pantalla?
+
+control-center-revert = Revertir
+
+control-center-keep = Conservar
+
+control-center-display-internal = Pantalla del equipo
+
+control-center-display-duplicate = Duplicar
+
+control-center-display-extend = Extender
+
+control-center-display-external = Segunda pantalla
+
+settings-swatch-hover = Al pasar el cursor
+
+ui-launcher-view-no-matching-applications = No hay aplicaciones que coincidan
+
+ui-launcher-view-places = Lugares
+
+ui-launcher-view-recent-projects = Proyectos recientes
+
+ui-launcher-view-all-projects = Todos los proyectos
+
+ui-launcher-view-pinned-recent = Fijados y recientes
+
+ui-launcher-view-all-applications = Todas las aplicaciones
+
+ui-launcher-view-settings = Configuración
+
+ui-launcher-view-pinned-recent-2 = Fijados y recientes
+
+ui-launcher-view-all-applications-2 = Todas las aplicaciones
+
+ui-launcher-view-browse-installed-applications = Explorar las aplicaciones instaladas
+
+ui-live-shell-run = Ejecutar
+
+ui-live-shell-enter-a-command = Introduce un comando
+
+ui-live-shell-run-2 = Ejecutar
+
+ui-live-shell-nickel = Nickel
+
+ui-live-shell-password = Contraseña
+
+ui-notification-view-notifications = Notificaciones
+
+ui-notification-view-dismiss = Descartar
+
+ui-remote-indicator-remote-control-stopped = Se detuvo el control remoto
+
+ui-remote-indicator-all-remote-access-and-input-were-released = Se liberaron todos los accesos remotos y controles de entrada
+
+ui-remote-indicator-remote-ai-control = Control remoto con IA
+
+ui-remote-indicator-left-ctrl-right-ctrl-also-stops-control = Ctrl izquierdo + Ctrl derecho también detiene el control
+
+ui-recovery-ui-nickel-shell-needs-attention = El shell de Nickel necesita atención
+
+ui-recovery-ui-the-compositor-is-still-running-and-your-applications-are-safe = El compositor sigue funcionando y tus aplicaciones están a salvo.
+
+ui-recovery-ui-enter-retry-now = Intro  Reintentar ahora
+
+ui-recovery-ui-esc-log-out-safely = Esc  Cerrar sesión de forma segura
+
+ui-winit-shell-nickel-remote-ai-control = Control remoto con IA de Nickel
+
+ui-view-codex-requested-input = Codex solicita información
+
+ui-view-enter-one-answer-per-line-in-question-order-use-an-option-label-or-your-own-answer = Introduce una respuesta por línea, en el orden de las preguntas. Usa la etiqueta de una opción o escribe tu propia respuesta.
+
+ui-view-back = Atrás
+
+ui-view-nickel-stores-only-the-environment-variable-name-never-its-secret-value = Nickel solo guarda el nombre de la variable de entorno, nunca su valor secreto.
+
+ui-view-identifier = Identificador
+
+ui-view-display-name = Nombre para mostrar
+
+ui-view-websocket-endpoint = Punto de conexión WebSocket
+
+ui-view-bearer-token-environment-variable-optional = Variable de entorno para el token de acceso (opcional)
+
+ui-view-default-working-directory-on-the-remote-host = Directorio de trabajo predeterminado en el equipo remoto
+
+ui-view-cancel = Cancelar
+
+ui-view-save-host = Guardar equipo
+
+ui-view-remote-codex-hosts = Equipos remotos de Codex
+
+ui-view-back-2 = Atrás
+
+ui-view-these-are-nickel-settings-nickel-does-not-read-or-modify-codex-desktop-configuration = Esta es la configuración de Nickel. Nickel no lee ni modifica la configuración de Codex Desktop.
+
+ui-view-local = Local
+
+ui-view-done = Listo
+
+ui-view-add-remote-host = Añadir equipo remoto
+
+ui-view-codex-diagnostics = Diagnósticos de Codex
+
+ui-view-back-3 = Atrás
+
+ui-view-account-usage = Uso de la cuenta
+
+ui-view-copy-safe-summary = Copiar resumen seguro
+
+ui-view-codex-projects = Proyectos de Codex
+
+ui-view-refresh = Actualizar
+
+ui-view-resume-conversation = Reanudar conversación
+
+ui-view-new = Nuevo
+
+ui-view-back-4 = Atrás
+
+ui-view-send-codex-feedback = Enviar comentarios sobre Codex
+
+ui-view-choose-a-category = Elige una categoría
+
+ui-view-optional-note = Nota opcional
+
+ui-view-sending-diagnostics-may-include-codex-logs-for-this-session-choose-the-no-diagnostics-action-if-you-only-want-to-send-the-category-and-note = El envío de diagnósticos puede incluir registros de Codex de esta sesión. Elige la opción sin diagnósticos si solo quieres enviar la categoría y la nota.
+
+ui-view-sign-in-to-codex = Iniciar sesión en Codex
+
+ui-view-authenticate-this-codex-profile-qr-codes-are-generated-locally-by-nickel = Autentica este perfil de Codex. Nickel genera los códigos QR de forma local.
+
+ui-view-phone-access = Acceso desde el teléfono
+
+ui-view-back-5 = Atrás
+
+ui-view-paired-phones-can-use-codex-remotely-nickel-desktop-permissions-remain-separate = Los teléfonos vinculados pueden usar Codex de forma remota. Los permisos de escritorio de Nickel se mantienen separados.
+
+ui-app-rename = Cambiar nombre
+
+ui-app-cancel = Cancelar
+
+ui-app-choose-how-nickel-file-should-handle-every-conflicting-name-in-this-transfer = Elige cómo debe gestionar Nickel File cada nombre en conflicto de esta transferencia.
+
+ui-app-keep-both = Conservar ambos
+
+ui-app-skip-conflicts = Omitir conflictos
+
+ui-app-cancel-transfer = Cancelar transferencia
+
+ui-components-apply = Aplicar
+
+ui-components-ok = Aceptar
+
+ui-components-cancel = Cancelar
+
+ui-components-no-matching-commands = No hay comandos que coincidan.
+
+ui-components-commands = Comandos
+
+ui-nickel-gaze-grid-recenter = Volver a centrar
+
+ui-lib-reload = Volver a cargar
+
+ui-lib-dismiss = Descartar
+
+ui-pages-codex = Codex
+
+ui-pages-use-codex-projects-and-conversations-in-nickel = Usa los proyectos y las conversaciones de Codex en Nickel
+
+ui-pages-on-screen-keyboard = Teclado en pantalla
+
+ui-pages-type-with-touch-a-controller-or-a-mouse = Escribe mediante la pantalla táctil, un mando o un ratón
+
+ui-pages-loading-file-and-protocol-associations = Cargando asociaciones de archivos y protocolos…
+
+ui-pages-application-compatibility-scale = Escala de compatibilidad de aplicaciones
+
+ui-pages-toolkit-scale-can-differ-from-display-scale-applications-may-need-a-restart = La escala del kit de herramientas puede diferir de la escala de la pantalla; puede que debas reiniciar las aplicaciones.
+
+ui-nickel-terminal-use-the-system-shell = Usar el shell del sistema
+
+ui-nickel-terminal-use-the-current-folder = Usar la carpeta actual
+
+ui-nickel-terminal-monospace = monoespaciada
+
+ui-nickel-terminal-smaller = Más pequeño
+
+ui-nickel-terminal-larger = Más grande
+
+ui-nickel-terminal-fewer = Menos
+
+ui-nickel-terminal-more = Más
+
+ui-nickel-terminal-block = Bloque
+
+ui-nickel-terminal-beam = Barra vertical
+
+ui-nickel-terminal-underline = Subrayado
+
+ui-nickel-terminal-fffcfcfc = #FFFCFCFC
+
+ui-nickel-terminal-ff111318 = #FF111318
+
+ui-nickel-terminal-save = Guardar
+
+ui-nickel-terminal-cancel = Cancelar
+
+ui-nickel-terminal-paste-multiple-lines = Pegar varias líneas
+
+ui-nickel-terminal-cancel-2 = Cancelar
+
+ui-on-screen-keyboard-not-enough-space-for-usable-keys-increase-the-available-window-area-or-reduce-display-scaling = No hay espacio suficiente para teclas utilizables. Aumenta el área disponible de la ventana o reduce la escala de la pantalla.
+
+ui-on-screen-keyboard-english-us = Inglés (EE. UU.)
+
+ui-components-lb = LB
+
+ui-components-rb = RB
+
+# Dynamic messages extracted from application surfaces.
+
+ui-codex-surface-title = Codex — { $name }
+
+ui-remote-client = Cliente: { $value }
+
+ui-remote-state = Estado: { $value }
+
+ui-remote-scope = Alcance: { $value }
+
+ui-remote-peer = Par remoto: { $value }
+
+ui-remote-time = Hora: { $value }
+
+ui-remote-grant-summary = { $transport } · { $active } activos / { $leases } concesiones
+
+ui-codex-connection = Conexión de Codex: { $status }
+
+ui-transfer-conflict-count = { $count } { $count ->
+    [one] elemento ya existe
+   *[other] elementos ya existen
+}
+
+ui-properties-title = Propiedades de { $name }
+
+ui-file-window-title = Nickel File — { $path }
+
+ui-gaze-eye-summary = ojo izquierdo rojo  |  ojo derecho verde  |  ambos azul    { $camera }  |  { $model }
+
+ui-markdown-link = { $label }  ↗

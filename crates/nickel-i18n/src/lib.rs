@@ -5,7 +5,12 @@ const DEFAULT_LOCALE: &str = "en-US";
 const EN_US: &str = include_str!("../locales/en-US/settings.ftl");
 const ES: &str = include_str!("../locales/es/settings.ftl");
 const DE: &str = include_str!("../locales/de/settings.ftl");
+const FR: &str = include_str!("../locales/fr/settings.ftl");
+const PT_BR: &str = include_str!("../locales/pt-BR/settings.ftl");
+const JA: &str = include_str!("../locales/ja/settings.ftl");
+const RU: &str = include_str!("../locales/ru/settings.ftl");
 const ZH: &str = include_str!("../locales/zh/settings.ftl");
+const ZH_HANT: &str = include_str!("../locales/zh-Hant/settings.ftl");
 const AR: &str = include_str!("../locales/ar/settings.ftl");
 
 /// Typed, shared labels for semantic controller actions.
@@ -73,10 +78,26 @@ impl Localizer {
             .unwrap_or_else(default_language);
         let language = requested.language.as_str();
         let right_to_left = matches!(language, "ar" | "fa" | "he" | "ur");
+        let traditional_chinese = match requested.script.as_ref().map(|script| script.as_str()) {
+            Some("Hant") => true,
+            Some("Hans") => false,
+            _ => requested
+                .region
+                .as_ref()
+                .is_some_and(|region| matches!(region.as_str(), "TW" | "HK" | "MO")),
+        };
         let (locale, source, fallback) = match language {
             "es" => (requested, ES, Some(bundle(default_language(), EN_US))),
             "de" => (requested, DE, Some(bundle(default_language(), EN_US))),
-            "zh" => (requested, ZH, Some(bundle(default_language(), EN_US))),
+            "fr" => (requested, FR, Some(bundle(default_language(), EN_US))),
+            "pt" => (requested, PT_BR, Some(bundle(default_language(), EN_US))),
+            "ja" => (requested, JA, Some(bundle(default_language(), EN_US))),
+            "ru" => (requested, RU, Some(bundle(default_language(), EN_US))),
+            "zh" => (
+                requested,
+                if traditional_chinese { ZH_HANT } else { ZH },
+                Some(bundle(default_language(), EN_US)),
+            ),
             "ar" => (requested, AR, Some(bundle(default_language(), EN_US))),
             _ => (default_language(), EN_US, None),
         };
@@ -255,9 +276,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_translation_falls_back_to_english() {
+    fn translated_entry_uses_selected_catalog() {
         let localizer = Localizer::for_locale(Some("es"));
-        assert_eq!(localizer.text("settings-swatch-hover"), "Hover");
+        assert_eq!(
+            localizer.text("settings-swatch-hover"),
+            "Al pasar el cursor"
+        );
     }
 
     #[test]
