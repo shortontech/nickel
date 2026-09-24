@@ -9,6 +9,15 @@ const FR: &str = include_str!("../locales/fr/settings.ftl");
 const PT_BR: &str = include_str!("../locales/pt-BR/settings.ftl");
 const JA: &str = include_str!("../locales/ja/settings.ftl");
 const RU: &str = include_str!("../locales/ru/settings.ftl");
+const PL: &str = include_str!("../locales/pl/settings.ftl");
+const UK: &str = include_str!("../locales/uk/settings.ftl");
+const KO: &str = include_str!("../locales/ko/settings.ftl");
+const TR: &str = include_str!("../locales/tr/settings.ftl");
+const IT: &str = include_str!("../locales/it/settings.ftl");
+const CS: &str = include_str!("../locales/cs/settings.ftl");
+const PT_PT: &str = include_str!("../locales/pt-PT/settings.ftl");
+const NL: &str = include_str!("../locales/nl/settings.ftl");
+const ID: &str = include_str!("../locales/id/settings.ftl");
 const ZH: &str = include_str!("../locales/zh/settings.ftl");
 const ZH_HANT: &str = include_str!("../locales/zh-Hant/settings.ftl");
 const AR: &str = include_str!("../locales/ar/settings.ftl");
@@ -90,9 +99,24 @@ impl Localizer {
             "es" => (requested, ES, Some(bundle(default_language(), EN_US))),
             "de" => (requested, DE, Some(bundle(default_language(), EN_US))),
             "fr" => (requested, FR, Some(bundle(default_language(), EN_US))),
+            "pt" if requested
+                .region
+                .as_ref()
+                .is_some_and(|region| region.as_str() == "PT") =>
+            {
+                (requested, PT_PT, Some(bundle(default_language(), EN_US)))
+            }
             "pt" => (requested, PT_BR, Some(bundle(default_language(), EN_US))),
             "ja" => (requested, JA, Some(bundle(default_language(), EN_US))),
             "ru" => (requested, RU, Some(bundle(default_language(), EN_US))),
+            "pl" => (requested, PL, Some(bundle(default_language(), EN_US))),
+            "uk" => (requested, UK, Some(bundle(default_language(), EN_US))),
+            "ko" => (requested, KO, Some(bundle(default_language(), EN_US))),
+            "tr" => (requested, TR, Some(bundle(default_language(), EN_US))),
+            "it" => (requested, IT, Some(bundle(default_language(), EN_US))),
+            "cs" => (requested, CS, Some(bundle(default_language(), EN_US))),
+            "nl" => (requested, NL, Some(bundle(default_language(), EN_US))),
+            "id" => (requested, ID, Some(bundle(default_language(), EN_US))),
             "zh" => (
                 requested,
                 if traditional_chinese { ZH_HANT } else { ZH },
@@ -281,6 +305,55 @@ mod tests {
         assert_eq!(
             localizer.text("settings-swatch-hover"),
             "Al pasar el cursor"
+        );
+    }
+
+    #[test]
+    fn portuguese_regions_use_their_respective_catalogs() {
+        assert_eq!(
+            Localizer::for_locale(Some("pt-BR")).text("settings-nav-display"),
+            "Tela"
+        );
+        assert_eq!(
+            Localizer::for_locale(Some("pt-PT")).text("settings-nav-display"),
+            "Ecrã"
+        );
+    }
+
+    #[test]
+    fn added_locales_use_their_native_catalogs() {
+        for (locale, expected) in [
+            ("pl-PL", "Ekran"),
+            ("uk-UA", "Дисплеї"),
+            ("ko-KR", "디스플레이"),
+            ("tr-TR", "Ekran"),
+            ("it-IT", "Schermo"),
+            ("cs-CZ", "Obrazovky"),
+            ("nl-NL", "Beeldscherm"),
+            ("id-ID", "Tampilan"),
+        ] {
+            assert_eq!(
+                Localizer::for_locale(Some(locale)).text("settings-nav-display"),
+                expected,
+                "{locale}"
+            );
+        }
+    }
+
+    #[test]
+    fn arabic_counts_use_dual_and_many_forms() {
+        let localizer = Localizer::for_locale(Some("ar"));
+        assert_eq!(
+            localizer.number("settings-network-visible-count", "count", 2),
+            "شبكتان مرئيتان"
+        );
+        assert_eq!(
+            localizer.number("settings-network-visible-count", "count", 11),
+            "11 شبكة مرئية"
+        );
+        assert_eq!(
+            localizer.number("ui-transfer-conflict-count", "count", 2),
+            "عنصران موجودان بالفعل"
         );
     }
 
