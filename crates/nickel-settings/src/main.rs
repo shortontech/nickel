@@ -307,7 +307,7 @@ impl SidebarIconKind {
 }
 
 fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
-    const SIZE: u32 = 24;
+    const SIZE: u32 = 20;
     let mut options = resvg::usvg::Options::default();
     let font_loaded = options
         .fontdb_mut()
@@ -315,7 +315,7 @@ fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
         .is_ok();
     let font_awesome = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{SIZE}" height="{SIZE}">
-<text x="12" y="18" text-anchor="middle" font-family="FontAwesome" font-size="16" fill="#a8abb2">{}</text>
+<text x="10" y="15" text-anchor="middle" font-family="FontAwesome" font-size="13.333" fill="#a8abb2">{}</text>
 </svg>"##,
         kind.glyph()
     );
@@ -328,11 +328,12 @@ fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
         .ok()
         .and_then(|tree| {
             let mut pixmap = resvg::tiny_skia::Pixmap::new(SIZE, SIZE)?;
-            resvg::render(
-                &tree,
-                resvg::tiny_skia::Transform::identity(),
-                &mut pixmap.as_mut(),
+            let source = tree.size();
+            let transform = resvg::tiny_skia::Transform::from_scale(
+                SIZE as f32 / source.width(),
+                SIZE as f32 / source.height(),
             );
+            resvg::render(&tree, transform, &mut pixmap.as_mut());
             image::RgbaImage::from_raw(SIZE, SIZE, pixmap.take())
         })
         .unwrap_or_else(|| image::RgbaImage::new(SIZE, SIZE));
@@ -1687,13 +1688,24 @@ impl SettingsApp {
             return;
         }
         let result = try_save_shell_settings(&self.shell_settings).and_then(|()| {
-            let mode = self
+            let appearance = self
                 .shell_settings
-                .resolve_appearance(nickel_platform::appearance())
-                .mode;
-            nickel_platform::publish_color_scheme(mode).map_err(|error| {
+                .resolve_appearance(nickel_platform::appearance());
+            nickel_platform::publish_color_scheme(appearance.mode).map_err(|error| {
                 format!("appearance was saved but could not be published: {error}")
-            })
+            })?;
+            if self.shell_settings.accent_hue.is_some()
+                || self.shell_settings.accent_intensity.is_some()
+            {
+                // Use the same palette accent as apply_window_appearance's border color.
+                nickel_platform::publish_system_accent(
+                    ThemePalette::from_appearance(appearance).accent,
+                )
+                .map_err(|error| {
+                    format!("appearance was saved but could not be published: {error}")
+                })?;
+            }
+            Ok(())
         });
         self.record_appearance_persistence(result);
     }
@@ -2292,6 +2304,8 @@ impl Application for SettingsApp {
 struct SettingsHostAdapter {
     input: nickel_input::winit::Adapter,
     sync_requested: bool,
+    #[cfg(target_os = "windows")]
+    applied_appearance: Option<Appearance>,
 }
 
 impl Default for SettingsHostAdapter {
@@ -2299,11 +2313,24 @@ impl Default for SettingsHostAdapter {
         Self {
             input: nickel_input::winit::Adapter::default(),
             sync_requested: true,
+            #[cfg(target_os = "windows")]
+            applied_appearance: None,
         }
     }
 }
 
 impl SettingsHostAdapter {
+    #[cfg(target_os = "windows")]
+    fn sync_window_appearance(&mut self, app: &SettingsApp, window: &winit::window::Window) {
+        let appearance = app
+            .shell_settings
+            .resolve_appearance(nickel_platform::appearance());
+        if self.applied_appearance != Some(appearance) {
+            nickel_platform::apply_window_appearance(window, appearance);
+            self.applied_appearance = Some(appearance);
+        }
+    }
+
     fn sync_display_plane(host: &mut UiHost<SettingsApp>) {
         let Ok(node) = host.query_unique(&SemanticSelector::Name("Display arrangement".into()))
         else {
@@ -2344,6 +2371,8 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
         services
             .window()
             .set_min_inner_size(Some(LogicalSize::new(850, 580)));
+        #[cfg(target_os = "windows")]
+        self.sync_window_appearance(host.application(), services.window());
         let app = host.application_mut();
         app.load_outputs();
         app.load_bluetooth();
@@ -2385,9 +2414,13 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
     fn poll(
         &mut self,
         host: &mut UiHost<SettingsApp>,
-        _services: HostServices<'_>,
+        services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         self.sync_requested = false;
+        #[cfg(target_os = "windows")]
+        self.sync_window_appearance(host.application(), services.window());
+        #[cfg(not(target_os = "windows"))]
+        let _ = services;
         Self::sync_display_plane(host);
         Ok(AdapterOutcome::default())
     }
@@ -2485,9 +2518,7 @@ mod tests {
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
     };
-    use nickel_ui::{
-        Application, SemanticRole, SwitchState,
-    };
+    use nickel_ui::{Application, SemanticRole, SwitchState};
 
     use super::view::codex_switch_state;
     use super::{

@@ -39,6 +39,7 @@ const GRID_GAP: f32 = 10.0;
 const TILE_MIN_WIDTH: f32 = 142.0;
 const TILE_HEIGHT: f32 = 108.0;
 const ICON_SIZE: f32 = 48.0;
+const PLACE_ICON_SIZE: u32 = 20;
 
 fn search_result_anchor(id: &str) -> UiId {
     UiId::new(format!("launcher-search-results/{id}"))
@@ -700,7 +701,7 @@ fn place_icon(path: &std::path::Path) -> RgbaImage {
     let request = ArtworkRequest {
         path,
         kind,
-        logical_size: 96,
+        logical_size: PLACE_ICON_SIZE as u16,
         scale_milli: 1000,
         appearance: ArtworkAppearance::Dark,
     };
@@ -713,16 +714,20 @@ fn place_icon(path: &std::path::Path) -> RgbaImage {
         .as_ref()
         .clone();
     }
-    nickel_platform::path_icon_with_theme_at_size(path, settings.file_icon_theme.as_deref(), 96)
-        .unwrap_or_else(|| {
-            nickel_file::icons::resolve_artwork(
-                nickel_core::shell_settings::FileIconPreference::Nickel,
-                &request,
-            )
-            .pixels
-            .as_ref()
-            .clone()
-        })
+    nickel_platform::path_icon_with_theme_at_size(
+        path,
+        settings.file_icon_theme.as_deref(),
+        PLACE_ICON_SIZE,
+    )
+    .unwrap_or_else(|| {
+        nickel_file::icons::resolve_artwork(
+            nickel_core::shell_settings::FileIconPreference::Nickel,
+            &request,
+        )
+        .pixels
+        .as_ref()
+        .clone()
+    })
 }
 
 fn normalize_launcher_icon(image: RgbaImage) -> RgbaImage {
@@ -1120,7 +1125,9 @@ fn build_dashboard_view_directional(
         });
         sidebar = sidebar.child(dashboard_link_row(
             theme,
-            Image::new(icon.0, icon.1).width(20.0).height(20.0),
+            Image::new(icon.0, icon.1)
+                .width(PLACE_ICON_SIZE as f32)
+                .height(PLACE_ICON_SIZE as f32),
             place.name(),
             LauncherAction::LaunchApplication(place.id().to_owned()),
         ));

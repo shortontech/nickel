@@ -98,6 +98,79 @@ pub fn apply_window_appearance(window: &Window, appearance: Appearance) {
     window.set_border_color(Some(color(palette.accent)));
 }
 
+/// Publish Nickel's chosen accent to the per-user Windows personalization values.
+/// Windows uses BGR for AccentColor and ARGB for DWM colorization; notify open
+/// windows after the values are written so their chrome updates immediately.
+pub fn publish_system_accent(accent: u32) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::{LPARAM, WPARAM},
+        UI::WindowsAndMessaging::{HWND_BROADCAST, SendNotifyMessageW, WM_SETTINGCHANGE},
+    };
+    use windows::core::w;
+
+    const DWM: &str = "Software\\Microsoft\\Windows\\DWM";
+    const EXPLORER_ACCENT: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
+    let (accent_color, colorization_color) = windows_accent_values(accent);
+    set_registry_dword(DWM, "AccentColor", accent_color)?;
+    set_registry_dword(DWM, "ColorizationColor", colorization_color)?;
+    set_registry_dword(EXPLORER_ACCENT, "AccentColorMenu", accent_color)?;
+    set_registry_dword(DWM, "ColorPrevalence", 1)?;
+    unsafe {
+        SendNotifyMessageW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            WPARAM(0),
+            LPARAM(w!("ImmersiveColorSet").as_ptr() as isize),
+        )
+    }
+    .map_err(|error| format!("could not notify Windows of the accent change: {error}"))
+}
+
+fn windows_accent_values(accent: u32) -> (u32, u32) {
+    let red = (accent >> 16) & 0xff;
+    let green = (accent >> 8) & 0xff;
+    let blue = accent & 0xff;
+    (
+        0xff00_0000 | (blue << 16) | (green << 8) | red,
+        0xc400_0000 | (red << 16) | (green << 8) | blue,
+    )
+}
+
+fn set_registry_dword(subkey: &str, name: &str, value: u32) -> Result<(), String> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, RegSetKeyValueW};
+
+    let subkey = subkey.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let name = name.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let result = unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(name.as_ptr()),
+            REG_DWORD.0,
+            Some((&raw const value).cast()),
+            size_of::<u32>() as u32,
+        )
+    };
+    if result.is_ok() {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not write Windows accent setting: {result:?}"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod accent_tests {
+    #[test]
+    fn windows_accent_values_use_the_expected_channel_order() {
+        assert_eq!(
+            super::windows_accent_values(0x123456),
+            (0xff56_3412, 0xc412_3456)
+        );
+    }
+}
+
 fn color(rgb: u32) -> Color {
     Color::from_rgb(
         ((rgb >> 16) & 0xff) as u8,

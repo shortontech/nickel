@@ -98,8 +98,14 @@ mod linux;
 
 #[cfg(target_os = "windows")]
 pub use windows::{
-    appearance, apply_window_appearance, path_icon, shortcut_target, show_hidden_files,
+    appearance, apply_window_appearance, path_icon, publish_system_accent, shortcut_target,
+    show_hidden_files,
 };
+
+#[cfg(not(target_os = "windows"))]
+pub fn publish_system_accent(_accent: u32) -> Result<(), String> {
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 pub use linux::{
