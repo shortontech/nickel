@@ -218,13 +218,21 @@ settings-network-no-adapters = لم يُعثر على محوّلات شبكة
 settings-network-wifi-disabled = Wi-Fi متوقف
 
 settings-network-visible-count = { $count ->
+        [zero] لا توجد شبكات مرئية
         [one] شبكة مرئية واحدة
-       *[other] { $count } شبكات مرئية
+        [two] شبكتان مرئيتان
+        [few] { $count } شبكات مرئية
+        [many] { $count } شبكة مرئية
+       *[other] { $count } شبكة مرئية
     }
 
 settings-network-saved-profile-count = { $count ->
+        [zero] لا توجد ملفات تعريف Wi-Fi محفوظة
         [one] ملف تعريف Wi-Fi محفوظ واحد
-       *[other] { $count } ملفات تعريف Wi-Fi محفوظة
+        [two] ملفا تعريف Wi-Fi محفوظان
+        [few] { $count } ملفات تعريف Wi-Fi محفوظة
+        [many] { $count } ملف تعريف Wi-Fi محفوظ
+       *[other] { $count } ملف تعريف Wi-Fi محفوظ
     }
 
 settings-network-connecting = جارٍ الاتصال بـ { $profile }
@@ -360,8 +368,12 @@ settings-bar-all-windows = كل النوافذ
 settings-bar-desktops = أسطح المكتب
 
 settings-bar-desktop-count = { $count ->
+        [zero] لا توجد أسطح مكتب
         [one] سطح مكتب واحد
-       *[other] { $count } أسطح مكتب
+        [two] سطحا مكتب
+        [few] { $count } أسطح مكتب
+        [many] { $count } سطح مكتب
+       *[other] { $count } سطح مكتب
     }
 
 settings-appearance-color-palette = لوحة الألوان
@@ -620,15 +632,19 @@ ui-remote-scope = النطاق: { $value }
 
 ui-remote-peer = النظير: { $value }
 
-ui-remote-time = الوقت: { $value }
+ui-remote-time = الوقت المتبقي: { $value }
 
 ui-remote-grant-summary = { $transport } · { $active } نشط / { $leases } أذونات
 
 ui-codex-connection = اتصال Codex: { $status }
 
-ui-transfer-conflict-count = { $count } { $count ->
-    [one] عنصر موجود بالفعل
-   *[other] عناصر موجودة بالفعل
+ui-transfer-conflict-count = { $count ->
+    [zero] لا توجد عناصر موجودة بالفعل
+    [one] عنصر واحد موجود بالفعل
+    [two] عنصران موجودان بالفعل
+    [few] { $count } عناصر موجودة بالفعل
+    [many] { $count } عنصر موجود بالفعل
+   *[other] { $count } عنصر موجود بالفعل
 }
 
 ui-properties-title = خصائص { $name }

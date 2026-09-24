@@ -499,7 +499,7 @@ ui-remote-scope = Alcance: { $value }
 
 ui-remote-peer = Par remoto: { $value }
 
-ui-remote-time = Hora: { $value }
+ui-remote-time = Tiempo restante: { $value }
 
 ui-remote-grant-summary = { $transport } · { $active } activos / { $leases } concesiones
 
