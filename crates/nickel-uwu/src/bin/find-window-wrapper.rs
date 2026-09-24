@@ -18,8 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let found = wrapper_inspect::find_wrapper(frame)?;
     println!(
-        "interface={:#x} client={:#x}",
-        found.interface, found.client
+        "interface={:#x} client={:#x} wait_flags={:#x}",
+        found.interface, found.client, found.wait_flags
     );
     Ok(())
 }

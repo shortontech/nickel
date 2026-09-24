@@ -1,6 +1,7 @@
 pub struct Wrapper {
     pub interface: usize,
     pub client: usize,
+    pub wait_flags: u32,
 }
 
 pub fn find_wrapper(frame: usize) -> Result<Wrapper, Box<dyn std::error::Error>> {
@@ -117,9 +118,28 @@ pub fn find_wrapper(frame: usize) -> Result<Wrapper, Box<dyn std::error::Error>>
     let expected_wrapper_vtable = module_base + WRAPPER_VTABLE_RVA;
     println!("phase=inspect-host pid={host_pid} twinui={module_base:#x} frame={frame:#x}");
 
+    // Validate cached ownership on every use. Shell restarts and dispatcher
+    // replacement must not turn an old address into the active controller.
+    let inspect = |dispatcher: usize| {
+        if read_usize(process.0, dispatcher) != Some(dispatcher_vtable)
+            || read_usize(process.0, dispatcher + 8) != Some(expected_second_vtable)
+            || read_usize(process.0, dispatcher + 0xd8) != Some(expected_collection_vtable)
+        {
+            return None;
+        }
+        wrapper_in_dispatcher(dispatcher, frame, expected_wrapper_vtable, |address| {
+            read_usize(process.0, address)
+        })
+    };
+    if let Some((pid, base, dispatcher)) = LAST_DISPATCHER.get()
+        && pid == host_pid
+        && base == module_base
+        && let Some(wrapper) = inspect(dispatcher)
+    {
+        return Ok(wrapper);
+    }
     let mut cursor = 0usize;
     let mut scanned = 0usize;
-    let mut dispatcher = None;
     let mut buffer = vec![0u8; CHUNK_BYTES];
     loop {
         let mut info = MEMORY_BASIC_INFORMATION::default();
@@ -168,57 +188,128 @@ pub fn find_wrapper(frame: usize) -> Result<Wrapper, Box<dyn std::error::Error>>
                     continue;
                 }
                 let candidate = address + offset;
-                if read_usize(process.0, candidate + 8) == Some(expected_second_vtable)
-                    && read_usize(process.0, candidate + 0xd8) == Some(expected_collection_vtable)
-                {
-                    dispatcher = Some(candidate);
-                    break;
+                if let Some(wrapper) = inspect(candidate) {
+                    LAST_DISPATCHER.set(Some((host_pid, module_base, candidate)));
+                    println!(
+                        "phase=wrapper-found dispatcher={candidate:#x} interface={:#x} frame={frame:#x} client={:#x} wait_flags={:#x}",
+                        wrapper.interface, wrapper.client, wrapper.wait_flags
+                    );
+                    return Ok(wrapper);
                 }
-            }
-            if dispatcher.is_some() {
-                break;
+                // A matching dispatcher vtable is insufficient: old dispatcher
+                // objects can coexist with the one that owns a newly launched app.
             }
             address += length;
         }
-        if dispatcher.is_some() || scanned >= MAX_SCAN_BYTES {
+        if scanned >= MAX_SCAN_BYTES {
             break;
         }
     }
-    let dispatcher = dispatcher.ok_or("active UWP window dispatcher not found")?;
-    let begin =
-        read_usize(process.0, dispatcher + 0x180).ok_or("wrapper array start unreadable")?;
-    let end = read_usize(process.0, dispatcher + 0x188).ok_or("wrapper array end unreadable")?;
-    if end < begin
-        || (end - begin) % size_of::<usize>() != 0
-        || end - begin > 1024 * size_of::<usize>()
-    {
-        return Err("wrapper array has an unexpected size".into());
+    Err(format!("no UWP wrapper owns frame {frame:#x} after scanning {scanned} bytes").into())
+}
+
+thread_local! {
+    static LAST_DISPATCHER: std::cell::Cell<Option<(u32, usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+fn wrapper_in_dispatcher(
+    dispatcher: usize,
+    frame: usize,
+    expected_vtable: usize,
+    read: impl Fn(usize) -> Option<usize>,
+) -> Option<Wrapper> {
+    let begin = read(dispatcher.checked_add(0x180)?)?;
+    let end = read(dispatcher.checked_add(0x188)?)?;
+    let bytes = end.checked_sub(begin)?;
+    if bytes % size_of::<usize>() != 0 || bytes > 1024 * size_of::<usize>() {
+        return None;
     }
-    println!(
-        "phase=dispatcher address={dispatcher:#x} wrappers={}",
-        (end - begin) / size_of::<usize>()
-    );
     for entry in (begin..end).step_by(size_of::<usize>()) {
-        let Some(wrapper) = read_usize(process.0, entry) else {
+        let Some(wrapper) = read(entry) else {
             continue;
         };
-        if read_usize(process.0, wrapper) != Some(expected_wrapper_vtable) {
+        if read(wrapper) != Some(expected_vtable) || read(wrapper.checked_add(0x78)?) != Some(frame)
+        {
             continue;
         }
-        let wrapper_frame = read_usize(process.0, wrapper + 0x78).unwrap_or(0);
-        if wrapper_frame != frame {
+        let Some(client) = read(wrapper.checked_add(0x158)?) else {
             continue;
-        }
-        let client = read_usize(process.0, wrapper + 0x158).unwrap_or(0);
-        let flags = read_usize(process.0, wrapper + 0x160).unwrap_or(0) as u32;
-        println!(
-            "phase=wrapper-found interface={:#x} frame={frame:#x} client={client:#x} wait_flags={flags:#x}",
-            wrapper + 0x20
-        );
-        return Ok(Wrapper {
-            interface: wrapper + 0x20,
+        };
+        let Some(flags) = read(wrapper.checked_add(0x160)?) else {
+            continue;
+        };
+        return Some(Wrapper {
+            interface: wrapper.checked_add(0x20)?,
             client,
+            wait_flags: flags as u32,
         });
     }
-    Err(format!("no UWP wrapper owns frame {frame:#x}").into())
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn memory() -> HashMap<usize, usize> {
+        HashMap::from([
+            (0x1180, 0x3000),
+            (0x1188, 0x3008),
+            (0x3000, 0x4000),
+            (0x4000, 0x7777),
+            (0x4078, 11),
+            (0x4158, 12),
+            (0x4160, 0),
+            (0x2180, 0x5000),
+            (0x2188, 0x5008),
+            (0x5000, 0x6000),
+            (0x6000, 0x7777),
+            (0x6078, 21),
+            (0x6158, 0),
+            (0x6160, 17),
+        ])
+    }
+
+    #[test]
+    fn older_dispatcher_does_not_hide_new_apps_wrapper() {
+        let memory = memory();
+        let found = [0x1000, 0x2000]
+            .into_iter()
+            .find_map(|dispatcher| {
+                wrapper_in_dispatcher(dispatcher, 21, 0x7777, |address| {
+                    memory.get(&address).copied()
+                })
+            })
+            .unwrap();
+        assert_eq!(found.interface, 0x6020);
+        assert_eq!(found.client, 0);
+        assert_eq!(found.wait_flags, 17);
+    }
+
+    #[test]
+    fn empty_or_invalid_old_collection_can_be_skipped() {
+        for end in [0x3000, 0x2fff, 0x3001, 0x9000] {
+            let mut memory = memory();
+            memory.insert(0x1188, end);
+            assert!(
+                wrapper_in_dispatcher(0x1000, 21, 0x7777, |address| memory.get(&address).copied())
+                    .is_none()
+            );
+            assert!(
+                wrapper_in_dispatcher(0x2000, 21, 0x7777, |address| memory.get(&address).copied())
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_readiness_is_not_treated_as_ready() {
+        let mut memory = memory();
+        memory.remove(&0x6160);
+        assert!(
+            wrapper_in_dispatcher(0x2000, 21, 0x7777, |address| memory.get(&address).copied())
+                .is_none()
+        );
+    }
 }

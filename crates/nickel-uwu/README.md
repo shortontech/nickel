@@ -568,3 +568,66 @@ resize fix or proof that a cold login works.
 
 Validation: the new diagnostic built in release mode, passed targeted Clippy
 with warnings denied, and was exercised against live Windows build 26200 frames.
+
+
+## Presentation recovery (2026-09-24)
+
+The embedded host now reconciles surviving frames as well as fresh frames.
+A wrapper's existing client identity, an already selected pending client, or
+an attached CoreWindow takes precedence over matching by application identity.
+Unassociated windows still require an unambiguous match, with fresh cores
+preferred over old orphans. A child of another frame is never selected.
+
+Attachment no longer removes a pair from recovery. The host observes wrapper
+association, zero readiness wait flags, correct parenting, visible window styles,
+and uncloaked frame and CoreWindow state before reporting readiness. Those
+observations must remain ready over at least one second across timer ticks;
+callbacks or a failed observation restart confirmation. This verifies shell
+presentation state, not application first paint or the correctness of app content.
+Completed pairs are left alone until a window disappears. Minimized frames are
+not restored by pending recovery.
+
+After fifteen seconds, incomplete initialization retries every five seconds
+instead of abandoning the frame. Disappearing clients reset pending association
+and confirmation when a replacement is discovered. The existing private uncloak
+lookup is by AUMID, so uncloaking remains deferred when multiple frames share that
+identity. Per-app errors, slow recovery, readiness, and observed presentation
+state now use tracing and are retained in Nickel's normal shell log; standalone
+fixture stdout/stderr messages remain available.
+
+Automated coverage uses the production reconciliation loop with synthetic native
+observations and effects. It covers attachment followed by uncloak failure,
+asynchronous attachment, readiness reverting, retry backoff and later recovery,
+surviving attached and unattached cores, replacement clients, and ownership
+conflicts. This adapter lifecycle is outside nickel-core's shell scenario model.
+
+Validation: Windows package tests pass (17 tests), including all diagnostic
+binary test targets. Package Clippy passes for all targets and features with
+warnings denied; package formatting checks pass. Live cold-login,
+Explorer handoff, minimizing during initialization, and first-paint/resize
+acceptance remain to be exercised with a rebuilt shell. The private Windows
+interfaces and build-specific offsets remain subject to the existing constraints.
+
+
+### Multiple live dispatchers (2026-09-24)
+
+Live Armoury Crate SE launch exposed a separate discovery failure: the heap
+finder selected dispatcher 0x193c7e067e0, which did not own frame 0x2d066e.
+Read-only enumeration found its wrapper in dispatcher 0x193f295abb0 instead.
+The running shell eventually recovered the app after 81,256 ms without manual
+presentation commands; inspection then showed the expected client and zero
+readiness flags.
+
+The finder now continues past dispatchers that do not contain the requested
+frame, including empty or invalid collections. It caches the successful
+candidate per thread, revalidating process, module, dispatcher vtables, and
+frame ownership on each lookup. The new read-only probe located the live
+Armoury Crate wrapper directly. Package library tests pass (20 tests) and
+Clippy passes for all targets and features with warnings denied.
+
+
+Live acceptance after rebuilding and restarting Nickel: the user launched both
+Calculator and Armoury Crate SE and confirmed that both opened very quickly,
+where both had previously been slow. ApplicationFrameHost had been terminated
+before this Nickel restart, so this run exercised newly created frames. This
+was a same-login-session test; a cold-login result has not been recorded.
