@@ -1,7 +1,7 @@
 settings-display-title = Cài đặt màn hình
 settings-display-subtitle = Kéo màn hình để sắp xếp theo vị trí thực tế
 settings-bar-title = Thanh Nickel
-settings-bar-subtitle = Màn hình, ứng dụng và màn hình làm việc
+settings-bar-subtitle = Màn hình, ứng dụng và màn hình nền
 settings-appearance-title = Giao diện
 settings-appearance-subtitle = Sáng, tối và một sắc độ khởi đầu
 settings-network-title = Cài đặt mạng
@@ -30,9 +30,9 @@ settings-keyboard-search-value = Gõ khi menu Start đang mở
 settings-keyboard-navigate = Di chuyển giữa các thao tác
 settings-keyboard-activate = Kích hoạt thao tác đã chọn
 settings-keyboard-back = Xóa nội dung tìm kiếm hoặc đóng
-settings-keyboard-workspaces = Chuyển màn hình làm việc
+settings-keyboard-workspaces = Chuyển không gian làm việc
 settings-keyboard-workspaces-value = Ctrl+Alt+Left/Right · Ctrl+Alt+0–9 · Super+Ctrl+Left/Right
-settings-keyboard-workspaces-unavailable = Không khả dụng — Windows quản lý phím tắt chuyển màn hình ảo
+settings-keyboard-workspaces-unavailable = Không khả dụng — Windows quản lý phím tắt chuyển màn hình nền ảo
 settings-about-title = Giới thiệu Nickel
 settings-about-subtitle = Thông tin hệ thống về bản cài đặt Nickel này.
 settings-about-card-title = Nickel
@@ -128,7 +128,7 @@ control-center-title = Trung tâm điều khiển
 control-center-wifi = Wi-Fi
 control-center-bluetooth = Bluetooth
 control-center-audio = Âm thanh
-control-center-workspaces = Màn hình làm việc
+control-center-workspaces = Không gian làm việc
 control-center-show-desktop = Hiện màn hình nền
 control-center-notifications = Thông báo
 control-center-show-devices = Hiện thiết bị
@@ -156,11 +156,11 @@ settings-bar-all-displays = Tất cả màn hình ({ $count })
 settings-bar-window-scope = Cửa sổ hiển thị trên từng thanh
 settings-bar-this-display = Màn hình này
 settings-bar-all-windows = Tất cả cửa sổ
-settings-bar-desktops = Màn hình làm việc
+settings-bar-desktops = Màn hình nền
 settings-bar-desktop-count =
     { $count ->
-        [one] { $count } màn hình làm việc
-       *[other] { $count } màn hình làm việc
+        [one] { $count } màn hình nền
+       *[other] { $count } màn hình nền
     }
 
 settings-appearance-mode = Chế độ
