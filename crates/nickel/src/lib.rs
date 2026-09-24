@@ -136,6 +136,8 @@ mod wgpu_presenter;
 mod window_preview;
 #[cfg(target_os = "windows")]
 mod windows_launch_broker;
+#[cfg(target_os = "windows")]
+mod windows_uwu;
 #[allow(dead_code)]
 mod winit_shell;
 
@@ -2290,6 +2292,19 @@ fn shell_event_ends_process(event: &ShellEvent) -> bool {
 /// Runs the Nickel desktop shell using process command-line arguments.
 pub fn run() -> Result<(), String> {
     #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-uwu-host")) {
+        let parent_pid = std::env::args()
+            .nth(2)
+            .ok_or("UWP shell host requires a parent process ID")?
+            .parse::<u32>()
+            .map_err(|error| format!("invalid UWP shell host parent ID: {error}"))?;
+        return if nickel_uwu::run_managed_host(parent_pid) == std::process::ExitCode::SUCCESS {
+            Ok(())
+        } else {
+            Err("UWP shell host failed".into())
+        };
+    }
+    #[cfg(target_os = "windows")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-launch-broker"))
     {
         return windows_launch_broker::run_broker_child();
@@ -2315,6 +2330,8 @@ pub fn run() -> Result<(), String> {
     platform::register_session_shell().map_err(|error| {
         format!("Nickel shell could not authenticate with the session protocol: {error}")
     })?;
+    #[cfg(target_os = "windows")]
+    let mut uwu_supervisor = windows_uwu::UwuSupervisor::start();
     let started = Instant::now();
     let mut shell_options = command_line.shell_options();
     shell_options.bar_on_all_displays =
@@ -2455,6 +2472,8 @@ pub fn run() -> Result<(), String> {
     let mut diagnostic_overdue_after_poll = Vec::new();
     let mut project_menu_changed_since_refresh = false;
     loop {
+        #[cfg(target_os = "windows")]
+        uwu_supervisor.poll();
         #[cfg(target_os = "windows")]
         if remote_control.is_none()
             && remote_control_retry_at.is_some_and(|deadline| Instant::now() >= deadline)

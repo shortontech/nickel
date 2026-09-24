@@ -88,6 +88,7 @@ xcursor.workspace = true
 arboard = "3.6.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+nickel-uwu = { path = "../nickel-uwu", default-features = false }
 accesskit = "0.24.1"
 accesskit_windows = "0.34.0"
 nickel-platform = { path = "../nickel-platform" }

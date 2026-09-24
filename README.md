@@ -1,356 +1,118 @@
 # Nickel
 
-Nickel is an experimental desktop shell written entirely in Rust. On Windows, it provides a
-GPU-rendered desktop, taskbar, application launcher, task switching, system controls, settings,
-and a file browser without requiring Windows Explorer as the desktop shell.
+**One Rust desktop for Windows and Linux, because apparently one operating
+system was not enough trouble.** Nickel brings its own desktop, taskbar,
+launcher, task switching, system controls, controller navigation, and apps. It
+targets both platforms. On Linux, it also runs its own compositor. Naturally.
 
-On Linux, the same Nickel executable owns a Smithay compositor and the desktop shell. It runs as a
-nested development session or directly through DRM and udev. Nickel's supported operating systems
-are Windows and Linux; macOS is not a build or release target.
+**Windows without Explorer. UWP apps that actually open.** Nickel is the first
+independent Windows shell to run UWP apps without keeping Explorer alive behind
+the curtains, rattling chains and pretending not to be there. It does this with
+the [Universal Windows Usher](crates/nickel-uwu/README.md). Universal. Windows.
+Usher. UwU. We reverse-engineered the Windows shell deeply enough to make it say
+“UwU.” You are welcome. `^_^`
 
-## Included Applications
+The naming scheme only gets worse from here: Nickel is the desktop, Plating is
+the settings app, and File is called File because even we have limits.
 
-- **Nickel UI** — the desktop shell, taskbar, launcher, task switcher, and system controls
-- **Nickel Settings** — display and system settings
-- **Nickel File** — directory browsing and file launching
-- **Nickel Markdown** — safe, selectable local Markdown viewing
-- **Nickel** — the desktop shell and, on Linux, its compositor and session host
+## Try it without surrendering your desktop
 
-## What Nickel Does
+Nickel uses stable Rust. No nightly incantations are required. Run commands
+from the repository root.
 
-### Desktop and Taskbar
+### Windows
 
-- Draws the desktop wallpaper on Windows and Linux
-- Shows running applications with native icons
-- Groups and cycles multiple windows from the same application
-- Tracks the active window
-- Hosts notification-area icons and their context menus on supported platforms
-- Displays the clock and opens system controls on Windows and Linux
-- Reserves space when applications are maximized on Windows and Linux
-- Hides behind borderless fullscreen applications
-
-### Launcher and Run
-
-- Indexes installed applications and Start Menu shortcuts on Windows
-- Indexes `.desktop` applications on Linux
-- Includes shortcuts from the user Desktop
-- Searches applications with fuzzy matching
-- Supports pinned applications and launch history
-- Provides keyboard navigation and scrolling
-- Opens Run with command history, clipboard support, and IME-aware text input
-
-### Task Switching
-
-- Switches between windows with live DWM previews on Windows
-- Cycles forward or backward
-- Cycles windows within one application
-- Supports mouse selection from the preview
-- Preserves fullscreen applications while switching
-
-### System Controls and Settings
-
-- Shows the real display layout
-- Identifies displays and selects the primary display
-- Reports the active network
-- Controls master volume
-- Selects the default audio output
-- Responds to hardware volume and media controls
-- Displays a compact volume indicator
-
-## Using Nickel
-
-### Keyboard
-
-| Input | Action |
-| --- | --- |
-| `Windows` | Open or close the launcher on Windows and Linux |
-| `Windows` + `R` | Open Run on Windows and Linux |
-| `Alt` + `Tab` | Open Nickel Flip and move to the next window on Windows and Linux |
-| `Alt` + `` ` `` | Cycle windows in the current application on Windows and Linux |
-| Arrow keys | Move through launcher results |
-| `Enter` | Launch the selected result |
-| `Escape` | Close the active Nickel surface |
-
-Hardware volume, mute, play/pause, stop, previous, next, fast-forward, and rewind controls work when
-Nickel is the Windows shell.
-
-### Mouse
-
-- Click the Nickel Bar button to open or close the launcher.
-- Click an application on Nickel Bar to activate it.
-- Repeatedly click a grouped application to cycle through its windows.
-- Hover a grouped application to see live window previews on Windows.
-- Click the clock and system area to open Nickel Plating on Windows and Linux.
-- Hold `Windows` and left-drag to move a window on Windows and Linux.
-- Hold `Windows` and right-drag to resize a window on Windows and Linux.
-
-## Running Nickel
-
-Nickel uses stable Rust.
-
-```bash
-cargo build --workspace
-cargo test --workspace
-```
-
-Launch the desktop shell:
-
-```bash
+```powershell
 cargo run -p nickel
 ```
 
-For a Windows cross-build smoke test under Proton, the shell has two optional acceptance flags:
+This starts Nickel beside your current Windows desktop. When Nickel is installed
+as the shell and owns the Windows shell window, it starts UwU automatically. If
+Explorer is still registered, Nickel politely shares the session instead of
+starting a turf war. See the
+[UwU research notes](crates/nickel-uwu/README.md) for the implementation,
+diagnostic commands, and a heroic quantity of COM archaeology.
 
-```bash
-proton run target/x86_64-pc-windows-gnu/debug/nickel.exe \
-  --no-desktop-windows --panel-top
-```
+### Linux nested session
 
-`--no-desktop-windows` skips creating wallpaper/desktop windows while retaining the panel and
-other shell surfaces. `--panel-top` places each panel at the top of its display. These flags are
-independent, may be combined, and do not change normal shell defaults.
-
-Launch Nickel Settings:
-
-```bash
-cargo run -p nickel-settings
-```
-
-Open Nickel File from the launcher or with `Windows` + `E` on Windows.
-
-Open a local Markdown document:
-
-```bash
-cargo run -p nickel-markdown-ui -- README.md
-```
-
-### Linux Nested Session
-
-Run Nickel inside an existing Linux desktop:
+Run Nickel inside an existing Linux desktop, like a desktop-shaped ship in a
+desktop-shaped bottle:
 
 ```bash
 cargo run -p nickel --no-default-features --features backend-winit --bin nickel-nested
 ```
 
-Live compositor tests may add `--test-control`. This explicitly enables the
-capability-authenticated `TestInput` protocol command for the nested backend, allowing tests to
-inject semantic keyboard and pointer events through the same Smithay input path as physical
-devices. The direct backend additionally requires `NICKEL_ALLOW_NATIVE_TEST_CONTROL=1`; test
-control is disabled by default on both backends.
-Ordinary nested and native sessions do not bind a compatibility control socket or export a
-capability token; compositor-owned shell and file UI use typed in-process authority instead.
+For a direct DRM/udev session or an SDDM login session, see
+[Linux sessions](docs/linux-sessions.md). The direct session is still under
+development; bring logs and a healthy respect for input devices.
 
-With the `NICKEL_SESSION_CONTROL` and `NICKEL_SESSION_TOKEN` variables issued only by an explicit
-`--test-control` session,
-`nickel-test-input` can inspect registered windows and inject individual production input events:
+## Shiny objects
 
-```bash
-cargo run -p nickel --bin nickel-test-input -- windows
-cargo run -p nickel --bin nickel-test-input -- workspaces
-cargo run -p nickel --bin nickel-test-input -- outputs
-cargo run -p nickel --bin nickel-test-input -- surfaces
-cargo run -p nickel --bin nickel-test-input -- caches
-cargo run -p nickel --bin nickel-test-input -- move 64 700
-cargo run -p nickel --bin nickel-test-input -- wheel 0 -120
-cargo run -p nickel --bin nickel-test-input -- button left pressed
-cargo run -p nickel --bin nickel-test-input -- button left released
-```
+- A GPU-rendered desktop and taskbar with application grouping, native icons,
+  previews, and task switching. Pixels should earn their keep.
+- An application launcher with fuzzy search, pinned apps, and launch history.
+- Controller navigation with PlayStation, Xbox, Switch, and generic gamepads.
+  Confirm and cancel follow the controller family, because muscle memory is a
+  user interface contract.
+- Nickel Plating for display, network, audio, and other system controls. Yes,
+  the settings app is called Plating. We committed to the bit.
+- Nickel File, a Markdown viewer, a terminal, and a Codex chat application.
+  It is a desktop; eventually it started collecting apps.
+- A shared shell experience on Windows and Linux, including a Smithay
+  compositor on Linux. Same desk, different arguments with the kernel.
 
-The same capability provides semantic workspace commands, nested output hotplug, and lock-boundary
-acceptance without copied coordinates or private state mutation. It cannot invoke logout or power
-actions. Run `nickel-test-input --help` for the complete command set.
+### How to drive it
 
-Renderer-owned shell targets can be exercised without copying panel or overlay coordinates:
+| Input | Action |
+| --- | --- |
+| `Windows` | Open or close the launcher |
+| `Windows` + `R` | Open Run |
+| `Alt` + `Tab` | Switch windows |
+| `Alt` + `` ` `` | Cycle windows in the current application |
+| `Windows` + `E` | Open Nickel File on Windows |
+| `Windows` + left-drag | Move a window |
+| `Windows` + right-drag | Resize a window |
 
-```bash
-cargo run -p nickel --bin nickel-test-input -- \
-  semantic panel-app org.nickel.Terminal hover
-cargo run -p nickel --bin nickel-test-input -- \
-  semantic preview 10 menu
-cargo run -p nickel --bin nickel-test-input -- \
-  semantic menu 10 minimize
-cargo run -p nickel --bin nickel-test-input -- \
-  scenario grouped-windows org.nickel.Terminal
-```
+The launcher also supports arrow-key navigation, `Enter` to launch, and
+`Escape` to close the active Nickel surface.
 
-The shell resolves these names from its live grouping and preview/menu frame records. The compositor
-then translates the returned surface-local point through its authoritative shell-surface placement
-and injects normal pointer motion and button events. The capability endpoint is absent unless the
-nested session was started with `--test-control`, requires the session token, and is removed from
-ordinary application environments.
+### Couch controls
 
-The grouped-windows scenario requires two disposable windows with the supplied application ID. It
-discovers their compositor IDs, drives hover, peek, activation, close, minimize, maximize, and
-restore through renderer-resolved targets, and polls authoritative window snapshots after each
-transition. Because it deliberately closes and changes those windows, use it only with fixtures in
-an explicitly test-controlled nested session.
+| Controller input | Action |
+| --- | --- |
+| D-pad or left stick | Navigate |
+| South face button | Confirm |
+| East face button or Select | Cancel |
+| Start | Open the context menu |
+| Left or right shoulder | Switch panes |
+| Guide | Open or close the launcher |
 
-The client does not mutate shell state directly: events still pass through the compositor's normal
-hit testing, focus handling, and input reducers.
+Nintendo layouts use the east face button to confirm and the south face button
+to cancel. Nickel detects the controller family instead of asking a Switch
+owner to pretend the letters are in Xbox places.
 
-### Linux Direct Session
+## How unfinished is it?
 
-Protocol policies, compatibility evidence, and known limitations are tracked in
-[`docs/linux-application-compatibility.md`](docs/linux-application-compatibility.md).
-The compositor lock authority, PAM boundary, and remaining native acceptance are documented in
-[`docs/session-locking.md`](docs/session-locking.md).
+Nickel is under active development, which is the dignified way to say that some
+buttons are ambitions. Work remains on notifications, hardware controls, Wi-Fi
+connection management, accessibility, touch-keyboard support, multiple
+monitors, and the direct Linux session.
 
-Linux local audio cues require the PipeWire development package to build and a running PipeWire service for playback.
+## Rabbit holes
 
-The direct backend requires DRM, GBM, libinput, udev, libseat, and EGL development packages. Build
-it without the nested backend:
-
-```bash
-cargo build -p nickel
-```
-
-Run it from a text VT:
-
-```bash
-RUST_LOG=info target/debug/nickel --backend udev
-```
-
-For an explicitly authorized native TTY test, run these two lines in separate tmux panes (the
-second pane may replace `surfaces` with another `nickel-test-input` command):
-
-```bash
-NICKEL_ALLOW_NATIVE_TEST_CONTROL=1 NICKEL_SECURE_STORAGE_REQUIRED=0 NICKEL_TEST_CONTROL_ENV_FILE=/tmp/nickel-test-control.env target/release/nickel --backend udev --test-control
-nickelas surfaces
-```
-
-`NICKEL_SECURE_STORAGE_REQUIRED=0` is only for an isolated TTY diagnostic without the normal
-wallet service. Remove `/tmp/nickel-test-control.env` after the test; ordinary SDDM sessions must
-not use either override.
-
-Set `NICKEL_DRM_DEVICE=/dev/dri/cardN` to select a specific GPU.
-
-### Linux Login Session
-
-Build the integrated compositor, shell, and login launcher:
-
-```bash
-cargo build --release -p nickel
-```
-
-Install the completed build as an SDDM Wayland session:
-
-```bash
-sudo packaging/install-nickel-session.sh
-```
-
-The installer resolves the checkout containing the script rather than assuming a fixed repository
-path. `NICKEL_RELEASE_DIR` may select another completed release directory, and
-`NICKEL_INSTALL_ROOT` stages the exact installed layout under a temporary packaging root.
-
-To remove the session, delete only the files installed by the script:
-
-```bash
-sudo rm /usr/share/wayland-sessions/nickel.desktop
-sudo rm /usr/share/applications/nickel-settings.desktop
-sudo rm /usr/share/icons/hicolor/512x512/apps/nickel-settings.png
-sudo rm /usr/local/bin/nickel-login /usr/local/bin/nickel
-sudo rm /usr/local/bin/nickel-settings /usr/local/bin/nickel-terminal
-```
-
-If a development build cannot start, select another desktop from SDDM's session chooser. From that
-desktop, inspect the previous boot with `journalctl -b -1 | rg 'nickel|sddm-helper'`, rebuild
-Nickel, and rerun the installer. A compositor startup failure exits back to
-the display manager; an intentional logout exits successfully. Do not replace the installed binaries
-with symlinks into `target/`: a later default-feature build can replace the direct-backend binary.
-
-Nickel asks the user D-Bus session for its configured `org.freedesktop.secrets` provider; it does not
-select or start a KWallet-, GNOME Keyring-, or KeePassXC-specific service. The operating system may
-use a provider-specific PAM module to unlock the wallet at login. Providers without PAM integration
-remain supported through the standard Secret Service unlock prompt, but automatic login-password
-unlock is not universal. Nickel verifies the existing default collection, exposes readiness to the
-shell, warns before launching known credential-dependent applications while storage is unavailable,
-and never creates a replacement collection.
-
-To pin reconnections to a specific provider, place its absolute executable path in
-`$XDG_CONFIG_HOME/nickel/secret-service-provider` (or
-`~/.config/nickel/secret-service-provider`). Nickel rejects a different process taking ownership of
-`org.freedesktop.secrets`; without this optional pin it reports the current owner for diagnosis but
-does not persist an automatic selection.
-
-## Project Status
-
-- Notifications are not displayed yet.
-- Battery, brightness, Bluetooth, and power controls are not implemented.
-- Wi-Fi connection management is incomplete.
-- Some packaged Windows applications and system settings require additional activation support.
-- Accessibility and touch-keyboard integration are incomplete.
-- Multiple-monitor behavior needs more testing.
-- Nickel File currently provides basic directory browsing and file launching.
-- The direct Linux session is not ready for general use.
-
-The Windows shell compatibility checklist lives in
-[`specs/0021-windows-shell-contract.md`](specs/0021-windows-shell-contract.md).
-
-## Project Layout
-
-```text
-crates/
-|-- nickel-ui/         Declarative UX layer, layout, state, and software presentation
-|-- nickel-codex/      Typed Codex CLI selection, app-server RPC, and diagnostics
-|-- nickel-codex-fixture/ Offline protocol fixtures, replay validation, and failure injection
-|-- nickel-codex-ui/   Standalone declarative Codex chat application
-|-- nickel-core/        Shell state and behavior
-|-- nickel-file/        Nickel File browser and file manager
-|-- nickel-logging/     Native logging
-|-- nickel-markdown/    Safe typed Markdown parsing and presentation
-|-- nickel-markdown-ui/ Standalone read-only Markdown viewer
-|-- nickel-platform/    Shared native platform adapters
-|-- nickel/             Desktop shell plus the Linux compositor and session host
-|-- nickel-settings/    Nickel Plating settings application
-`-- nickel-terminal/   Nickel terminal application
-```
-
-Active design work lives in [`specs/`](specs/). Completed specifications live in
-[`specs/done/`](specs/done/).
-
-## Codex Backend Diagnostics
-
-Codex support is deliberately testable without Nickel UI. These commands validate offline replay and
-probe a CLI without starting a model turn:
-
-```bash
-cargo run -p nickel-codex-fixture -- validate crates/nickel-codex-fixture/fixtures
-cargo run -p nickel-codex --bin nickel-codex-test -- replay crates/nickel-codex-fixture/fixtures/basic.json
-cargo run -p nickel-codex --bin nickel-codex-test -- probe --backend installed
-cargo run -p nickel-codex-ui -- --replay crates/nickel-codex-fixture/fixtures/basic.json
-```
-
-`nickel-codex-test` emits versioned JSONL on stdout. Installed Codex is preferred only after generated
-schema and initialization compatibility checks; release builds retain a pinned bundled fallback.
-Nickel delegates account authentication to the experimental Codex app-server login RPC and never
-handles passwords or raw OpenAI credentials itself. To test a clean profile without touching the
-ordinary Codex profile, set an absolute child-only override:
-
-```bash
-mkdir -p /absolute/private/test-profile
-NICKEL_CODEX_HOME=/absolute/private/test-profile cargo run -p nickel-codex-ui -- --backend installed
-```
-
-Only the spawned Codex app-server receives `CODEX_HOME`; Nickel, probes, and the parent environment
-remain unchanged.
-
-An authenticated first turn must be started on the same app-server connection that creates its thread;
-subsequent one-shot turns resume the persisted thread explicitly:
-
-```bash
-cargo run -p nickel-codex --bin nickel-codex-test -- start-thread --cwd "$PWD" --text "Hello"
-cargo run -p nickel-codex --bin nickel-codex-test -- turn THREAD_ID --text "Continue"
-```
-
-The standalone graphical client runs independently of the Nickel shell:
-
-```bash
-cargo run -p nickel-codex-ui -- --backend installed
-```
+- [Cargo workspace layout](docs/cargo-workspace.md) — crates and their roles.
+- [Linux sessions](docs/linux-sessions.md) — nested, direct, and login-session
+  setup and diagnostics.
+- [UwU research notes](crates/nickel-uwu/README.md) — Windows UWP discovery,
+  experiments, and diagnostics. Yes, that still means Universal Windows
+  Usher.
+- [Codex backend diagnostics](docs/codex-backend-diagnostics.md) — offline
+  replay and backend tests.
+- [Active specifications](specs/) and [completed specifications](specs/done/).
 
 ## Contributing
 
-Before submitting a change:
+Before submitting a change, appease the usual three-headed Cargo guardian:
 
 ```bash
 cargo fmt --all --check
@@ -358,7 +120,8 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
-Include behavior tests where practical and record the platforms tested.
+Include behavior tests where practical and record the platforms tested. “It
+worked on my machine” is useful evidence once you tell us which machine.
 
 ## License
 
@@ -366,3 +129,8 @@ Copyright 2026 Steven Horton.
 
 Nickel is dual-licensed under the [MIT License](LICENSE-MIT) or the
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+## Similar projects
+
+- [GyroShell](https://github.com/Pdawg-bytes/GyroShell)
+- [Cairo Shell](https://github.com/cairoshell/cairoshel)

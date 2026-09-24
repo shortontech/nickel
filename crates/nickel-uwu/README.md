@@ -1,4 +1,24 @@
-# Windows immersive manager probe
+# Nickel UWU: Universal Windows Usher
+
+`nickel-uwu` is the Windows-only UWP presentation component. Its library owns
+the immersive shell controller, shell-window registration, and automatic
+presentation loop. Nickel starts that loop in a managed child of `nickel.exe`
+when the session has no registered shell window. The child uses the same
+executable, exits when Nickel exits, and is stopped during normal Nickel
+shutdown. With Explorer or another shell registered, Nickel waits and checks
+again so it can take over if that shell later exits.
+
+The `nickel-windows-frame-probe` binary and the other binaries in `src/bin/`
+remain manual diagnostics. Nickel depends on the library with its `diagnostics`
+feature disabled. The rebuilt Nickel helper was also run while the old fixture
+owned the shell window; it refused registration as expected. The existing live
+fixture test below applies to the diagnostic host, not to a Nickel-managed
+child. Private offsets and callbacks were derived from Windows build 26200.
+The host validates the relevant live import targets and COM vtable entries at
+runtime instead of rejecting other Windows build numbers before startup. The
+managed child still needs live runtime validation before broad deployment.
+
+## Diagnostic history
 
 This isolated diagnostic fixture tries to create Windows' registered **Immersive
 Application Manager** COM class (`{50FDBB99-5C92-495E-9E81-E2C2F48CDDAE}`),
@@ -7,15 +27,15 @@ and queries two candidate service IDs. It then runs `nickel-windows-app-probe`
 with any acquired objects kept alive. Each phase reports an HRESULT. A successful
 app launch after a failed service query is only a baseline; it does not show
 that the fixture supplied the missing frame service. This remains separate
-from Nickel's launch path.
+from the automatic presentation path.
 
 Build both small probes in release mode with one compiler job:
 
 ```powershell
-cargo build --release -j 1 -p nickel-windows-frame-probe -p nickel-windows-app-probe
+cargo build --release -j 1 -p nickel-uwu -p nickel-windows-app-probe
 .\target\release\nickel-windows-frame-probe.exe 'Shorton.NickelUwpTarget_hmprcxg96edac!App'
 .\target\release\nickel-windows-frame-probe.exe 'Shorton.NickelUwpTarget_hmprcxg96edac!App' --private-service
-cargo build --release -j 1 -p nickel-windows-frame-probe --bin band-probe
+cargo build --release -j 1 -p nickel-uwu --bin band-probe
 .\target\release\band-probe.exe
 ```
 
@@ -509,7 +529,7 @@ dimensions, and window data pointers. With an explicit frame HWND it can request
 a normal resize or a maximize/restore transition:
 
 ```powershell
-cargo build --release -j 1 -p nickel-windows-frame-probe --bin resize-inspect
+cargo build --release -j 1 -p nickel-uwu --bin resize-inspect
 .\target\release\resize-inspect.exe
 .\target\release\resize-inspect.exe FRAME_HWND_HEX 700 740
 .\target\release\resize-inspect.exe FRAME_HWND_HEX maximize

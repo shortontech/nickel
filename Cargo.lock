@@ -3189,6 +3189,7 @@ dependencies = [
  "nickel-storage",
  "nickel-ui",
  "nickel-ui-testkit",
+ "nickel-uwu",
  "nix 0.31.3",
  "notify",
  "nucleo-matcher",
@@ -3609,19 +3610,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "nickel-windows-app-probe"
-version = "0.1.0"
-dependencies = [
- "windows",
-]
-
-[[package]]
-name = "nickel-windows-frame-probe"
+name = "nickel-uwu"
 version = "0.1.0"
 dependencies = [
  "libloading",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "nickel-windows-app-probe"
+version = "0.1.0"
+dependencies = [
+ "windows",
 ]
 
 [[package]]

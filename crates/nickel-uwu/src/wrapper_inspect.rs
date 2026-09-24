@@ -25,7 +25,7 @@ pub fn find_wrapper(frame: usize) -> Result<Wrapper, Box<dyn std::error::Error>>
     };
 
     // These layout constants are from this machine's Windows build 26200
-    // symbols and live objects. They are diagnostic only, never a platform API.
+    // symbols and live objects. They are private to the verified Windows build.
     const DISPATCHER_VTABLE_RVA: usize = 0x74c4a0;
     const DISPATCHER_SECOND_VTABLE_RVA: usize = 0x74c510;
     const WRAPPER_COLLECTION_VTABLE_RVA: usize = 0x74d618;
@@ -78,7 +78,7 @@ pub fn find_wrapper(frame: usize) -> Result<Wrapper, Box<dyn std::error::Error>>
         return Err("shell window has no process ID".into());
     }
     // SAFETY: The requested rights allow read-only inspection of this user's
-    // diagnostic host; Windows checks the PID and access token.
+    // shell host; Windows checks the PID and access token.
     let process = OwnedHandle(unsafe {
         OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, host_pid)?
     });

@@ -1,4 +1,4 @@
-//! Diagnostic-only redirection of one Windows shell import in this process.
+//! Build-specific redirection of the immersive fallback window's desktop band.
 
 use std::{
     ffi::c_void,
@@ -135,8 +135,8 @@ impl FallbackBandRedirect {
             ));
         }
         ORIGINAL.store(original, Ordering::Release);
-        // SAFETY: This slot belongs to a DLL loaded only into the diagnostic
-        // worker. The original pointer is restored before either DLL unloads.
+        // SAFETY: This slot belongs to the DLL loaded in the dedicated host
+        // process. The original pointer is restored before either DLL unloads.
         unsafe { write_slot(slot, redirect_create_window_in_band as *const () as usize) }?;
         Ok(Self {
             _twinui: twinui,
@@ -146,6 +146,7 @@ impl FallbackBandRedirect {
         })
     }
 
+    #[cfg(feature = "diagnostics")]
     pub fn redirected_count(&self) -> usize {
         REDIRECTED.load(Ordering::Relaxed)
     }

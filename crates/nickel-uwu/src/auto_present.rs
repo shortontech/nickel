@@ -28,7 +28,7 @@ use windows::{
     core::{BOOL, GUID, HRESULT, IUnknown, Interface, PWSTR},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Window {
     hwnd: usize,
     pid: u32,
@@ -139,24 +139,61 @@ struct Pending {
     last_error: String,
 }
 
+fn unique_core_for_app(
+    app_id: &str,
+    frames: &[(Window, String)],
+    cores: &[(Window, String)],
+    preexisting_frames: &HashSet<Window>,
+    preexisting_cores: &HashSet<Window>,
+) -> Option<Window> {
+    let mut matching_frames = frames
+        .iter()
+        .filter(|(window, id)| id == app_id && !preexisting_frames.contains(window));
+    matching_frames.next()?;
+    if matching_frames.next().is_some() {
+        return None;
+    }
+    // A newly created view wins over an orphan from an earlier shell session.
+    // If activation reused an existing CoreWindow, accept it only when it is
+    // the sole unparented candidate for this application.
+    let mut new_cores = cores
+        .iter()
+        .filter(|(window, id)| id == app_id && !preexisting_cores.contains(window));
+    if let Some((core, _)) = new_cores.next() {
+        return new_cores.next().is_none().then_some(*core);
+    }
+    let mut old_cores = cores.iter().filter(|(_, id)| id == app_id);
+    let core = old_cores.next()?.0;
+    old_cores.next().is_none().then_some(core)
+}
+
 pub struct AutoPresent {
-    preexisting: HashSet<Window>,
+    preexisting_frames: HashSet<Window>,
+    preexisting_cores: HashSet<Window>,
     complete: HashSet<(Window, Window)>,
     pending: HashMap<Window, Pending>,
+    unmatched: HashMap<Window, (usize, usize, usize)>,
 }
 
 impl AutoPresent {
     /// Snapshot before controller startup: do not attach orphan windows left by
     /// an earlier shell session to a newly activated instance of the same app.
     pub fn new() -> Self {
+        let snapshot = windows();
         Self {
-            preexisting: windows()
-                .into_iter()
+            preexisting_frames: snapshot
+                .iter()
+                .filter(|(_, frame)| *frame)
+                .map(|(window, _)| *window)
+                .collect(),
+            preexisting_cores: snapshot
+                .iter()
                 .filter(|(_, frame)| !frame)
-                .map(|(w, _)| w)
+                .map(|(window, _)| *window)
                 .collect(),
             complete: HashSet::new(),
             pending: HashMap::new(),
+            unmatched: HashMap::new(),
         }
     }
 
@@ -166,35 +203,65 @@ impl AutoPresent {
         self.complete
             .retain(|(frame, core)| live.contains(frame) && live.contains(core));
         self.pending.retain(|frame, _| live.contains(frame));
-        self.preexisting.retain(|w| live.contains(w));
+        self.unmatched.retain(|frame, _| live.contains(frame));
+        self.preexisting_frames.retain(|w| live.contains(w));
+        self.preexisting_cores.retain(|w| live.contains(w));
         let cores: Vec<_> = all
             .iter()
-            .filter(|(w, frame)| !frame && !self.preexisting.contains(w))
+            .filter(|(window, frame)| {
+                !frame && unsafe { GetParent(HWND(window.hwnd as *mut c_void)) }.is_err()
+            })
             .filter_map(|(w, _)| process_app_id(w.pid).map(|id| (*w, id)))
             .collect();
-        for (frame, is_frame) in &all {
-            if !is_frame || self.complete.iter().any(|(done, _)| done == frame) {
+        let frames: Vec<_> = all
+            .iter()
+            .filter(|(_, is_frame)| *is_frame)
+            .filter_map(|(window, _)| frame_app_id(window.hwnd).map(|id| (*window, id)))
+            .collect();
+        for (frame, app_id) in &frames {
+            if self.preexisting_frames.contains(frame)
+                || self.complete.iter().any(|(done, _)| done == frame)
+            {
                 continue;
             }
-            let Some(app_id) = frame_app_id(frame.hwnd) else {
+            let Some(core) = unique_core_for_app(
+                app_id,
+                &frames,
+                &cores,
+                &self.preexisting_frames,
+                &self.preexisting_cores,
+            ) else {
+                let counts = (
+                    frames
+                        .iter()
+                        .filter(|(window, id)| {
+                            id == app_id && !self.preexisting_frames.contains(window)
+                        })
+                        .count(),
+                    cores
+                        .iter()
+                        .filter(|(window, id)| {
+                            id == app_id && !self.preexisting_cores.contains(window)
+                        })
+                        .count(),
+                    cores
+                        .iter()
+                        .filter(|(window, id)| {
+                            id == app_id && self.preexisting_cores.contains(window)
+                        })
+                        .count(),
+                );
+                if self.unmatched.insert(*frame, counts) != Some(counts) {
+                    eprintln!(
+                        "phase=auto-present result=waiting app={app_id:?} frame={:#x} frames={} new_cores={} old_cores={}",
+                        frame.hwnd, counts.0, counts.1, counts.2
+                    );
+                }
                 continue;
             };
-            let candidates: Vec<_> = cores
-                .iter()
-                .filter(|(_, id)| id == &app_id)
-                .map(|(w, _)| *w)
-                .collect();
-            // Never guess between multiple views of the same app. Keep retries
-            // independent so an ambiguous or slow app cannot block another.
-            let matching_frames = all
-                .iter()
-                .filter(|(_, is_frame)| *is_frame)
-                .filter(|(w, _)| frame_app_id(w.hwnd).as_deref() == Some(&app_id))
-                .count();
-            if candidates.len() != 1 || matching_frames != 1 {
-                continue;
-            }
-            let core = candidates[0];
+            self.unmatched.remove(frame);
+            // Ambiguous views are left untouched. A slow app has its own
+            // pending record and cannot consume another app's retry budget.
             let pending = self.pending.entry(*frame).or_insert_with(|| Pending {
                 started: Instant::now(),
                 last_error: String::new(),
@@ -209,7 +276,7 @@ impl AutoPresent {
                 }
                 continue;
             }
-            let result = Self::present(*frame, core, &app_id);
+            let result = Self::present(*frame, core, app_id);
             match result {
                 Ok(true) => {
                     println!(
@@ -248,14 +315,165 @@ impl AutoPresent {
             return Ok(false);
         }
         if wrapper.client == 0 {
-            crate::probe_window_discovery(wrapper.interface, core.hwnd)?;
+            crate::presentation_callbacks::probe_window_discovery(wrapper.interface, core.hwnd)?;
         }
-        crate::probe_window_visibility(wrapper.interface, core.hwnd)?;
-        crate::probe_window_layout(wrapper.interface, core.hwnd)?;
+        crate::presentation_callbacks::probe_window_visibility(wrapper.interface, core.hwnd)?;
+        crate::presentation_callbacks::probe_window_layout(wrapper.interface, core.hwnd)?;
         uncloak(app_id).map_err(|e| e.to_string())?;
         // SAFETY: Parenting to the correct AFH frame is the observable result of
         // SetPresentedWindow; do not report success based only on an HRESULT.
         Ok(unsafe { GetParent(HWND(core.hwnd as *mut c_void)) }.ok()
             == Some(HWND(frame.hwnd as *mut c_void)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::{Window, unique_core_for_app};
+
+    fn window(hwnd: usize) -> Window {
+        Window { hwnd, pid: 1 }
+    }
+
+    #[test]
+    fn distinct_apps_can_each_match_one_core() {
+        let frames = [
+            (window(1), "Calculator".into()),
+            (window(2), "Settings".into()),
+        ];
+        let cores = [
+            (window(3), "Calculator".into()),
+            (window(4), "Settings".into()),
+        ];
+        assert_eq!(
+            unique_core_for_app(
+                "Calculator",
+                &frames,
+                &cores,
+                &HashSet::new(),
+                &HashSet::new()
+            ),
+            Some(window(3))
+        );
+        assert_eq!(
+            unique_core_for_app(
+                "Settings",
+                &frames,
+                &cores,
+                &HashSet::new(),
+                &HashSet::new()
+            ),
+            Some(window(4))
+        );
+    }
+
+    #[test]
+    fn multiple_views_of_one_app_are_ambiguous() {
+        let frames = [
+            (window(1), "Calculator".into()),
+            (window(2), "Calculator".into()),
+        ];
+        let cores = [(window(3), "Calculator".into())];
+        assert_eq!(
+            unique_core_for_app(
+                "Calculator",
+                &frames,
+                &cores,
+                &HashSet::new(),
+                &HashSet::new()
+            ),
+            None
+        );
+
+        let frames = [(window(1), "Calculator".into())];
+        let cores = [
+            (window(3), "Calculator".into()),
+            (window(4), "Calculator".into()),
+        ];
+        assert_eq!(
+            unique_core_for_app(
+                "Calculator",
+                &frames,
+                &cores,
+                &HashSet::new(),
+                &HashSet::new()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn new_core_wins_over_old_orphan() {
+        let frames = [(window(1), "Calculator".into())];
+        let cores = [
+            (window(2), "Calculator".into()),
+            (window(3), "Calculator".into()),
+        ];
+        assert_eq!(
+            unique_core_for_app(
+                "Calculator",
+                &frames,
+                &cores,
+                &HashSet::new(),
+                &HashSet::from([window(2)])
+            ),
+            Some(window(3))
+        );
+    }
+
+    #[test]
+    fn one_reused_core_can_be_presented() {
+        let frames = [(window(1), "Calculator".into())];
+        let cores = [(window(2), "Calculator".into())];
+        assert_eq!(
+            unique_core_for_app(
+                "Calculator",
+                &frames,
+                &cores,
+                &HashSet::new(),
+                &HashSet::from([window(2)])
+            ),
+            Some(window(2))
+        );
+    }
+
+    #[test]
+    fn multiple_old_orphans_remain_ambiguous() {
+        let frames = [(window(1), "Calculator".into())];
+        let cores = [
+            (window(2), "Calculator".into()),
+            (window(3), "Calculator".into()),
+        ];
+        assert_eq!(
+            unique_core_for_app(
+                "Calculator",
+                &frames,
+                &cores,
+                &HashSet::new(),
+                &HashSet::from([window(2), window(3)])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn old_frame_does_not_block_new_frame() {
+        let frames = [
+            (window(1), "Calculator".into()),
+            (window(2), "Calculator".into()),
+        ];
+        let cores = [(window(3), "Calculator".into())];
+        assert_eq!(
+            unique_core_for_app(
+                "Calculator",
+                &frames,
+                &cores,
+                &HashSet::from([window(1)]),
+                &HashSet::new()
+            ),
+            Some(window(3))
+        );
     }
 }
