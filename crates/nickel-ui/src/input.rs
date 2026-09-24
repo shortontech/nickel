@@ -428,6 +428,18 @@ impl FocusedInputDispatcher {
                             UiEvent::KeyboardNavigateBack
                         })
                     }
+                    (LogicalKey::Named(NamedKey::Delete), _)
+                        if !text_editing
+                            && !event.repeat
+                            && !shift
+                            && !control
+                            && !event.modifiers.aggregate(AggregateModifier::Alt) =>
+                    {
+                        InputCommand::Application {
+                            shortcut: Shortcut::Delete,
+                            fallback: None,
+                        }
+                    }
                     (LogicalKey::Named(NamedKey::Delete), _) => {
                         InputCommand::Ui(UiEvent::TextDelete)
                     }
@@ -1171,6 +1183,34 @@ mod tests {
                 shortcut: Shortcut::Rename,
                 fallback: None,
             }]
+        );
+    }
+
+    #[test]
+    fn delete_dispatches_file_action_only_outside_text_editing() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        let delete = key_at(
+            44,
+            LogicalKey::Named(NamedKey::Delete),
+            KeyCode::Delete,
+            &[],
+        );
+        assert_eq!(
+            dispatch.dispatch_with_context(&delete, InputContext::default()),
+            [InputCommand::Application {
+                shortcut: Shortcut::Delete,
+                fallback: None,
+            }]
+        );
+        assert_eq!(
+            dispatch.dispatch_with_context(
+                &delete,
+                InputContext {
+                    text_focused: true,
+                    ..InputContext::default()
+                }
+            ),
+            [InputCommand::Ui(UiEvent::TextDelete)]
         );
     }
 

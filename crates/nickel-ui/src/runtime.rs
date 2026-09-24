@@ -947,6 +947,7 @@ impl ControllerPollSchedule {
 pub enum Shortcut {
     Submit,
     Rename,
+    Delete,
     Newline,
     NavigateUp,
     NavigateDown,

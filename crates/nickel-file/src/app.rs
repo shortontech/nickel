@@ -82,6 +82,8 @@ type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 type ActivationResult = (u64, String, Result<(), OpenPathError>);
 type TransferUpdate = (TransferIntent, usize, usize, Option<TransferReport>);
 type RenameResult = (crate::FileIdentity, PathBuf, Result<(), String>);
+#[cfg(target_os = "windows")]
+type TrashResult = (usize, Result<(), String>);
 
 #[derive(Clone, Debug)]
 pub(crate) struct PendingTransferConflict {
@@ -112,6 +114,8 @@ pub enum FileMessage {
     ContextCopyPath,
     ContextOpenTerminal,
     ContextRename,
+    #[cfg(target_os = "windows")]
+    ContextTrash,
     ContextProperties,
     ContextCurrentFolderProperties,
     CloseProperties,
@@ -218,6 +222,8 @@ pub struct FileApp {
     pub(crate) selected_entries: HashSet<crate::FileIdentity>,
     pub(crate) rename_editor: Option<RenameEditor>,
     rename_rx: Option<Receiver<RenameResult>>,
+    #[cfg(target_os = "windows")]
+    trash_rx: Option<Receiver<TrashResult>>,
     pub(crate) file_clipboard: Option<ClipboardOffer>,
     #[cfg(target_os = "linux")]
     native_clipboard_generation: u64,
@@ -657,6 +663,8 @@ impl FileApp {
             selected_entries: HashSet::new(),
             rename_editor: None,
             rename_rx: None,
+            #[cfg(target_os = "windows")]
+            trash_rx: None,
             file_clipboard: None,
             #[cfg(target_os = "linux")]
             native_clipboard_generation: 0,
@@ -1991,6 +1999,8 @@ impl FileApp {
                     self.status = "The selected item is no longer available".into();
                 }
             }
+            #[cfg(target_os = "windows")]
+            FileMessage::ContextTrash => self.start_trash(self.context_selection.clone()),
             FileMessage::RenameChanged(text) => {
                 if let Some(editor) = &mut self.rename_editor {
                     editor.text = text
@@ -2980,6 +2990,71 @@ impl FileApp {
         true
     }
 
+    #[cfg(target_os = "windows")]
+    fn start_trash(&mut self, paths: Vec<PathBuf>) {
+        if self.trash_rx.is_some() {
+            self.status = "A Recycle Bin operation is already running".into();
+            return;
+        }
+        if paths.is_empty() {
+            self.status = "No items selected".into();
+            return;
+        }
+        let sources = paths
+            .iter()
+            .map(|path| {
+                self.browser
+                    .entries()
+                    .iter()
+                    .position(|entry| &entry.path == path)
+                    .and_then(|index| self.browser.identity_at(index))
+                    .map(|identity| (path.clone(), identity))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(sources) = sources else {
+            self.status = "Selection changed; refresh and try again".into();
+            return;
+        };
+        let count = sources.len();
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("nickel-file-trash".into())
+            .spawn(move || {
+                let result = crate::platform::move_to_trash(&sources);
+                let _ = sender.send((count, result));
+            }) {
+            Ok(_) => {
+                self.trash_rx = Some(receiver);
+                self.status = format!("Moving {count} items to Recycle Bin…");
+            }
+            Err(error) => self.status = format!("Could not start Recycle Bin operation: {error}"),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn poll_trash(&mut self) -> bool {
+        let Some(receiver) = self.trash_rx.as_ref() else {
+            return false;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => {
+                self.trash_rx = None;
+                self.status = "Recycle Bin worker stopped unexpectedly".into();
+                self.refresh_directory(self.browser.show_hidden());
+                return true;
+            }
+        };
+        self.trash_rx = None;
+        self.refresh_directory(self.browser.show_hidden());
+        self.status = match result {
+            (count, Ok(())) => format!("Moved {count} items to Recycle Bin"),
+            (_, Err(error)) => format!("Could not move all items to Recycle Bin: {error}"),
+        };
+        true
+    }
+
     fn poll_native_drop(&mut self) -> bool {
         if self
             .native_drop_deadline
@@ -3217,11 +3292,24 @@ impl Application for FileApp {
                             .shortcut("F2")
                             .separator_before(true),
                     )
-                    .item(OverlayMenuItem::disabled_with_reason(
-                        "trash",
-                        "Move to Trash",
-                        "Trash integration is not implemented yet",
-                    ))
+                    .item({
+                        #[cfg(target_os = "windows")]
+                        {
+                            OverlayMenuItem::action(
+                                "trash",
+                                "Move to Recycle Bin",
+                                FileMessage::ContextTrash,
+                            )
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            OverlayMenuItem::disabled_with_reason(
+                                "trash",
+                                "Move to Trash",
+                                "Trash integration is not implemented yet",
+                            )
+                        }
+                    })
                     .item(
                         OverlayMenuItem::action(
                             "copy-path",
@@ -3446,6 +3534,16 @@ impl Application for FileApp {
             || association_changed
             || self.poll_activation()
             || self.poll_rename()
+            || {
+                #[cfg(target_os = "windows")]
+                {
+                    self.poll_trash()
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    false
+                }
+            }
             || self.poll_native_drop()
             || self.poll_transfer()
             || {
@@ -3486,6 +3584,8 @@ impl Application for FileApp {
                 .as_ref()
                 .map(|_| Duration::from_millis(50)),
             self.rename_rx.as_ref().map(|_| Duration::from_millis(16)),
+            #[cfg(target_os = "windows")]
+            self.trash_rx.as_ref().map(|_| Duration::from_millis(16)),
             self.native_drop_deadline
                 .map(|deadline| deadline.saturating_duration_since(Instant::now())),
             self.native_drop_hover_started.as_ref().map(|(_, started)| {
@@ -3508,6 +3608,13 @@ impl Application for FileApp {
     }
 
     fn shortcut_outcome(&mut self, shortcut: nickel_ui::Shortcut) -> nickel_ui::ShortcutOutcome {
+        #[cfg(target_os = "windows")]
+        if shortcut == nickel_ui::Shortcut::Delete {
+            let paths = self.ordered_selection_snapshot();
+            let available = !paths.is_empty() && self.trash_rx.is_none();
+            self.start_trash(paths);
+            return nickel_ui::ShortcutOutcome::handled(available);
+        }
         if shortcut == nickel_ui::Shortcut::Rename {
             let available = self.selected_entries.len() == 1;
             self.update_message(FileMessage::BeginRename);

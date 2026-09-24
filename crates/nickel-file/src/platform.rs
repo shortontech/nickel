@@ -5,6 +5,12 @@ use std::{
     sync::mpsc::{Receiver, TryRecvError, sync_channel},
 };
 
+#[cfg(target_os = "windows")]
+#[path = "windows_trash.rs"]
+mod windows_trash;
+#[cfg(target_os = "windows")]
+pub(crate) use windows_trash::move_to_trash;
+
 #[cfg(target_os = "linux")]
 use std::io;
 
