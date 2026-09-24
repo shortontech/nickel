@@ -768,6 +768,19 @@ fn wrapper_parameters(files: &[&syn::File]) -> HashMap<String, HashSet<usize>> {
 }
 
 fn rust_files(path: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    // The workbench and Rust examples are development fixtures, not shipped UI.
+    if path
+        .components()
+        .any(|component| component.as_os_str() == "examples")
+        || (path
+            .components()
+            .any(|component| component.as_os_str() == "nickel-ui-workbench")
+            && path
+                .components()
+                .any(|component| component.as_os_str() == "crates"))
+    {
+        return Ok(());
+    }
     if path.is_file() {
         if path.extension().is_some_and(|extension| extension == "rs")
             && !path
