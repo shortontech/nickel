@@ -342,7 +342,7 @@ ui-view-back-5 = 뒤로
 ui-view-paired-phones-can-use-codex-remotely-nickel-desktop-permissions-remain-separate = 페어링된 휴대폰에서 Codex를 원격으로 사용할 수 있습니다. Nickel 데스크톱 권한은 별도로 유지됩니다.
 ui-app-rename = 이름 바꾸기
 ui-app-cancel = 취소
-ui-app-choose-how-nickel-file-should-handle-every-conflicting-name-in-this-transfer = 이 전송에서 이름이 충돌하는 항목을 Nickel 파일에서 어떻게 처리할지 선택하세요.
+ui-app-choose-how-nickel-file-should-handle-every-conflicting-name-in-this-transfer = 이 전송에서 이름이 충돌하는 항목을 Nickel File에서 어떻게 처리할지 선택하세요.
 ui-app-keep-both = 둘 다 유지
 ui-app-skip-conflicts = 충돌 항목 건너뛰기
 ui-app-cancel-transfer = 전송 취소
@@ -366,8 +366,8 @@ ui-nickel-terminal-use-the-current-folder = 현재 폴더 사용
 ui-nickel-terminal-monospace = 고정 폭 글꼴
 ui-nickel-terminal-smaller = 작게
 ui-nickel-terminal-larger = 크게
-ui-nickel-terminal-fewer = 적게
-ui-nickel-terminal-more = 많이
+ui-nickel-terminal-fewer = 더 적게
+ui-nickel-terminal-more = 더 많이
 ui-nickel-terminal-block = 블록
 ui-nickel-terminal-beam = 세로줄
 ui-nickel-terminal-underline = 밑줄
@@ -389,13 +389,13 @@ ui-remote-state = 상태: { $value }
 ui-remote-scope = 범위: { $value }
 ui-remote-peer = 상대: { $value }
 ui-remote-time = 남은 시간: { $value }
-ui-remote-grant-summary = { $transport } · 활성 { $active }개 / 임대 { $leases }개
+ui-remote-grant-summary = { $transport } · 활성 { $active }개 / 권한 { $leases }개
 ui-codex-connection = Codex 연결: { $status }
 ui-transfer-conflict-count = { $count }{ $count ->
     [one]개 항목이 이미 있습니다
    *[other]개 항목이 이미 있습니다
 }
 ui-properties-title = { $name } 속성
-ui-file-window-title = Nickel 파일 — { $path }
+ui-file-window-title = Nickel File — { $path }
 ui-gaze-eye-summary = 빨강: 왼쪽 눈  |  초록: 오른쪽 눈  |  파랑: 양쪽 눈    { $camera }  |  { $model }
 ui-markdown-link = { $label }  ↗
