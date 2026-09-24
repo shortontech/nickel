@@ -51,14 +51,6 @@ impl SettingsApp {
                     self.localizer.text("settings-bluetooth-pair-title"),
                     self.localizer.text("settings-bluetooth-pair-subtitle"),
                 ),
-                SettingsPage::PrintersStorage => (
-                    "Printers & Storage".into(),
-                    "Print queues, removable media, and filesystem usage".into(),
-                ),
-                SettingsPage::Security => (
-                    "Security & Updates".into(),
-                    "System maintenance, protection, privacy, and secure storage".into(),
-                ),
                 SettingsPage::DefaultApps => (
                     self.localizer.text("settings-default-apps-title"),
                     self.localizer.text("settings-default-apps-subtitle"),
@@ -103,8 +95,6 @@ impl SettingsApp {
         let appearance_label = self.localizer.text("settings-nav-appearance");
         let network_label = self.localizer.text("settings-nav-network");
         let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
-        let printers_storage_label = "Printers & Storage".to_owned();
-        let security_label = "Security & Updates".to_owned();
         let default_apps_label = self.localizer.text("settings-nav-default-apps");
         let optional_features_label = "Optional Features".to_owned();
         let keyboard_label = self.localizer.text("settings-nav-keyboard");
@@ -226,22 +216,12 @@ impl SettingsApp {
                 ),
                 SettingsSearchEntry::new(
                     &optional_features_label,
-                    "Codex integration",
-                    "Enable Codex projects and conversations",
+                    "Codex",
+                    "Use Codex projects and conversations in Nickel",
                     "optional-feature-codex-enabled",
                     SettingsMessage::NavigateTarget(
                         SettingsPage::OptionalFeatures,
                         "optional-feature-codex-enabled".into(),
-                    ),
-                ),
-                SettingsSearchEntry::new(
-                    &optional_features_label,
-                    "Remote AI Control",
-                    "Remote · AI · MCP · Codex · automation · desktop control · phone pairing",
-                    "optional-feature-remote-control",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::OptionalFeatures,
-                        "optional-feature-remote-control".into(),
                     ),
                 ),
                 SettingsSearchEntry::new(
@@ -404,24 +384,6 @@ impl SettingsApp {
             .header(destination_header(SettingsPage::BluetoothPair))
             .leading(sidebar_icon(SidebarIconKind::Bluetooth))
             .visible(false),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::PrintersStorage,
-                printers_storage_label,
-                SettingsMessage::Navigate(SettingsPage::PrintersStorage),
-                self.peripherals_components(),
-            )
-            .header(destination_header(SettingsPage::PrintersStorage))
-            .leading(sidebar_icon(SidebarIconKind::PrintersStorage))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::Security,
-                security_label,
-                SettingsMessage::Navigate(SettingsPage::Security),
-                self.security_components(),
-            )
-            .header(destination_header(SettingsPage::Security))
-            .leading(sidebar_icon(SidebarIconKind::Security))
-            .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(
                 SettingsPage::DefaultApps,
                 default_apps_label,

@@ -100,31 +100,6 @@ fn semantic_theme(palette: ThemePalette) -> SemanticTheme {
     ))
 }
 
-fn render_remote_pairing_qr(payload: &str) -> Option<Arc<image::RgbaImage>> {
-    const MODULE: u32 = 6;
-    const QUIET: u32 = 4;
-    let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
-    let modules = code.width() as u32;
-    let size = (modules + QUIET * 2) * MODULE;
-    let mut image = image::RgbaImage::from_pixel(size, size, image::Rgba([255, 255, 255, 255]));
-    for y in 0..modules {
-        for x in 0..modules {
-            if code[(x as usize, y as usize)] == qrcode::Color::Dark {
-                for py in 0..MODULE {
-                    for px in 0..MODULE {
-                        image.put_pixel(
-                            (x + QUIET) * MODULE + px,
-                            (y + QUIET) * MODULE + py,
-                            image::Rgba([0, 0, 0, 255]),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    Some(Arc::new(image))
-}
-
 fn load_wallpaper_preview(
     settings: &WallpaperSettings,
 ) -> Result<Option<nickel_platform::DecodedPreview>, nickel_platform::PreviewDecodeError> {
@@ -276,8 +251,6 @@ enum SidebarIconKind {
     Appearance,
     Network,
     Bluetooth,
-    PrintersStorage,
-    Security,
     DefaultApps,
     OptionalFeatures,
     Keyboard,
@@ -285,15 +258,13 @@ enum SidebarIconKind {
 }
 
 impl SidebarIconKind {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 10] = [
         Self::Search,
         Self::Display,
         Self::Bar,
         Self::Appearance,
         Self::Network,
         Self::Bluetooth,
-        Self::PrintersStorage,
-        Self::Security,
         Self::DefaultApps,
         Self::OptionalFeatures,
         Self::Keyboard,
@@ -312,8 +283,6 @@ impl SidebarIconKind {
             Self::Appearance => '\u{f1fc}',
             Self::Network => '\u{f0ac}',
             Self::Bluetooth => '\u{f294}',
-            Self::PrintersStorage => '\u{f02f}',
-            Self::Security => '\u{f132}',
             Self::DefaultApps => '\u{f2d0}',
             Self::OptionalFeatures => '\u{f12e}',
             Self::Keyboard => '\u{f11c}',
@@ -329,8 +298,6 @@ impl SidebarIconKind {
             Self::Appearance => include_bytes!("../../../assets/icons/settings/appearance.svg"),
             Self::Network => include_bytes!("../../../assets/icons/settings/network.svg"),
             Self::Bluetooth => include_bytes!("../../../assets/icons/settings/bluetooth.svg"),
-            Self::PrintersStorage => include_bytes!("../../../assets/icons/start-menu/about.svg"),
-            Self::Security => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::DefaultApps => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::OptionalFeatures => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::Keyboard => include_bytes!("../../../assets/icons/start-menu/keyboard.svg"),
@@ -373,7 +340,7 @@ fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
 }
 
 fn sidebar_icon<Message>(kind: SidebarIconKind) -> Image<Message> {
-    static ICONS: OnceLock<[Arc<image::RgbaImage>; 12]> = OnceLock::new();
+    static ICONS: OnceLock<[Arc<image::RgbaImage>; 10]> = OnceLock::new();
     let icons = ICONS.get_or_init(|| SidebarIconKind::ALL.map(rasterize_sidebar_icon));
     Image::new(400 + kind.index() as u16, icons[kind.index()].clone())
         .fit(ImageFit::Contain)
@@ -449,8 +416,6 @@ enum SettingsPage {
     Network,
     Bluetooth,
     BluetoothPair,
-    PrintersStorage,
-    Security,
     DefaultApps,
     OptionalFeatures,
     KeyboardShortcuts,
@@ -466,8 +431,6 @@ impl std::fmt::Display for SettingsPage {
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
             Self::BluetoothPair => "bluetooth-pair",
-            Self::PrintersStorage => "printers-storage",
-            Self::Security => "security",
             Self::DefaultApps => "default-apps",
             Self::OptionalFeatures => "optional-features",
             Self::KeyboardShortcuts => "keyboard-shortcuts",
@@ -518,36 +481,6 @@ struct DefaultAppsDiscovery {
     )>,
 }
 
-type PeripheralTaskResult = Result<
-    (
-        Option<nickel_platform::PeripheralOutcome>,
-        nickel_platform::PeripheralSnapshot,
-    ),
-    nickel_platform::PeripheralError,
->;
-struct MaintenanceTaskResult {
-    outcome: Option<Result<nickel_platform::MaintenanceOutcome, nickel_platform::MaintenanceError>>,
-    snapshot: Result<nickel_platform::MaintenanceSnapshot, nickel_platform::MaintenanceError>,
-}
-
-fn show_pending_maintenance_phase(
-    snapshot: &mut nickel_platform::MaintenanceSnapshot,
-    action: &nickel_platform::MaintenanceAction,
-) {
-    let Some(status) = snapshot.updates.value.as_mut() else {
-        return;
-    };
-    status.phase = match action {
-        nickel_platform::MaintenanceAction::CheckForUpdates => {
-            nickel_platform::UpdatePhase::Checking
-        }
-        nickel_platform::MaintenanceAction::InstallUpdates => {
-            nickel_platform::UpdatePhase::Installing
-        }
-        _ => return,
-    };
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
     Navigate(SettingsPage),
@@ -559,13 +492,6 @@ enum SettingsMessage {
     BluetoothDiscovery,
     BluetoothDevice(usize),
     BluetoothScroll,
-    PeripheralRefresh,
-    PeripheralAddressChanged(String),
-    PeripheralAction(nickel_platform::PeripheralAction),
-    PeripheralScroll,
-    MaintenanceRefresh,
-    MaintenanceAction(nickel_platform::MaintenanceAction),
-    MaintenanceScroll,
     SetWifiPower(bool),
     WifiNetwork(usize),
     NetworkScroll,
@@ -586,43 +512,7 @@ enum SettingsMessage {
     SetOnScreenKeyboard(nickel_core::on_screen_keyboard::KeyboardPreference),
     ConfirmDisableCodex,
     CancelDisableCodex,
-    ToggleCodexSourceSelect,
-    SetCodexSource(CodexSource),
-    CodexExecutablePathChanged(String),
-    ApplyCodexExecutable,
     RetryCodexProbe,
-    SetRemoteControlEnabled(bool),
-    SetRemoteAudibleIndications(bool),
-    CopyRemoteConnectionInfo,
-    StartRemotePairing,
-    CancelRemotePairing,
-    StopRemoteControlNow,
-    DecideRemoteClient {
-        client_id: String,
-        decision: nickel_session_protocol::RemoteClientDecision,
-    },
-    RevokeRemoteClient(String),
-    BlockRemoteClient {
-        client_id: String,
-        blocked: bool,
-    },
-    ManageRemoteLease {
-        lease_id: u64,
-        action: nickel_session_protocol::RemoteLeaseAction,
-    },
-    DecideRemoteLease {
-        pending_generation: u64,
-        client_id: String,
-        request: nickel_session_protocol::RemoteLeaseRequest,
-        allow: bool,
-    },
-    RemoteLeaseCustomMinutesChanged(String),
-    ApproveRemoteLeaseDuration {
-        pending_generation: u64,
-        client_id: String,
-        request: nickel_session_protocol::RemoteLeaseRequest,
-        duration_seconds: Option<u64>,
-    },
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
@@ -630,15 +520,6 @@ enum SettingsMessage {
     SetAccentHue(u16),
     SetAppearanceHue(u16),
     SetAppearanceIntensity(u8),
-    TerminalShellChanged(String),
-    TerminalWorkingDirectoryChanged(String),
-    TerminalFontFamilyChanged(String),
-    SetTerminalFontSize(u16),
-    SetTerminalScrollback(usize),
-    SetTerminalCursorStyle(nickel_core::terminal_settings::TerminalCursorStyle),
-    TerminalForegroundChanged(String),
-    TerminalBackgroundChanged(String),
-    SetTerminalCloseOnSuccess(bool),
     WallpaperChoose,
     WallpaperRemove,
     ToggleWallpaperPositionSelect,
@@ -759,36 +640,6 @@ fn appearance_intensity_message(fraction: f32) -> SettingsMessage {
     SettingsMessage::SetAppearanceIntensity((fraction.clamp(0.0, 1.0) * 100.0).round() as u8)
 }
 
-fn terminal_font_size_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::SetTerminalFontSize(60 + (fraction.clamp(0.0, 1.0) * 660.0).round() as u16)
-}
-
-fn terminal_scrollback_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::SetTerminalScrollback(
-        (fraction.clamp(0.0, 1.0)
-            * nickel_core::terminal_settings::MAX_TERMINAL_SCROLLBACK_LINES as f32)
-            .round() as usize,
-    )
-}
-
-fn terminal_color(value: &str) -> Option<u32> {
-    let value = value.trim().strip_prefix('#').unwrap_or(value.trim());
-    let parsed = u32::from_str_radix(value, 16).ok()?;
-    match value.len() {
-        6 => Some(0xff00_0000 | parsed),
-        8 => Some(parsed),
-        _ => None,
-    }
-}
-
-fn bounded_terminal_text(value: String) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(nickel_core::terminal_settings::MAX_TERMINAL_SETTING_TEXT)
-        .collect()
-}
-
 fn reduce_transparency_message(value: bool) -> SettingsMessage {
     SettingsMessage::SetReduceTransparency(value)
 }
@@ -863,193 +714,6 @@ fn default_app_categories() -> Vec<DefaultAppRow> {
 }
 
 impl SettingsApp {
-    fn load_peripherals(&mut self) {
-        if self.peripheral_rx.is_some() {
-            return;
-        }
-        let service = nickel_platform::peripheral_service();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        match std::thread::Builder::new()
-            .name("nickel-peripheral-inspection".into())
-            .spawn(move || {
-                let _ = sender.send(service.inspect().map(|snapshot| (None, snapshot)));
-            }) {
-            Ok(_) => {
-                self.peripheral_status = Some("Loading printers and storage…".into());
-                self.peripheral_rx = Some(receiver);
-            }
-            Err(error) => {
-                self.peripheral_status =
-                    Some(format!("Printers and storage could not load: {error}"));
-            }
-        }
-    }
-
-    fn request_peripheral_action(&mut self, action: nickel_platform::PeripheralAction) {
-        if self.peripheral_rx.is_some() {
-            return;
-        }
-        let service = nickel_platform::peripheral_service();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        match std::thread::Builder::new()
-            .name("nickel-peripheral-action".into())
-            .spawn(move || {
-                let _ = sender.send(
-                    service
-                        .request_and_refresh(action)
-                        .map(|(outcome, snapshot)| (Some(outcome), snapshot)),
-                );
-            }) {
-            Ok(_) => {
-                self.peripheral_status = Some("Waiting for the operating system…".into());
-                self.peripheral_rx = Some(receiver);
-            }
-            Err(error) => {
-                self.peripheral_status = Some(format!("The request could not start: {error}"));
-            }
-        }
-    }
-
-    fn poll_peripherals(&mut self) -> bool {
-        let Some(receiver) = self.peripheral_rx.as_ref() else {
-            return false;
-        };
-        let result = match receiver.try_recv() {
-            Ok(result) => result,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err(nickel_platform::PeripheralError {
-                    class: nickel_platform::PeripheralFailureClass::ProviderUnavailable,
-                    detail: "The peripheral provider stopped before returning data".into(),
-                })
-            }
-        };
-        self.peripheral_rx = None;
-        self.next_peripheral_refresh = Instant::now() + Duration::from_secs(2);
-        match result {
-            Ok((outcome, snapshot)) => {
-                self.peripheral_snapshot = Some(snapshot);
-                self.peripheral_status = outcome.map(|outcome| match outcome {
-                    nickel_platform::PeripheralOutcome::Accepted => {
-                        "The operating system confirmed the request.".into()
-                    }
-                    nickel_platform::PeripheralOutcome::Cancelled => {
-                        "The request was cancelled before it completed.".into()
-                    }
-                    nickel_platform::PeripheralOutcome::Uncertain => {
-                        "The operating system may have accepted the request; refresh before retrying."
-                            .into()
-                    }
-                    nickel_platform::PeripheralOutcome::Busy { detail }
-                    | nickel_platform::PeripheralOutcome::AuthorizationRequired { detail }
-                    | nickel_platform::PeripheralOutcome::Unsupported { detail }
-                    | nickel_platform::PeripheralOutcome::Rejected { detail } => detail,
-                });
-            }
-            Err(error) => self.peripheral_status = Some(error.to_string()),
-        }
-        true
-    }
-
-    fn load_maintenance(&mut self) {
-        if self.maintenance_rx.is_some() {
-            return;
-        }
-        let service = nickel_platform::maintenance_service();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        match std::thread::Builder::new()
-            .name("nickel-maintenance-inspection".into())
-            .spawn(move || {
-                let _ = sender.send(MaintenanceTaskResult {
-                    outcome: None,
-                    snapshot: service.inspect(),
-                });
-            }) {
-            Ok(_) => {
-                self.maintenance_status = Some("Loading authoritative system status…".into());
-                self.maintenance_rx = Some(receiver);
-            }
-            Err(error) => {
-                self.maintenance_status = Some(format!("System status could not load: {error}"));
-            }
-        }
-    }
-
-    fn poll_maintenance(&mut self) -> bool {
-        let Some(receiver) = self.maintenance_rx.as_ref() else {
-            return false;
-        };
-        let result = match receiver.try_recv() {
-            Ok(result) => result,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => MaintenanceTaskResult {
-                outcome: None,
-                snapshot: Err(nickel_platform::MaintenanceError {
-                    class: nickel_platform::MaintenanceFailureClass::ProviderUnavailable,
-                    detail: "System status provider stopped before returning data".into(),
-                }),
-            },
-        };
-        self.maintenance_rx = None;
-        let snapshot_error = match result.snapshot {
-            Ok(snapshot) => {
-                self.maintenance_snapshot = Some(snapshot);
-                None
-            }
-            Err(error) => Some(error),
-        };
-        self.maintenance_status = match (result.outcome, snapshot_error) {
-            (Some(Ok(outcome)), refresh_error) => {
-                let mut detail = match outcome {
-                    nickel_platform::MaintenanceOutcome::Accepted => {
-                        "The operating system accepted the maintenance request.".into()
-                    }
-                    nickel_platform::MaintenanceOutcome::NativeConsentRequired { detail }
-                    | nickel_platform::MaintenanceOutcome::Unsupported { detail }
-                    | nickel_platform::MaintenanceOutcome::Rejected { detail } => detail,
-                };
-                if let Some(error) = refresh_error {
-                    detail.push_str(&format!(" Status refresh failed: {error}"));
-                }
-                Some(detail)
-            }
-            (Some(Err(error)), _) => Some(error.to_string()),
-            (None, refresh_error) => refresh_error.map(|error| error.to_string()),
-        };
-        true
-    }
-
-    fn request_maintenance_action(&mut self, action: nickel_platform::MaintenanceAction) {
-        if self.maintenance_rx.is_some() {
-            return;
-        }
-        let service = nickel_platform::maintenance_service();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let pending_action = action.clone();
-        match std::thread::Builder::new()
-            .name("nickel-maintenance-action".into())
-            .spawn(move || {
-                let outcome = service.request(action);
-                let snapshot = service.inspect();
-                let _ = sender.send(MaintenanceTaskResult {
-                    outcome: Some(outcome),
-                    snapshot,
-                });
-            }) {
-            Ok(_) => {
-                if let Some(snapshot) = self.maintenance_snapshot.as_mut() {
-                    show_pending_maintenance_phase(snapshot, &pending_action);
-                }
-                self.maintenance_status = Some("Waiting for the operating system…".into());
-                self.maintenance_rx = Some(receiver);
-            }
-            Err(error) => {
-                self.maintenance_status =
-                    Some(format!("Maintenance request could not start: {error}"));
-            }
-        }
-    }
-
     fn refresh_toolkit_scale(&mut self) {
         #[cfg(target_os = "linux")]
         {
@@ -1312,8 +976,6 @@ impl SettingsApp {
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth | SettingsPage::BluetoothPair => self.load_bluetooth(),
-                    SettingsPage::PrintersStorage => self.load_peripherals(),
-                    SettingsPage::Security => self.load_maintenance(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
                     SettingsPage::Bar => self.refresh_workspace_state(),
                     SettingsPage::OptionalFeatures => {
@@ -1332,8 +994,6 @@ impl SettingsApp {
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth | SettingsPage::BluetoothPair => self.load_bluetooth(),
-                    SettingsPage::PrintersStorage => self.load_peripherals(),
-                    SettingsPage::Security => self.load_maintenance(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
                     SettingsPage::Bar => self.refresh_workspace_state(),
                     SettingsPage::OptionalFeatures => {
@@ -1430,259 +1090,7 @@ impl SettingsApp {
             }
             SettingsMessage::ConfirmDisableCodex => self.request_codex_enabled(false, true),
             SettingsMessage::CancelDisableCodex => self.codex_disable_confirmation = false,
-            SettingsMessage::ToggleCodexSourceSelect => {
-                self.codex_source_select_expanded = !self.codex_source_select_expanded;
-            }
-            SettingsMessage::SetCodexSource(source) => {
-                self.codex_source_select_expanded = false;
-                self.update_codex_source(source);
-            }
-            SettingsMessage::CodexExecutablePathChanged(path) => self.codex_executable_path = path,
-            SettingsMessage::ApplyCodexExecutable => {
-                let path = std::path::PathBuf::from(self.codex_executable_path.trim());
-                if path.is_absolute() {
-                    self.update_codex_source(CodexSource::Executable(path));
-                } else {
-                    self.codex_feature.effective = FeatureEffectiveState::Rejected;
-                    self.codex_feature.capability.diagnostic =
-                        Some("Select an absolute executable path".into());
-                }
-            }
             SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
-            SettingsMessage::SetRemoteControlEnabled(enabled) => {
-                self.request_remote_control_enabled(enabled);
-            }
-            SettingsMessage::SetRemoteAudibleIndications(enabled) => {
-                if !self.persistence_enabled {
-                    self.remote_control_settings.audible_indications = enabled;
-                } else {
-                    let result = nickel_remote_control::RemoteAiControlSettings::load_default()
-                        .and_then(|mut settings| {
-                            settings.audible_indications = enabled;
-                            settings.save(
-                                nickel_remote_control::RemoteAiControlSettings::default_path()?,
-                            )?;
-                            Ok(settings)
-                        });
-                    match result {
-                        Ok(settings) => self.remote_control_settings = settings,
-                        Err(error) => {
-                            self.remote_control_runtime.diagnostic = Some(error.to_string())
-                        }
-                    }
-                }
-            }
-            SettingsMessage::CopyRemoteConnectionInfo => {
-                if let Some(connection) =
-                    view::remote_exposure_presentation(&self.remote_control_runtime).connection_info
-                {
-                    self.remote_clipboard_write = Some(connection);
-                }
-            }
-            SettingsMessage::StartRemotePairing => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                match session_request(SessionRequest::Command(
-                    SessionCommand::StartRemotePairing { now_unix_secs: now },
-                )) {
-                    Ok(ServerMessage::RemotePairing(pairing)) => {
-                        self.remote_pairing_qr = render_remote_pairing_qr(&pairing.qr_payload);
-                        self.remote_pairing = Some(pairing);
-                    }
-                    Ok(ServerMessage::Error { message, .. }) => {
-                        self.remote_control_runtime.diagnostic = Some(message)
-                    }
-                    Ok(_) => {
-                        self.remote_control_runtime.diagnostic =
-                            Some("Unexpected pairing response".into())
-                    }
-                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-                }
-            }
-            SettingsMessage::CancelRemotePairing => {
-                let _ =
-                    session_request(SessionRequest::Command(SessionCommand::CancelRemotePairing));
-                self.remote_pairing = None;
-                self.remote_pairing_qr = None;
-            }
-            SettingsMessage::StopRemoteControlNow => {
-                match session_request(SessionRequest::Command(
-                    SessionCommand::EmergencyStopRemoteControl,
-                )) {
-                    Ok(ServerMessage::RemoteControl(runtime)) => {
-                        self.remote_control_runtime = runtime;
-                        self.remote_pairing = None;
-                        self.remote_pairing_qr = None;
-                        self.remote_control_settings =
-                            nickel_remote_control::RemoteAiControlSettings::load_default()
-                                .unwrap_or_default();
-                    }
-                    Ok(ServerMessage::Error { message, .. }) => {
-                        self.remote_control_runtime.diagnostic = Some(message)
-                    }
-                    Ok(_) => {
-                        self.remote_control_runtime.diagnostic =
-                            Some("Unexpected remote-control response".into())
-                    }
-                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-                }
-            }
-            SettingsMessage::DecideRemoteClient {
-                client_id,
-                decision,
-            } => {
-                match session_request(SessionRequest::Command(
-                    SessionCommand::DecideRemoteClient {
-                        client_id,
-                        decision,
-                        // Protocol compatibility only. Pairing approves an authenticated identity;
-                        // every desktop operation needs a separately approved resource lease.
-                        capabilities: Vec::new(),
-                    },
-                )) {
-                    Ok(ServerMessage::RemoteControl(runtime)) => {
-                        self.remote_control_runtime = runtime
-                    }
-                    Ok(ServerMessage::Error { message, .. }) => {
-                        self.remote_control_runtime.diagnostic = Some(message)
-                    }
-                    Ok(_) => {
-                        self.remote_control_runtime.diagnostic =
-                            Some("Unexpected remote-control response".into())
-                    }
-                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-                }
-            }
-            SettingsMessage::DecideRemoteLease {
-                pending_generation,
-                client_id,
-                request,
-                allow,
-            } => {
-                match session_request(SessionRequest::Command(SessionCommand::DecideRemoteLease {
-                    pending_generation,
-                    client_id,
-                    request,
-                    allow,
-                })) {
-                    Ok(ServerMessage::RemoteControl(runtime)) => {
-                        self.remote_control_runtime = runtime
-                    }
-                    Ok(ServerMessage::Error { message, .. }) => {
-                        self.remote_control_runtime.diagnostic = Some(message)
-                    }
-                    Ok(_) => {
-                        self.remote_control_runtime.diagnostic =
-                            Some("Unexpected lease response".into())
-                    }
-                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-                }
-            }
-            SettingsMessage::RemoteLeaseCustomMinutesChanged(value) => {
-                self.remote_lease_custom_minutes = value.chars().take(10).collect();
-            }
-            SettingsMessage::ApproveRemoteLeaseDuration {
-                pending_generation,
-                client_id,
-                request,
-                duration_seconds,
-            } => {
-                match session_request(SessionRequest::Command(
-                    SessionCommand::ApproveRemoteLeaseDuration {
-                        pending_generation,
-                        client_id,
-                        request,
-                        duration_seconds,
-                    },
-                )) {
-                    Ok(ServerMessage::RemoteControl(runtime)) => {
-                        self.remote_control_runtime = runtime
-                    }
-                    Ok(ServerMessage::Error { message, .. }) => {
-                        self.remote_control_runtime.diagnostic = Some(message)
-                    }
-                    Ok(_) => {
-                        self.remote_control_runtime.diagnostic =
-                            Some("Unexpected lease response".into())
-                    }
-                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-                }
-            }
-            SettingsMessage::ManageRemoteLease { lease_id, action } => {
-                match session_request(SessionRequest::Command(SessionCommand::ManageRemoteLease {
-                    lease_id,
-                    action,
-                })) {
-                    Ok(ServerMessage::RemoteControl(runtime)) => {
-                        self.remote_control_runtime = runtime
-                    }
-                    Ok(ServerMessage::Error { message, .. }) => {
-                        self.remote_control_runtime.diagnostic = Some(message)
-                    }
-                    Ok(_) => {
-                        self.remote_control_runtime.diagnostic =
-                            Some("Unexpected lease response".into())
-                    }
-                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-                }
-            }
-            SettingsMessage::BlockRemoteClient { client_id, blocked } => {
-                match session_request(SessionRequest::Command(SessionCommand::BlockRemoteClient {
-                    client_id,
-                    blocked,
-                })) {
-                    Ok(ServerMessage::RemoteControl(runtime)) => {
-                        self.remote_control_runtime = runtime
-                    }
-                    Ok(ServerMessage::Error { message, .. }) => {
-                        self.remote_control_runtime.diagnostic = Some(message)
-                    }
-                    Ok(_) => {
-                        self.remote_control_runtime.diagnostic =
-                            Some("Unexpected remote-control response".into())
-                    }
-                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-                }
-            }
-            SettingsMessage::RevokeRemoteClient(client_id) => {
-                match session_request(SessionRequest::Command(
-                    SessionCommand::RevokeRemoteClient { client_id },
-                )) {
-                    Ok(ServerMessage::RemoteControl(runtime)) => {
-                        self.remote_control_runtime = runtime
-                    }
-                    Ok(ServerMessage::Error { message, .. }) => {
-                        self.remote_control_runtime.diagnostic = Some(message)
-                    }
-                    Ok(_) => {
-                        self.remote_control_runtime.diagnostic =
-                            Some("Unexpected remote-control response".into())
-                    }
-                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-                }
-            }
-            SettingsMessage::PeripheralRefresh => {
-                self.peripheral_snapshot = None;
-                self.load_peripherals();
-            }
-            SettingsMessage::PeripheralAddressChanged(value) => self.peripheral_address = value,
-            SettingsMessage::PeripheralAction(action) => {
-                if matches!(action, nickel_platform::PeripheralAction::AddPrinter { .. }) {
-                    self.peripheral_address.clear();
-                }
-                self.request_peripheral_action(action);
-            }
-            SettingsMessage::PeripheralScroll => {}
-            SettingsMessage::MaintenanceRefresh => {
-                self.maintenance_snapshot = None;
-                self.load_maintenance();
-            }
-            SettingsMessage::MaintenanceAction(action) => {
-                self.request_maintenance_action(action);
-            }
-            SettingsMessage::MaintenanceScroll => {}
             SettingsMessage::BluetoothDevice(index) => {
                 let Some(device) = self.bluetooth.devices.get(index).cloned() else {
                     return;
@@ -1719,56 +1127,6 @@ impl SettingsApp {
             SettingsMessage::SetAppearanceHue(hue) => self.set_appearance_hue(hue),
             SettingsMessage::SetAppearanceIntensity(intensity) => {
                 self.set_appearance_intensity(intensity);
-            }
-            SettingsMessage::TerminalShellChanged(value) => {
-                let value = bounded_terminal_text(value);
-                self.terminal_settings.default_shell = (!value.trim().is_empty()).then_some(value);
-                self.persist_terminal_settings();
-            }
-            SettingsMessage::TerminalWorkingDirectoryChanged(value) => {
-                let value = bounded_terminal_text(value);
-                self.terminal_settings.initial_working_directory =
-                    (!value.trim().is_empty()).then(|| std::path::PathBuf::from(value));
-                self.persist_terminal_settings();
-            }
-            SettingsMessage::TerminalFontFamilyChanged(value) => {
-                self.terminal_settings.font_family = bounded_terminal_text(value);
-                self.persist_terminal_settings();
-            }
-            SettingsMessage::SetTerminalFontSize(size) => {
-                self.terminal_settings.font_size_tenths = size.clamp(60, 720);
-                self.persist_terminal_settings();
-            }
-            SettingsMessage::SetTerminalScrollback(lines) => {
-                self.terminal_settings.scrollback_lines =
-                    lines.min(nickel_core::terminal_settings::MAX_TERMINAL_SCROLLBACK_LINES);
-                self.persist_terminal_settings();
-            }
-            SettingsMessage::SetTerminalCursorStyle(style) => {
-                self.terminal_settings.cursor_style = style;
-                self.persist_terminal_settings();
-            }
-            SettingsMessage::TerminalForegroundChanged(value) => {
-                self.terminal_foreground_input = bounded_terminal_text(value);
-                if let Some(color) = terminal_color(&self.terminal_foreground_input) {
-                    self.terminal_settings.foreground = color;
-                    self.persist_terminal_settings();
-                } else {
-                    self.terminal_status = Some("Foreground must be #RRGGBB or #AARRGGBB.".into());
-                }
-            }
-            SettingsMessage::TerminalBackgroundChanged(value) => {
-                self.terminal_background_input = bounded_terminal_text(value);
-                if let Some(color) = terminal_color(&self.terminal_background_input) {
-                    self.terminal_settings.background = color;
-                    self.persist_terminal_settings();
-                } else {
-                    self.terminal_status = Some("Background must be #RRGGBB or #AARRGGBB.".into());
-                }
-            }
-            SettingsMessage::SetTerminalCloseOnSuccess(value) => {
-                self.terminal_settings.close_on_successful_exit = value;
-                self.persist_terminal_settings();
             }
             SettingsMessage::WallpaperChoose => {
                 let (sender, receiver) = mpsc::channel();
@@ -2229,35 +1587,6 @@ impl SettingsApp {
         }
     }
 
-    fn apply_remote_control_observation(&mut self, result: std::io::Result<ServerMessage>) {
-        let reason = match result {
-            Ok(ServerMessage::RemoteControl(snapshot)) => {
-                self.remote_control_runtime = snapshot;
-                return;
-            }
-            Ok(ServerMessage::Error { message, .. }) => message,
-            Ok(_) => "Unexpected remote-control response".into(),
-            Err(error) => error.to_string(),
-        };
-        let runtime = &mut self.remote_control_runtime;
-        runtime.effective = nickel_session_protocol::RemoteControlEffectiveState::Rejected;
-        runtime.acknowledged_generation = 0;
-        runtime.diagnostic = Some(
-            format!("Current remote control status is unavailable: {reason}")
-                .chars()
-                .take(256)
-                .collect(),
-        );
-        // These are actionable live projections, not a durable grant cache.
-        // Keep historical audits, but don't offer stale approvals or lease controls.
-        runtime.pending_clients.clear();
-        runtime.pending_leases.clear();
-        runtime.active_leases.clear();
-        runtime.granted_clients.clear();
-        self.remote_pairing = None;
-        self.remote_pairing_qr = None;
-    }
-
     fn refresh_optional_feature_state(&mut self) {
         if self.persistence_enabled {
             self.keyboard_runtime =
@@ -2265,34 +1594,6 @@ impl SettingsApp {
                     Ok(ServerMessage::OnScreenKeyboard(snapshot)) => Some(snapshot),
                     _ => None,
                 };
-            match nickel_remote_control::RemoteAiControlSettings::load_default() {
-                Ok(settings) => self.remote_control_settings = settings,
-                Err(error) => {
-                    self.remote_control_settings = Default::default();
-                    self.remote_control_runtime.diagnostic = Some(error.to_string());
-                }
-            }
-            self.apply_remote_control_observation(session_request(SessionRequest::Query(
-                SessionQuery::RemoteControl,
-            )));
-            let now_unix_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let pairing_expired = self
-                .remote_pairing
-                .as_ref()
-                .is_some_and(|pairing| now_unix_secs > pairing.expires_at);
-            let phone_connected = !self.remote_control_runtime.pending_clients.is_empty();
-            if pairing_expired || phone_connected {
-                self.remote_pairing = None;
-                self.remote_pairing_qr = None;
-                if pairing_expired {
-                    let _ = session_request(SessionRequest::Command(
-                        SessionCommand::CancelRemotePairing,
-                    ));
-                }
-            }
         }
         let disk = OptionalFeatureSettings::load_default();
         let runtime = OptionalFeatureRuntime::load_default();
@@ -2365,102 +1666,6 @@ impl SettingsApp {
         }
     }
 
-    fn request_remote_control_enabled(&mut self, enabled: bool) {
-        if self.remote_control_settings.requested_enabled == enabled
-            && self.remote_control_runtime.requested_enabled == enabled
-        {
-            return;
-        }
-        let mut requested = self.remote_control_settings.clone();
-        requested.set_requested(enabled);
-        if !self.persistence_enabled {
-            self.remote_control_settings = requested.clone();
-            self.remote_control_runtime.requested_enabled = enabled;
-            self.remote_control_runtime.effective = if enabled {
-                nickel_session_protocol::RemoteControlEffectiveState::Enabled
-            } else {
-                nickel_session_protocol::RemoteControlEffectiveState::Disabled
-            };
-            self.remote_control_runtime.generation = requested.generation;
-            self.remote_control_runtime.acknowledged_generation = requested.generation;
-            return;
-        }
-        match session_request(SessionRequest::Command(
-            SessionCommand::ApplyRemoteControl {
-                requested_enabled: enabled,
-                generation: requested.generation,
-            },
-        )) {
-            Ok(ServerMessage::RemoteControl(runtime)) => {
-                let confirmed = runtime.acknowledged_generation == requested.generation
-                    && ((enabled
-                        && runtime.effective
-                            == nickel_session_protocol::RemoteControlEffectiveState::Enabled)
-                        || (!enabled
-                            && runtime.effective
-                                == nickel_session_protocol::RemoteControlEffectiveState::Disabled));
-                self.remote_control_runtime = runtime;
-                if confirmed {
-                    let saved = nickel_remote_control::RemoteAiControlSettings::default_path()
-                        .and_then(|path| requested.save(path));
-                    match saved {
-                        Ok(()) => self.remote_control_settings = requested,
-                        Err(error) => {
-                            self.remote_control_runtime.diagnostic = Some(error.to_string())
-                        }
-                    }
-                }
-            }
-            Ok(ServerMessage::Error { message, .. }) => {
-                self.remote_control_runtime.diagnostic = Some(message)
-            }
-            Ok(_) => {
-                self.remote_control_runtime.diagnostic =
-                    Some("Unexpected remote-control response".into())
-            }
-            Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-        }
-    }
-
-    fn update_codex_source(&mut self, source: CodexSource) {
-        if !self.codex_feature.editable() || self.optional_features.codex_source == source {
-            return;
-        }
-        if self.optional_feature_runtime.active_windows > 0 {
-            self.codex_feature.effective = FeatureEffectiveState::Rejected;
-            self.codex_feature.capability.diagnostic =
-                Some("Close built-in Codex windows before changing the backend source".into());
-            return;
-        }
-        if self.persistence_enabled {
-            match try_update_optional_feature_settings(|settings| {
-                settings.codex_source = source.clone();
-                settings.codex_generation = settings.codex_generation.saturating_add(1);
-            }) {
-                Ok(settings) => self.optional_features = settings,
-                Err(error) => {
-                    self.codex_feature.effective = FeatureEffectiveState::Rejected;
-                    self.codex_feature.capability.diagnostic = Some(error);
-                    return;
-                }
-            }
-            if let Err(error) =
-                session_request(SessionRequest::Command(SessionCommand::ReloadShellSettings))
-            {
-                self.codex_feature.capability.diagnostic = Some(format!(
-                    "Saved; waiting for the shell to observe the change: {error}"
-                ));
-            }
-        } else {
-            self.optional_features.codex_source = source;
-            self.optional_features.codex_generation =
-                self.optional_features.codex_generation.saturating_add(1);
-        }
-        self.codex_feature.generation = self.optional_features.codex_generation;
-        self.codex_feature.effective = FeatureEffectiveState::Enabling;
-        self.start_codex_probe();
-    }
-
     fn set_appearance_hue(&mut self, hue: u16) {
         if self.shell_settings.accent_hue == Some(hue) {
             return;
@@ -2475,17 +1680,6 @@ impl SettingsApp {
         }
         self.shell_settings.accent_intensity = Some(intensity);
         self.appearance_save_deadline = Some(Instant::now() + Duration::from_millis(16));
-    }
-
-    fn persist_terminal_settings(&mut self) {
-        if !self.persistence_enabled {
-            self.terminal_status = None;
-            return;
-        }
-        self.terminal_status = match self.terminal_settings.save_default() {
-            Ok(()) => Some("Saved for new terminal windows.".into()),
-            Err(error) => Some(format!("Terminal settings could not be saved: {error}")),
-        };
     }
 
     fn persist_appearance(&mut self) {
@@ -2567,22 +1761,10 @@ impl SettingsApp {
         self.poll_wifi_power();
         self.poll_bluetooth_operation();
         self.poll_codex_probe();
-        if self.poll_peripherals() {
-            self.request_redraw();
-        }
-        if self.poll_maintenance() {
-            self.request_redraw();
-        }
         if self.poll_default_apps_discovery() {
             self.request_redraw();
         }
         let now = Instant::now();
-        if self.page == SettingsPage::PrintersStorage
-            && self.peripheral_rx.is_none()
-            && now >= self.next_peripheral_refresh
-        {
-            self.load_peripherals();
-        }
         if self
             .pending_display_revert
             .as_ref()
@@ -3015,7 +2197,7 @@ impl Application for SettingsApp {
     }
 
     fn take_clipboard_write(&mut self) -> Option<String> {
-        self.remote_clipboard_write.take()
+        None
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
@@ -3066,13 +2248,6 @@ impl Application for SettingsApp {
                 self.next_default_apps_refresh
             });
         }
-        if self.page == SettingsPage::PrintersStorage {
-            deadlines.push(if self.peripheral_rx.is_some() {
-                now + Duration::from_millis(16)
-            } else {
-                self.next_peripheral_refresh
-            });
-        }
         if self.wallpaper_dialog_rx.is_some() {
             deadlines.push(now + self.wallpaper_poll_delay);
         }
@@ -3089,12 +2264,6 @@ impl Application for SettingsApp {
             deadlines.push(self.next_toolkit_scale_refresh);
         }
         if self.codex_probe_rx.is_some() {
-            deadlines.push(now + Duration::from_millis(16));
-        }
-        if self.maintenance_rx.is_some() {
-            deadlines.push(now + Duration::from_millis(16));
-        }
-        if self.peripheral_rx.is_some() {
             deadlines.push(now + Duration::from_millis(16));
         }
         deadlines
@@ -3181,10 +2350,6 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
         app.load_linux_network();
         if app.page == SettingsPage::DefaultApps {
             app.load_default_apps();
-        } else if app.page == SettingsPage::Security {
-            app.load_maintenance();
-        } else if app.page == SettingsPage::PrintersStorage {
-            app.load_peripherals();
         }
         #[cfg(target_os = "windows")]
         {
@@ -3321,19 +2486,18 @@ mod tests {
         ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
     };
     use nickel_ui::{
-        ActionKind, Application, HostBatch, SemanticAction, SemanticRole, SwitchState,
+        Application, SemanticRole, SwitchState,
     };
 
-    use super::view::{codex_switch_state, remote_exposure_presentation};
+    use super::view::codex_switch_state;
     use super::{
-        ApplicationScalePolicy, BluetoothDevice, BluetoothOperation, CodexSource, ControllerAction,
+        ApplicationScalePolicy, BluetoothDevice, BluetoothOperation, ControllerAction,
         DefaultAppsDiscovery, FeatureEffectiveState, FeatureHealth, FeatureInstallation,
-        FeatureSupport, FileIconPreference, MaintenanceTaskResult, NetworkAdapter,
-        OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
-        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
-        WallpaperSettings, WifiNetwork, codex_feature_state, constrain_center,
-        resolve_codex_feature_state, separate_overlapping_display_cards,
-        shell_behavior_transaction, show_pending_maintenance_phase, snap_rect,
+        FeatureSupport, FileIconPreference, NetworkAdapter, OptionalFeatureRuntime,
+        OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp, SettingsHostAdapter,
+        SettingsMessage, SettingsPage, ThemePreference, UiHost, WallpaperSettings, WifiNetwork,
+        codex_feature_state, constrain_center, resolve_codex_feature_state,
+        separate_overlapping_display_cards, shell_behavior_transaction, snap_rect,
     };
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
@@ -3956,106 +3120,6 @@ mod tests {
     }
 
     #[test]
-    fn security_page_exposes_every_required_authority_without_false_health() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Security);
-        app.maintenance_rx = None;
-        app.maintenance_snapshot = Some(nickel_platform::maintenance_backend().inspect().unwrap());
-        let tree = app.build_ui(850.0, 900.0);
-
-        assert!(
-            !tree
-                .semantic_targets_for_message(&SettingsMessage::MaintenanceRefresh)
-                .is_empty()
-        );
-        let labels = tree
-            .accessibility_nodes()
-            .iter()
-            .filter_map(|node| node.label.as_deref())
-            .collect::<Vec<_>>();
-        for required in [
-            "System updates",
-            "Firewall",
-            "Malware protection",
-            "Secure storage",
-            "Camera",
-            "Microphone",
-            "Location",
-            "Notifications",
-            "Screen capture",
-        ] {
-            assert!(labels.contains(&required), "missing status row {required}");
-        }
-        assert!(!labels.contains(&"Healthy"));
-    }
-
-    #[test]
-    fn printers_and_storage_page_exposes_safe_async_actions() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::PrintersStorage);
-        app.peripheral_rx = None;
-        app.peripheral_snapshot = Some(nickel_platform::PeripheralSnapshot {
-            provider: nickel_platform::PeripheralProvider::Unsupported {
-                platform: "fixture".into(),
-            },
-            printers: Ok(vec![nickel_platform::Printer {
-                id: "office".into(),
-                name: "Office printer".into(),
-                is_default: false,
-                state: nickel_platform::PrinterState::Ready,
-                jobs: vec![nickel_platform::PrintJob {
-                    id: "office-1".into(),
-                    name: "Report".into(),
-                    state: nickel_platform::PrintJobState::Pending,
-                }],
-            }]),
-            volumes: Ok(vec![nickel_platform::RemovableVolume {
-                id: "/dev/fixture".into(),
-                name: "Backup drive".into(),
-                capacity_bytes: Some(1_000),
-                available_bytes: Some(500),
-                mount_path: Some("/media/backup".into()),
-                state: nickel_platform::VolumeState::Mounted,
-                ejectable: true,
-                detail: None,
-            }]),
-            filesystems: Ok(vec![nickel_platform::FilesystemUsage {
-                id: "root".into(),
-                name: "Root".into(),
-                mount_path: "/".into(),
-                capacity_bytes: 1_000,
-                available_bytes: 400,
-            }]),
-            omitted_printers: 0,
-            omitted_jobs: 0,
-            omitted_volumes: 0,
-            omitted_filesystems: 0,
-        });
-        let tree = app.build_ui(850.0, 900.0);
-
-        assert!(
-            !tree
-                .semantic_targets_for_message(&SettingsMessage::PeripheralAction(
-                    nickel_platform::PeripheralAction::CancelPrintJob {
-                        printer_id: "office".into(),
-                        job_id: "office-1".into(),
-                    },
-                ))
-                .is_empty()
-        );
-        assert!(
-            !tree
-                .semantic_targets_for_message(&SettingsMessage::PeripheralAction(
-                    nickel_platform::PeripheralAction::OpenCleanupLocation("/".into()),
-                ))
-                .is_empty()
-        );
-        assert!(
-            !tree
-                .semantic_targets_for_message(&SettingsMessage::PeripheralRefresh)
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn default_app_discovery_reports_partial_refresh_and_applies_rows_atomically() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
         let retained = nickel_platform::AssociationTarget::mime("image/svg+xml");
@@ -4119,191 +3183,6 @@ mod tests {
                 "missing Appearance control for {message:?}"
             );
         }
-    }
-
-    #[test]
-    fn appearance_exposes_and_bounds_every_terminal_preference() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
-        let tree = app.build_ui(1000.0, 2400.0);
-        for label in [
-            "Shell executable",
-            "Initial working directory",
-            "Fixed-width font family",
-            "Foreground color",
-            "Background color",
-        ] {
-            assert!(
-                tree.accessibility_nodes()
-                    .iter()
-                    .any(|node| node.label.as_deref() == Some(label)),
-                "missing terminal preference {label}"
-            );
-        }
-        assert!(
-            !tree
-                .semantic_targets_for_message(&SettingsMessage::SetTerminalCursorStyle(
-                    nickel_core::terminal_settings::TerminalCursorStyle::Beam,
-                ))
-                .is_empty()
-        );
-        assert!(
-            !tree
-                .semantic_targets_for_message(&SettingsMessage::SetTerminalCloseOnSuccess(true))
-                .is_empty()
-        );
-
-        app.update(SettingsMessage::TerminalShellChanged("x".repeat(
-            nickel_core::terminal_settings::MAX_TERMINAL_SETTING_TEXT + 20,
-        )));
-        app.update(SettingsMessage::SetTerminalFontSize(u16::MAX));
-        app.update(SettingsMessage::SetTerminalScrollback(usize::MAX));
-        app.update(SettingsMessage::TerminalForegroundChanged("#123456".into()));
-        app.update(SettingsMessage::TerminalBackgroundChanged("invalid".into()));
-        assert_eq!(
-            app.terminal_settings.default_shell.as_ref().unwrap().len(),
-            nickel_core::terminal_settings::MAX_TERMINAL_SETTING_TEXT
-        );
-        assert_eq!(app.terminal_settings.font_size_tenths, 720);
-        assert_eq!(
-            app.terminal_settings.scrollback_lines,
-            nickel_core::terminal_settings::MAX_TERMINAL_SCROLLBACK_LINES
-        );
-        assert_eq!(app.terminal_settings.foreground, 0xff12_3456);
-        assert_eq!(
-            app.terminal_settings.background,
-            nickel_core::terminal_settings::TerminalSettings::default().background
-        );
-        assert!(
-            app.terminal_status
-                .as_deref()
-                .unwrap()
-                .contains("Background")
-        );
-    }
-
-    #[test]
-    fn security_page_exposes_supported_update_and_native_consent_actions() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Security);
-        app.maintenance_rx = None;
-        app.maintenance_snapshot = Some(nickel_platform::MaintenanceSnapshot {
-            provider: nickel_platform::MaintenanceProvider::WindowsUpdateAndSecurity,
-            updates: nickel_platform::Observation {
-                state: nickel_platform::ObservationState::Current,
-                value: Some(nickel_platform::UpdateStatus {
-                    available: 2,
-                    phase: nickel_platform::UpdatePhase::Idle,
-                    restart_required: true,
-                    last_successful_check: Some(std::time::SystemTime::now()),
-                }),
-                observed_at: Some(std::time::SystemTime::now()),
-                detail: None,
-            },
-            protection: nickel_platform::ProtectionStatus {
-                firewall: nickel_platform::Observation::unsupported("fixture"),
-                malware_protection: nickel_platform::Observation::unsupported("fixture"),
-            },
-            permissions: vec![nickel_platform::PermissionStatus {
-                kind: nickel_platform::PermissionKind::Camera,
-                global_enabled: nickel_platform::Observation::unsupported("fixture"),
-                per_application_consent: true,
-                mutation: nickel_platform::PermissionMutation::NativeConsent,
-            }],
-            secure_storage: nickel_platform::Observation::unsupported("fixture"),
-        });
-        let tree = app.build_ui(850.0, 900.0);
-        for action in [
-            nickel_platform::MaintenanceAction::CheckForUpdates,
-            nickel_platform::MaintenanceAction::InstallUpdates,
-            nickel_platform::MaintenanceAction::ScheduleRestart,
-            nickel_platform::MaintenanceAction::OpenNativePermissionSettings(
-                nickel_platform::PermissionKind::Camera,
-            ),
-            nickel_platform::MaintenanceAction::RecoverSecureStorage,
-        ] {
-            assert!(
-                !tree
-                    .semantic_targets_for_message(&SettingsMessage::MaintenanceAction(action))
-                    .is_empty(),
-                "missing supported maintenance action"
-            );
-        }
-    }
-
-    #[test]
-    fn maintenance_progress_and_failed_action_refresh_are_independent() {
-        let snapshot = |phase| nickel_platform::MaintenanceSnapshot {
-            provider: nickel_platform::MaintenanceProvider::Unsupported {
-                platform: "fixture".into(),
-            },
-            updates: nickel_platform::Observation {
-                state: nickel_platform::ObservationState::Current,
-                value: Some(nickel_platform::UpdateStatus {
-                    available: 2,
-                    phase,
-                    restart_required: false,
-                    last_successful_check: Some(std::time::SystemTime::UNIX_EPOCH),
-                }),
-                observed_at: Some(std::time::SystemTime::UNIX_EPOCH),
-                detail: None,
-            },
-            protection: nickel_platform::ProtectionStatus {
-                firewall: nickel_platform::Observation::unsupported("fixture"),
-                malware_protection: nickel_platform::Observation::unsupported("fixture"),
-            },
-            permissions: Vec::new(),
-            secure_storage: nickel_platform::Observation::unsupported("fixture"),
-        };
-
-        let mut checking = snapshot(nickel_platform::UpdatePhase::Idle);
-        show_pending_maintenance_phase(
-            &mut checking,
-            &nickel_platform::MaintenanceAction::CheckForUpdates,
-        );
-        assert_eq!(
-            checking.updates.value.unwrap().phase,
-            nickel_platform::UpdatePhase::Checking
-        );
-        let mut installing = snapshot(nickel_platform::UpdatePhase::Downloading);
-        show_pending_maintenance_phase(
-            &mut installing,
-            &nickel_platform::MaintenanceAction::InstallUpdates,
-        );
-        assert_eq!(
-            installing.updates.value.unwrap().phase,
-            nickel_platform::UpdatePhase::Installing
-        );
-
-        let mut app = SettingsApp::with_initial_page(SettingsPage::Security);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        app.maintenance_snapshot = Some(snapshot(nickel_platform::UpdatePhase::Installing));
-        app.maintenance_rx = Some(receiver);
-        sender
-            .send(MaintenanceTaskResult {
-                outcome: Some(Err(nickel_platform::MaintenanceError {
-                    class: nickel_platform::MaintenanceFailureClass::Cancelled,
-                    detail: "provider cancelled".into(),
-                })),
-                snapshot: Ok(snapshot(nickel_platform::UpdatePhase::Idle)),
-            })
-            .unwrap();
-        assert!(app.poll_maintenance());
-        assert_eq!(
-            app.maintenance_snapshot
-                .as_ref()
-                .unwrap()
-                .updates
-                .value
-                .as_ref()
-                .unwrap()
-                .phase,
-            nickel_platform::UpdatePhase::Idle
-        );
-        assert!(
-            app.maintenance_status
-                .as_deref()
-                .unwrap()
-                .contains("Cancelled")
-        );
     }
 
     #[cfg(target_os = "linux")]
@@ -5088,20 +3967,6 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_search_finds_remote_control_by_mcp_and_phone_pairing_terms() {
-        for query in ["MCP", "phone pairing", "desktop control"] {
-            let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
-            app.sidebar_query = query.into();
-            let tree = app.build_ui(850.0, 580.0);
-            let destination = SettingsMessage::NavigateTarget(
-                SettingsPage::OptionalFeatures,
-                "optional-feature-remote-control".into(),
-            );
-            assert_eq!(tree.semantic_targets_for_message(&destination).len(), 1);
-        }
-    }
-
-    #[test]
     fn sidebar_search_omits_unimplemented_appearance_destinations() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.sidebar_query = "fonts".into();
@@ -5632,838 +4497,6 @@ mod tests {
     }
 
     #[test]
-    fn listener_switch_enables_connections_without_approving_any_resource() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.persistence_enabled = false;
-        app.remote_control_settings = Default::default();
-        app.remote_control_settings.set_requested(false);
-        app.remote_control_runtime.requested_enabled = false;
-        app.remote_control_runtime.effective =
-            nickel_session_protocol::RemoteControlEffectiveState::Disabled;
-
-        app.handle_settings_message(SettingsMessage::SetRemoteControlEnabled(true));
-        assert!(app.remote_control_runtime.active_leases.is_empty());
-        assert!(app.remote_control_runtime.pending_leases.is_empty());
-        assert!(app.remote_control_settings.requested_enabled);
-        assert_eq!(
-            app.remote_control_runtime.effective,
-            nickel_session_protocol::RemoteControlEffectiveState::Enabled
-        );
-        assert_eq!(
-            app.remote_control_runtime.acknowledged_generation,
-            app.remote_control_settings.generation
-        );
-    }
-
-    #[test]
-    fn remote_control_card_exposes_switch_and_pairing_actions() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_control_settings.set_requested(true);
-        app.remote_control_runtime.requested_enabled = true;
-        app.remote_control_runtime.effective =
-            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
-        let frame = app.build_ui(1100.0, 720.0);
-
-        assert_eq!(
-            frame
-                .semantic_targets_for_message(&SettingsMessage::SetRemoteControlEnabled(false))
-                .len(),
-            1
-        );
-        assert_eq!(
-            frame
-                .semantic_targets_for_message(&SettingsMessage::StartRemotePairing)
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn trusted_settings_show_bounded_payload_free_operation_audit_fields() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_control_runtime.operation_audit = vec![
-            nickel_session_protocol::RemoteOperationAuditEvent {
-                generation: 7,
-                observed_at_us: 9_000_000,
-                method: "pointer_action".into(),
-                matched_lease_id: Some(42),
-                duration_us: 12_500,
-                outcome: nickel_session_protocol::RemoteOperationOutcome::Success,
-            },
-            nickel_session_protocol::RemoteOperationAuditEvent {
-                generation: 8,
-                observed_at_us: 10_000_000,
-                method: "capture_window".into(),
-                matched_lease_id: None,
-                duration_us: 3_000,
-                outcome: nickel_session_protocol::RemoteOperationOutcome::Error,
-            },
-        ];
-        app.remote_control_runtime.operation_audit_evicted = 3;
-
-        let tree = app.build_ui(1100.0, 1200.0);
-        let labels = tree
-            .accessibility_nodes()
-            .iter()
-            .filter_map(|node| node.label.as_deref())
-            .collect::<Vec<_>>();
-        for expected in [
-            "Recent remote operations",
-            "Showing the latest 2 of 2 retained operations. 3 older operations discarded.",
-            "pointer_action · Succeeded",
-            "Matched lease 42 · 0.013s duration · 9s after session start",
-            "capture_window · Failed",
-            "No matching lease · 0.003s duration · 10s after session start",
-        ] {
-            assert!(
-                labels.contains(&expected),
-                "missing operation audit field {expected:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn remote_exposure_presentation_distinguishes_local_remote_and_inactive_listeners() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_control_runtime.effective =
-            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
-        app.remote_control_runtime.endpoint = "http://127.0.0.1:42637/mcp".into();
-        let local = remote_exposure_presentation(&app.remote_control_runtime);
-        assert_eq!(local.kind, nickel_ui::SettingsStatusKind::Information);
-        assert!(local.exposure.starts_with("Local only"));
-        assert_eq!(
-            local.transport,
-            "Loopback HTTP active · restricted to this computer"
-        );
-        assert_eq!(local.effective_endpoint, "http://127.0.0.1:42637/mcp");
-        assert_eq!(local.listen_address, "127.0.0.1:42637");
-        assert_eq!(local.fingerprint, "Not used — loopback HTTP");
-        assert!(local.connection_info.is_some());
-
-        app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
-        app.remote_control_runtime.host_fingerprint = Some("SHA256:fixture".into());
-        let remote = remote_exposure_presentation(&app.remote_control_runtime);
-        assert_eq!(remote.kind, nickel_ui::SettingsStatusKind::Validation);
-        assert!(remote.exposure.starts_with("REMOTE EXPOSURE ACTIVE"));
-        assert!(
-            remote
-                .transport
-                .contains("verify the host certificate fingerprint")
-        );
-        assert_eq!(remote.listen_address, "192.0.2.40:42637");
-        assert_eq!(remote.fingerprint, "SHA256:fixture");
-
-        app.remote_control_runtime.effective =
-            nickel_session_protocol::RemoteControlEffectiveState::Disabled;
-        let disabled = remote_exposure_presentation(&app.remote_control_runtime);
-        assert_eq!(disabled.kind, nickel_ui::SettingsStatusKind::Unavailable);
-        assert!(disabled.exposure.starts_with("Not exposed"));
-        assert!(disabled.exposure.contains("remote address is configured"));
-        assert_eq!(disabled.effective_endpoint, "None — listener is disabled");
-        assert!(disabled.connection_info.is_none());
-    }
-
-    #[test]
-    fn remote_connection_info_copy_uses_semantics_and_excludes_authority() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_control_runtime.effective =
-            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
-        app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
-        app.remote_control_runtime.host_fingerprint = Some("SHA256:host-fixture".into());
-        app.remote_control_runtime.environment_override = true;
-        app.remote_control_runtime.granted_clients =
-            vec![nickel_session_protocol::RemoteGrantedClientSnapshot {
-                id: "client-authority-canary".into(),
-                label: "Development agent".into(),
-                capabilities: vec![],
-                remembered: false,
-                blocked: false,
-                origin: None,
-            }];
-        app.remote_control_runtime.active_leases =
-            vec![nickel_session_protocol::RemoteActiveLease {
-                lease_id: 8675309,
-                client_label: "Development agent".into(),
-                scope: nickel_session_protocol::RemoteResourceScope::FullSession,
-                resource_label: None,
-                remaining_seconds: Some(1800),
-                suspended: false,
-                full_debug: true,
-            }];
-        let mut host = UiHost::new(app, 1100, 1200);
-        let labels = host
-            .accessibility_nodes()
-            .iter()
-            .filter_map(|node| node.label.as_deref())
-            .collect::<Vec<_>>();
-        for expected in [
-            "REMOTE EXPOSURE ACTIVE. New connections have no authority until locally approved.",
-            "Effective MCP endpoint",
-            "https://192.0.2.40:42637/mcp",
-            "Configured listen address",
-            "192.0.2.40:42637",
-            "Protected transport",
-            "HTTPS active · verify the host certificate fingerprint below",
-            "Listener configuration source",
-            "NICKEL_MCP_LISTEN_ADDR process environment (read only)",
-            "Host certificate SHA-256",
-            "SHA256:host-fixture",
-        ] {
-            assert!(
-                labels.contains(&expected),
-                "missing active field {expected:?}"
-            );
-        }
-        assert!(
-            host.accessibility_nodes()
-                .iter()
-                .find(|node| { node.id.as_str().ends_with("remote-control-copy-connection") })
-                .is_some_and(|node| node.enabled)
-        );
-        let target = host
-            .unique_semantic_target_for_message(&SettingsMessage::CopyRemoteConnectionInfo)
-            .expect("copy action has one production semantic target");
-        let outcome =
-            host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
-        let copied = outcome
-            .clipboard_text
-            .expect("semantic activation offers connection details to the host clipboard");
-        assert_eq!(
-            copied,
-            "Nickel MCP listen address: 192.0.2.40:42637\nNickel MCP endpoint: https://192.0.2.40:42637/mcp\nTransport: HTTPS\nConfiguration source: NICKEL_MCP_LISTEN_ADDR process environment\nHost certificate SHA-256: SHA256:host-fixture"
-        );
-        assert!(!copied.contains("client-authority-canary"));
-        assert!(!copied.contains("8675309"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn rejected_environment_bind_is_truthful_through_the_semantic_host() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_control_settings.set_requested(true);
-        app.remote_control_runtime.requested_enabled = true;
-        app.remote_control_runtime.effective =
-            nickel_session_protocol::RemoteControlEffectiveState::Rejected;
-        app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
-        app.remote_control_runtime.environment_override = true;
-        app.remote_control_runtime.host_fingerprint = Some("stale-fingerprint-canary".into());
-        app.remote_control_runtime.diagnostic =
-            Some("cannot bind MCP listener: 192.0.2.40:42637: address in use".into());
-
-        let mut host = UiHost::new(app, 1100, 1200);
-        let labels = host
-            .accessibility_nodes()
-            .iter()
-            .filter_map(|node| node.label.as_deref())
-            .collect::<Vec<_>>();
-        for expected in [
-            "NO LISTENER ACTIVE. The requested remote address failed to bind. Nickel did not fall back to loopback or another port.",
-            "Effective MCP endpoint",
-            "None — listener did not start",
-            "Configured listen address",
-            "192.0.2.40:42637",
-            "Protected transport",
-            "Unavailable — the listener did not start",
-            "Listener configuration source",
-            "NICKEL_MCP_LISTEN_ADDR process environment (read only)",
-            "Host certificate SHA-256",
-            "Unavailable — listener did not start",
-            "cannot bind MCP listener: 192.0.2.40:42637: address in use",
-        ] {
-            assert!(
-                labels.contains(&expected),
-                "missing truthful field {expected:?}"
-            );
-        }
-        assert!(!labels.contains(&"stale-fingerprint-canary"));
-
-        let copy = host
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.id.as_str().ends_with("remote-control-copy-connection"))
-            .expect("copy connection button");
-        assert!(!copy.enabled);
-        assert!(
-            host.semantic_targets_for_message(&SettingsMessage::CopyRemoteConnectionInfo)
-                .is_empty()
-        );
-        host.application_mut()
-            .handle_settings_message(SettingsMessage::CopyRemoteConnectionInfo);
-        assert!(host.application().remote_clipboard_write.is_none());
-    }
-
-    #[test]
-    fn full_debug_approval_lays_out_every_trusted_review_detail() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_control_runtime.effective =
-            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
-        app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
-        app.remote_control_runtime.host_fingerprint = Some("SHA256:host-fixture".into());
-        app.remote_control_runtime.granted_clients =
-            vec![nickel_session_protocol::RemoteGrantedClientSnapshot {
-                id: "verified-development-client".into(),
-                label: "Claimed development agent".into(),
-                capabilities: vec![nickel_session_protocol::RemoteCapability::Observe],
-                remembered: false,
-                blocked: false,
-                origin: Some(nickel_session_protocol::RemoteClientOrigin {
-                    address: "192.0.2.8:4421".into(),
-                    tls: true,
-                }),
-            }];
-        let request = nickel_session_protocol::RemoteLeaseRequest {
-            renewal: None,
-            scope: nickel_session_protocol::RemoteResourceScope::FullSession,
-            duration_seconds: Some(7200),
-            allow_resumption: true,
-            full_debug: true,
-        };
-        app.remote_control_runtime.pending_leases =
-            vec![nickel_session_protocol::RemotePendingLease {
-                pending_generation: 19,
-                client_id: "verified-development-client".into(),
-                client_label: "Claimed development agent".into(),
-                request: request.clone(),
-                resource_label: None,
-                changes: Default::default(),
-            }];
-
-        let tree = app.build_ui_with_diagnostics(1100.0, 720.0);
-        let diagnostics = tree
-            .diagnostics()
-            .iter()
-            .filter(|diagnostic| diagnostic.kind != nickel_ui::DiagnosticKind::ClippedInteraction)
-            .collect::<Vec<_>>();
-        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
-        let labels = tree
-            .accessibility_nodes()
-            .iter()
-            .filter_map(|node| node.label.as_deref())
-            .collect::<Vec<_>>();
-        for expected in [
-            "Resource",
-            "Full Control & Debug Nickel",
-            "Diagnostic reach",
-            "Protected boundary",
-            "Claimed client name",
-            "Claimed development agent",
-            "Verified client identity",
-            "verified-development-client",
-            "Authenticated network origin",
-            "192.0.2.8:4421 · TLS protected",
-            "Requested duration",
-            "2 hours",
-            "Allow full debug",
-        ] {
-            assert!(
-                labels.contains(&expected),
-                "missing approval detail {expected:?}"
-            );
-        }
-        assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::DecideRemoteLease {
-                pending_generation: 19,
-                client_id: "verified-development-client".into(),
-                request,
-                allow: true,
-            })
-            .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn remote_access_lifecycle_actions_are_large_and_keyboard_reachable() {
-        use nickel_session_protocol::{
-            RemoteActiveLease, RemoteLeaseAction, RemoteLeaseRenewal, RemoteLeaseRequest,
-            RemotePendingClientSnapshot, RemotePendingLease, RemoteResourceScope,
-        };
-
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_control_runtime.effective =
-            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
-        app.remote_control_runtime.pending_clients = vec![RemotePendingClientSnapshot {
-            id: "new-assistive-client".into(),
-            label: "New assistive client".into(),
-            requested: vec![],
-            connected_at: 1,
-        }];
-        let initial_request = RemoteLeaseRequest {
-            renewal: None,
-            scope: RemoteResourceScope::FullSession,
-            duration_seconds: Some(1200),
-            allow_resumption: false,
-            full_debug: false,
-        };
-        let renewal_request = RemoteLeaseRequest {
-            renewal: Some(RemoteLeaseRenewal {
-                lease_id: 41,
-                generation: 3,
-            }),
-            scope: RemoteResourceScope::FullSession,
-            duration_seconds: Some(7200),
-            allow_resumption: false,
-            full_debug: false,
-        };
-        app.remote_control_runtime.pending_leases = vec![RemotePendingLease {
-            pending_generation: 7,
-            client_id: "initial-client".into(),
-            client_label: "Initial client".into(),
-            request: initial_request.clone(),
-            resource_label: None,
-            changes: Default::default(),
-        }];
-        app.remote_control_runtime.active_leases = vec![
-            RemoteActiveLease {
-                lease_id: 41,
-                client_label: "Active client".into(),
-                scope: RemoteResourceScope::FullSession,
-                resource_label: None,
-                remaining_seconds: Some(120),
-                suspended: false,
-                full_debug: false,
-            },
-            RemoteActiveLease {
-                lease_id: 42,
-                client_label: "Paused client".into(),
-                scope: RemoteResourceScope::FullSession,
-                resource_label: None,
-                remaining_seconds: Some(120),
-                suspended: true,
-                full_debug: false,
-            },
-        ];
-
-        let messages = [
-            SettingsMessage::DecideRemoteClient {
-                client_id: "new-assistive-client".into(),
-                decision: nickel_session_protocol::RemoteClientDecision::AllowOnce,
-            },
-            SettingsMessage::ApproveRemoteLeaseDuration {
-                pending_generation: 7,
-                client_id: "initial-client".into(),
-                request: initial_request,
-                duration_seconds: Some(7200),
-            },
-            SettingsMessage::ManageRemoteLease {
-                lease_id: 41,
-                action: RemoteLeaseAction::Pause,
-            },
-            SettingsMessage::ManageRemoteLease {
-                lease_id: 42,
-                action: RemoteLeaseAction::Resume,
-            },
-            SettingsMessage::ManageRemoteLease {
-                lease_id: 41,
-                action: RemoteLeaseAction::Revoke,
-            },
-        ];
-        let mut host = UiHost::new(app, 1100, 720);
-        let mut remaining = messages
-            .iter()
-            .map(|message| {
-                let target = host
-                    .unique_semantic_target_for_message(message)
-                    .expect("each remote access action has one production semantic target");
-                assert!(
-                    target.bounds.size.width >= 44.0 && target.bounds.size.height >= 44.0,
-                    "remote access target is too small: {:?}",
-                    target.bounds
-                );
-                assert_eq!(target.role, Some(SemanticRole::Button));
-                assert!(target.interactive);
-                target.id
-            })
-            .collect::<Vec<_>>();
-
-        // Tab traversal is driven by input events rather than a response timer. It may
-        // take as long as the local user needs and scrolls each action into view.
-        for _ in 0..512 {
-            host.handle_event(nickel_ui::UiEvent::FocusNext);
-            if let Some(focused) = host.inspect().keyboard_focus.as_ref() {
-                remaining.retain(|target| target != focused);
-            }
-            if remaining.is_empty() {
-                break;
-            }
-        }
-        assert!(
-            remaining.is_empty(),
-            "keyboard traversal did not reach remote access actions: {remaining:?}"
-        );
-
-        // Keep focus on an existing local action while a production runtime
-        // observation adds a renewal card. A renewal is ordinary page content,
-        // never a focus-taking prompt or transient surface.
-        let pause = host
-            .unique_semantic_target_for_message(&SettingsMessage::ManageRemoteLease {
-                lease_id: 41,
-                action: RemoteLeaseAction::Pause,
-            })
-            .unwrap()
-            .id;
-        for _ in 0..512 {
-            if host.inspect().keyboard_focus.as_ref() == Some(&pause) {
-                break;
-            }
-            host.handle_event(nickel_ui::UiEvent::FocusNext);
-        }
-        assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&pause));
-        let focus_generation = host.inspect().keyboard_focus_generation;
-
-        let mut refreshed = host.application().remote_control_runtime.clone();
-        refreshed.pending_leases.push(RemotePendingLease {
-            pending_generation: 8,
-            client_id: "renewing-client".into(),
-            client_label: "Renewing client".into(),
-            request: renewal_request.clone(),
-            resource_label: None,
-            changes: Default::default(),
-        });
-        host.application_mut().apply_remote_control_observation(Ok(
-            nickel_session_protocol::ServerMessage::RemoteControl(refreshed),
-        ));
-        let refresh = host.step(HostBatch {
-            application_changed: true,
-            ..HostBatch::default()
-        });
-        assert!(refresh.telemetry.rebuilt);
-        assert!(
-            refresh.telemetry.input_to_frame_us < 1_000_000,
-            "renewal refresh stalled Settings for {}us",
-            refresh.telemetry.input_to_frame_us
-        );
-        assert!(host.inspect().window_focused);
-        assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&pause));
-        assert_eq!(
-            host.inspect().keyboard_focus_generation,
-            focus_generation,
-            "a renewal observation stole or reset local keyboard focus"
-        );
-
-        let renewal = host
-            .unique_semantic_target_for_message(&SettingsMessage::ApproveRemoteLeaseDuration {
-                pending_generation: 8,
-                client_id: "renewing-client".into(),
-                request: renewal_request,
-                duration_seconds: Some(7200),
-            })
-            .expect("the refreshed renewal has one production semantic action");
-        assert_eq!(renewal.role, Some(SemanticRole::Button));
-        assert!(renewal.interactive);
-        assert!(
-            renewal.bounds.size.width >= 44.0 && renewal.bounds.size.height >= 44.0,
-            "renewal target is too small: {:?}",
-            renewal.bounds
-        );
-        for _ in 0..512 {
-            if host.inspect().keyboard_focus.as_ref() == Some(&renewal.id) {
-                break;
-            }
-            host.handle_event(nickel_ui::UiEvent::FocusNext);
-        }
-        assert_eq!(
-            host.inspect().keyboard_focus.as_ref(),
-            Some(&renewal.id),
-            "renewal action was not reachable through production keyboard traversal"
-        );
-    }
-
-    #[test]
-    fn audible_preference_changes_locally_without_changing_listener_authority() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.persistence_enabled = false;
-        app.remote_control_settings.audible_indications = true;
-        let generation = app.remote_control_settings.generation;
-        let enabled = app.remote_control_settings.requested_enabled;
-        let frame = app.build_ui(1100.0, 720.0);
-        assert_eq!(
-            frame
-                .semantic_targets_for_message(&SettingsMessage::SetRemoteAudibleIndications(false))
-                .len(),
-            1
-        );
-        app.handle_settings_message(SettingsMessage::SetRemoteAudibleIndications(false));
-        assert!(!app.remote_control_settings.audible_indications);
-        assert_eq!(app.remote_control_settings.generation, generation);
-        assert_eq!(app.remote_control_settings.requested_enabled, enabled);
-    }
-
-    #[test]
-    fn remote_status_failure_removes_stale_approval_until_a_fresh_snapshot_arrives() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        let request = nickel_session_protocol::RemoteLeaseRequest {
-            renewal: None,
-            scope: nickel_session_protocol::RemoteResourceScope::FullSession,
-            duration_seconds: Some(1200),
-            allow_resumption: false,
-            full_debug: false,
-        };
-        let mut live = app.remote_control_runtime.clone();
-        live.effective = nickel_session_protocol::RemoteControlEffectiveState::Enabled;
-        live.acknowledged_generation = 7;
-        live.diagnostic = None;
-        live.pending_leases = vec![nickel_session_protocol::RemotePendingLease {
-            pending_generation: 1,
-            client_id: "agent".into(),
-            client_label: "Agent".into(),
-            resource_label: None,
-            changes: Default::default(),
-            request: request.clone(),
-        }];
-        let approve = SettingsMessage::ApproveRemoteLeaseDuration {
-            pending_generation: 1,
-            client_id: "agent".into(),
-            request,
-            duration_seconds: Some(1200),
-        };
-        app.apply_remote_control_observation(Ok(
-            nickel_session_protocol::ServerMessage::RemoteControl(live.clone()),
-        ));
-        assert!(
-            !app.build_ui(1100.0, 1200.0)
-                .semantic_targets_for_message(&approve)
-                .is_empty()
-        );
-        app.apply_remote_control_observation(Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "fixture timeout",
-        )));
-        assert_eq!(
-            app.remote_control_runtime.effective,
-            nickel_session_protocol::RemoteControlEffectiveState::Rejected
-        );
-        assert_eq!(app.remote_control_runtime.acknowledged_generation, 0);
-        assert!(
-            app.remote_control_runtime
-                .diagnostic
-                .as_ref()
-                .unwrap()
-                .contains("unavailable")
-        );
-        assert!(
-            app.build_ui(1100.0, 1200.0)
-                .semantic_targets_for_message(&approve)
-                .is_empty()
-        );
-        app.apply_remote_control_observation(Ok(
-            nickel_session_protocol::ServerMessage::RemoteControl(live),
-        ));
-        assert_eq!(app.remote_control_runtime.acknowledged_generation, 7);
-        assert!(
-            !app.build_ui(1100.0, 1200.0)
-                .semantic_targets_for_message(&approve)
-                .is_empty()
-        );
-        // The payload may be identical after disconnect/reconnect. Its old
-        // semantic action must not identify the replacement approval card.
-        let mut replacement = app.remote_control_runtime.clone();
-        replacement.pending_leases[0].pending_generation = 2;
-        app.apply_remote_control_observation(Ok(
-            nickel_session_protocol::ServerMessage::RemoteControl(replacement),
-        ));
-        let ui = app.build_ui(1100.0, 1200.0);
-        assert!(ui.semantic_targets_for_message(&approve).is_empty());
-        let mut fresh_approve = approve;
-        if let SettingsMessage::ApproveRemoteLeaseDuration {
-            pending_generation, ..
-        } = &mut fresh_approve
-        {
-            *pending_generation = 2;
-        }
-        assert!(!ui.semantic_targets_for_message(&fresh_approve).is_empty());
-    }
-
-    #[test]
-    fn full_debug_approval_offers_the_thirty_minute_preset() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_lease_custom_minutes = "7".into();
-        let request = nickel_session_protocol::RemoteLeaseRequest {
-            renewal: None,
-            scope: nickel_session_protocol::RemoteResourceScope::FullSession,
-            duration_seconds: Some(30),
-            allow_resumption: false,
-            full_debug: true,
-        };
-        app.remote_control_runtime.pending_leases =
-            vec![nickel_session_protocol::RemotePendingLease {
-                pending_generation: 1,
-                client_id: "agent".into(),
-                client_label: "Development agent".into(),
-                resource_label: None,
-                changes: Default::default(),
-                request: request.clone(),
-            }];
-        let frame = app.build_ui(1100.0, 1200.0);
-        for (duration_seconds, expected) in
-            [(Some(1800), 1), (Some(1200), 0), (Some(7200), 1), (None, 1)]
-        {
-            assert_eq!(
-                frame
-                    .semantic_targets_for_message(&SettingsMessage::ApproveRemoteLeaseDuration {
-                        pending_generation: 1,
-                        client_id: "agent".into(),
-                        request: request.clone(),
-                        duration_seconds,
-                    })
-                    .len(),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn lease_approval_card_preserves_the_exact_resource_and_duration() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_lease_custom_minutes = "7".into();
-        let request = nickel_session_protocol::RemoteLeaseRequest {
-            renewal: None,
-            scope: nickel_session_protocol::RemoteResourceScope::Application("Anki".into()),
-            duration_seconds: Some(7200),
-            allow_resumption: true,
-            full_debug: false,
-        };
-        app.remote_control_runtime.pending_leases =
-            vec![nickel_session_protocol::RemotePendingLease {
-                pending_generation: 1,
-                client_id: "agent".into(),
-                client_label: "Development agent".into(),
-                resource_label: Some("Verified application windows".into()),
-                changes: Default::default(),
-                request: request.clone(),
-            }];
-        let frame = app.build_ui(1100.0, 1200.0);
-        for duration_seconds in [Some(1200), Some(7200), Some(420), None] {
-            assert_eq!(
-                frame
-                    .semantic_targets_for_message(&SettingsMessage::ApproveRemoteLeaseDuration {
-                        pending_generation: 1,
-                        client_id: "agent".into(),
-                        request: request.clone(),
-                        duration_seconds,
-                    })
-                    .len(),
-                1
-            );
-        }
-        for allow in [false, true] {
-            assert_eq!(
-                frame
-                    .semantic_targets_for_message(&SettingsMessage::DecideRemoteLease {
-                        pending_generation: 1,
-                        client_id: "agent".into(),
-                        request: request.clone(),
-                        allow,
-                    })
-                    .len(),
-                1
-            );
-        }
-        let broader = nickel_session_protocol::RemoteLeaseRequest {
-            renewal: None,
-            scope: nickel_session_protocol::RemoteResourceScope::FullSession,
-            ..request
-        };
-        assert!(
-            frame
-                .semantic_targets_for_message(&SettingsMessage::DecideRemoteLease {
-                    pending_generation: 1,
-                    client_id: "agent".into(),
-                    request: broader,
-                    allow: true,
-                })
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn connected_client_block_control_tracks_acknowledged_local_policy() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        for blocked in [false, true] {
-            app.remote_control_runtime.granted_clients =
-                vec![nickel_session_protocol::RemoteGrantedClientSnapshot {
-                    id: "block-fixture".into(),
-                    origin: None,
-                    label: "Fixture".into(),
-                    capabilities: vec![],
-                    remembered: false,
-                    blocked,
-                }];
-            let frame = app.build_ui(1100.0, 1200.0);
-            assert_eq!(
-                frame
-                    .semantic_targets_for_message(&SettingsMessage::BlockRemoteClient {
-                        client_id: "block-fixture".into(),
-                        blocked: !blocked,
-                    })
-                    .len(),
-                1
-            );
-            assert!(
-                frame
-                    .semantic_targets_for_message(&SettingsMessage::BlockRemoteClient {
-                        client_id: "block-fixture".into(),
-                        blocked,
-                    })
-                    .is_empty()
-            );
-            assert!(app.remote_control_runtime.active_leases.is_empty());
-        }
-    }
-
-    #[test]
-    fn pending_remote_client_requires_a_local_scoped_decision() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.remote_control_runtime.pending_clients =
-            vec![nickel_session_protocol::RemotePendingClientSnapshot {
-                id: "pending-client".into(),
-                label: "Unverified phone".into(),
-                requested: vec![
-                    nickel_session_protocol::RemoteCapability::Observe,
-                    nickel_session_protocol::RemoteCapability::KeyboardInput,
-                ],
-                connected_at: 42,
-            }];
-        let frame = app.build_ui(1100.0, 720.0);
-        for decision in [
-            nickel_session_protocol::RemoteClientDecision::Deny,
-            nickel_session_protocol::RemoteClientDecision::AllowOnce,
-        ] {
-            assert_eq!(
-                frame
-                    .semantic_targets_for_message(&SettingsMessage::DecideRemoteClient {
-                        client_id: "pending-client".into(),
-                        decision,
-                    })
-                    .len(),
-                1
-            );
-        }
-        assert!(
-            frame
-                .semantic_targets_for_message(&SettingsMessage::DecideRemoteClient {
-                    client_id: "pending-client".into(),
-                    decision: nickel_session_protocol::RemoteClientDecision::Remember,
-                })
-                .is_empty()
-        );
-        assert!(frame.semantic_nodes().iter().all(|node| {
-            node.name.as_deref() != Some("Allow once (Observe)")
-                && node.name.as_deref() != Some("Allow once (Keyboard Input)")
-                && node.name.as_deref() != Some("Remember (Keyboard Input)")
-                && node.name.as_deref() != Some("Requested")
-        }));
-        assert_eq!(
-            frame
-                .semantic_nodes()
-                .iter()
-                .filter(|node| node.name.as_deref() == Some("Allow client"))
-                .count(),
-            1
-        );
-    }
-
-    #[test]
     fn runtime_projection_does_not_confuse_disabled_with_missing_installation() {
         let settings = OptionalFeatureSettings {
             codex_enabled: false,
@@ -6573,23 +4606,6 @@ mod tests {
         let before = app.optional_features.clone();
         app.handle_settings_message(SettingsMessage::SetCodexEnabled(false));
         assert_eq!(app.optional_features, before);
-    }
-
-    #[test]
-    fn changing_source_creates_one_new_pending_generation() {
-        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
-        app.persistence_enabled = false;
-        app.codex_probe_rx = None;
-        app.codex_feature.capability.policy = FeaturePolicy::Editable;
-        app.optional_feature_runtime.active_windows = 0;
-        app.optional_features.codex_source = CodexSource::CompatibleInstalled;
-        let generation = app.optional_features.codex_generation;
-        app.handle_settings_message(SettingsMessage::SetCodexSource(CodexSource::Bundled));
-        assert_eq!(app.optional_features.codex_source, CodexSource::Bundled);
-        assert_eq!(app.optional_features.codex_generation, generation + 1);
-        assert_eq!(app.codex_feature.effective, FeatureEffectiveState::Enabling);
-        app.handle_settings_message(SettingsMessage::SetCodexSource(CodexSource::Bundled));
-        assert_eq!(app.optional_features.codex_generation, generation + 1);
     }
 
     #[test]

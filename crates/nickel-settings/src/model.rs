@@ -22,10 +22,6 @@ pub(super) struct SettingsApp {
     pub(super) pending_effects: Vec<SettingsEffect>,
     pub(super) active_destination: Option<SettingsPage>,
     pub(super) appearance_notice: Option<AppearanceNotice>,
-    pub(super) terminal_settings: nickel_core::terminal_settings::TerminalSettings,
-    pub(super) terminal_foreground_input: String,
-    pub(super) terminal_background_input: String,
-    pub(super) terminal_status: Option<String>,
     pub(super) persistence_enabled: bool,
     pub(super) wallpaper_position_select_expanded: bool,
     pub(super) animation_select_expanded: bool,
@@ -49,15 +45,7 @@ pub(super) struct SettingsApp {
     pub(super) codex_feature: FeatureState,
     pub(super) codex_probe_rx:
         Option<std::sync::mpsc::Receiver<(u64, CodexSource, FeatureCapability)>>,
-    pub(super) codex_source_select_expanded: bool,
-    pub(super) codex_executable_path: String,
     pub(super) codex_disable_confirmation: bool,
-    pub(super) remote_control_settings: nickel_remote_control::RemoteAiControlSettings,
-    pub(super) remote_control_runtime: nickel_session_protocol::RemoteControlSnapshot,
-    pub(super) remote_lease_custom_minutes: String,
-    pub(super) remote_pairing: Option<nickel_session_protocol::RemotePairingSnapshot>,
-    pub(super) remote_pairing_qr: Option<Arc<image::RgbaImage>>,
-    pub(super) remote_clipboard_write: Option<String>,
     pub(super) next_optional_feature_refresh: Instant,
     pub(super) shell_settings: ShellSettings,
     pub(super) shell_topology_generation: u64,
@@ -85,14 +73,6 @@ pub(super) struct SettingsApp {
     pub(super) bluetooth_operation: Option<BluetoothOperation>,
     pub(super) bluetooth_operation_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub(super) bluetooth_status: Option<String>,
-    pub(super) peripheral_snapshot: Option<nickel_platform::PeripheralSnapshot>,
-    pub(super) peripheral_status: Option<String>,
-    pub(super) peripheral_address: String,
-    pub(super) peripheral_rx: Option<std::sync::mpsc::Receiver<PeripheralTaskResult>>,
-    pub(super) next_peripheral_refresh: Instant,
-    pub(super) maintenance_snapshot: Option<nickel_platform::MaintenanceSnapshot>,
-    pub(super) maintenance_status: Option<String>,
-    pub(super) maintenance_rx: Option<std::sync::mpsc::Receiver<MaintenanceTaskResult>>,
     pub(super) next_bluetooth_refresh: Instant,
     pub(super) next_network_refresh: Instant,
     pub(super) confirmed_displays: Vec<DisplayCard>,
@@ -113,53 +93,9 @@ impl Default for SettingsApp {
         let localizer = Localizer::system();
         let status = localizer.text("settings-status-changes-not-applied");
         let wallpaper_settings = load_wallpaper_settings();
-        let terminal_settings = nickel_core::terminal_settings::TerminalSettings::load_default();
-        let terminal_foreground_input = format!("#{:08x}", terminal_settings.foreground);
-        let terminal_background_input = format!("#{:08x}", terminal_settings.background);
         let optional_features = load_optional_feature_settings();
         let optional_feature_runtime = OptionalFeatureRuntime::load_default();
         let codex_feature = codex_feature_state(&optional_features, &optional_feature_runtime);
-        let codex_executable_path = match &optional_features.codex_source {
-            CodexSource::Executable(path) => path.display().to_string(),
-            _ => String::new(),
-        };
-        let remote_control_settings =
-            nickel_remote_control::RemoteAiControlSettings::load_default().unwrap_or_default();
-        let remote_control_runtime = session_request(nickel_session_protocol::Request::Query(
-            nickel_session_protocol::Query::RemoteControl,
-        ))
-        .ok()
-        .and_then(|message| match message {
-            nickel_session_protocol::ServerMessage::RemoteControl(snapshot) => Some(snapshot),
-            _ => None,
-        })
-        .unwrap_or(nickel_session_protocol::RemoteControlSnapshot {
-            requested_enabled: remote_control_settings.requested_enabled,
-            effective: nickel_session_protocol::RemoteControlEffectiveState::Rejected,
-            generation: remote_control_settings.generation,
-            acknowledged_generation: 0,
-            endpoint: nickel_remote_control::MCP_ENDPOINT.into(),
-            host_fingerprint: None,
-            environment_override: false,
-            diagnostic: Some(
-                "Remote control status is unavailable; the session has not acknowledged its listener state."
-                    .into(),
-            ),
-            pending_clients: Vec::new(),
-            pending_leases: Vec::new(),
-            active_leases: Vec::new(),
-            granted_clients: Vec::new(),
-            lease_audit: Vec::new(),
-            lease_audit_evicted: 0,
-            permission_audit: Vec::new(),
-            permission_audit_evicted: 0,
-            trace_audit: Vec::new(),
-            trace_audit_evicted: 0,
-            operation_audit: Vec::new(),
-            operation_audit_evicted: 0,
-            connection_audit: Vec::new(),
-            connection_audit_evicted: 0,
-        });
         let application_scale_policy = nickel_core::dpi::ApplicationScaleSettings::load_default()
             .unwrap_or_default()
             .policy;
@@ -260,10 +196,6 @@ impl Default for SettingsApp {
             pending_effects: Vec::new(),
             active_destination: Some(SettingsPage::Display),
             appearance_notice: None,
-            terminal_settings,
-            terminal_foreground_input,
-            terminal_background_input,
-            terminal_status: None,
             persistence_enabled: !cfg!(test),
             wallpaper_position_select_expanded: false,
             animation_select_expanded: false,
@@ -286,15 +218,7 @@ impl Default for SettingsApp {
             optional_feature_runtime,
             codex_feature,
             codex_probe_rx: None,
-            codex_source_select_expanded: false,
-            codex_executable_path,
             codex_disable_confirmation: false,
-            remote_control_settings,
-            remote_control_runtime,
-            remote_lease_custom_minutes: "20".into(),
-            remote_pairing: None,
-            remote_pairing_qr: None,
-            remote_clipboard_write: None,
             next_optional_feature_refresh: Instant::now(),
             shell_settings,
             shell_topology_generation,
@@ -325,14 +249,6 @@ impl Default for SettingsApp {
             bluetooth_operation: None,
             bluetooth_operation_rx: None,
             bluetooth_status: None,
-            peripheral_snapshot: None,
-            peripheral_status: None,
-            peripheral_address: String::new(),
-            peripheral_rx: None,
-            next_peripheral_refresh: Instant::now(),
-            maintenance_snapshot: None,
-            maintenance_status: None,
-            maintenance_rx: None,
             next_bluetooth_refresh: Instant::now(),
             next_network_refresh: Instant::now(),
             confirmed_displays: displays,
@@ -361,10 +277,6 @@ impl SettingsApp {
             app.start_codex_probe();
         } else if page == SettingsPage::Bar {
             app.refresh_workspace_state();
-        } else if page == SettingsPage::Security {
-            app.load_maintenance();
-        } else if page == SettingsPage::PrintersStorage {
-            app.load_peripherals();
         }
         app
     }

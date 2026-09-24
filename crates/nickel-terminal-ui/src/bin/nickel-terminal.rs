@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use nickel_core::terminal_settings::TerminalSettings;
+use nickel_core::terminal_settings::{TerminalCursorStyle, TerminalSettings};
 use nickel_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey};
 use nickel_terminal::{
     TerminalDimensions, TerminalEvent, TerminalExit, TerminalOptions, TerminalProgram,
@@ -18,9 +18,9 @@ use nickel_terminal_ui::{
     TerminalViewport, confirm_paste, prepare_paste, translate_input_with_modes,
 };
 use nickel_ui::{
-    AdapterOutcome, Application, Button, Column, Container, FrameOverlay, HostAdapter,
+    AdapterOutcome, AnyView, Application, Button, Column, Container, FrameOverlay, HostAdapter,
     HostServices, Insets, Justify, OverlayAnchor, OverlayMenu, OverlayMenuItem, Row, SemanticRole,
-    Text, UiHost, UiId, View, ViewContext,
+    Text, TextField, UiHost, UiId, View, ViewContext,
 };
 use winit::event::WindowEvent;
 
@@ -171,7 +171,32 @@ struct TerminalApp {
     close_on_successful_exit: bool,
     exit_requested: bool,
     settings: TerminalSettings,
+    preferences: Option<TerminalPreferences>,
     viewport_size: (u32, u32),
+}
+
+struct TerminalPreferences {
+    settings: TerminalSettings,
+    shell: String,
+    working_directory: String,
+    foreground: String,
+    background: String,
+}
+
+impl TerminalPreferences {
+    fn from_settings(settings: &TerminalSettings) -> Self {
+        Self {
+            settings: settings.clone(),
+            shell: settings.default_shell.clone().unwrap_or_default(),
+            working_directory: settings
+                .initial_working_directory
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            foreground: format!("#{:08X}", settings.foreground),
+            background: format!("#{:08X}", settings.background),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -186,6 +211,19 @@ enum Message {
     Paste,
     SelectAll,
     ClearScrollback,
+    OpenPreferences,
+    PreferencesScroll,
+    ClosePreferences,
+    SavePreferences,
+    SetShell(String),
+    SetWorkingDirectory(String),
+    SetFontFamily(String),
+    AdjustFontSize(i16),
+    AdjustScrollback(isize),
+    SetCursorStyle(TerminalCursorStyle),
+    SetForeground(String),
+    SetBackground(String),
+    ToggleCloseOnSuccess,
 }
 
 impl TerminalApp {
@@ -257,6 +295,7 @@ impl TerminalApp {
             close_on_successful_exit: settings.close_on_successful_exit,
             exit_requested: false,
             settings: settings.clone(),
+            preferences: None,
             viewport_size: (900, 600),
         })
     }
@@ -459,6 +498,146 @@ impl TerminalApp {
             }
         }
     }
+
+    fn save_preferences(&mut self) {
+        let Some(preferences) = self.preferences.as_mut() else {
+            return;
+        };
+        let parse_color = |value: &str| {
+            let digits = value.trim().trim_start_matches('#');
+            match digits.len() {
+                6 => u32::from_str_radix(digits, 16)
+                    .ok()
+                    .map(|color| color | 0xff00_0000),
+                8 => u32::from_str_radix(digits, 16).ok(),
+                _ => None,
+            }
+        };
+        let Some(foreground) = parse_color(&preferences.foreground) else {
+            self.active_mut().status = Some("Foreground color must be #RRGGBB or #AARRGGBB".into());
+            return;
+        };
+        let Some(background) = parse_color(&preferences.background) else {
+            self.active_mut().status = Some("Background color must be #RRGGBB or #AARRGGBB".into());
+            return;
+        };
+        preferences.settings.default_shell =
+            (!preferences.shell.trim().is_empty()).then(|| preferences.shell.trim().to_owned());
+        preferences.settings.initial_working_directory =
+            (!preferences.working_directory.trim().is_empty())
+                .then(|| PathBuf::from(preferences.working_directory.trim()));
+        preferences.settings.foreground = foreground;
+        preferences.settings.background = background;
+        let requested = preferences.settings.clone();
+        if let Err(error) = requested.save_default() {
+            self.active_mut().status =
+                Some(format!("Could not save Terminal preferences: {error}"));
+            return;
+        }
+        self.close_on_successful_exit = requested.close_on_successful_exit;
+        self.palette.foreground = requested.foreground;
+        self.palette.background = requested.background;
+        self.palette.cursor_style = requested.cursor_style;
+        self.palette.font_family =
+            nickel_render_assets::resolve_monospace_family(&requested.font_family);
+        self.metrics = CellMetrics::resolved(&self.palette.font_family, requested.font_size(), 1.0);
+        self.settings = requested;
+        self.preferences = None;
+        let (width, height) = self.viewport_size;
+        self.resize(width, height);
+        self.active_mut().status = Some(
+            "Preferences saved. Shell, folder, and scrollback changes apply to new tabs.".into(),
+        );
+    }
+}
+
+fn preferences_view(preferences: &TerminalPreferences) -> impl View<Message> {
+    let label = |text| Text::new(text).color(0xffeceff4);
+    Column::new()
+        .gap(8.0)
+        .padding(Insets::all(16.0))
+        .child(label("Terminal preferences"))
+        .child(label("Default shell for new tabs"))
+        .child(TextField::on_change_with_placeholder(
+            &preferences.shell,
+            "Use the system shell",
+            Message::SetShell,
+        ))
+        .child(label("Starting folder for new tabs"))
+        .child(TextField::on_change_with_placeholder(
+            &preferences.working_directory,
+            "Use the current folder",
+            Message::SetWorkingDirectory,
+        ))
+        .child(label("Font family"))
+        .child(TextField::on_change_with_placeholder(
+            &preferences.settings.font_family,
+            "monospace",
+            Message::SetFontFamily,
+        ))
+        .child(
+            Row::new()
+                .gap(8.0)
+                .child(label(&format!(
+                    "Font size: {:.1}",
+                    preferences.settings.font_size()
+                )))
+                .child(Button::new(Message::AdjustFontSize(-10), "Smaller"))
+                .child(Button::new(Message::AdjustFontSize(10), "Larger")),
+        )
+        .child(
+            Row::new()
+                .gap(8.0)
+                .child(label(&format!(
+                    "Scrollback: {} lines",
+                    preferences.settings.scrollback_lines
+                )))
+                .child(Button::new(Message::AdjustScrollback(-1000), "Fewer"))
+                .child(Button::new(Message::AdjustScrollback(1000), "More")),
+        )
+        .child(label("Cursor shape"))
+        .child(
+            Row::new()
+                .gap(8.0)
+                .child(Button::new(
+                    Message::SetCursorStyle(TerminalCursorStyle::Block),
+                    "Block",
+                ))
+                .child(Button::new(
+                    Message::SetCursorStyle(TerminalCursorStyle::Beam),
+                    "Beam",
+                ))
+                .child(Button::new(
+                    Message::SetCursorStyle(TerminalCursorStyle::Underline),
+                    "Underline",
+                )),
+        )
+        .child(label("Text color (#RRGGBB or #AARRGGBB)"))
+        .child(TextField::on_change_with_placeholder(
+            &preferences.foreground,
+            "#FFFCFCFC",
+            Message::SetForeground,
+        ))
+        .child(label("Background color (#RRGGBB or #AARRGGBB)"))
+        .child(TextField::on_change_with_placeholder(
+            &preferences.background,
+            "#FF111318",
+            Message::SetBackground,
+        ))
+        .child(Button::new(
+            Message::ToggleCloseOnSuccess,
+            if preferences.settings.close_on_successful_exit {
+                "Close tabs after successful commands: On"
+            } else {
+                "Close tabs after successful commands: Off"
+            },
+        ))
+        .child(
+            Row::new()
+                .gap(8.0)
+                .child(Button::new(Message::SavePreferences, "Save"))
+                .child(Button::new(Message::ClosePreferences, "Cancel")),
+        )
 }
 
 impl Application for TerminalApp {
@@ -497,6 +676,66 @@ impl Application for TerminalApp {
             }
             Message::ClearScrollback => {
                 self.apply_input(TerminalInputCommand::ClearScrollback);
+            }
+            Message::OpenPreferences => {
+                self.preferences = Some(TerminalPreferences::from_settings(&self.settings));
+            }
+            Message::PreferencesScroll => {}
+            Message::ClosePreferences => self.preferences = None,
+            Message::SavePreferences => self.save_preferences(),
+            Message::SetShell(value) => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.shell = value;
+                }
+            }
+            Message::SetWorkingDirectory(value) => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.working_directory = value;
+                }
+            }
+            Message::SetFontFamily(value) => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.settings.font_family = value;
+                }
+            }
+            Message::AdjustFontSize(delta) => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.settings.font_size_tenths = preferences
+                        .settings
+                        .font_size_tenths
+                        .saturating_add_signed(delta)
+                        .clamp(60, 720);
+                }
+            }
+            Message::AdjustScrollback(delta) => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.settings.scrollback_lines = preferences
+                        .settings
+                        .scrollback_lines
+                        .saturating_add_signed(delta)
+                        .min(nickel_core::terminal_settings::MAX_TERMINAL_SCROLLBACK_LINES);
+                }
+            }
+            Message::SetCursorStyle(style) => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.settings.cursor_style = style;
+                }
+            }
+            Message::SetForeground(value) => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.foreground = value;
+                }
+            }
+            Message::SetBackground(value) => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.background = value;
+                }
+            }
+            Message::ToggleCloseOnSuccess => {
+                if let Some(preferences) = self.preferences.as_mut() {
+                    preferences.settings.close_on_successful_exit =
+                        !preferences.settings.close_on_successful_exit;
+                }
             }
         }
     }
@@ -558,6 +797,20 @@ impl Application for TerminalApp {
                     .width(34.0),
             );
         }
+        let body = if let Some(preferences) = &self.preferences {
+            AnyView::new(
+                nickel_ui::VerticalScroll::new(Message::PreferencesScroll, 0.0)
+                    .grow(1.0)
+                    .child(preferences_view(preferences)),
+            )
+        } else {
+            AnyView::new(
+                Container::new()
+                    .id("terminal-interaction")
+                    .context_message(Message::OpenContextMenu)
+                    .child(viewport),
+            )
+        };
         let mut root = Column::new()
             .gap(0.0)
             .child(
@@ -566,12 +819,7 @@ impl Application for TerminalApp {
                     .background(0xff20242b)
                     .child(tabs),
             )
-            .child(
-                Container::new()
-                    .id("terminal-interaction")
-                    .context_message(Message::OpenContextMenu)
-                    .child(viewport),
-            );
+            .child(body);
         if let Some(status) = status {
             root = root.child(
                 Container::new()
@@ -596,6 +844,9 @@ impl Application for TerminalApp {
     }
 
     fn frame_overlays(&self, _: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        if self.preferences.is_some() {
+            return Vec::new();
+        }
         let copy = if self.active().session.selected_text().is_some() {
             OverlayMenuItem::action("copy", "Copy", Message::Copy).shortcut("Ctrl+Shift+C")
         } else {
@@ -616,7 +867,11 @@ impl Application for TerminalApp {
             "clear-scrollback",
             "Clear Scrollback",
             Message::ClearScrollback,
-        ));
+        ))
+        .item(
+            OverlayMenuItem::action("preferences", "Preferences…", Message::OpenPreferences)
+                .separator_before(true),
+        );
         menu.background = self.palette.background;
         menu.border = self.palette.foreground;
         menu.foreground = self.palette.foreground;
@@ -727,6 +982,9 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         input: &nickel_input::InputEvent,
         _: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        if host.application().preferences.is_some() {
+            return Ok(AdapterOutcome::default());
+        }
         if let Some(shortcut) = tab_shortcut(input) {
             let changed = match shortcut {
                 TabShortcut::New => host.application_mut().add_tab(),

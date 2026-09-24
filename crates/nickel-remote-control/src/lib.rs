@@ -894,6 +894,17 @@ impl RemoteControlRuntime {
         settings: &RemoteAiControlSettings,
         desktop: std::sync::Arc<dyn DesktopAuthority>,
     ) {
+        // Keep the MCP listener unavailable while its product UI is withdrawn.
+        // This also covers an older saved preference that requested it on.
+        const MCP_SERVER_ENABLED: bool = false;
+        if !MCP_SERVER_ENABLED {
+            self.shutdown_session();
+            self.status.requested_enabled = false;
+            self.status.generation = settings.generation;
+            self.status.acknowledged_generation = settings.generation;
+            self.status.diagnostic = Some("MCP server is disabled in this build".into());
+            return;
+        }
         self.apply_with_listener_selection(
             settings,
             desktop,

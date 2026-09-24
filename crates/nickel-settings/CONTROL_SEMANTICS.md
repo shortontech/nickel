@@ -28,14 +28,9 @@ consumer so reviews can distinguish deliberate composites from accidental reimpl
 | Bluetooth | Adapter power | confirmed binary platform state | `SettingsRow` plus `Switch` | migrated; unavailable state is disabled and requests are typed |
 | Bluetooth | Discovery | start/stop command | semantic secondary button | retained because discovery is an operation, not preference state |
 | Bluetooth | Device | connect/disconnect command with status | semantic device card | custom composite retained for pairing/battery/connection status |
-| Printers & Storage | Printer, job, and removable-media actions | typed request followed by authoritative asynchronous refresh | compact `SettingsRow` controls | added; names are sanitized and failed requests preserve provider state |
-| Printers & Storage | Filesystem usage and cleanup | bounded read-only usage plus explicit open-location command | compact `SettingsRow` controls | added; Nickel never deletes data automatically |
 | Default Apps | Association category | observed effective handler plus platform capability | searchable `SettingsRow` plus `SelectField` or native-consent button | retained; failed and rejected requests preserve the effective handler |
 | Default Apps | Association target browser | platform-reported MIME or URI scheme search results | `SettingsSearchField` plus semantic result buttons | retained |
-| Security & Updates | Maintenance and protection status | typed authoritative observations with explicit freshness/failure state | compact `SettingsRow` list plus Refresh button | added; unsupported and stale providers never imply health |
 | Optional Features | Codex enabled | policy- and capability-resolved persistent binary state | `SettingsRow` plus `Switch` | retained; unavailable, policy-blocked, pending, rejected, and restart-required states are explicit |
-| Optional Features | Codex source | symbolic backend selection | `SelectField` | retained |
-| Optional Features | Executable path | validated absolute path | `TextField` plus semantic button | retained; invalid input reports rejection without changing effective state |
 | Optional Features | Retry capability probe | asynchronous command | semantic secondary button | retained |
 | Keyboard Shortcuts | Shortcut rows | observed binding | status rows | retained until editing is implemented |
 | About Nickel | Product/platform details | observed information | status/text rows | retained |
