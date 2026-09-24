@@ -1,24 +1,21 @@
 # Nickel
 
-**One Rust desktop for Windows and Linux, because apparently one operating
-system was not enough trouble.** Nickel brings its own desktop, taskbar,
-launcher, task switching, system controls, controller navigation, and apps. It
-targets both platforms. On Linux, it also runs its own compositor. Naturally.
+**One Rust desktop for Windows and Linux.** Nickel brings its own desktop,
+taskbar, launcher, task switching, system controls, controller navigation, and
+apps. On Linux, the same executable also runs a Smithay compositor.
 
-**Windows without Explorer. UWP apps that actually open.** Nickel is the first
-independent Windows shell to run UWP apps without keeping Explorer alive behind
-the curtains, rattling chains and pretending not to be there. It does this with
-the [Universal Windows Usher](crates/nickel-uwu/README.md). Universal. Windows.
-Usher. UwU. We reverse-engineered the Windows shell deeply enough to make it say
-“UwU.” You are welcome. `^_^`
+**Windows without Explorer, including UWP apps.** Nickel is the first
+independent Windows shell to run UWP apps without keeping Explorer alive. It
+does this through the
+[Universal Windows Usher](crates/nickel-uwu/README.md)—UwU for short—which
+recreates the Windows shell services those applications expect.
 
-The naming scheme only gets worse from here: Nickel is the desktop, Plating is
-the settings app, and File is called File because even we have limits.
+Nickel is the desktop, Plating is the settings app, and File is called File
+because even we have limits.
 
-## Try it without surrendering your desktop
+## Try it
 
-Nickel uses stable Rust. No nightly incantations are required. Run commands
-from the repository root.
+Nickel uses stable Rust. Run commands from the repository root.
 
 ### Windows
 
@@ -29,9 +26,9 @@ cargo run -p nickel
 This starts Nickel beside your current Windows desktop. When Nickel is installed
 as the shell and owns the Windows shell window, it starts UwU automatically. If
 Explorer is still registered, Nickel politely shares the session instead of
-starting a turf war. See the
+replacing it. See the
 [UwU research notes](crates/nickel-uwu/README.md) for the implementation,
-diagnostic commands, and a heroic quantity of COM archaeology.
+diagnostic commands, and the underlying COM research.
 
 ### Linux nested session
 
@@ -44,24 +41,32 @@ cargo run -p nickel --no-default-features --features backend-winit --bin nickel-
 
 For a direct DRM/udev session or an SDDM login session, see
 [Linux sessions](docs/linux-sessions.md). The direct session is still under
-development; bring logs and a healthy respect for input devices.
+development.
 
-## Shiny objects
+## Features
 
 - A GPU-rendered desktop and taskbar with application grouping, native icons,
-  previews, and task switching. Pixels should earn their keep.
+  previews, and task switching.
 - An application launcher with fuzzy search, pinned apps, and launch history.
 - Controller navigation with PlayStation, Xbox, Switch, and generic gamepads.
   Confirm and cancel follow the controller family, because muscle memory is a
   user interface contract.
-- Nickel Plating for display, network, audio, and other system controls. Yes,
-  the settings app is called Plating. We committed to the bit.
+- Nickel Plating for display, network, audio, and other system controls.
 - Nickel File, a Markdown viewer, a terminal, and a Codex chat application.
-  It is a desktop; eventually it started collecting apps.
 - A shared shell experience on Windows and Linux, including a Smithay
-  compositor on Linux. Same desk, different arguments with the kernel.
+  compositor on Linux.
 
-### How to drive it
+## Architecture
+
+Portable shell state, search, ranking, navigation, and UI live in focused Rust
+crates. Narrow platform adapters connect that shared behavior to Windows APIs or
+to Nickel's Linux compositor. This keeps interaction policy deterministic and
+testable while each platform retains its native windowing and system services.
+
+See the [Cargo workspace guide](docs/cargo-workspace.md) for the crate map and
+responsibilities.
+
+## Keyboard and mouse
 
 | Input | Action |
 | --- | --- |
@@ -76,7 +81,7 @@ development; bring logs and a healthy respect for input devices.
 The launcher also supports arrow-key navigation, `Enter` to launch, and
 `Escape` to close the active Nickel surface.
 
-### Couch controls
+### Controller
 
 | Controller input | Action |
 | --- | --- |
@@ -91,28 +96,27 @@ Nintendo layouts use the east face button to confirm and the south face button
 to cancel. Nickel detects the controller family instead of asking a Switch
 owner to pretend the letters are in Xbox places.
 
-## How unfinished is it?
+## Project status
 
-Nickel is under active development, which is the dignified way to say that some
-buttons are ambitions. Work remains on notifications, hardware controls, Wi-Fi
-connection management, accessibility, touch-keyboard support, multiple
-monitors, and the direct Linux session.
+Nickel is experimental and under active development. The core desktop,
+launcher, task switching, controller navigation, and bundled applications are
+usable today. Work remains on notifications, hardware controls, Wi-Fi connection
+management, accessibility, touch-keyboard support, multiple-monitor coverage,
+and the direct Linux session.
 
-## Rabbit holes
+## Further reading
 
-- [Cargo workspace layout](docs/cargo-workspace.md) — crates and their roles.
 - [Linux sessions](docs/linux-sessions.md) — nested, direct, and login-session
   setup and diagnostics.
 - [UwU research notes](crates/nickel-uwu/README.md) — Windows UWP discovery,
-  experiments, and diagnostics. Yes, that still means Universal Windows
-  Usher.
+  experiments, and diagnostics.
 - [Codex backend diagnostics](docs/codex-backend-diagnostics.md) — offline
   replay and backend tests.
 - [Active specifications](specs/) and [completed specifications](specs/done/).
 
 ## Contributing
 
-Before submitting a change, appease the usual three-headed Cargo guardian:
+Before submitting a change, run the usual three Cargo checks:
 
 ```bash
 cargo fmt --all --check
