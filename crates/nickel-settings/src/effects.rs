@@ -369,142 +369,45 @@ impl SettingsApp {
 
     #[cfg(target_os = "windows")]
     pub(crate) fn load_windows_wifi(&mut self) {
-        use std::{collections::HashMap, slice};
-        use windows::Win32::{
-            Foundation::{HANDLE, NO_ERROR},
-            NetworkManagement::WiFi::{
-                WLAN_AVAILABLE_NETWORK_CONNECTED, WLAN_AVAILABLE_NETWORK_LIST,
-                WLAN_INTERFACE_INFO_LIST, WLAN_PROFILE_INFO_LIST, WlanCloseHandle,
-                WlanEnumInterfaces, WlanFreeMemory, WlanGetAvailableNetworkList,
-                WlanGetProfileList, WlanOpenHandle,
-            },
-        };
-
-        let mut negotiated = 0;
-        let mut handle = HANDLE::default();
-        if unsafe { WlanOpenHandle(2, None, &mut negotiated, &mut handle) } != NO_ERROR.0 {
-            self.wifi_status = self.localizer.text("settings-network-service-unavailable");
-            return;
-        }
-        let mut interface_list = std::ptr::null_mut::<WLAN_INTERFACE_INFO_LIST>();
-        if unsafe { WlanEnumInterfaces(handle, None, &mut interface_list) } != NO_ERROR.0
-            || interface_list.is_null()
-        {
-            unsafe {
-                WlanCloseHandle(handle, None);
-            }
-            self.wifi_status = self
-                .localizer
-                .text("settings-network-interface-unavailable");
-            return;
-        }
-
-        let interfaces = unsafe {
-            slice::from_raw_parts(
-                (*interface_list).InterfaceInfo.as_ptr(),
-                (*interface_list).dwNumberOfItems as usize,
-            )
-        };
-        let mut networks_by_profile = HashMap::<String, WifiNetwork>::new();
-        for interface in interfaces {
-            let interface_id = interface.InterfaceGuid.to_u128();
-            let mut available_profiles = HashMap::<String, (u32, bool)>::new();
-            let mut available = std::ptr::null_mut::<WLAN_AVAILABLE_NETWORK_LIST>();
-            if unsafe {
-                WlanGetAvailableNetworkList(
-                    handle,
-                    &raw const interface.InterfaceGuid,
-                    0,
-                    None,
-                    &mut available,
-                )
-            } == NO_ERROR.0
-                && !available.is_null()
-            {
-                let entries = unsafe {
-                    slice::from_raw_parts(
-                        (*available).Network.as_ptr(),
-                        (*available).dwNumberOfItems as usize,
+        match nickel_platform::windows_connectivity::wifi_snapshot() {
+            Ok(snapshot) => {
+                self.network_available = snapshot.available;
+                self.wifi_enabled = snapshot.enabled;
+                self.wifi_networks = snapshot
+                    .networks
+                    .into_iter()
+                    .map(|network| WifiNetwork {
+                        profile: network.profile,
+                        signal: network.signal_percent,
+                        connected: network.connected,
+                        saved: true,
+                        secure: true,
+                        interface: network.interface,
+                    })
+                    .collect();
+                self.wifi_status = if !snapshot.available {
+                    self.localizer
+                        .text("settings-network-interface-unavailable")
+                } else if !snapshot.enabled {
+                    self.localizer.text("settings-network-wifi-disabled")
+                } else if self.wifi_networks.is_empty() {
+                    self.localizer.text("settings-network-no-saved-profiles")
+                } else {
+                    self.localizer.number(
+                        "settings-network-saved-profile-count",
+                        "count",
+                        self.wifi_networks.len() as i64,
                     )
                 };
-                for network in entries {
-                    let profile = wide_text(&network.strProfileName);
-                    if !profile.is_empty() {
-                        available_profiles.insert(
-                            profile.to_ascii_lowercase(),
-                            (
-                                network.wlanSignalQuality,
-                                network.dwFlags & WLAN_AVAILABLE_NETWORK_CONNECTED != 0,
-                            ),
-                        );
-                    }
-                }
-                unsafe { WlanFreeMemory(available.cast()) };
             }
-
-            let mut profile_list = std::ptr::null_mut::<WLAN_PROFILE_INFO_LIST>();
-            if unsafe {
-                WlanGetProfileList(
-                    handle,
-                    &raw const interface.InterfaceGuid,
-                    None,
-                    &mut profile_list,
-                )
-            } != NO_ERROR.0
-                || profile_list.is_null()
-            {
-                continue;
+            Err(error) => {
+                tracing::warn!(%error, "failed to read Windows Wi-Fi settings");
+                self.network_available = false;
+                self.wifi_enabled = false;
+                self.wifi_networks.clear();
+                self.wifi_status = self.localizer.text("settings-network-service-unavailable");
             }
-            let profiles = unsafe {
-                slice::from_raw_parts(
-                    (*profile_list).ProfileInfo.as_ptr(),
-                    (*profile_list).dwNumberOfItems as usize,
-                )
-            };
-            for saved in profiles {
-                let profile = wide_text(&saved.strProfileName);
-                if profile.is_empty() {
-                    continue;
-                }
-                let key = profile.to_ascii_lowercase();
-                let (signal, connected) =
-                    available_profiles.get(&key).copied().unwrap_or((0, false));
-                networks_by_profile.entry(key).or_insert(WifiNetwork {
-                    profile,
-                    signal,
-                    connected,
-                    saved: true,
-                    secure: true,
-                    interface: interface_id,
-                });
-            }
-            unsafe { WlanFreeMemory(profile_list.cast()) };
         }
-        unsafe {
-            WlanFreeMemory(interface_list.cast());
-            WlanCloseHandle(handle, None);
-        }
-        let mut networks: Vec<_> = networks_by_profile.into_values().collect();
-        networks.sort_by_key(|network| {
-            (
-                !network.connected,
-                network.signal == 0,
-                std::cmp::Reverse(network.signal),
-                network.profile.to_ascii_lowercase(),
-            )
-        });
-        self.wifi_status = if networks.is_empty() {
-            self.localizer.text("settings-network-no-saved-profiles")
-        } else {
-            self.localizer.number(
-                "settings-network-saved-profile-count",
-                "count",
-                networks.len() as i64,
-            )
-        };
-        self.network_available = true;
-        self.wifi_enabled = true;
-        self.wifi_networks = networks;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -512,52 +415,24 @@ impl SettingsApp {
 
     #[cfg(target_os = "windows")]
     pub(crate) fn connect_windows_wifi(&mut self, index: usize) {
-        use windows::{
-            Win32::{
-                Foundation::{HANDLE, NO_ERROR},
-                NetworkManagement::WiFi::{
-                    WLAN_CONNECTION_PARAMETERS, WlanCloseHandle, WlanConnect, WlanOpenHandle,
-                    dot11_BSS_type_any, wlan_connection_mode_profile,
-                },
-            },
-            core::{GUID, PCWSTR},
-        };
-
         let Some(network) = self.wifi_networks.get(index) else {
             return;
         };
         let profile = network.profile.clone();
-        let interface = GUID::from_u128(network.interface);
-        let profile_wide: Vec<u16> = profile.encode_utf16().chain([0]).collect();
-        let mut negotiated = 0;
-        let mut handle = HANDLE::default();
-        if unsafe { WlanOpenHandle(2, None, &mut negotiated, &mut handle) } != NO_ERROR.0 {
-            self.wifi_status = self.localizer.text("settings-network-service-unavailable");
-            return;
-        }
-        let parameters = WLAN_CONNECTION_PARAMETERS {
-            wlanConnectionMode: wlan_connection_mode_profile,
-            strProfile: PCWSTR(profile_wide.as_ptr()),
-            dot11BssType: dot11_BSS_type_any,
-            ..Default::default()
-        };
         let result =
-            unsafe { WlanConnect(handle, &raw const interface, &raw const parameters, None) };
-        unsafe {
-            WlanCloseHandle(handle, None);
-        }
-        self.wifi_status = if result == NO_ERROR.0 {
-            self.pending_wifi_profile = Some(profile.clone());
-            self.next_wifi_refresh = Some(Instant::now() + Duration::from_millis(400));
-            self.wifi_refreshes_left = 15;
-            self.localizer
-                .value("settings-network-connecting", "profile", &profile)
-        } else {
-            self.localizer.value(
-                "settings-network-connection-failed",
-                "error",
-                &result.to_string(),
-            )
+            nickel_platform::windows_connectivity::connect_wifi(network.interface, &profile);
+        self.wifi_status = match result {
+            Ok(()) => {
+                self.pending_wifi_profile = Some(profile.clone());
+                self.next_wifi_refresh = Some(Instant::now() + Duration::from_millis(400));
+                self.wifi_refreshes_left = 15;
+                self.localizer
+                    .value("settings-network-connecting", "profile", &profile)
+            }
+            Err(error) => {
+                self.localizer
+                    .value("settings-network-connection-failed", "error", &error)
+            }
         };
     }
 

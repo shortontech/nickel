@@ -17,6 +17,8 @@ mod platform_contract;
 pub mod process_identity;
 mod toolkit_scale;
 mod toolkit_transaction;
+#[cfg(target_os = "windows")]
+pub mod windows_connectivity;
 pub use toolkit_transaction::{
     ScaleTransactionReport, ToolkitOutcome, ToolkitOutcomeKind, transact_application_scale,
 };

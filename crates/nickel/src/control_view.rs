@@ -702,7 +702,11 @@ fn wifi(
             status.signal_percent
         )
     } else {
-        format!("{} nearby", status.networks.len())
+        if cfg!(target_os = "windows") {
+            format!("{} saved", status.networks.len())
+        } else {
+            format!("{} nearby", status.networks.len())
+        }
     };
     let mut children = vec![AnyView::new(directional_row(
         Row::new()
@@ -866,7 +870,12 @@ fn bluetooth_view(
                 })
                 .into(),
                 device.connected,
-                device.paired.then(|| ControlAction::ToggleBluetoothDevice {
+                (if cfg!(target_os = "windows") {
+                    !device.paired
+                } else {
+                    device.paired
+                })
+                .then(|| ControlAction::ToggleBluetoothDevice {
                     id: device.id.clone(),
                 }),
             )

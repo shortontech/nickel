@@ -932,7 +932,8 @@ impl SettingsApp {
         } else {
             ui! { <Column gap={12.0} children={adapter_cards} /> }
         };
-        let wifi_power_available = self.network_available && cfg!(target_os = "linux");
+        let wifi_power_available =
+            self.network_available && cfg!(any(target_os = "linux", target_os = "windows"));
         let wifi_switch_state = if !wifi_power_available && self.wifi_enabled {
             SwitchState::DisabledOn
         } else if !wifi_power_available {

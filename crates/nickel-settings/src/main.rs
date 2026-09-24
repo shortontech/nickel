@@ -1044,7 +1044,6 @@ impl SettingsApp {
             }
             SettingsMessage::SetWifiPower(enabled) => {
                 if !self.network_available
-                    || !cfg!(target_os = "linux")
                     || self.wifi_power_rx.is_some()
                     || enabled == self.wifi_enabled
                 {
@@ -1055,6 +1054,16 @@ impl SettingsApp {
                     let (sender, receiver) = mpsc::channel();
                     std::thread::spawn(move || {
                         let _ = sender.send(set_linux_wifi_enabled(enabled));
+                    });
+                    self.wifi_power_rx = Some(receiver);
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let (sender, receiver) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = sender.send(
+                            nickel_platform::windows_connectivity::set_wifi_powered(enabled),
+                        );
                     });
                     self.wifi_power_rx = Some(receiver);
                 }
@@ -3216,7 +3225,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn wifi_power_uses_one_truthful_semantic_switch() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
@@ -3268,7 +3277,7 @@ mod tests {
         assert!(!wifi.enabled);
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     #[test]
     fn unsupported_platform_wifi_power_remains_truthfully_disabled() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
@@ -3312,7 +3321,7 @@ mod tests {
         assert!(!wifi.enabled);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn failed_wifi_power_request_restores_the_confirmed_state_and_reports_error() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Network);

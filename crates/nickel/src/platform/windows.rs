@@ -681,89 +681,54 @@ pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
 }
 
 pub fn network_status() -> super::NetworkStatus {
-    use windows::Win32::{
-        Foundation::{HANDLE, NO_ERROR},
-        NetworkManagement::WiFi::{
-            WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO_LIST, WlanCloseHandle,
-            WlanEnumInterfaces, WlanFreeMemory, WlanOpenHandle, WlanQueryInterface,
-            wlan_interface_state_connected, wlan_intf_opcode_current_connection,
-        },
-    };
-
-    let mut negotiated = 0;
-    let mut handle = HANDLE::default();
-    if unsafe { WlanOpenHandle(2, None, &mut negotiated, &mut handle) } != NO_ERROR.0 {
-        return super::NetworkStatus::default();
-    }
-    let mut interfaces = std::ptr::null_mut::<WLAN_INTERFACE_INFO_LIST>();
-    if unsafe { WlanEnumInterfaces(handle, None, &mut interfaces) } != NO_ERROR.0
-        || interfaces.is_null()
-    {
-        unsafe {
-            WlanCloseHandle(handle, None);
-        }
-        return super::NetworkStatus::default();
-    }
-
-    let mut status = super::NetworkStatus {
-        available: true,
-        ..Default::default()
-    };
-    let entries = unsafe {
-        std::slice::from_raw_parts(
-            (*interfaces).InterfaceInfo.as_ptr(),
-            (*interfaces).dwNumberOfItems as usize,
-        )
-    };
-    for interface in entries {
-        let mut bytes = 0;
-        let mut data = std::ptr::null_mut::<c_void>();
-        if unsafe {
-            WlanQueryInterface(
-                handle,
-                &raw const interface.InterfaceGuid,
-                wlan_intf_opcode_current_connection,
-                None,
-                &mut bytes,
-                &mut data,
-                None,
-            )
-        } != NO_ERROR.0
-            || data.is_null()
-            || bytes < std::mem::size_of::<WLAN_CONNECTION_ATTRIBUTES>() as u32
-        {
-            continue;
-        }
-        let connection = unsafe { &*data.cast::<WLAN_CONNECTION_ATTRIBUTES>() };
-        if connection.isState == wlan_interface_state_connected {
-            let ssid = &connection.wlanAssociationAttributes.dot11Ssid;
-            let length = (ssid.uSSIDLength as usize).min(ssid.ucSSID.len());
-            status.connected = true;
-            status.name = String::from_utf8_lossy(&ssid.ucSSID[..length]).into_owned();
-            status.signal_percent = connection.wlanAssociationAttributes.wlanSignalQuality;
-        }
-        unsafe { WlanFreeMemory(data) };
-        if status.connected {
-            break;
-        }
-    }
-    unsafe {
-        WlanFreeMemory(interfaces.cast());
-        WlanCloseHandle(handle, None);
-    }
-    status
+    nickel_platform::windows_connectivity::wifi_snapshot()
+        .map(|snapshot| super::NetworkStatus {
+            available: snapshot.available,
+            enabled: snapshot.enabled,
+            connected: snapshot.connected,
+            name: snapshot.name,
+            signal_percent: snapshot.signal_percent,
+            networks: snapshot
+                .networks
+                .into_iter()
+                .map(|network| super::WifiNetworkStatus {
+                    id: network.id(),
+                    name: network.profile,
+                    signal_percent: network.signal_percent,
+                    connected: network.connected,
+                    saved: true,
+                })
+                .collect(),
+        })
+        .unwrap_or_default()
 }
 
-pub fn set_wifi_enabled(_enabled: bool) -> bool {
-    false
+pub fn set_wifi_enabled(enabled: bool) -> bool {
+    nickel_platform::windows_connectivity::set_wifi_powered(enabled).is_ok()
 }
 
-pub fn activate_wifi_network(_id: &str) -> bool {
-    false
+pub fn activate_wifi_network(id: &str) -> bool {
+    nickel_platform::windows_connectivity::connect_wifi_id(id).is_ok()
 }
 
 pub fn bluetooth_status() -> super::BluetoothStatus {
-    super::BluetoothStatus::default()
+    nickel_platform::windows_connectivity::bluetooth_snapshot()
+        .map(|snapshot| super::BluetoothStatus {
+            available: snapshot.available,
+            powered: snapshot.powered,
+            discovering: false,
+            devices: snapshot
+                .devices
+                .into_iter()
+                .map(|device| super::BluetoothDeviceStatus {
+                    id: device.id,
+                    name: device.name,
+                    paired: device.paired,
+                    connected: device.connected,
+                })
+                .collect(),
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn refresh_connectivity_status() -> Result<super::ConnectivityRefresh, String> {
@@ -773,16 +738,23 @@ pub(crate) fn refresh_connectivity_status() -> Result<super::ConnectivityRefresh
     ))
 }
 
-pub fn set_bluetooth_powered(_powered: bool) -> bool {
-    false
+pub fn set_bluetooth_powered(powered: bool) -> bool {
+    nickel_platform::windows_connectivity::set_bluetooth_powered(powered).is_ok()
 }
 
-pub fn set_bluetooth_discovery(_discovering: bool) -> bool {
-    false
+pub fn set_bluetooth_discovery(discovering: bool) -> bool {
+    // Windows scans through device enumeration; there is no persistent discovery switch.
+    !discovering || nickel_platform::windows_connectivity::bluetooth_snapshot().is_ok()
 }
 
-pub fn toggle_bluetooth_device(_id: &str) -> bool {
-    false
+pub fn toggle_bluetooth_device(id: &str) -> bool {
+    let status = bluetooth_status();
+    let Some(device) = status.devices.iter().find(|device| device.id == id) else {
+        return false;
+    };
+    !device.paired
+        && nickel_platform::windows_connectivity::pair_bluetooth_device(id, device.connected)
+            .is_ok()
 }
 
 pub fn audio_status() -> super::AudioStatus {
