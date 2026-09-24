@@ -343,13 +343,16 @@ shell thread and logs wait flags before and immediately after it. For each
 fresh app, the working order was:
 
 1. Activate its AUMID with `nickel-windows-app-probe` while `--host-pump` runs.
-2. Identify the live UWP wrapper and CoreWindow HWND in the host; call
-   `post-window-discovery WRAPPER HWND`.
+2. Identify the frame and CoreWindow HWNDs. Run
+   `find-window-wrapper FRAME_HWND_HEX` to get this build's wrapper interface,
+   then call `post-window-discovery WRAPPER HWND`.
 3. Call `post-window-visible WRAPPER HWND` and `post-window-layout WRAPPER HWND`.
 4. Call `switch-view AUMID --uncloak` to remove shell cloaking from the view.
 
-The wrapper must be matched to the app's live CoreWindow. The readiness event
-can briefly clear flag `2` and then have it set again; a second layout event
+The wrapper must be matched to the app's live CoreWindow. The finder reads only
+the diagnostic host's memory and validates this build's dispatcher and wrapper
+vtables; it is not a production discovery path. The readiness event can briefly
+clear flag `2` and then have it set again; a second layout event
 cleared it in one Calculator run. The host logged `before=0x2 after=0x0` for
 both apps in the later run. Both CoreWindows and frames became uncloaked.
 
@@ -357,8 +360,8 @@ With Explorer absent, Windows Settings rendered its populated Home screen and
 accepted input. The user confirmed it resizes and is usable. Calculator also
 rendered its controls and accepted number-button input. This establishes a
 working Explorer-free UI path for two installed packaged apps in addition to
-the Rust target. The host still requires manual wrapper identification and
-readiness callbacks; Nickel does not yet perform this sequence itself.
+the Rust target. The host still requires manual frame/CoreWindow identification
+and readiness callbacks; Nickel does not yet perform this sequence itself.
 
 Calculator's `ApplicationFrameWindow` initially measured about `336x509`,
 while its CoreWindow stayed `320x320`, leaving a colored strip beneath the
@@ -375,3 +378,36 @@ Calculator-specific move/resize handoff unresolved.
 ApplicationFrameHost's `CApplicationFrameManager::EnableLayoutFrames` flag was
 observed off. Enabling it temporarily in the live diagnostic process did not
 make Calculator's CoreWindow follow a frame resize, so the flag was restored.
+
+## Shell hook forwarding experiment (2026-09-23)
+
+[GyroShell PR 31](https://github.com/Pdawg-bytes/GyroShell/pull/31) pointed to
+`SetTaskmanWindow` and the private `IImmersiveShellHookService`. The fixture's
+`RegisterShellHookWindow` had succeeded, but its stock `STATIC` window
+procedure discarded hook messages before the `GetMessageW` diagnostic could
+see them. The `--host-pump` mode now subclasses that window, registers it as
+the task manager window, and forwards window-created/destroyed events (codes
+`1` and `2`) through `PostShellHookMessage`. The separate
+`shell-hook-service-probe` confirms the service can be queried without
+Explorer and reports the current task manager HWND with `--get-taskman`.
+
+With no task manager HWND, launching Calculator produced no observed hook
+events. With one registered, the host received creation events for both its
+`ApplicationFrameWindow` and its `CoreWindow`; forwarding returned `S_OK`.
+Calculator's CoreWindow still stayed separate from its frame until the manual
+discovery, visibility, layout, and uncloak sequence above. Forwarding code `6`
+(`HSHELL_REDRAW`) caused a redraw feedback loop, so the fixture limits both
+queuing and forwarding to codes `1` and `2`. This does not establish a general
+shell-hook policy for Nickel.
+
+This build's `UwpWindowEventDispatcher::OnShellHookMessage` handles several
+private event codes from `17` through `26`, but does not directly handle `1`
+or `2`. Its `GetViewFromHwnd` lookup compares against each wrapper's window
+ID, which is zero for a new Calculator wrapper before discovery. The active
+dispatcher does hold a collection of those wrappers, and the wrapper for
+Calculator already records its frame HWND. `find-window-wrapper` uses that
+identity without attaching a debugger or restarting the host. In the live
+Calculator session it returned the same wrapper pointer found by CDB and
+reported the layout wait flag returning to `2` after the first layout call; a
+second layout call cleared it. The production lifecycle and resize path still
+need investigation.

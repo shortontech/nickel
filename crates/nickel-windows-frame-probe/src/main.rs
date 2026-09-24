@@ -317,16 +317,14 @@ fn run_host(pump_messages: bool) -> ExitCode {
     use std::io::Write;
     use windows::Win32::{
         System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
-        UI::WindowsAndMessaging::{
-            DispatchMessageW, GetMessageW, MSG, RegisterWindowMessageW, TranslateMessage,
-        },
+        UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MSG, TranslateMessage},
     };
 
     if let Err(error) = configure_dpi_awareness() {
         eprintln!("phase=host-dpi error={error}");
         return ExitCode::FAILURE;
     }
-    let Some(shell_window) = ShellWindowGuard::register() else {
+    let Some(shell_window) = ShellWindowGuard::register(pump_messages) else {
         return ExitCode::FAILURE;
     };
     // SAFETY: This thread balances successful COM initialization below.
@@ -351,25 +349,47 @@ fn run_host(pump_messages: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let shell_hook_service = if pump_messages {
+        match connect_shell_hook_service() {
+            Ok(service) => Some(service),
+            Err(error) => {
+                eprintln!("phase=host-shell-hook-service error={error}");
+                drop(controller);
+                drop(redirect);
+                unsafe { CoUninitialize() };
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
     println!("phase=host-ready");
     let _ = std::io::stdout().flush();
     let _keep_alive = (controller, redirect);
     if pump_messages {
         println!("phase=host-message-loop");
-        // SAFETY: The static UTF-16 string is terminated and lives through
-        // this call. A zero return means the message was not registered.
-        let shell_hook_message = unsafe { RegisterWindowMessageW(windows::core::w!("SHELLHOOK")) };
-        println!("phase=shell-hook-message id={shell_hook_message:#x}");
         let mut message = MSG::default();
         // SAFETY: The shell window belongs to this thread, and the message
         // structure remains valid through each dispatch.
         while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
-            if message.message == shell_hook_message {
-                println!(
-                    "phase=shell-hook-event code={} hwnd={:#x}",
-                    message.wParam.0, message.lParam.0
-                );
+            if message.hwnd == shell_window.window && message.message == 0x8070 {
+                // Forward only the documented top-level window lifecycle
+                // events while probing. Forwarding HSHELL_REDRAW (6) caused
+                // the hook service to request another redraw indefinitely.
+                if matches!(message.wParam.0, 1 | 2) {
+                    println!(
+                        "phase=shell-hook-event code={} hwnd={:#x}",
+                        message.wParam.0, message.lParam.0
+                    );
+                    if let Some(service) = shell_hook_service.as_ref() {
+                        match forward_shell_hook(service, message.wParam.0, message.lParam.0) {
+                            Ok(()) => println!("phase=shell-hook-forward result=success"),
+                            Err(error) => println!("phase=shell-hook-forward error={error}"),
+                        }
+                    }
+                }
                 let _ = std::io::stdout().flush();
+                continue;
             }
             if message.hwnd == shell_window.window && message.message == 0x806c {
                 match switch_settings_view_in_host() {
@@ -426,8 +446,75 @@ fn run_host(pump_messages: bool) -> ExitCode {
             std::thread::park();
         }
     }
+    drop(shell_hook_service);
     unsafe { CoUninitialize() };
     ExitCode::SUCCESS
+}
+
+#[cfg(target_os = "windows")]
+fn connect_shell_hook_service() -> windows::core::Result<windows::core::IUnknown> {
+    use std::ffi::c_void;
+    use windows::{
+        Win32::System::Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance, IServiceProvider},
+        core::{GUID, HRESULT, IUnknown, Interface},
+    };
+
+    const IMMERSIVE_SHELL: GUID = GUID::from_u128(0xc2f03a33_21f5_47fa_b4bb_156362a2f239);
+    const SHELL_HOOK_SERVICE: GUID = GUID::from_u128(0x4624bd39_5fc3_44a8_a809_163a836e9031);
+    const SHELL_HOOK_INTERFACE: GUID = GUID::from_u128(0x914d9b3a_5e53_4e14_bbba_46062acb35a4);
+    type QueryService = unsafe extern "system" fn(
+        *mut c_void,
+        *const GUID,
+        *const GUID,
+        *mut *mut c_void,
+    ) -> HRESULT;
+
+    // SAFETY: run_host initialized COM on this thread; Windows owns the
+    // registered local server and returns an owned interface reference.
+    let shell: IServiceProvider =
+        unsafe { CoCreateInstance(&IMMERSIVE_SHELL, None, CLSCTX_LOCAL_SERVER) }?;
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: IServiceProvider slot 3 is QueryService, and raw is writable.
+    let query: QueryService = unsafe {
+        let vtable = shell.as_raw().cast::<*const usize>().read();
+        std::mem::transmute(vtable.add(3).read())
+    };
+    unsafe {
+        query(
+            shell.as_raw(),
+            &SHELL_HOOK_SERVICE,
+            &SHELL_HOOK_INTERFACE,
+            &mut raw,
+        )
+    }
+    .ok()?;
+    if raw.is_null() {
+        return Err(windows::core::Error::from_hresult(HRESULT(
+            0x80004003_u32 as i32,
+        )));
+    }
+    println!("phase=host-shell-hook-service interface={raw:p}");
+    // SAFETY: Successful QueryService transferred one owned COM reference.
+    Ok(unsafe { IUnknown::from_raw(raw) })
+}
+
+#[cfg(target_os = "windows")]
+fn forward_shell_hook(
+    service: &windows::core::IUnknown,
+    code: usize,
+    hwnd: isize,
+) -> windows::core::Result<()> {
+    use std::ffi::c_void;
+    use windows::core::{HRESULT, Interface};
+
+    type PostShellHookMessage = unsafe extern "system" fn(*mut c_void, usize, isize) -> HRESULT;
+    // SAFETY: The queried interface's vtable has IUnknown slots 0-2,
+    // Register at 3, Unregister at 4, and PostShellHookMessage at 5.
+    let post: PostShellHookMessage = unsafe {
+        let vtable = service.as_raw().cast::<*const usize>().read();
+        std::mem::transmute(vtable.add(5).read())
+    };
+    unsafe { post(service.as_raw(), code, hwnd) }.ok()
 }
 
 #[cfg(target_os = "windows")]
@@ -676,7 +763,7 @@ fn run_with_immersive_manager(
     }
 
     let _shell_window = if register_shell_window {
-        match ShellWindowGuard::register() {
+        match ShellWindowGuard::register(false) {
             Some(window) => Some(window),
             None => return ExitCode::FAILURE,
         }
@@ -1104,28 +1191,78 @@ fn install_component_filter(
 }
 
 #[cfg(target_os = "windows")]
+static SHELL_HOOK_MESSAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(target_os = "windows")]
+static ORIGINAL_SHELL_WNDPROC: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn shell_window_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use std::sync::atomic::Ordering;
+    use windows::Win32::{
+        Foundation::LRESULT,
+        UI::WindowsAndMessaging::{CallWindowProcW, DefWindowProcW, PostMessageW, WNDPROC},
+    };
+
+    let hook_message = SHELL_HOOK_MESSAGE.load(Ordering::Relaxed);
+    if hook_message != 0 && message == hook_message {
+        if matches!(wparam.0, 1 | 2) {
+            // SAFETY: hwnd is the live window receiving this callback. Posting
+            // avoids a COM call inside Windows' synchronous shell hook delivery.
+            if let Err(error) = unsafe { PostMessageW(Some(hwnd), 0x8070, wparam, lparam) } {
+                eprintln!("phase=queue-shell-hook error={error}");
+            }
+        }
+        return LRESULT(0);
+    }
+    let original = ORIGINAL_SHELL_WNDPROC.load(Ordering::Relaxed);
+    if original != 0 {
+        // SAFETY: SetWindowLongPtrW returned this live system STATIC window
+        // procedure when the same HWND was subclassed below.
+        let previous: WNDPROC = unsafe { std::mem::transmute(original) };
+        unsafe { CallWindowProcW(previous, hwnd, message, wparam, lparam) }
+    } else {
+        // SAFETY: The original procedure may be temporarily unavailable
+        // while the window is being registered or destroyed.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+}
+
+#[cfg(target_os = "windows")]
 struct ShellWindowGuard {
     window: windows::Win32::Foundation::HWND,
     shell_hook_registered: bool,
+    taskman_registered: bool,
+    original_wndproc: isize,
+    set_taskman: unsafe extern "system" fn(*mut std::ffi::c_void) -> i32,
     _library: libloading::Library,
 }
 
 #[cfg(target_os = "windows")]
 impl ShellWindowGuard {
-    fn register() -> Option<Self> {
+    fn register(register_taskman: bool) -> Option<Self> {
+        use std::sync::atomic::Ordering;
         use std::{ffi::c_void, path::PathBuf};
         use windows::{
             Win32::{
                 Foundation::GetLastError,
                 UI::WindowsAndMessaging::{
-                    CreateWindowExW, DestroyWindow, GetShellWindow, RegisterShellHookWindow,
-                    WINDOW_EX_STYLE, WS_POPUP,
+                    CreateWindowExW, DeregisterShellHookWindow, DestroyWindow, GWLP_WNDPROC,
+                    GetShellWindow, RegisterShellHookWindow, RegisterWindowMessageW,
+                    SetWindowLongPtrW, WINDOW_EX_STYLE, WS_POPUP,
                 },
             },
             core::w,
         };
 
         type SetShellWindowEx = unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32;
+        type SetTaskmanWindow = unsafe extern "system" fn(*mut c_void) -> i32;
+        type GetTaskmanWindow = unsafe extern "system" fn() -> *mut c_void;
 
         if !unsafe { GetShellWindow() }.is_invalid() {
             eprintln!("phase=shell-window result=already-registered");
@@ -1149,6 +1286,20 @@ impl ShellWindowGuard {
             Ok(symbol) => symbol,
             Err(error) => {
                 eprintln!("phase=resolve-SetShellWindowEx error={error}");
+                return None;
+            }
+        };
+        let set_taskman = match unsafe { library.get::<SetTaskmanWindow>(b"SetTaskmanWindow\0") } {
+            Ok(symbol) => *symbol,
+            Err(error) => {
+                eprintln!("phase=resolve-SetTaskmanWindow error={error}");
+                return None;
+            }
+        };
+        let get_taskman = match unsafe { library.get::<GetTaskmanWindow>(b"GetTaskmanWindow\0") } {
+            Ok(symbol) => *symbol,
+            Err(error) => {
+                eprintln!("phase=resolve-GetTaskmanWindow error={error}");
                 return None;
             }
         };
@@ -1200,6 +1351,31 @@ impl ShellWindowGuard {
             let _ = unsafe { DestroyWindow(window) };
             return None;
         }
+        // Shell hook notifications are sent directly to the window procedure;
+        // they are not returned by GetMessageW. Subclass this hidden window
+        // before registering it so the message loop can forward each event.
+        let hook_message = unsafe { RegisterWindowMessageW(w!("SHELLHOOK")) };
+        if hook_message == 0 {
+            eprintln!("phase=register-shell-hook-message result=failed");
+            let _ = unsafe { DestroyWindow(window) };
+            return None;
+        }
+        SHELL_HOOK_MESSAGE.store(hook_message, Ordering::Relaxed);
+        let original_wndproc = unsafe {
+            SetWindowLongPtrW(
+                window,
+                GWLP_WNDPROC,
+                shell_window_proc as *const () as usize as isize,
+            )
+        };
+        if original_wndproc == 0 {
+            eprintln!("phase=subclass-shell-window result=failed");
+            SHELL_HOOK_MESSAGE.store(0, Ordering::Relaxed);
+            let _ = unsafe { DestroyWindow(window) };
+            return None;
+        }
+        ORIGINAL_SHELL_WNDPROC.store(original_wndproc, Ordering::Relaxed);
+        println!("phase=shell-hook-message id={hook_message:#x}");
         // SAFETY: This thread owns the live shell HWND. The guard unregisters
         // the same HWND before destroying it.
         let shell_hook_registered = unsafe { RegisterShellHookWindow(window) }.as_bool();
@@ -1210,10 +1386,37 @@ impl ShellWindowGuard {
                 "phase=RegisterShellHookWindow result=failed last_error={}",
                 unsafe { GetLastError() }.0
             );
+            let _ = unsafe { SetWindowLongPtrW(window, GWLP_WNDPROC, original_wndproc) };
+            ORIGINAL_SHELL_WNDPROC.store(0, Ordering::Relaxed);
+            SHELL_HOOK_MESSAGE.store(0, Ordering::Relaxed);
+            let _ = unsafe { DestroyWindow(window) };
+            return None;
         }
+        // The shell window alone does not cause the desktop's shell hook
+        // notifications to reach this process. The task manager window is
+        // registered by Explorer and by other replacement shells.
+        let taskman_registered = if register_taskman {
+            let registered = unsafe { set_taskman(window.0) } != 0;
+            let matches = unsafe { get_taskman() } == window.0;
+            println!("phase=SetTaskmanWindow registered={registered} matches_own_window={matches}");
+            if !registered || !matches {
+                let _ = unsafe { DeregisterShellHookWindow(window) };
+                let _ = unsafe { SetWindowLongPtrW(window, GWLP_WNDPROC, original_wndproc) };
+                ORIGINAL_SHELL_WNDPROC.store(0, Ordering::Relaxed);
+                SHELL_HOOK_MESSAGE.store(0, Ordering::Relaxed);
+                let _ = unsafe { DestroyWindow(window) };
+                return None;
+            }
+            true
+        } else {
+            false
+        };
         Some(Self {
             window,
             shell_hook_registered,
+            taskman_registered,
+            original_wndproc,
+            set_taskman,
             _library: library,
         })
     }
@@ -1222,12 +1425,21 @@ impl ShellWindowGuard {
 #[cfg(target_os = "windows")]
 impl Drop for ShellWindowGuard {
     fn drop(&mut self) {
-        use windows::Win32::UI::WindowsAndMessaging::{DeregisterShellHookWindow, DestroyWindow};
+        use std::sync::atomic::Ordering;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DeregisterShellHookWindow, DestroyWindow, GWLP_WNDPROC, SetWindowLongPtrW,
+        };
 
         // SAFETY: The current thread created this window and owns its lifetime.
         if self.shell_hook_registered {
             let _ = unsafe { DeregisterShellHookWindow(self.window) };
         }
+        if self.taskman_registered {
+            let _ = unsafe { (self.set_taskman)(std::ptr::null_mut()) };
+        }
+        let _ = unsafe { SetWindowLongPtrW(self.window, GWLP_WNDPROC, self.original_wndproc) };
+        ORIGINAL_SHELL_WNDPROC.store(0, Ordering::Relaxed);
+        SHELL_HOOK_MESSAGE.store(0, Ordering::Relaxed);
         let _ = unsafe { DestroyWindow(self.window) };
     }
 }
