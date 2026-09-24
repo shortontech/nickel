@@ -66,16 +66,12 @@ pub enum FileDialogOutcome {
 
 /// Opens the platform-native image chooser.
 ///
-/// Linux uses the XDG portal directly. Windows reports that the capability is
-/// unavailable until its native adapter is implemented.
+/// Linux uses the XDG portal and Windows uses the common item dialog.
 #[cfg(target_os = "windows")]
 pub fn choose_image_file(
-    _callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
+    callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
 ) -> Result<(), String> {
-    Err(format!(
-        "the native image file chooser is not implemented for {}",
-        std::env::consts::OS
-    ))
+    windows_file_dialog::choose_image_file(callback)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -94,6 +90,8 @@ pub fn choose_image_file(
 
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(target_os = "windows")]
+mod windows_file_dialog;
 
 #[cfg(target_os = "linux")]
 mod linux;
