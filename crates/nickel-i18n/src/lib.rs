@@ -21,6 +21,11 @@ const ID: &str = include_str!("../locales/id/settings.ftl");
 const ZH: &str = include_str!("../locales/zh/settings.ftl");
 const ZH_HANT: &str = include_str!("../locales/zh-Hant/settings.ftl");
 const AR: &str = include_str!("../locales/ar/settings.ftl");
+const VI: &str = include_str!("../locales/vi/settings.ftl");
+const HI: &str = include_str!("../locales/hi/settings.ftl");
+const UR: &str = include_str!("../locales/ur/settings.ftl");
+const BN: &str = include_str!("../locales/bn/settings.ftl");
+const FIL: &str = include_str!("../locales/fil/settings.ftl");
 
 /// Typed, shared labels for semantic controller actions.
 ///
@@ -123,6 +128,11 @@ impl Localizer {
                 Some(bundle(default_language(), EN_US)),
             ),
             "ar" => (requested, AR, Some(bundle(default_language(), EN_US))),
+            "vi" => (requested, VI, Some(bundle(default_language(), EN_US))),
+            "hi" => (requested, HI, Some(bundle(default_language(), EN_US))),
+            "ur" => (requested, UR, Some(bundle(default_language(), EN_US))),
+            "bn" => (requested, BN, Some(bundle(default_language(), EN_US))),
+            "fil" => (requested, FIL, Some(bundle(default_language(), EN_US))),
             _ => (default_language(), EN_US, None),
         };
         Self {
@@ -322,18 +332,23 @@ mod tests {
 
     #[test]
     fn added_locales_use_their_native_catalogs() {
-        for (locale, expected) in [
-            ("pl-PL", "Ekran"),
-            ("uk-UA", "Дисплеї"),
-            ("ko-KR", "디스플레이"),
-            ("tr-TR", "Ekran"),
-            ("it-IT", "Schermo"),
-            ("cs-CZ", "Obrazovky"),
-            ("nl-NL", "Beeldscherm"),
-            ("id-ID", "Tampilan"),
+        for (locale, key, expected) in [
+            ("pl-PL", "settings-nav-display", "Ekran"),
+            ("uk-UA", "settings-nav-display", "Дисплеї"),
+            ("ko-KR", "settings-nav-display", "디스플레이"),
+            ("tr-TR", "settings-nav-display", "Ekran"),
+            ("it-IT", "settings-nav-display", "Schermo"),
+            ("cs-CZ", "settings-nav-display", "Obrazovky"),
+            ("nl-NL", "settings-nav-display", "Beeldscherm"),
+            ("id-ID", "settings-nav-display", "Tampilan"),
+            ("vi-VN", "settings-nav-display", "Màn hình"),
+            ("hi-IN", "settings-nav-display", "डिस्प्ले"),
+            ("ur-PK", "settings-nav-display", "ڈسپلے"),
+            ("bn-BD", "settings-nav-display", "ডিসপ্লে"),
+            ("fil-PH", "settings-nav-about", "Tungkol sa Nickel"),
         ] {
             assert_eq!(
-                Localizer::for_locale(Some(locale)).text("settings-nav-display"),
+                Localizer::for_locale(Some(locale)).text(key),
                 expected,
                 "{locale}"
             );
