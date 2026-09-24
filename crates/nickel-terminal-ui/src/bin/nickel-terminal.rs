@@ -560,19 +560,19 @@ fn preferences_view(preferences: &TerminalPreferences) -> impl View<Message> {
         .child(label("Default shell for new tabs"))
         .child(TextField::on_change_with_placeholder(
             &preferences.shell,
-            "Use the system shell",
+            nickel_i18n::system_text("ui-nickel-terminal-use-the-system-shell"),
             Message::SetShell,
         ))
         .child(label("Starting folder for new tabs"))
         .child(TextField::on_change_with_placeholder(
             &preferences.working_directory,
-            "Use the current folder",
+            nickel_i18n::system_text("ui-nickel-terminal-use-the-current-folder"),
             Message::SetWorkingDirectory,
         ))
         .child(label("Font family"))
         .child(TextField::on_change_with_placeholder(
             &preferences.settings.font_family,
-            "monospace",
+            nickel_i18n::system_text("ui-nickel-terminal-monospace"),
             Message::SetFontFamily,
         ))
         .child(
@@ -582,8 +582,14 @@ fn preferences_view(preferences: &TerminalPreferences) -> impl View<Message> {
                     "Font size: {:.1}",
                     preferences.settings.font_size()
                 )))
-                .child(Button::new(Message::AdjustFontSize(-10), "Smaller"))
-                .child(Button::new(Message::AdjustFontSize(10), "Larger")),
+                .child(Button::new(
+                    Message::AdjustFontSize(-10),
+                    nickel_i18n::system_text("ui-nickel-terminal-smaller"),
+                ))
+                .child(Button::new(
+                    Message::AdjustFontSize(10),
+                    nickel_i18n::system_text("ui-nickel-terminal-larger"),
+                )),
         )
         .child(
             Row::new()
@@ -592,8 +598,14 @@ fn preferences_view(preferences: &TerminalPreferences) -> impl View<Message> {
                     "Scrollback: {} lines",
                     preferences.settings.scrollback_lines
                 )))
-                .child(Button::new(Message::AdjustScrollback(-1000), "Fewer"))
-                .child(Button::new(Message::AdjustScrollback(1000), "More")),
+                .child(Button::new(
+                    Message::AdjustScrollback(-1000),
+                    nickel_i18n::system_text("ui-nickel-terminal-fewer"),
+                ))
+                .child(Button::new(
+                    Message::AdjustScrollback(1000),
+                    nickel_i18n::system_text("ui-nickel-terminal-more"),
+                )),
         )
         .child(label("Cursor shape"))
         .child(
@@ -601,27 +613,27 @@ fn preferences_view(preferences: &TerminalPreferences) -> impl View<Message> {
                 .gap(8.0)
                 .child(Button::new(
                     Message::SetCursorStyle(TerminalCursorStyle::Block),
-                    "Block",
+                    nickel_i18n::system_text("ui-nickel-terminal-block"),
                 ))
                 .child(Button::new(
                     Message::SetCursorStyle(TerminalCursorStyle::Beam),
-                    "Beam",
+                    nickel_i18n::system_text("ui-nickel-terminal-beam"),
                 ))
                 .child(Button::new(
                     Message::SetCursorStyle(TerminalCursorStyle::Underline),
-                    "Underline",
+                    nickel_i18n::system_text("ui-nickel-terminal-underline"),
                 )),
         )
         .child(label("Text color (#RRGGBB or #AARRGGBB)"))
         .child(TextField::on_change_with_placeholder(
             &preferences.foreground,
-            "#FFFCFCFC",
+            nickel_i18n::system_text("ui-nickel-terminal-fffcfcfc"),
             Message::SetForeground,
         ))
         .child(label("Background color (#RRGGBB or #AARRGGBB)"))
         .child(TextField::on_change_with_placeholder(
             &preferences.background,
-            "#FF111318",
+            nickel_i18n::system_text("ui-nickel-terminal-ff111318"),
             Message::SetBackground,
         ))
         .child(Button::new(
@@ -635,8 +647,14 @@ fn preferences_view(preferences: &TerminalPreferences) -> impl View<Message> {
         .child(
             Row::new()
                 .gap(8.0)
-                .child(Button::new(Message::SavePreferences, "Save"))
-                .child(Button::new(Message::ClosePreferences, "Cancel")),
+                .child(Button::new(
+                    Message::SavePreferences,
+                    nickel_i18n::system_text("ui-nickel-terminal-save"),
+                ))
+                .child(Button::new(
+                    Message::ClosePreferences,
+                    nickel_i18n::system_text("ui-nickel-terminal-cancel"),
+                )),
         )
 }
 
@@ -836,9 +854,12 @@ impl Application for TerminalApp {
             root = root
                 .child(nickel_ui::Button::new(
                     Message::ConfirmPaste,
-                    "Paste multiple lines",
+                    nickel_i18n::system_text("ui-nickel-terminal-paste-multiple-lines"),
                 ))
-                .child(nickel_ui::Button::new(Message::CancelPaste, "Cancel"));
+                .child(nickel_ui::Button::new(
+                    Message::CancelPaste,
+                    nickel_i18n::system_text("ui-nickel-terminal-cancel-2"),
+                ));
         }
         root
     }

@@ -61,42 +61,52 @@ impl Application for RecoveryApplication {
             .border_value(Border::new(theme.text.danger, 1.0))
             .radius(14.0)
             .child(
-                Text::new("Nickel shell needs attention")
-                    .scale(1.25)
-                    .bold(true)
-                    .color(theme.text.primary),
+                Text::new(nickel_i18n::system_text(
+                    "ui-recovery-ui-nickel-shell-needs-attention",
+                ))
+                .scale(1.25)
+                .bold(true)
+                .color(theme.text.primary),
             )
             .child(
-                Text::new("The compositor is still running and your applications are safe.")
-                    .color(theme.text.secondary),
+                Text::new(nickel_i18n::system_text(
+                    "ui-recovery-ui-the-compositor-is-still-running-and-your-applications-are-safe",
+                ))
+                .color(theme.text.secondary),
             )
             .child(
                 Row::new()
                     .gap(14.0)
                     .child(
-                        Button::new(RecoveryAction::Retry, "Enter  Retry now")
-                            .id("recovery-retry")
-                            .width(156.0)
-                            .height(30.0)
-                            .padding(Insets::symmetric(5.0, 12.0))
-                            .radius(7.0)
-                            .background(theme.accent.ordinary)
-                            .color(theme.accent.on_accent)
-                            .focus_background_tint(theme.borders.focus)
-                            .controller_focus_background_tint(theme.borders.controller_focus),
+                        Button::new(
+                            RecoveryAction::Retry,
+                            nickel_i18n::system_text("ui-recovery-ui-enter-retry-now"),
+                        )
+                        .id("recovery-retry")
+                        .width(156.0)
+                        .height(30.0)
+                        .padding(Insets::symmetric(5.0, 12.0))
+                        .radius(7.0)
+                        .background(theme.accent.ordinary)
+                        .color(theme.accent.on_accent)
+                        .focus_background_tint(theme.borders.focus)
+                        .controller_focus_background_tint(theme.borders.controller_focus),
                     )
                     .child(
-                        Button::new(RecoveryAction::Exit, "Esc  Log out safely")
-                            .id("recovery-exit")
-                            .width(180.0)
-                            .height(30.0)
-                            .padding(Insets::symmetric(5.0, 12.0))
-                            .radius(7.0)
-                            .background(theme.surfaces.card)
-                            .border(theme.borders.ordinary, 1.0)
-                            .color(theme.text.secondary)
-                            .focus_background_tint(theme.borders.focus)
-                            .controller_focus_background_tint(theme.borders.controller_focus),
+                        Button::new(
+                            RecoveryAction::Exit,
+                            nickel_i18n::system_text("ui-recovery-ui-esc-log-out-safely"),
+                        )
+                        .id("recovery-exit")
+                        .width(180.0)
+                        .height(30.0)
+                        .padding(Insets::symmetric(5.0, 12.0))
+                        .radius(7.0)
+                        .background(theme.surfaces.card)
+                        .border(theme.borders.ordinary, 1.0)
+                        .color(theme.text.secondary)
+                        .focus_background_tint(theme.borders.focus)
+                        .controller_focus_background_tint(theme.borders.controller_focus),
                     ),
             )
     }

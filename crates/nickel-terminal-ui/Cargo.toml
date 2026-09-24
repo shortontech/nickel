@@ -11,6 +11,7 @@ name = "nickel-terminal"
 path = "src/bin/nickel-terminal.rs"
 
 [dependencies]
+nickel-i18n = { path = "../nickel-i18n" }
 nickel-input = { path = "../nickel-input" }
 nickel-core = { path = "../nickel-core" }
 nickel-terminal = { path = "../nickel-terminal" }

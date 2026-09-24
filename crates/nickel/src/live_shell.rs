@@ -231,7 +231,7 @@ impl UiApplication for RunApplication {
             .height(content_height)
             .gap(10.0)
             .child(
-                Text::new("Run")
+                Text::new(nickel_i18n::system_text("ui-live-shell-run"))
                     .scale(22.0)
                     .color(self.palette.text)
                     .bold(true),
@@ -239,7 +239,7 @@ impl UiApplication for RunApplication {
             .child(
                 TextField::on_change_with_placeholder(
                     &self.command,
-                    "Enter a command",
+                    nickel_i18n::system_text("ui-live-shell-enter-a-command"),
                     RunAction::SetCommand,
                 )
                 .id("run-command")
@@ -251,10 +251,13 @@ impl UiApplication for RunApplication {
                 .controller_focus_background_tint(self.palette.complement),
             )
             .child(
-                Button::new(RunAction::Submit, "Run")
-                    .id("run-submit")
-                    .width(88.0)
-                    .height(36.0),
+                Button::new(
+                    RunAction::Submit,
+                    nickel_i18n::system_text("ui-live-shell-run-2"),
+                )
+                .id("run-submit")
+                .width(88.0)
+                .height(36.0),
             );
         if let Some(status) = &self.status {
             content = content.child(Text::new(status).color(self.palette.complement));
@@ -480,7 +483,7 @@ impl nickel_ui::Application for LockApplication {
             .height(height)
             .child(Spacer::vertical(height * 0.38))
             .child(
-                Text::new("Nickel")
+                Text::new(nickel_i18n::system_text("ui-live-shell-nickel"))
                     .height(48.0)
                     .scale(30.0)
                     .color(self.palette.text)
@@ -514,7 +517,7 @@ impl nickel_ui::Application for LockApplication {
                     .child(
                         TextField::on_change_masked_with_placeholder(
                             &self.password,
-                            "Password",
+                            nickel_i18n::system_text("ui-live-shell-password"),
                             '•',
                             LockMessage::Password,
                         )

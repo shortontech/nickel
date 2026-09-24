@@ -1080,7 +1080,7 @@ impl CodexSurfaces {
             return Err(format!("thread {} already has a Nickel writer", thread.0));
         }
         let result = (|| {
-            let title = format!("Codex — {name}");
+            let title = nickel_i18n::system_value("ui-codex-surface-title", "name", &name);
             let application_id = codex_project_application_id(Some(&project_id), &cwd);
             let id = shell.create_codex_chat_surface(&title, &application_id)?;
             let (width, height) = shell

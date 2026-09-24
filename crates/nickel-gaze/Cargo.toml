@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+nickel-i18n = { path = "../nickel-i18n" }
 ctrlc.workspace = true
 image.workspace = true
 nickel-ui = { path = "../nickel-ui" }

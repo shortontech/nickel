@@ -3268,8 +3268,8 @@ impl Application for FileApp {
                             .focus_background_tint(palette.accent)
                             .controller_focus_background_tint(palette.complement)}
                         <Row gap={8.0}>
-                            <Button on_press={FileMessage::CommitRename}>{"Rename"}</Button>
-                            <Button on_press={FileMessage::CancelRename}>{"Cancel"}</Button>
+                            <Button on_press={FileMessage::CommitRename}>{self.localizer.text("ui-app-rename")}</Button>
+                            <Button on_press={FileMessage::CancelRename}>{self.localizer.text("ui-app-cancel")}</Button>
                         </Row>
                     </Column>
                 },
@@ -3294,12 +3294,12 @@ impl Application for FileApp {
                     accessibility_label={format!("Resolve {count} file transfer conflicts")}
                     background={palette.surface} padding={Insets::all(18.0)}>
                     <Column gap={12.0}>
-                        <Text color={palette.text} scale={1.25}>{format!("{count} item{} already exist{}", if count == 1 { "" } else { "s" }, if count == 1 { "s" } else { "" })}</Text>
-                        <Text color={palette.muted}> {"Choose how Nickel File should handle every conflicting name in this transfer."} </Text>
+                        <Text color={palette.text} scale={1.25}>{self.localizer.number("ui-transfer-conflict-count", "count", count as i64)}</Text>
+                        <Text color={palette.muted}> {self.localizer.text("ui-app-choose-how-nickel-file-should-handle-every-conflicting-name-in-this-transfer")} </Text>
                         <Row gap={8.0}>
-                            <Button on_press={FileMessage::TransferKeepBoth}> {"Keep both"} </Button>
-                            <Button on_press={FileMessage::TransferSkipConflicts}> {"Skip conflicts"} </Button>
-                            <Button on_press={FileMessage::TransferCancelConflicts}> {"Cancel transfer"} </Button>
+                            <Button on_press={FileMessage::TransferKeepBoth}> {self.localizer.text("ui-app-keep-both")} </Button>
+                            <Button on_press={FileMessage::TransferSkipConflicts}> {self.localizer.text("ui-app-skip-conflicts")} </Button>
+                            <Button on_press={FileMessage::TransferCancelConflicts}> {self.localizer.text("ui-app-cancel-transfer")} </Button>
                         </Row>
                     </Column>
                 </Container>

@@ -109,6 +109,15 @@ impl Localizer {
         self.format(id, Some(&args))
     }
 
+    pub fn values(&self, id: &str, values: &[(&str, &str)]) -> String {
+        let args = args(
+            values
+                .iter()
+                .map(|(name, value)| (*name, FluentValue::from(*value))),
+        );
+        self.format(id, Some(&args))
+    }
+
     /// Formats a logical byte count through the active locale. The exact count
     /// remains available to callers; this is only the compact visible label.
     pub fn bytes(&self, bytes: u64) -> String {
@@ -159,6 +168,26 @@ impl Localizer {
             })
             .unwrap_or_else(|| id.to_owned())
     }
+}
+
+thread_local! {
+    static SYSTEM_LOCALIZER: Localizer = Localizer::system();
+}
+
+pub fn system_text(id: &str) -> String {
+    SYSTEM_LOCALIZER.with(|localizer| localizer.text(id))
+}
+
+pub fn system_value(id: &str, name: &str, value: &str) -> String {
+    SYSTEM_LOCALIZER.with(|localizer| localizer.value(id, name, value))
+}
+
+pub fn system_number(id: &str, name: &str, value: i64) -> String {
+    SYSTEM_LOCALIZER.with(|localizer| localizer.number(id, name, value))
+}
+
+pub fn system_values(id: &str, values: &[(&str, &str)]) -> String {
+    SYSTEM_LOCALIZER.with(|localizer| localizer.values(id, values))
 }
 
 pub fn args<'a, I>(values: I) -> FluentArgs<'a>

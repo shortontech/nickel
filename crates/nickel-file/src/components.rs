@@ -69,7 +69,7 @@ pub(crate) fn properties_dialog(
     };
     let content = ui! {
         <Column gap={8.0}>
-            <Text height={28.0} scale={1.35} color={palette.text}>{format!("{} Properties", properties.name)}</Text>
+            <Text height={28.0} scale={1.35} color={palette.text}>{app.localizer.value("ui-properties-title", "name", &properties.name)}</Text>
             {if app.status.is_empty() { ui! { <></> } } else { ui! { <Text height={24.0} color={palette.accent}>{app.status.clone()}</Text> } }}
             {if stale { ui! { <Text height={22.0} color={palette.accent}>{"This item changed or is no longer available."}</Text> } } else { ui! { <></> } }}
             {row("Kind", properties.kind.clone())}
@@ -120,11 +120,11 @@ pub(crate) fn properties_dialog(
             <Row height={38.0}>
                 <Container grow={1.0} />
                 <Button id={"file-properties-apply"} on_press={FileMessage::PropertiesApply}
-                    enabled={!stale} width={90.0} height={34.0} color={palette.text}>{"Apply"}</Button>
+                    enabled={!stale} width={90.0} height={34.0} color={palette.text}>{app.localizer.text("ui-components-apply")}</Button>
                 <Button id={"file-properties-ok"} on_press={FileMessage::PropertiesOk}
-                    enabled={!stale} width={90.0} height={34.0} color={palette.text}>{"OK"}</Button>
+                    enabled={!stale} width={90.0} height={34.0} color={palette.text}>{app.localizer.text("ui-components-ok")}</Button>
                 <Button id={"file-properties-close"} on_press={FileMessage::CloseProperties}
-                    width={90.0} height={34.0} color={palette.text}>{"Cancel"}</Button>
+                    width={90.0} height={34.0} color={palette.text}>{app.localizer.text("ui-components-cancel")}</Button>
             </Row>
         </Column>
     };
@@ -441,7 +441,7 @@ pub(crate) fn command_surface(
     let results_height = (available_height - 132.0).max(1.0);
     let results = if rows.is_empty() {
         AnyView::new(ui! {
-            <Container padding={Insets::all(16.0)}><Text color={palette.muted}>{"No matching commands."}</Text></Container>
+            <Container padding={Insets::all(16.0)}><Text color={palette.muted}>{app.localizer.text("ui-components-no-matching-commands")}</Text></Container>
         })
     } else {
         AnyView::new(
@@ -493,7 +493,7 @@ pub(crate) fn command_surface(
             padding={Insets { top: 24.0, right: 32.0, bottom: 24.0, left: 32.0 }}>
             <Column gap={10.0}>
                 <Container height={22.0} shrink={0.0}>
-                    <Text color={palette.text} scale={1.35}>{"Commands"}</Text>
+                    <Text color={palette.text} scale={1.35}>{app.localizer.text("ui-components-commands")}</Text>
                 </Container>
                 <Container height={40.0} shrink={0.0} background={palette.surface} border={(palette.accent, 1.0)}
                     padding={Insets { top: 9.0, right: 12.0, bottom: 7.0, left: 12.0 }}>

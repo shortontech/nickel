@@ -284,7 +284,7 @@ impl Application for KeyboardApp {
                 content = content.child(key_row);
             }
         } else {
-            content = content.child(Text::new("Not enough space for usable keys. Increase the available window area or reduce display scaling."));
+            content = content.child(Text::new(nickel_i18n::system_text("ui-on-screen-keyboard-not-enough-space-for-usable-keys-increase-the-available-window-area-or-reduce-display-scaling")));
         }
         let mut keyboard = Row::new().gap(8.0);
         if side_controls {
@@ -292,7 +292,9 @@ impl Application for KeyboardApp {
                 Column::new()
                     .width(100.0)
                     .gap(8.0)
-                    .child(Text::new("English (US)"))
+                    .child(Text::new(nickel_i18n::system_text(
+                        "ui-on-screen-keyboard-english-us",
+                    )))
                     .child(
                         button(
                             KeyboardMessage::PersistentModifiers,

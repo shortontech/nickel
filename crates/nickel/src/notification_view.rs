@@ -197,7 +197,12 @@ impl Application for NotificationApp {
                         .child(
                             Column::new()
                                 .gap(8.0)
-                                .child(Text::new("Notifications").color(self.palette.text))
+                                .child(
+                                    Text::new(nickel_i18n::system_text(
+                                        "ui-notification-view-notifications",
+                                    ))
+                                    .color(self.palette.text),
+                                )
                                 .children(entries),
                         ),
                     ),
@@ -239,17 +244,20 @@ impl Application for NotificationApp {
                 .label_align(TextAlign::Center)
             }))
             .child(
-                Button::new(NotificationMessage::Dismiss, "Dismiss")
-                    .id("notification-dismiss")
-                    .width(button_width)
-                    .height(30.0)
-                    .padding(Insets::all(5.0))
-                    .background(self.palette.surface_hover)
-                    .focus_background_tint(self.palette.accent)
-                    .controller_focus_background_tint(self.palette.accent)
-                    .radius(7.0)
-                    .color(self.palette.text)
-                    .label_align(TextAlign::Center),
+                Button::new(
+                    NotificationMessage::Dismiss,
+                    nickel_i18n::system_text("ui-notification-view-dismiss"),
+                )
+                .id("notification-dismiss")
+                .width(button_width)
+                .height(30.0)
+                .padding(Insets::all(5.0))
+                .background(self.palette.surface_hover)
+                .focus_background_tint(self.palette.accent)
+                .controller_focus_background_tint(self.palette.accent)
+                .radius(7.0)
+                .color(self.palette.text)
+                .label_align(TextAlign::Center),
             );
         AnyView::new(
             Container::new()

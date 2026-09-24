@@ -100,8 +100,9 @@ impl SettingsApp {
         };
         let codex = SettingsCard::titled(
             theme,
-            "Codex",
-            "Use Codex projects and conversations in Nickel",
+            self.localizer.text("ui-pages-codex"),
+            self.localizer
+                .text("ui-pages-use-codex-projects-and-conversations-in-nickel"),
         )
         .child(
             SettingsRow::new(theme, "Enable Codex", status).trailing(
@@ -185,8 +186,9 @@ impl SettingsApp {
         };
         let keyboard = SettingsCard::titled(
             theme,
-            "On-screen keyboard",
-            "Type with touch, a controller, or a mouse",
+            self.localizer.text("ui-pages-on-screen-keyboard"),
+            self.localizer
+                .text("ui-pages-type-with-touch-a-controller-or-a-mouse"),
         )
         .child(mode)
         .child(SettingsRow::new(theme, "Current state", status));
@@ -252,7 +254,13 @@ impl SettingsApp {
             .cloned()
             .collect::<Vec<_>>();
         let target_results = if self.default_apps_loading && self.default_app_targets.is_empty() {
-            AnyView::new(Text::new("Loading file and protocol associations…").color(palette.muted))
+            AnyView::new(
+                Text::new(
+                    self.localizer
+                        .text("ui-pages-loading-file-and-protocol-associations"),
+                )
+                .color(palette.muted),
+            )
         } else if matching_targets.is_empty() {
             AnyView::new(
                 Text::new(if self.default_app_target_status.is_some() {
@@ -670,8 +678,8 @@ impl SettingsApp {
         .id("application-scale-policy");
         let app_scale = SettingsCard::titled(
             theme,
-            "Application compatibility scale",
-            "Toolkit scale can differ from display scale; applications may need a restart.",
+            self.localizer.text("ui-pages-application-compatibility-scale"),
+            self.localizer.text("ui-pages-toolkit-scale-can-differ-from-display-scale-applications-may-need-a-restart"),
         )
         .id("application-scale")
         .child(application_scale_policy_choices)

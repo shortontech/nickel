@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+fluent-syntax = "0.12.0"
 proc-macro2.workspace = true
 syn.workspace = true
 

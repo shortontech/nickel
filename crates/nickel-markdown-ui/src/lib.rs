@@ -928,7 +928,7 @@ pub fn viewer_view_with_palette(
         palette,
     );
     let reload = toolbar_button(
-        "Reload",
+        &nickel_i18n::system_text("ui-lib-reload"),
         ViewerMessage::Reload,
         actions_enabled && model.current().is_some(),
         palette,
@@ -1073,7 +1073,10 @@ fn status_view(
                     .gap(8.0)
                     .background(palette.error)
                     .child(Text::new(message).color(palette.text).wrap(true).grow(1.0))
-                    .child(Button::new(ViewerMessage::DismissStatus, "Dismiss")),
+                    .child(Button::new(
+                        ViewerMessage::DismissStatus,
+                        nickel_i18n::system_text("ui-lib-dismiss"),
+                    )),
             )
         },
     )

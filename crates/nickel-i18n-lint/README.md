@@ -15,3 +15,7 @@ The command reports every detected hardcoded UI string and fails while any
 findings remain. There is no accepted-findings baseline. Use a narrow
 `nickel-i18n-lint: allow <reason>` comment only when a literal does not need
 translation.
+
+The command also reports `NIL002` warnings for English Fluent message, term,
+and attribute keys missing from another locale's matching catalog. Missing
+translations use the English fallback at runtime and do not fail the lint gate.

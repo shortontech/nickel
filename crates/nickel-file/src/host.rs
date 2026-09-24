@@ -702,9 +702,10 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 );
             }
         }
-        let title = format!(
-            "Nickel File — {}",
-            host.application().browser.current().display()
+        let title = host.application().localizer.value(
+            "ui-file-window-title",
+            "path",
+            &host.application().browser.current().display().to_string(),
         );
         services.window().set_title(&title);
         Ok(if host.application().exit_requested {

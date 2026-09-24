@@ -2931,7 +2931,7 @@ fn InteractionCard(
         } => ui! {
             <Container fill_width padding={Insets::all(8.0)} gap={4.0}
                 background={theme.surfaces.raised} border={Border::new(theme.borders.ordinary, 1.0)} radius={8.0}>
-                <Text color={theme.text.primary}>{"Codex requested input"}</Text>
+                <Text color={theme.text.primary}>{nickel_i18n::system_text("ui-view-codex-requested-input")}</Text>
                 // Questions and option descriptions may be long, but the answer
                 // field and authority-owned actions must remain outside this scroll.
                 <Column id={id!(user_input_questions)} fill_width max_height={32.0}
@@ -2944,7 +2944,7 @@ fn InteractionCard(
                         })}
                     </Column>
                 })}
-                <Text color={theme.text.secondary}>{"Enter one answer per line, in question order. Use an option label or your own answer."}</Text>
+                <Text color={theme.text.secondary}>{nickel_i18n::system_text("ui-view-enter-one-answer-per-line-in-question-order-use-an-option-label-or-your-own-answer")}</Text>
                 </Column>
                 <Container fill_width padding={Insets::all(8.0)} background={theme.surfaces.card} radius={6.0}>
                     {[()].into_iter().filter(|_| questions.iter().any(|question| question.is_secret)).map(|_| ui! {
@@ -2987,26 +2987,26 @@ fn remote_hosts_panel(
                     <Column grow={1.0}>
                         <Text scale={1.6} color={theme.text.primary}>{if editor.original_id.is_some() { "Edit remote host" } else { "Add remote host" }}</Text>
                     </Column>
-                    <Button on_press={ChatMessage::ManageRemoteHosts} background={theme.surfaces.hover} color={theme.text.primary}>{"Back"}</Button>
+                    <Button on_press={ChatMessage::ManageRemoteHosts} background={theme.surfaces.hover} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-back")}</Button>
                 </Row>
-                <Text color={theme.text.secondary}>{"Nickel stores only the environment-variable name, never its secret value."}</Text>
-                <Text color={theme.text.primary}>{"Identifier"}</Text>
+                <Text color={theme.text.secondary}>{nickel_i18n::system_text("ui-view-nickel-stores-only-the-environment-variable-name-never-its-secret-value")}</Text>
+                <Text color={theme.text.primary}>{nickel_i18n::system_text("ui-view-identifier")}</Text>
                 <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
                     <TextField value={&editor.id} on_change={remote_host_id_changed} color={theme.text.primary} />
                 </Container>
-                <Text color={theme.text.primary}>{"Display name"}</Text>
+                <Text color={theme.text.primary}>{nickel_i18n::system_text("ui-view-display-name")}</Text>
                 <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
                     <TextField value={&editor.name} on_change={remote_host_name_changed} color={theme.text.primary} />
                 </Container>
-                <Text color={theme.text.primary}>{"WebSocket endpoint"}</Text>
+                <Text color={theme.text.primary}>{nickel_i18n::system_text("ui-view-websocket-endpoint")}</Text>
                 <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
                     <TextField value={&editor.endpoint} on_change={remote_host_endpoint_changed} color={theme.text.primary} />
                 </Container>
-                <Text color={theme.text.primary}>{"Bearer-token environment variable (optional)"}</Text>
+                <Text color={theme.text.primary}>{nickel_i18n::system_text("ui-view-bearer-token-environment-variable-optional")}</Text>
                 <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
                     <TextField value={&editor.token_env} on_change={remote_host_token_env_changed} color={theme.text.primary} />
                 </Container>
-                <Text color={theme.text.primary}>{"Default working directory on the remote host"}</Text>
+                <Text color={theme.text.primary}>{nickel_i18n::system_text("ui-view-default-working-directory-on-the-remote-host")}</Text>
                 <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={6.0}>
                     <TextField value={&editor.default_cwd} on_change={remote_host_cwd_changed} color={theme.text.primary} />
                 </Container>
@@ -3016,8 +3016,8 @@ fn remote_hosts_panel(
                     </Container>
                 })}
                 <Row gap={8.0}>
-                    <Button on_press={ChatMessage::ManageRemoteHosts} background={theme.surfaces.card} color={theme.text.primary}>{"Cancel"}</Button>
-                    <Button on_press={ChatMessage::SaveRemoteHost} background={theme.accent.ordinary} color={theme.accent.on_accent}>{"Save host"}</Button>
+                    <Button on_press={ChatMessage::ManageRemoteHosts} background={theme.surfaces.card} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-cancel")}</Button>
+                    <Button on_press={ChatMessage::SaveRemoteHost} background={theme.accent.ordinary} color={theme.accent.on_accent}>{nickel_i18n::system_text("ui-view-save-host")}</Button>
                 </Row>
             </Column>
         });
@@ -3028,13 +3028,13 @@ fn remote_hosts_panel(
             background={theme.surfaces.window} overflow_y={Overflow::Auto}>
             <Row fill_width gap={8.0} align={Align::Center}>
                 <Column grow={1.0}>
-                    <Text scale={1.6} color={theme.text.primary}>{"Remote Codex hosts"}</Text>
+                    <Text scale={1.6} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-remote-codex-hosts")}</Text>
                 </Column>
-                <Button on_press={ChatMessage::CloseRemoteHosts} background={theme.surfaces.hover} color={theme.text.primary}>{"Back"}</Button>
+                <Button on_press={ChatMessage::CloseRemoteHosts} background={theme.surfaces.hover} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-back-2")}</Button>
             </Row>
-            <Text color={theme.text.secondary}>{"These are Nickel settings. Nickel does not read or modify Codex Desktop configuration."}</Text>
+            <Text color={theme.text.secondary}>{nickel_i18n::system_text("ui-view-these-are-nickel-settings-nickel-does-not-read-or-modify-codex-desktop-configuration")}</Text>
             <Container fill_width padding={Insets::all(12.0)} background={theme.surfaces.card} radius={8.0}>
-                <Text color={theme.text.primary}>{"Local"}</Text>
+                <Text color={theme.text.primary}>{nickel_i18n::system_text("ui-view-local")}</Text>
                 <Text color={theme.text.secondary}>{if settings.selected == "local" { "Selected" } else { "Uses the installed or bundled Codex CLI" }}</Text>
             </Container>
             {settings.hosts.iter().map(|host| ui! {
@@ -3055,8 +3055,8 @@ fn remote_hosts_panel(
                 </Container>
             })}
             <Row gap={8.0}>
-                <Button on_press={ChatMessage::CloseRemoteHosts} background={theme.surfaces.card} color={theme.text.primary}>{"Done"}</Button>
-                <Button on_press={ChatMessage::AddRemoteHost} background={theme.accent.ordinary} color={theme.accent.on_accent}>{"Add remote host"}</Button>
+                <Button on_press={ChatMessage::CloseRemoteHosts} background={theme.surfaces.card} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-done")}</Button>
+                <Button on_press={ChatMessage::AddRemoteHost} background={theme.accent.ordinary} color={theme.accent.on_accent}>{nickel_i18n::system_text("ui-view-add-remote-host")}</Button>
             </Row>
         </Column>
     })
@@ -3379,9 +3379,9 @@ fn diagnostics_panel(
         <Column id={id!(codex_diagnostics)} fill_width gap={10.0} padding={Insets::all(12.0)}
             background={theme.surfaces.card} radius={8.0}>
             <Row fill_width gap={8.0} align_items={Align::Center}>
-                <Text scale={1.25} color={theme.text.primary} grow={1.0}>{"Codex diagnostics"}</Text>
+                <Text scale={1.25} color={theme.text.primary} grow={1.0}>{nickel_i18n::system_text("ui-view-codex-diagnostics")}</Text>
                 <Button on_press={ChatMessage::ToggleDiagnostics}
-                    background={theme.surfaces.hover} color={theme.text.primary}>{"Back"}</Button>
+                    background={theme.surfaces.hover} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-back-3")}</Button>
             </Row>
             <Text color={theme.text.primary}>{run_status_label(state.run_presentation_status())}</Text>
             {state.run_secondary_status().map(|secondary| ui! {
@@ -3389,7 +3389,7 @@ fn diagnostics_panel(
             })}
             <Text color={theme.text.primary} wrap={true}>{cause}</Text>
             <Text color={theme.text.secondary} wrap={true}>{next_action}</Text>
-            <Text color={theme.text.primary}>{"Account usage"}</Text>
+            <Text color={theme.text.primary}>{nickel_i18n::system_text("ui-view-account-usage")}</Text>
             {[()].into_iter().filter(|_| state.rate_limits_pending).map(|_| ui! {
                 <Text color={theme.text.secondary}>{"Loading rate limits…"}</Text>
             })}
@@ -3417,7 +3417,7 @@ fn diagnostics_panel(
                 <Button on_press={ChatMessage::ToggleDiagnosticDetails}
                     background={theme.surfaces.hover} color={theme.text.primary}>{if details_open { "Hide technical details" } else { "Show technical details" }}</Button>
                 <Button on_press={ChatMessage::CopyDiagnosticSummary}
-                    background={theme.surfaces.hover} color={theme.text.primary}>{"Copy safe summary"}</Button>
+                    background={theme.surfaces.hover} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-copy-safe-summary")}</Button>
                 {[()].into_iter().filter(|_| matches!(copy_result, Some(Ok(())))).map(|_| ui! {
                     <Text id={id!(diagnostic_copy_confirmation)} color={theme.text.success}
                         accessibility_label={"Safe diagnostic summary copied to clipboard"}>{"Copied"}</Text>
@@ -3492,9 +3492,9 @@ fn project_menu_view(
             <Container fill_width shrink={0.0} padding={Insets::all(14.0)} gap={6.0}
                 background={theme.surfaces.sidebar} border={Border::new(theme.borders.ordinary, 1.0)} radius={10.0}>
                 <Row fill_width shrink={0.0} gap={8.0}>
-                    <Text scale={1.5} color={theme.text.primary} grow={1.0}>{"Codex projects"}</Text>
+                    <Text scale={1.5} color={theme.text.primary} grow={1.0}>{nickel_i18n::system_text("ui-view-codex-projects")}</Text>
                     <Button on_press={ChatMessage::Refresh} background={theme.surfaces.raised} color={theme.text.primary}
-                        controller_focus_background_tint={controller_focus} radius={7.0}>{"Refresh"}</Button>
+                        controller_focus_background_tint={controller_focus} radius={7.0}>{nickel_i18n::system_text("ui-view-refresh")}</Button>
                 </Row>
                 <Text color={theme.text.secondary} shrink={0.0}>{status}</Text>
             </Container>
@@ -3625,9 +3625,9 @@ fn resume_picker(
             padding={Insets::all(8.0)} gap={6.0} background={theme.surfaces.card}
             border={Border::new(theme.borders.ordinary, 1.0)} radius={8.0}>
             <Row fill_width gap={8.0}>
-                <Text color={theme.text.primary} grow={1.0}>{"Resume conversation"}</Text>
-                <Button on_press={ChatMessage::NewChat} background={theme.surfaces.hover} color={theme.text.primary}>{"New"}</Button>
-                <Button on_press={ChatMessage::CloseResumePicker} background={theme.surfaces.hover} color={theme.text.primary}>{"Back"}</Button>
+                <Text color={theme.text.primary} grow={1.0}>{nickel_i18n::system_text("ui-view-resume-conversation")}</Text>
+                <Button on_press={ChatMessage::NewChat} background={theme.surfaces.hover} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-new")}</Button>
+                <Button on_press={ChatMessage::CloseResumePicker} background={theme.surfaces.hover} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-back-4")}</Button>
             </Row>
             {[()].into_iter().filter(|_| loading).map(|_| ui! {
                 <Text color={theme.text.secondary}>{"Loading recent conversations…"}</Text>
@@ -3900,7 +3900,7 @@ fn feedback_panel(
         .children([
             AnyView::new(ui! {
                 <Row fill_width align_items={Align::Center} gap={8.0}>
-                    <Text scale={1.2} color={theme.text.primary} grow={1.0}>{"Send Codex feedback"}</Text>
+                    <Text scale={1.2} color={theme.text.primary} grow={1.0}>{nickel_i18n::system_text("ui-view-send-codex-feedback")}</Text>
                     {Button::new(ChatMessage::CloseFeedback, "Back")
                         .background(theme.surfaces.hover)
                         .color(theme.text.primary)
@@ -3909,7 +3909,7 @@ fn feedback_panel(
             }),
             AnyView::new(ui! {
                 <Column fill_width gap={6.0}>
-                    <Text color={theme.text.secondary}>{"Choose a category"}</Text>
+                    <Text color={theme.text.secondary}>{nickel_i18n::system_text("ui-view-choose-a-category")}</Text>
                     {CATEGORIES.into_iter().map(|(value, label, description)| ui! {
                         <Button on_press={ChatMessage::SelectFeedbackCategory(value.into())}
                             enabled={!pending}
@@ -3923,7 +3923,7 @@ fn feedback_panel(
             }),
             AnyView::new(ui! {
                 <Column fill_width gap={6.0}>
-                    <Text color={theme.text.secondary}>{"Optional note"}</Text>
+                    <Text color={theme.text.secondary}>{nickel_i18n::system_text("ui-view-optional-note")}</Text>
                     <Container fill_width min_height={80.0} padding={Insets::all(10.0)}
                         background={theme.surfaces.card}
                         border={Border::new(theme.borders.ordinary, 1.0)} radius={6.0}>
@@ -3935,7 +3935,7 @@ fn feedback_panel(
             }),
             AnyView::new(ui! {
                 <Text color={theme.text.secondary} wrap={true}>
-                    {"Sending diagnostics may include Codex logs for this session. Choose the no-diagnostics action if you only want to send the category and note."}
+                    {nickel_i18n::system_text("ui-view-sending-diagnostics-may-include-codex-logs-for-this-session-choose-the-no-diagnostics-action-if-you-only-want-to-send-the-category-and-note")}
                 </Text>
             }),
             AnyView::new(ui! {
@@ -4366,8 +4366,8 @@ fn login_panel(state: &ChatState, theme: SemanticTheme) -> AnyView<ChatMessage> 
     AnyView::new(ui! {
         <Column grow={1.0} fill_width align_self={Align::Center} max_width={560.0}
             padding={Insets::all(28.0)} gap={14.0}>
-            <Text scale={1.8} color={theme.text.primary}>{"Sign in to Codex"}</Text>
-            <Text color={theme.text.secondary}>{"Authenticate this Codex profile. QR codes are generated locally by Nickel."}</Text>
+            <Text scale={1.8} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-sign-in-to-codex")}</Text>
+            <Text color={theme.text.secondary}>{nickel_i18n::system_text("ui-view-authenticate-this-codex-profile-qr-codes-are-generated-locally-by-nickel")}</Text>
             {state.login_qr.as_ref().map(|qr| ui! {
                 <Image asset_id={65001} image={qr.clone()} generation={1}
                     width={264.0} height={264.0} fit={ImageFit::Contain}
@@ -4442,18 +4442,18 @@ fn codex_phone_access_panel(state: &ChatState, theme: SemanticTheme) -> AnyView<
             padding={Insets::all(20.0)} gap={10.0}>
             <Row fill_width gap={8.0} align={Align::Center}>
                 <Column grow={1.0}>
-                    <Text scale={1.5} color={theme.text.primary}>{"Phone access"}</Text>
+                    <Text scale={1.5} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-phone-access")}</Text>
                 </Column>
                 <Button on_press={ChatMessage::CloseRemoteControl}
-                    background={theme.surfaces.hover} color={theme.text.primary}>{"Back"}</Button>
+                    background={theme.surfaces.hover} color={theme.text.primary}>{nickel_i18n::system_text("ui-view-back-5")}</Button>
             </Row>
             <Text color={theme.text.secondary} wrap={true}>
-                {"Paired phones can use Codex remotely. Nickel desktop permissions remain separate."}
+                {nickel_i18n::system_text("ui-view-paired-phones-can-use-codex-remotely-nickel-desktop-permissions-remain-separate")}
             </Text>
             <Container fill_width padding={Insets::all(10.0)} background={theme.surfaces.card} radius={8.0}>
                 <Row fill_width gap={10.0} align={Align::Center}>
                     <Column grow={1.0}>
-                        <Text color={theme.text.primary}>{format!("Codex connection: {status_label}")}</Text>
+                        <Text color={theme.text.primary}>{nickel_i18n::system_value("ui-codex-connection", "status", status_label)}</Text>
                     </Column>
                     {if connected {
                         AnyView::new(ui! { <Button on_press={ChatMessage::DisableRemoteControl}

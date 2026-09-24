@@ -17,6 +17,7 @@ path = "src/main.rs"
 required-features = ["application"]
 
 [dependencies]
+nickel-i18n = { path = "../nickel-i18n" }
 nickel-markdown = { path = "../nickel-markdown", default-features = false }
 nickel-core = { path = "../nickel-core", optional = true }
 nickel-platform = { path = "../nickel-platform", optional = true }

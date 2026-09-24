@@ -11,6 +11,7 @@ authenticated-live-tests = []
 workbench-fixtures = []
 
 [dependencies]
+nickel-i18n = { path = "../nickel-i18n" }
 nickel-codex = { path = "../nickel-codex" }
 image.workspace = true
 base64.workspace = true

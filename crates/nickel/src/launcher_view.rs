@@ -899,7 +899,12 @@ fn build_launcher_view_directional(
         .scroll_owner("launcher-search-scroll")
         .gap(GRID_GAP);
     let result_content = if launcher.result_count() == 0 {
-        AnyView::new(Text::new("No matching applications").color(theme.text.secondary))
+        AnyView::new(
+            Text::new(nickel_i18n::system_text(
+                "ui-launcher-view-no-matching-applications",
+            ))
+            .color(theme.text.secondary),
+        )
     } else {
         AnyView::new(
             VerticalScroll::new(LauncherAction::SearchScroll, 0.0)
@@ -1098,9 +1103,11 @@ fn build_dashboard_view_directional(
         structural_icon(icons, name, bytes, theme.text.secondary)
     };
 
-    let mut sidebar = Column::new()
-        .gap(2.0)
-        .child(Text::new("Places").scale(0.8).color(theme.text.secondary));
+    let mut sidebar = Column::new().gap(2.0).child(
+        Text::new(nickel_i18n::system_text("ui-launcher-view-places"))
+            .scale(0.8)
+            .color(theme.text.secondary),
+    );
     for place in launcher.place_applications() {
         let icon = icons.resolve(place).unwrap_or_else(|| {
             icons
@@ -1120,7 +1127,7 @@ fn build_dashboard_view_directional(
     }
     if launcher.codex_available() {
         sidebar = sidebar.child(
-            Text::new("Recent projects")
+            Text::new(nickel_i18n::system_text("ui-launcher-view-recent-projects"))
                 .scale(0.8)
                 .color(theme.text.secondary),
         );
@@ -1147,7 +1154,7 @@ fn build_dashboard_view_directional(
         }
         sidebar = sidebar.child(dashboard_text_link(
             theme,
-            "All projects",
+            &nickel_i18n::system_text("ui-launcher-view-all-projects"),
             LauncherAction::SeeAllProjects,
         ));
     }
@@ -1155,12 +1162,12 @@ fn build_dashboard_view_directional(
         sidebar = sidebar
             .child(dashboard_text_link(
                 theme,
-                "Pinned & recent",
+                &nickel_i18n::system_text("ui-launcher-view-pinned-recent"),
                 LauncherAction::SetView(LauncherView::Favorites),
             ))
             .child(dashboard_text_link(
                 theme,
-                "All applications",
+                &nickel_i18n::system_text("ui-launcher-view-all-applications"),
                 LauncherAction::SetView(LauncherView::Applications),
             ));
     }
@@ -1192,7 +1199,10 @@ fn build_dashboard_view_directional(
                         .width(24.0)
                         .height(24.0),
                     )
-                    .child(Text::new("Settings").color(theme.text.primary)),
+                    .child(
+                        Text::new(nickel_i18n::system_text("ui-launcher-view-settings"))
+                            .color(theme.text.primary),
+                    ),
             ),
     );
 
@@ -1541,7 +1551,7 @@ fn dashboard_view_switch(
     if view == LauncherView::Applications {
         AnyView::new(dashboard_text_link(
             theme,
-            "Pinned & recent",
+            &nickel_i18n::system_text("ui-launcher-view-pinned-recent-2"),
             LauncherAction::SetView(LauncherView::Favorites),
         ))
     } else {
@@ -1570,11 +1580,18 @@ fn dashboard_view_switch(
             .child(
                 Column::new()
                     .gap(2.0)
-                    .child(Text::new("All applications").color(theme.text.primary))
                     .child(
-                        Text::new("Browse installed applications")
-                            .scale(0.9)
-                            .color(theme.text.secondary),
+                        Text::new(nickel_i18n::system_text(
+                            "ui-launcher-view-all-applications-2",
+                        ))
+                        .color(theme.text.primary),
+                    )
+                    .child(
+                        Text::new(nickel_i18n::system_text(
+                            "ui-launcher-view-browse-installed-applications",
+                        ))
+                        .scale(0.9)
+                        .color(theme.text.secondary),
                     ),
             );
         let content = if direction == ReadingDirection::RightToLeft {

@@ -859,11 +859,14 @@ where
         .enumerate()
         .map(|(index, (label, destination))| {
             AnyView::new(
-                Button::new(map_link(&destination), format!("{label}  ↗"))
-                    .id(UiId::new(format!("markdown-link-{id}-{index}")))
-                    .background(palette.surface)
-                    .color(palette.accent)
-                    .align_self(Align::Start),
+                Button::new(
+                    map_link(&destination),
+                    nickel_i18n::system_value("ui-markdown-link", "label", &label),
+                )
+                .id(UiId::new(format!("markdown-link-{id}-{index}")))
+                .background(palette.surface)
+                .color(palette.accent)
+                .align_self(Align::Start),
             )
         });
     let styled = inline_link_ranges.into_iter().fold(

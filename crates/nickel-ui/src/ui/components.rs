@@ -2200,8 +2200,16 @@ impl<Message> ShoulderHints<Message> {
         Self(
             Row::new()
                 .gap(8.0)
-                .child(keycap("LB", color, muted))
-                .child(keycap("RB", color, muted)),
+                .child(keycap(
+                    &nickel_i18n::system_text("ui-components-lb"),
+                    color,
+                    muted,
+                ))
+                .child(keycap(
+                    &nickel_i18n::system_text("ui-components-rb"),
+                    color,
+                    muted,
+                )),
         )
     }
 }

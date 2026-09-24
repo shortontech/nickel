@@ -433,9 +433,12 @@ fn scene(
         .child(status);
     if let Some(sample) = live {
         header_details = header_details.child(Spacer::vertical(4.0)).child(
-            Text::new(format!(
-                "red left eye  |  green right eye  |  blue combined    {}  |  {}",
-                sample.camera, sample.model
+            Text::new(nickel_i18n::system_values(
+                "ui-gaze-eye-summary",
+                &[
+                    ("camera", &sample.camera.to_string()),
+                    ("model", &sample.model.to_string()),
+                ],
             ))
             .height(22.0)
             .scale(0.62)
@@ -447,10 +450,13 @@ fn scene(
         .gap(8.0)
         .child(header_details.width((width - reserved_controls).max(240.0)))
         .child(
-            Button::new(Message::Recenter, "Recenter")
-                .id("recenter")
-                .background(HIGHLIGHT)
-                .border(ACCENT, 1.0),
+            Button::new(
+                Message::Recenter,
+                nickel_i18n::system_text("ui-nickel-gaze-grid-recenter"),
+            )
+            .id("recenter")
+            .background(HIGHLIGHT)
+            .border(ACCENT, 1.0),
         );
     if let Some(sample) = live {
         let preview_size = 52.0;

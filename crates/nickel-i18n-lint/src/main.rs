@@ -5,6 +5,7 @@ use std::{
     process::ExitCode,
 };
 
+use fluent_syntax::{ast, parser};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use syn::{
     Attribute, Expr, ExprCall, ExprMacro, ExprMethodCall, FnArg, ImplItemFn, ItemFn, ItemMod,
@@ -14,6 +15,7 @@ use syn::{
 };
 
 const CODE: &str = "NIL001";
+const MISSING_TRANSLATION_CODE: &str = "NIL002";
 const SUPPRESSION: &str = "nickel-i18n-lint: allow";
 
 #[derive(Debug, Eq, PartialEq)]
@@ -56,7 +58,10 @@ impl<'a> UiStringVisitor<'a> {
     }
 
     fn report(&mut self, span: Span, literal: String, sink: String) {
-        if literal.is_empty() {
+        if !literal
+            .bytes()
+            .any(|character| character.is_ascii_alphabetic())
+        {
             return;
         }
         let start = span.start();
@@ -819,8 +824,97 @@ fn lint_syntax(
     visitor.diagnostics
 }
 
+fn catalog_keys(path: &Path) -> Result<HashSet<String>, String> {
+    let source =
+        fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let resource = parser::parse(source.as_str())
+        .map_err(|(_, errors)| format!("{}: invalid Fluent catalog: {errors:?}", path.display()))?;
+    let mut keys = HashSet::new();
+    for entry in resource.body {
+        match entry {
+            ast::Entry::Message(message) => {
+                let id = message.id.name;
+                if message.value.is_some() {
+                    keys.insert(id.to_owned());
+                }
+                for attribute in message.attributes {
+                    keys.insert(format!("{id}.{}", attribute.id.name));
+                }
+            }
+            ast::Entry::Term(term) => {
+                let id = term.id.name;
+                keys.insert(format!("-{id}"));
+                for attribute in term.attributes {
+                    keys.insert(format!("-{id}.{}", attribute.id.name));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(keys)
+}
+
+fn locale_roots(inputs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = HashSet::new();
+    for input in inputs.iter().filter(|input| input.is_dir()) {
+        for candidate in [
+            input.to_owned(),
+            input.join("locales"),
+            input.join("nickel-i18n/locales"),
+            input.join("crates/nickel-i18n/locales"),
+        ] {
+            if candidate.file_name().is_some_and(|name| name == "locales")
+                && candidate.join("en-US").is_dir()
+            {
+                roots.insert(candidate);
+            }
+        }
+    }
+    let mut roots = roots.into_iter().collect::<Vec<_>>();
+    roots.sort();
+    roots
+}
+
+fn missing_translations(root: &Path) -> Result<Vec<(PathBuf, String, PathBuf)>, String> {
+    let english = root.join("en-US");
+    let mut english_files = fs::read_dir(&english)
+        .map_err(|error| format!("{}: {error}", english.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("{}: {error}", english.display()))?;
+    english_files.retain(|path| path.extension().is_some_and(|extension| extension == "ftl"));
+    english_files.sort();
+    let mut locales = fs::read_dir(root)
+        .map_err(|error| format!("{}: {error}", root.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("{}: {error}", root.display()))?;
+    locales.retain(|path| path.is_dir() && path.file_name().is_some_and(|name| name != "en-US"));
+    locales.sort();
+    let mut missing = Vec::new();
+    for english_file in english_files {
+        let english_keys = catalog_keys(&english_file)?;
+        for locale in &locales {
+            let translated_file = locale.join(english_file.file_name().unwrap());
+            let translated_keys = if translated_file.exists() {
+                catalog_keys(&translated_file)?
+            } else {
+                HashSet::new()
+            };
+            for key in english_keys.difference(&translated_keys) {
+                missing.push((translated_file.clone(), key.clone(), english_file.clone()));
+            }
+        }
+    }
+    missing.sort();
+    Ok(missing)
+}
+
 fn main() -> ExitCode {
-    let inputs = env::args_os().skip(1).map(PathBuf::from).collect::<Vec<_>>();
+    let inputs = env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
     let inputs = if inputs.is_empty() {
         vec![PathBuf::from("crates")]
     } else {
@@ -878,6 +972,25 @@ fn main() -> ExitCode {
             diagnostic.literal,
             diagnostic.sink,
         );
+    }
+    for root in locale_roots(&inputs) {
+        let missing = match missing_translations(&root) {
+            Ok(missing) => missing,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::from(2);
+            }
+        };
+        for (translated_file, key, english_file) in &missing {
+            eprintln!(
+                "{}: {MISSING_TRANSLATION_CODE} warning: missing translation key {key:?} from {}",
+                translated_file.display(),
+                english_file.display(),
+            );
+        }
+        if !missing.is_empty() {
+            eprintln!("{} missing translation warning(s)", missing.len());
+        }
     }
     if violations.is_empty() {
         ExitCode::SUCCESS

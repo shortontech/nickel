@@ -84,11 +84,18 @@ impl Application for RemoteIndicator {
                 .padding(Insets::all(14.0))
                 .gap(6.0)
                 .background(self.theme.surfaces.raised)
-                .child(Text::new("Remote control stopped").color(self.theme.text.primary))
                 .child(
-                    Text::new("All remote access and input were released")
-                        .color(self.theme.text.secondary)
-                        .wrap(true),
+                    Text::new(nickel_i18n::system_text(
+                        "ui-remote-indicator-remote-control-stopped",
+                    ))
+                    .color(self.theme.text.primary),
+                )
+                .child(
+                    Text::new(nickel_i18n::system_text(
+                        "ui-remote-indicator-all-remote-access-and-input-were-released",
+                    ))
+                    .color(self.theme.text.secondary)
+                    .wrap(true),
                 )
                 .into_element();
         }
@@ -100,32 +107,49 @@ impl Application for RemoteIndicator {
                     .fill_width()
                     .gap(4.0)
                     .child(
-                        Text::new(format!("Client: {}", grant.client))
-                            .color(self.theme.text.primary)
-                            .wrap(true),
-                    )
-                    .child(
-                        Text::new(format!(
-                            "State: {}",
-                            lease_status(grant.suspended, grant.connected)
+                        Text::new(nickel_i18n::system_value(
+                            "ui-remote-client",
+                            "value",
+                            &grant.client,
                         ))
                         .color(self.theme.text.primary)
                         .wrap(true),
                     )
                     .child(
-                        Text::new(format!("Scope: {}", grant.scope))
-                            .color(self.theme.text.primary)
-                            .wrap(true),
+                        Text::new(nickel_i18n::system_value(
+                            "ui-remote-state",
+                            "value",
+                            &lease_status(grant.suspended, grant.connected),
+                        ))
+                        .color(self.theme.text.primary)
+                        .wrap(true),
                     )
                     .child(
-                        Text::new(format!("Peer: {}", grant.peer))
-                            .color(self.theme.text.primary)
-                            .wrap(true),
+                        Text::new(nickel_i18n::system_value(
+                            "ui-remote-scope",
+                            "value",
+                            &grant.scope,
+                        ))
+                        .color(self.theme.text.primary)
+                        .wrap(true),
                     )
                     .child(
-                        Text::new(format!("Time: {}", grant.remaining))
-                            .color(self.theme.text.primary)
-                            .wrap(true),
+                        Text::new(nickel_i18n::system_value(
+                            "ui-remote-peer",
+                            "value",
+                            &grant.peer,
+                        ))
+                        .color(self.theme.text.primary)
+                        .wrap(true),
+                    )
+                    .child(
+                        Text::new(nickel_i18n::system_value(
+                            "ui-remote-time",
+                            "value",
+                            &grant.remaining,
+                        ))
+                        .color(self.theme.text.primary)
+                        .wrap(true),
                     ),
             );
         }
@@ -138,7 +162,12 @@ impl Application for RemoteIndicator {
                 Row::new()
                     .fill_width()
                     .gap(12.0)
-                    .child(Text::new("Remote AI Control").color(self.theme.text.primary))
+                    .child(
+                        Text::new(nickel_i18n::system_text(
+                            "ui-remote-indicator-remote-ai-control",
+                        ))
+                        .color(self.theme.text.primary),
+                    )
                     .child(
                         Button::semantic(
                             self.theme,
@@ -152,14 +181,21 @@ impl Application for RemoteIndicator {
                     ),
             )
             .child(
-                Text::new(format!(
-                    "{} · {} active / {} leases",
-                    self.transport,
-                    self.grants
-                        .iter()
-                        .filter(|grant| grant.connected && !grant.suspended)
-                        .count(),
-                    self.grants.len()
+                Text::new(nickel_i18n::system_values(
+                    "ui-remote-grant-summary",
+                    &[
+                        ("transport", &self.transport),
+                        (
+                            "active",
+                            &self
+                                .grants
+                                .iter()
+                                .filter(|grant| grant.connected && !grant.suspended)
+                                .count()
+                                .to_string(),
+                        ),
+                        ("leases", &self.grants.len().to_string()),
+                    ],
                 ))
                 .color(self.theme.text.primary)
                 .wrap(true),
@@ -172,9 +208,11 @@ impl Application for RemoteIndicator {
                     .child(grants),
             )
             .child(
-                Text::new("Left Ctrl + Right Ctrl also stops control")
-                    .color(self.theme.text.primary)
-                    .wrap(true),
+                Text::new(nickel_i18n::system_text(
+                    "ui-remote-indicator-left-ctrl-right-ctrl-also-stops-control",
+                ))
+                .color(self.theme.text.primary)
+                .wrap(true),
             )
             .into_element()
     }

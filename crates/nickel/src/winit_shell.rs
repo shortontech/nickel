@@ -1285,7 +1285,9 @@ impl WinitShell {
             geometry.scale,
         );
         let attributes = Window::default_attributes()
-            .with_title("Nickel Remote AI Control")
+            .with_title(nickel_i18n::system_text(
+                "ui-winit-shell-nickel-remote-ai-control",
+            ))
             .with_active(false)
             .with_skip_taskbar(true)
             .with_position(winit::dpi::PhysicalPosition::new(geometry.x, geometry.y))
