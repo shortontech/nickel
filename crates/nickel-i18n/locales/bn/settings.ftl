@@ -55,7 +55,7 @@ settings-display-primary = প্রাথমিক ডিসপ্লে
 settings-status-changes-not-applied = পরিবর্তন প্রয়োগ করা হয়নি
 settings-status-identifying = ডিসপ্লে শনাক্ত করা হচ্ছে
 settings-status-identify-failed = শনাক্ত করা যায়নি
-settings-status-using-mock-displays = নমুনা ডিসপ্লে ব্যবহার করা হচ্ছে
+settings-status-using-mock-displays = অনুকৃত ডিসপ্লে ব্যবহার করা হচ্ছে
 settings-status-no-displays = কোনো ডিসপ্লে পাওয়া যায়নি
 settings-status-layout-applied = বিন্যাস প্রয়োগ করা হয়েছে
 settings-status-apply-failed = প্রয়োগ করা যায়নি: { $error }
@@ -380,7 +380,7 @@ ui-nickel-terminal-cancel = বাতিল
 ui-nickel-terminal-paste-multiple-lines = একাধিক লাইন পেস্ট করুন
 ui-nickel-terminal-cancel-2 = বাতিল
 ui-on-screen-keyboard-not-enough-space-for-usable-keys-increase-the-available-window-area-or-reduce-display-scaling = ব্যবহারযোগ্য কী দেখানোর মতো যথেষ্ট জায়গা নেই। উইন্ডোর উপলভ্য জায়গা বাড়ান অথবা ডিসপ্লে স্কেলিং কমান।
-ui-on-screen-keyboard-english-us = English (US)
+ui-on-screen-keyboard-english-us = ইংরেজি (US)
 ui-components-lb = LB
 ui-components-rb = RB
 
