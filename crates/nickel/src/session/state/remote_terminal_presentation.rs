@@ -1,7 +1,7 @@
 //! Terminal presentation settings are staged off-thread and committed by the desktop owner.
 use super::NickelSession;
 use crate::remote_policy::{
-    apply_terminal_preferences as apply, terminal_preferences as preferences,
+    apply_terminal_preferences as apply, terminal_preferences as preferences, terminal_snapshot,
 };
 use nickel_core::terminal_settings::{PreparedTerminalSettings, TerminalSettings, settings_path};
 use nickel_remote_control::{
@@ -98,14 +98,11 @@ impl TerminalPresentationState {
                 .ok_or("terminal presentation generation exhausted")?;
             self.observed = Some((read.revision.clone(), configured.clone()));
         }
-        Ok(Snapshot {
-            generation: self.generation,
+        Ok(terminal_snapshot(
+            self.generation,
             observed_at_us,
-            configured,
-            custom_shell_configured: read.settings.default_shell.is_some(),
-            initial_directory_configured: read.settings.initial_working_directory.is_some(),
-            applies_to_new_terminals: true,
-        })
+            &read.settings,
+        ))
     }
 
     fn validate(&self, prepared: &PreparedChange, transaction: &Transaction) -> Result<(), String> {

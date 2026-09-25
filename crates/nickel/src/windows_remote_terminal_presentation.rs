@@ -6,7 +6,7 @@
 //! directory values are preserved in the file but never enter the remote API.
 
 use crate::remote_policy::{
-    apply_terminal_preferences as apply, terminal_preferences as preferences,
+    apply_terminal_preferences as apply, terminal_preferences as preferences, terminal_snapshot,
 };
 use nickel_core::terminal_settings::{PreparedTerminalSettings, TerminalSettings, settings_path};
 use nickel_remote_control::terminal_presentation as api;
@@ -165,7 +165,7 @@ impl State {
         observed_at_us: u64,
     ) -> Result<api::Snapshot, String> {
         let configured = preferences(&prepared.settings);
-        let value = (prepared.revision.clone(), configured.clone());
+        let value = (prepared.revision.clone(), configured);
         if self.observed.as_ref() != Some(&value) {
             self.generation = self
                 .generation
@@ -173,10 +173,9 @@ impl State {
                 .ok_or("terminal presentation generation exhausted")?;
             self.observed = Some(value);
         }
-        Ok(snapshot(
+        Ok(terminal_snapshot(
             self.generation,
             observed_at_us,
-            configured,
             &prepared.settings,
         ))
     }
@@ -210,31 +209,12 @@ impl State {
             .generation
             .checked_add(1)
             .ok_or("terminal presentation generation exhausted")?;
-        self.observed = Some((committed.revision.clone(), configured.clone()));
-        Ok(snapshot(
+        self.observed = Some((committed.revision.clone(), configured));
+        Ok(terminal_snapshot(
             self.generation,
             observed_at_us,
-            configured,
             &committed.settings,
         ))
-    }
-}
-
-fn snapshot(
-    generation: u64,
-    observed_at_us: u64,
-    configured: api::Preferences,
-    settings: &TerminalSettings,
-) -> api::Snapshot {
-    api::Snapshot {
-        generation,
-        observed_at_us,
-        configured,
-        custom_shell_configured: settings.default_shell.is_some(),
-        initial_directory_configured: settings.initial_working_directory.is_some(),
-        // nickel-terminal loads this file while constructing each process and
-        // retains the resulting settings for that process and its later tabs.
-        applies_to_new_terminals: true,
     }
 }
 

@@ -86,3 +86,8 @@ supplies its existing backend reads and retains its worker/commit owner. Eight s
 and both focused Windows application-scale owner tests pass. Formatting and the exact Windows
 workspace strict Clippy command pass after this consolidation. The Linux path has not been built
 or tested under the current user instruction.
+
+Terminal snapshot projection is also shared now. Both owners derive the configured presentation
+and the two private launch-field presence flags from the same function; neither private value
+enters the remote payload. The shared policy suite and both focused Windows terminal-owner tests
+pass. The Linux owner retains its native revision, authorization, and commit sequence.

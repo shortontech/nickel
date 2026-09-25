@@ -113,6 +113,22 @@ pub(crate) fn terminal_preferences(
     }
 }
 
+pub(crate) fn terminal_snapshot(
+    generation: u64,
+    observed_at_us: u64,
+    settings: &TerminalSettings,
+) -> terminal_presentation::Snapshot {
+    terminal_presentation::Snapshot {
+        generation,
+        observed_at_us,
+        configured: terminal_preferences(settings),
+        custom_shell_configured: settings.default_shell.is_some(),
+        initial_directory_configured: settings.initial_working_directory.is_some(),
+        // Each terminal process reads this file when it starts.
+        applies_to_new_terminals: true,
+    }
+}
+
 pub(crate) fn apply_terminal_preferences(
     settings: &mut TerminalSettings,
     requested: &terminal_presentation::Preferences,
@@ -385,6 +401,16 @@ mod tests {
             settings.initial_working_directory.as_deref(),
             Some(std::path::Path::new("private-directory"))
         );
+        let snapshot = terminal_snapshot(3, 42, &settings);
+        assert_eq!(snapshot.generation, 3);
+        assert_eq!(snapshot.observed_at_us, 42);
+        assert_eq!(snapshot.configured, requested);
+        assert!(snapshot.custom_shell_configured);
+        assert!(snapshot.initial_directory_configured);
+        assert!(snapshot.applies_to_new_terminals);
+        let wire = serde_json::to_string(&snapshot).unwrap();
+        assert!(!wire.contains("private-shell"));
+        assert!(!wire.contains("private-directory"));
     }
 
     #[test]
