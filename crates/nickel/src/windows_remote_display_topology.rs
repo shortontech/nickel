@@ -1018,10 +1018,12 @@ mod tests {
         path.sourceInfo.id = 5;
         path.targetInfo.id = 6;
         path.sourceInfo.Anonymous.modeInfoIdx = 0;
-        let mut mode = DISPLAYCONFIG_MODE_INFO::default();
-        mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
-        mode.adapterId = path.sourceInfo.adapterId;
-        mode.id = path.sourceInfo.id;
+        let mut mode = DISPLAYCONFIG_MODE_INFO {
+            infoType: DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
+            adapterId: path.sourceInfo.adapterId,
+            id: path.sourceInfo.id,
+            ..Default::default()
+        };
         mode.Anonymous.sourceMode.width = 1920;
         mode.Anonymous.sourceMode.height = 1080;
         assert_eq!(active_source_modes(&[path], &[mode]).unwrap().len(), 1);
