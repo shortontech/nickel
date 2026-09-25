@@ -849,7 +849,48 @@ mod tests {
     #[test]
     #[ignore = "reads the current Windows display topology"]
     fn native_display_target_identity_matches_active_monitors() {
+        use windows::Win32::Devices::Display::{
+            DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+        };
+
         let outputs = crate::platform::remote_observation::outputs().unwrap();
+        let all_paths = native_paths(QDC_ALL_PATHS).unwrap();
+        let active_paths = native_paths(QDC_ONLY_ACTIVE_PATHS).unwrap();
+        let available_targets = all_paths
+            .iter()
+            .filter(|path| path.targetInfo.targetAvailable.as_bool())
+            .map(target_key)
+            .collect::<BTreeSet<_>>();
+        let active_targets = active_paths.iter().map(target_key).collect::<BTreeSet<_>>();
+        eprintln!(
+            "Windows display topology: {} active monitors, {} active targets, {} available targets across {} paths",
+            outputs.len(),
+            active_targets.len(),
+            available_targets.len(),
+            all_paths.len()
+        );
+        for path in all_paths.iter().filter(|path| {
+            path.targetInfo.targetAvailable.as_bool() && !active_targets.contains(&target_key(path))
+        }) {
+            let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                    size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                    adapterId: path.targetInfo.adapterId,
+                    id: path.targetInfo.id,
+                },
+                ..Default::default()
+            };
+            // SAFETY: The initialized packet is writable for this read-only query.
+            let result = unsafe { DisplayConfigGetDeviceInfo(&raw mut target.header) };
+            eprintln!(
+                "inactive available target: query={}, monitor_path_present={}, friendly_name_present={}",
+                result,
+                target.monitorDevicePath[0] != 0,
+                target.monitorFriendlyDeviceName[0] != 0
+            );
+            break;
+        }
         let identities =
             complete_active_target_identities(outputs.iter().map(|output| output.name.clone()));
         match identities {

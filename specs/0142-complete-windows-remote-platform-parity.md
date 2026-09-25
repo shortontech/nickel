@@ -87,7 +87,12 @@ with an accurate reason and contract evidence.
   compiles and formatting passes.
 - A read-only native DisplayConfig probe found connected targets outside the active monitor
   inventory on the current Windows setup. Remote snapshots report incomplete topology and
-  refuse layout transactions there. The opt-in native display mutation test has not run.
+  refuse layout transactions there. On 2026-09-25, the probe found one active monitor, two
+  available targets, and 150 possible paths; the inactive available target returned a monitor
+  device path and friendly name. The opt-in native display mutation test has not run. See the
+  [QueryDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-querydisplayconfig)
+  and [target device name](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_target_device_name)
+  documentation for the path and monitor identity fields used by the probe.
 - Windows printer and removable-volume reads are available through a bounded observation
   worker. Printer mutations remain unavailable because the native spooler calls lack a
   cancellable production owner; the platform contract records that limitation.
