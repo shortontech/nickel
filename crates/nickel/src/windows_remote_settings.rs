@@ -879,6 +879,7 @@ impl PreparedWallpaperRead {
         Self::at_with_catalog(path, catalog)
     }
 
+    #[cfg(test)]
     fn at(path: PathBuf) -> Result<Self, String> {
         Self::at_with_catalog(path, Catalog::discover(|| Ok(()))?)
     }
@@ -927,12 +928,6 @@ pub(crate) struct PreparedWallpaperChange {
 }
 
 impl PreparedWallpaperChange {
-    pub(crate) fn prepare(
-        transaction: &nickel_remote_control::wallpaper::Transaction,
-    ) -> Result<Self, String> {
-        Self::prepare_with_check(transaction, || Ok(()))
-    }
-
     pub(crate) fn prepare_with_check(
         transaction: &nickel_remote_control::wallpaper::Transaction,
         mut check: impl FnMut() -> Result<(), String>,
@@ -941,6 +936,7 @@ impl PreparedWallpaperChange {
         Self::from_read_with_check(prior, transaction, &mut check)
     }
 
+    #[cfg(test)]
     fn from_read(
         prior: PreparedWallpaperRead,
         transaction: &nickel_remote_control::wallpaper::Transaction,
