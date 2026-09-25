@@ -2672,6 +2672,32 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         if !layout.valid_representation() {
             return Err("Windows display owner reported an invalid layout".into());
         }
+        let dimensions = inventory
+            .outputs
+            .iter()
+            .map(|output| {
+                Ok((
+                    identities
+                        .get(&output.name)
+                        .ok_or("Windows display identity changed")?
+                        .clone(),
+                    (
+                        u32::try_from(output.geometry[2])
+                            .map_err(|_| "Windows display width is invalid")?,
+                        u32::try_from(output.geometry[3])
+                            .map_err(|_| "Windows display height is invalid")?,
+                    ),
+                ))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?;
+        crate::windows_remote_display_topology::validate_position_change(
+            inventory.topology_generation,
+            inventory.topology_generation,
+            &layout,
+            &layout,
+            &layout,
+            &dimensions,
+        )?;
         permit.check_live()?;
         Ok(nickel_remote_control::display_layout::Snapshot {
             observation_generation: inventory.observation_generation,

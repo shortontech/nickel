@@ -3,6 +3,7 @@
 //! presented as a complete transactional layout while a connected target is
 //! disabled or while a cloned source obscures target identity.
 
+use nickel_remote_control::display_layout::Layout;
 use std::collections::{BTreeMap, BTreeSet};
 use windows::Win32::{
     Devices::Display::{
@@ -132,9 +133,97 @@ pub(crate) fn complete_active_target_identities(
     complete_active_targets(connected, active, monitor_names)
 }
 
+/// Validate the subset that the current GDI placement API can preserve: all
+/// connected targets remain enabled at their observed scale, while positions
+/// and primary selection may change. Dimensions come from the same fresh
+/// monitor observation as `current` and are keyed by stable target identity.
+pub(crate) fn validate_position_change(
+    requested_topology_generation: u64,
+    current_topology_generation: u64,
+    prior: &Layout,
+    requested: &Layout,
+    current: &Layout,
+    dimensions: &BTreeMap<String, (u32, u32)>,
+) -> Result<(), String> {
+    if requested_topology_generation != current_topology_generation
+        || prior != current
+        || !requested.valid_representation()
+        || !requested.same_output_incarnations(current)
+    {
+        return Err("Windows display request has stale or incomplete topology".into());
+    }
+    if dimensions.len() != current.outputs.len() {
+        return Err("Windows display dimensions are incomplete".into());
+    }
+    let primary = requested
+        .outputs
+        .iter()
+        .find(|placement| placement.output == requested.primary)
+        .ok_or("Windows primary display is unavailable")?;
+    for placement in &requested.outputs {
+        let observed = current
+            .outputs
+            .iter()
+            .find(|observed| observed.output == placement.output)
+            .ok_or("Windows display target retired")?;
+        if !observed.enabled || !placement.enabled {
+            return Err("Windows display enable changes require a DisplayConfig owner".into());
+        }
+        if placement.scale_120 != observed.scale_120 {
+            return Err("Windows display scale changes are unavailable".into());
+        }
+        let (width, height) = dimensions
+            .get(&placement.output.id)
+            .copied()
+            .ok_or("Windows display dimensions are unavailable")?;
+        if width == 0
+            || height == 0
+            || i64::from(placement.x) + i64::from(width) > i64::from(i32::MAX)
+            || i64::from(placement.y) + i64::from(height) > i64::from(i32::MAX)
+            || i32::try_from(i64::from(placement.x) - i64::from(primary.x)).is_err()
+            || i32::try_from(i64::from(placement.y) - i64::from(primary.y)).is_err()
+        {
+            return Err("Windows display placement exceeds native coordinate bounds".into());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nickel_remote_control::{display_layout::Placement, leases::ResourceId};
+
+    fn layout(primary: &str, left_x: i32, right_x: i32) -> Layout {
+        Layout {
+            primary: ResourceId {
+                id: primary.into(),
+                generation: if primary == "right" { 2 } else { 1 },
+            },
+            outputs: vec![
+                Placement {
+                    output: ResourceId {
+                        id: "left".into(),
+                        generation: 1,
+                    },
+                    x: left_x,
+                    y: -100,
+                    enabled: true,
+                    scale_120: 120,
+                },
+                Placement {
+                    output: ResourceId {
+                        id: "right".into(),
+                        generation: 2,
+                    },
+                    x: right_x,
+                    y: 0,
+                    enabled: true,
+                    scale_120: 180,
+                },
+            ],
+        }
+    }
 
     #[test]
     fn complete_active_topology_requires_exact_native_targets_and_monitor_names() {
@@ -158,6 +247,55 @@ mod tests {
                 names.clone()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn placement_validation_preserves_scale_and_rejects_retired_or_disabled_targets() {
+        let current = layout("left", -1920, 0);
+        let requested = layout("right", 0, -1920);
+        let dimensions = BTreeMap::from([
+            ("left".into(), (1920, 1080)),
+            ("right".into(), (1920, 1080)),
+        ]);
+        assert!(
+            validate_position_change(7, 7, &current, &requested, &current, &dimensions).is_ok()
+        );
+        let mut changed_scale = requested.clone();
+        changed_scale.outputs[1].scale_120 = 120;
+        assert!(
+            validate_position_change(7, 7, &current, &changed_scale, &current, &dimensions)
+                .is_err()
+        );
+        let mut disabled = requested.clone();
+        disabled.outputs[0].enabled = false;
+        assert!(
+            validate_position_change(7, 7, &current, &disabled, &current, &dimensions).is_err()
+        );
+        disabled.outputs[1].enabled = false;
+        assert!(
+            validate_position_change(7, 7, &current, &disabled, &current, &dimensions).is_err()
+        );
+        let mut retired = requested.clone();
+        retired.outputs[0].output.generation += 1;
+        assert!(validate_position_change(7, 7, &current, &retired, &current, &dimensions).is_err());
+        assert!(
+            validate_position_change(
+                7,
+                7,
+                &current,
+                &requested,
+                &layout("left", -1919, 0),
+                &dimensions
+            )
+            .is_err()
+        );
+        let overflowing = layout("left", i32::MAX, 0);
+        assert!(
+            validate_position_change(7, 7, &current, &overflowing, &current, &dimensions).is_err()
+        );
+        assert!(
+            validate_position_change(6, 7, &current, &requested, &current, &dimensions).is_err()
         );
     }
 }
