@@ -1,4 +1,6 @@
-use std::{path::PathBuf, sync::mpsc};
+use std::path::PathBuf;
+#[cfg(any(test, target_os = "linux"))]
+use std::sync::mpsc;
 
 use nickel_file::{FileLaunch, FileWindowRequest};
 
@@ -36,10 +38,12 @@ impl FileWindowHost for ExternalFileWindowHost {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) struct ChannelFileWindowHost {
     sender: mpsc::Sender<FileWindowRequest>,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 impl FileWindowHost for ChannelFileWindowHost {
     fn dispatch(&self, request: FileWindowRequest) -> Result<(), String> {
         self.sender
@@ -48,6 +52,7 @@ impl FileWindowHost for ChannelFileWindowHost {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) fn internal_file_window_channel() -> (
     std::sync::Arc<dyn FileWindowHost>,
     mpsc::Receiver<FileWindowRequest>,
