@@ -532,7 +532,7 @@ unsafe extern "system" fn collect_monitor(
     });
     BOOL(1)
 }
-fn outputs() -> Result<Vec<Output>, String> {
+pub(crate) fn outputs() -> Result<Vec<Output>, String> {
     let mut state = MonitorCollector {
         outputs: Vec::new(),
         failed: false,

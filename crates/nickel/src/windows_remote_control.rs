@@ -1203,8 +1203,120 @@ struct WindowsDesktopAuthority {
     capture_generation: std::sync::atomic::AtomicU64,
     peripheral_state: std::sync::Mutex<crate::remote_peripheral_controls::State>,
     peripheral_observation_worker: Arc<WindowsPlatformRefreshWorker>,
+    display_state: Arc<std::sync::Mutex<WindowsDisplayState>>,
     settings_worker: Arc<WindowsSettingsWorker>,
     platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
+}
+
+const WINDOWS_DISPLAY_RECOVERY_DURATION: Duration = Duration::from_secs(15);
+
+#[derive(Default)]
+struct WindowsDisplayState {
+    generation: u64,
+    pending: Option<WindowsDisplayRecovery>,
+}
+
+struct WindowsDisplayRecovery {
+    owner: DesktopPermit,
+    generation: u64,
+    confirmed: nickel_remote_control::display_layout::Layout,
+    requested: nickel_remote_control::display_layout::Layout,
+    plan: crate::windows_remote_display_topology::RecoveryPlan,
+    deadline: Option<Instant>,
+    confirmable: bool,
+    revert_failed: bool,
+}
+
+impl WindowsDisplayState {
+    fn snapshot(
+        &self,
+        inventory: &nickel_remote_control::diagnostics::OutputInventory,
+        observed: &crate::windows_remote_display_topology::Observation,
+    ) -> nickel_remote_control::display_layout::Snapshot {
+        use nickel_remote_control::display_layout::{Recovery, RecoveryState, Snapshot};
+        let (confirmed, recovery) = self.pending.as_ref().map_or_else(
+            || {
+                (
+                    observed.layout.clone(),
+                    Recovery {
+                        state: RecoveryState::Confirmed,
+                        generation: 0,
+                        deadline_uptime_us: None,
+                    },
+                )
+            },
+            |pending| {
+                (
+                    pending.confirmed.clone(),
+                    Recovery {
+                        state: if pending.revert_failed {
+                            RecoveryState::RevertFailed
+                        } else {
+                            RecoveryState::AwaitingConfirmation
+                        },
+                        generation: pending.generation,
+                        deadline_uptime_us: pending.deadline.map(|deadline| {
+                            inventory.observed_at_us.saturating_add(
+                                deadline
+                                    .saturating_duration_since(Instant::now())
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                            )
+                        }),
+                    },
+                )
+            },
+        );
+        Snapshot {
+            observation_generation: inventory.observation_generation,
+            observed_at_us: inventory.observed_at_us,
+            topology_generation: inventory.topology_generation,
+            topology_complete: observed.topology_complete,
+            transaction_supported: observed.topology_complete,
+            transaction_unavailable_reason: observed.transaction_unavailable_reason.clone(),
+            requested: observed.layout.clone(),
+            confirmed,
+            recovery,
+        }
+    }
+}
+
+fn spawn_windows_display_recovery(
+    state: Arc<std::sync::Mutex<WindowsDisplayState>>,
+    generation: u64,
+) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("nickel-windows-display-recovery".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                let Ok(mut state) = state.lock() else {
+                    return;
+                };
+                let Some(pending) = state.pending.as_mut() else {
+                    return;
+                };
+                if pending.generation != generation || pending.revert_failed {
+                    return;
+                }
+                if pending
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                    || pending.owner.check_standing_live().is_err()
+                {
+                    if pending.plan.restore().is_ok() {
+                        state.pending = None;
+                    } else {
+                        pending.deadline = None;
+                        pending.revert_failed = true;
+                    }
+                    return;
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|_| "Windows display recovery worker could not start".into())
 }
 impl WindowsDesktopAuthority {
     fn preferred_applications_catalog(
@@ -2629,100 +2741,279 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::display_layout::Snapshot, String> {
         permit.with_debug(false, || Ok(()))?;
+        let state = self
+            .display_state
+            .try_lock()
+            .map_err(|_| "Windows display transaction owner is busy")?;
         let inventory = self.list_outputs(permit.clone())?;
-        if inventory.truncated || inventory.outputs.is_empty() {
-            return Err("complete Windows display layout is unavailable".into());
-        }
-        let identities = crate::windows_remote_display_topology::complete_active_target_identities(
-            inventory.outputs.iter().map(|output| output.name.clone()),
-        )?;
-        let primary = inventory
-            .outputs
-            .iter()
-            .find(|output| output.primary && output.enabled)
-            .ok_or("Windows display layout has no enabled primary output")?;
-        let primary = nickel_remote_control::leases::ResourceId {
-            id: identities
-                .get(&primary.name)
-                .ok_or("Windows primary display identity changed")?
-                .clone(),
-            generation: primary.generation,
-        };
-        let mut outputs = inventory
-            .outputs
-            .iter()
-            .map(|output| {
-                Ok(nickel_remote_control::display_layout::Placement {
-                    output: nickel_remote_control::leases::ResourceId {
-                        id: identities
-                            .get(&output.name)
-                            .ok_or("Windows display identity changed")?
-                            .clone(),
-                        generation: output.generation,
-                    },
-                    x: output.geometry[0],
-                    y: output.geometry[1],
-                    enabled: output.enabled,
-                    scale_120: output.scale_120,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        outputs.sort_by(|left, right| left.output.id.cmp(&right.output.id));
-        let layout = nickel_remote_control::display_layout::Layout { primary, outputs };
-        if !layout.valid_representation() {
-            return Err("Windows display owner reported an invalid layout".into());
-        }
-        let dimensions = inventory
-            .outputs
-            .iter()
-            .map(|output| {
-                Ok((
-                    identities
-                        .get(&output.name)
-                        .ok_or("Windows display identity changed")?
-                        .clone(),
-                    (
-                        u32::try_from(output.geometry[2])
-                            .map_err(|_| "Windows display width is invalid")?,
-                        u32::try_from(output.geometry[3])
-                            .map_err(|_| "Windows display height is invalid")?,
-                    ),
-                ))
-            })
-            .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?;
-        crate::windows_remote_display_topology::validate_position_change(
-            inventory.topology_generation,
-            inventory.topology_generation,
-            &layout,
-            &layout,
-            &layout,
-            &dimensions,
-        )?;
+        let observed = crate::windows_remote_display_topology::observe(&inventory)?;
         permit.check_live()?;
-        Ok(nickel_remote_control::display_layout::Snapshot {
-            observation_generation: inventory.observation_generation,
-            observed_at_us: inventory.observed_at_us,
-            topology_generation: inventory.topology_generation,
-            transaction_supported: false,
-            transaction_unavailable_reason: Some(
-                "Nickel has no production Windows display reconfiguration owner".into(),
-            ),
-            requested: layout.clone(),
-            confirmed: layout,
-            recovery: nickel_remote_control::display_layout::Recovery {
-                state: nickel_remote_control::display_layout::RecoveryState::Confirmed,
-                generation: 0,
-                deadline_uptime_us: None,
-            },
-        })
+        Ok(state.snapshot(&inventory, &observed))
     }
     fn display_layout_transaction(
         &self,
         permit: DesktopPermit,
-        _transaction: nickel_remote_control::display_layout::Transaction,
+        transaction: nickel_remote_control::display_layout::Transaction,
     ) -> Result<nickel_remote_control::display_layout::Snapshot, String> {
+        use nickel_remote_control::display_layout::Transaction;
         permit.with_debug(false, || Ok(()))?;
-        Err("Windows display layout transactions are unavailable: Nickel has no production Windows display reconfiguration owner".into())
+        let mut state = self
+            .display_state
+            .try_lock()
+            .map_err(|_| "Windows display transaction owner is busy")?;
+        let inventory = self.list_outputs(permit.clone())?;
+        let observed = crate::windows_remote_display_topology::observe(&inventory)?;
+        if !observed.topology_complete {
+            return Err(observed
+                .transaction_unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "complete Windows display topology is unavailable".into()));
+        }
+        match transaction {
+            Transaction::Apply {
+                topology_generation,
+                prior,
+                requested,
+            } => {
+                if state.pending.is_some() {
+                    return Err("Windows display recovery is already pending".into());
+                }
+                crate::windows_remote_display_topology::validate_position_change(
+                    topology_generation,
+                    inventory.topology_generation,
+                    &prior,
+                    &requested,
+                    &observed.layout,
+                    &observed.dimensions,
+                )?;
+                let generation = state
+                    .generation
+                    .checked_add(1)
+                    .ok_or("Windows display recovery generations exhausted")?;
+                let attempt = permit.with_debug_input_deadline(false, |boundary| {
+                    if !crate::windows_remote_input::physical_input_idle() {
+                        return Err("shared input is busy".into());
+                    }
+                    permit.check_commit_boundary(boundary)?;
+                    Ok(
+                        crate::windows_remote_display_topology::apply_position_change(
+                            &observed,
+                            &prior,
+                            &requested,
+                            topology_generation,
+                            || permit.check_commit_boundary(boundary),
+                        ),
+                    )
+                })?;
+                let plan = match attempt {
+                    Ok(plan) => plan,
+                    Err(failure) => {
+                        if let Some(plan) = failure.recovery {
+                            state.generation = generation;
+                            state.pending = Some(WindowsDisplayRecovery {
+                                owner: permit.clone(),
+                                generation,
+                                confirmed: prior.clone(),
+                                requested: requested.clone(),
+                                plan,
+                                deadline: Some(Instant::now()),
+                                confirmable: false,
+                                revert_failed: false,
+                            });
+                            if spawn_windows_display_recovery(
+                                Arc::clone(&self.display_state),
+                                generation,
+                            )
+                            .is_err()
+                            {
+                                let pending = state.pending.as_mut().unwrap();
+                                if pending.plan.restore().is_ok() {
+                                    state.pending = None;
+                                } else {
+                                    pending.deadline = None;
+                                    pending.revert_failed = true;
+                                }
+                            }
+                        }
+                        return Err(failure.reason);
+                    }
+                };
+                state.generation = generation;
+                state.pending = Some(WindowsDisplayRecovery {
+                    owner: permit.clone(),
+                    generation,
+                    confirmed: prior,
+                    requested: requested.clone(),
+                    plan,
+                    deadline: Some(Instant::now() + WINDOWS_DISPLAY_RECOVERY_DURATION),
+                    confirmable: true,
+                    revert_failed: false,
+                });
+                if let Err(error) =
+                    spawn_windows_display_recovery(Arc::clone(&self.display_state), generation)
+                {
+                    let pending = state.pending.take().unwrap();
+                    return if pending.plan.restore().is_ok() {
+                        Err(error)
+                    } else {
+                        state.pending = Some(WindowsDisplayRecovery {
+                            deadline: None,
+                            revert_failed: true,
+                            ..pending
+                        });
+                        Err(
+                            "Windows display recovery worker failed and rollback is uncertain"
+                                .into(),
+                        )
+                    };
+                }
+                let confirmed_inventory = match self.list_outputs(permit.clone()) {
+                    Ok(inventory) => inventory,
+                    Err(error) => {
+                        state.pending.as_mut().unwrap().deadline = Some(Instant::now());
+                        return Err(format!(
+                            "Windows display readback failed; automatic recovery is pending: {error}"
+                        ));
+                    }
+                };
+                let confirmed = match crate::windows_remote_display_topology::observe(
+                    &confirmed_inventory,
+                ) {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        state.pending.as_mut().unwrap().deadline = Some(Instant::now());
+                        return Err(format!(
+                            "Windows display readback is incomplete; automatic recovery is pending: {error}"
+                        ));
+                    }
+                };
+                if !confirmed.topology_complete
+                    || !crate::windows_remote_display_topology::matches_physical_layout(
+                        &confirmed.layout,
+                        &requested,
+                    )
+                {
+                    let pending = state.pending.take().unwrap();
+                    return if pending.plan.restore().is_ok() {
+                        Err("Windows display readback did not confirm the requested layout".into())
+                    } else {
+                        state.pending = Some(WindowsDisplayRecovery {
+                            deadline: None,
+                            revert_failed: true,
+                            ..pending
+                        });
+                        Err("Windows display readback differed and rollback is uncertain".into())
+                    };
+                }
+                if let Err(error) = permit.check_live() {
+                    state.pending.as_mut().unwrap().deadline = Some(Instant::now());
+                    return Err(error);
+                }
+                Ok(state.snapshot(&confirmed_inventory, &confirmed))
+            }
+            Transaction::Keep {
+                topology_generation,
+                recovery_generation,
+            } => {
+                if topology_generation != inventory.topology_generation {
+                    return Err("Windows display topology changed before confirmation".into());
+                }
+                let pending = state
+                    .pending
+                    .as_ref()
+                    .ok_or("no Windows display recovery is pending")?;
+                if pending.generation != recovery_generation
+                    || !pending.owner.same_lease_as(&permit)
+                    || !pending.confirmable
+                    || pending.revert_failed
+                    || !crate::windows_remote_display_topology::matches_physical_layout(
+                        &observed.layout,
+                        &pending.requested,
+                    )
+                    || pending
+                        .deadline
+                        .is_none_or(|deadline| Instant::now() >= deadline)
+                {
+                    return Err(
+                        "Windows display recovery is stale or owned by another lease".into(),
+                    );
+                }
+                permit.with_debug(false, || Ok(()))?;
+                state.pending = None;
+                Ok(state.snapshot(&inventory, &observed))
+            }
+            Transaction::Revert {
+                topology_generation,
+                recovery_generation,
+            } => {
+                if topology_generation != inventory.topology_generation {
+                    return Err("Windows display topology changed before revert".into());
+                }
+                let pending = state
+                    .pending
+                    .as_mut()
+                    .ok_or("no Windows display recovery is pending")?;
+                if pending.generation != recovery_generation
+                    || !pending.owner.same_lease_as(&permit)
+                    || pending.revert_failed
+                    || pending
+                        .deadline
+                        .is_none_or(|deadline| Instant::now() >= deadline)
+                {
+                    return Err(
+                        "Windows display recovery is stale or owned by another lease".into(),
+                    );
+                }
+                let mut attempted = false;
+                let restored = permit.with_debug_input_deadline(false, |boundary| {
+                    if !crate::windows_remote_input::physical_input_idle() {
+                        return Err("shared input is busy".into());
+                    }
+                    permit.check_commit_boundary(boundary)?;
+                    attempted = true;
+                    pending.plan.restore()
+                });
+                if let Err(error) = restored {
+                    if attempted {
+                        pending.deadline = None;
+                        pending.revert_failed = true;
+                    }
+                    return Err(error);
+                }
+                let confirmed = pending.confirmed.clone();
+                let restored_inventory = match self.list_outputs(permit.clone()) {
+                    Ok(inventory) => inventory,
+                    Err(error) => {
+                        pending.deadline = Some(Instant::now());
+                        return Err(format!(
+                            "Windows display revert readback failed; recovery remains pending: {error}"
+                        ));
+                    }
+                };
+                let observed_restore = match crate::windows_remote_display_topology::observe(
+                    &restored_inventory,
+                ) {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        pending.deadline = Some(Instant::now());
+                        return Err(format!(
+                            "Windows display revert readback is incomplete; recovery remains pending: {error}"
+                        ));
+                    }
+                };
+                if !crate::windows_remote_display_topology::matches_physical_layout(
+                    &observed_restore.layout,
+                    &confirmed,
+                ) {
+                    pending.deadline = None;
+                    pending.revert_failed = true;
+                    return Err("Windows display revert readback did not match".into());
+                }
+                state.pending = None;
+                permit.check_live()?;
+                Ok(state.snapshot(&restored_inventory, &observed_restore))
+            }
+        }
     }
     fn list_surfaces(
         &self,
@@ -3341,6 +3632,7 @@ impl WindowsRemoteControl {
         let settings_worker = Arc::new(WindowsSettingsWorker::default());
         let platform_refresh_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         let peripheral_observation_worker = Arc::new(WindowsPlatformRefreshWorker::default());
+        let display_state = Arc::new(std::sync::Mutex::new(WindowsDisplayState::default()));
         let authority = Arc::new(WindowsDesktopAuthority {
             cleanup_wake,
             sender: sender.clone(),
@@ -3351,6 +3643,7 @@ impl WindowsRemoteControl {
                 crate::remote_peripheral_controls::State::default(),
             ),
             peripheral_observation_worker,
+            display_state,
             settings_worker: settings_worker.clone(),
             platform_refresh_worker: platform_refresh_worker.clone(),
         });
@@ -9505,6 +9798,7 @@ mod tests {
         let settings_worker = Arc::new(WindowsSettingsWorker::default());
         let platform_refresh_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         let peripheral_observation_worker = Arc::new(WindowsPlatformRefreshWorker::default());
+        let display_state = Arc::new(std::sync::Mutex::new(WindowsDisplayState::default()));
         WindowsRemoteControl {
             _transport: None,
             receiver,
@@ -9532,6 +9826,7 @@ mod tests {
                     crate::remote_peripheral_controls::State::default(),
                 ),
                 peripheral_observation_worker,
+                display_state,
                 settings_worker,
                 platform_refresh_worker,
             }),

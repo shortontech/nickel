@@ -103,6 +103,7 @@ impl NickelSession {
             observation_generation: self.remote_observation_generation,
             observed_at_us,
             topology_generation: self.output_topology_generation,
+            topology_complete: true,
             transaction_supported: true,
             transaction_unavailable_reason: None,
             requested,

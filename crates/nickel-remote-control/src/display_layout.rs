@@ -121,6 +121,9 @@ pub struct Snapshot {
     pub observation_generation: u64,
     pub observed_at_us: u64,
     pub topology_generation: u64,
+    /// False when the platform can observe only active monitors and cannot
+    /// represent every connected target. Transactions must then be unavailable.
+    pub topology_complete: bool,
     /// False means the platform can report layout but has no truthful production mutation path.
     pub transaction_supported: bool,
     pub transaction_unavailable_reason: Option<String>,

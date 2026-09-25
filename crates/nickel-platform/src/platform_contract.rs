@@ -149,11 +149,11 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "Explorer registry preference",
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
-    unavailable(
+    fixture(
         PlatformFamily::Windows,
         AdapterCapability::RemoteDisplayTransactions,
-        "no production Windows display reconfiguration owner",
-        "platform_contract::tests::matrix_is_complete_and_truthful",
+        "Windows DisplayConfig identity and guarded GDI placement owner",
+        "windows_remote_display_topology::tests::placement_validation_preserves_scale_and_rejects_retired_or_disabled_targets",
     ),
     unavailable(
         PlatformFamily::Windows,
@@ -224,6 +224,7 @@ mod tests {
             };
             assert_eq!(row[0], platform);
             assert_eq!(row[1], capability);
+            assert_eq!(row[3], contract.fixture);
             assert_eq!(row[5], "fixture_only");
             assert_eq!(row[6], "none");
             assert!(!row[3].is_empty());
