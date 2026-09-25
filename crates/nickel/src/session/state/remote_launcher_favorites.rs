@@ -1,6 +1,6 @@
 //! Installed favorites preparation is bounded/off-owner; rename retains original authority.
 use super::NickelSession;
-use crate::remote_policy::FavoriteCatalog;
+use crate::remote_policy::{FavoriteCatalog, favorite_snapshot};
 use nickel_core::launcher_preferences::{
     LauncherPreferences, PreparedLauncherPreferences, preferences_path,
 };
@@ -202,14 +202,14 @@ impl FavoritesState {
                 .ok_or("favorites generation exhausted")?;
         }
         self.observed = Some(value);
-        Ok(Snapshot {
-            generation: self.generation,
-            catalog_generation: prepared.catalog_generation,
-            observed_at_us: time,
-            favorites: prepared.favorites.clone(),
-            unavailable_favorites: prepared.unavailable,
+        Ok(favorite_snapshot(
+            self.generation,
+            prepared.catalog_generation,
+            time,
+            &prepared.favorites,
+            prepared.unavailable,
             runtime_applied,
-        })
+        ))
     }
     fn validate(&self, prepared: &PreparedRead, transaction: &Transaction) -> Result<(), String> {
         let expected = (

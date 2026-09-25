@@ -91,3 +91,7 @@ Terminal snapshot projection is also shared now. Both owners derive the configur
 and the two private launch-field presence flags from the same function; neither private value
 enters the remote payload. The shared policy suite and both focused Windows terminal-owner tests
 pass. The Linux owner retains its native revision, authorization, and commit sequence.
+
+Launcher favorites snapshots now use one shared projection as well. It carries the visible
+favorites, unavailable count, catalog generation, and runtime-applied flag without exposing
+hidden stored entries. The shared suite and all three focused Windows favorites-owner tests pass.

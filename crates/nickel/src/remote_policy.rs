@@ -36,6 +36,24 @@ pub(crate) fn favorite_projection(
     (favorites, unavailable)
 }
 
+pub(crate) fn favorite_snapshot(
+    generation: u64,
+    catalog_generation: u64,
+    observed_at_us: u64,
+    favorites: &[String],
+    unavailable_favorites: usize,
+    runtime_applied: bool,
+) -> launcher_favorites::Snapshot {
+    launcher_favorites::Snapshot {
+        generation,
+        catalog_generation,
+        observed_at_us,
+        favorites: favorites.to_vec(),
+        unavailable_favorites,
+        runtime_applied,
+    }
+}
+
 pub(crate) fn changed_favorites(
     prior: &LauncherPreferences,
     catalog: &impl FavoriteCatalog,
@@ -313,6 +331,15 @@ mod tests {
             favorite_projection(&prior, &Catalog),
             (vec!["one".into(), "two".into()], 1)
         );
+        let (visible, unavailable) = favorite_projection(&prior, &Catalog);
+        let snapshot = favorite_snapshot(3, 7, 42, &visible, unavailable, true);
+        assert_eq!(snapshot.generation, 3);
+        assert_eq!(snapshot.catalog_generation, 7);
+        assert_eq!(snapshot.observed_at_us, 42);
+        assert_eq!(snapshot.favorites, ["one", "two"]);
+        assert_eq!(snapshot.unavailable_favorites, 1);
+        assert!(snapshot.runtime_applied);
+        assert!(!serde_json::to_string(&snapshot).unwrap().contains("hidden"));
         let changed = changed_favorites(
             &prior,
             &Catalog,

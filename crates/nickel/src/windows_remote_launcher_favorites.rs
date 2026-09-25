@@ -4,7 +4,7 @@
 //! request. The owner supplies and later revalidates the production launcher's
 //! exact application-ID catalog before committing the staged replacement.
 
-use crate::remote_policy::{FavoriteCatalog, favorite_projection as projection};
+use crate::remote_policy::{FavoriteCatalog, favorite_projection as projection, favorite_snapshot};
 use nickel_core::launcher_preferences::{
     LauncherPreferences, PreparedLauncherPreferences, preferences_path,
 };
@@ -250,14 +250,14 @@ impl FavoritesState {
                 .ok_or("favorites generation exhausted")?;
             self.observed = Some(observed);
         }
-        Ok(Snapshot {
-            generation: self.generation,
-            catalog_generation: prepared.catalog.generation,
+        Ok(favorite_snapshot(
+            self.generation,
+            prepared.catalog.generation,
             observed_at_us,
-            favorites: prepared.favorites.clone(),
-            unavailable_favorites: prepared.unavailable,
+            &prepared.favorites,
+            prepared.unavailable,
             runtime_applied,
-        })
+        ))
     }
 
     pub(crate) fn validate(
