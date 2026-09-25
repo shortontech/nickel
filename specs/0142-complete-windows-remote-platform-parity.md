@@ -112,11 +112,12 @@ with an accurate reason and contract evidence.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
   request reply expires. Physical input epoch and idle state are rechecked during Apply staging.
-- Windows printer and removable-volume reads are available through a bounded observation
-  worker. Printer mutations remain unavailable because the native spooler calls lack a
-  cancellable production owner; the platform contract and scrubbed remote snapshot/outcome
-  record that limitation. Shared outcome mapping preserves busy, permission, unsupported,
-  and rejection categories without returning native details.
+- Windows printer and removable-volume reads use the tested single-flight bounded platform
+  observation worker. Its fixture test covers deadline expiry, rejection of overlapping reads,
+  and release after a late native completion. Printer mutations remain unavailable because the
+  native spooler calls lack a cancellable production owner; the platform contract and scrubbed
+  remote snapshot/outcome record that limitation. Shared outcome mapping preserves busy,
+  permission, unsupported, and rejection categories without returning native details.
 - The exact Windows workspace strict Clippy command now reaches `nickel` and fails on unused
   code warnings after style findings in the workspace were corrected. Native surface focus/DPI
   and peripheral changing coverage remain pending. Linux tests are excluded by the current

@@ -1737,28 +1737,22 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::peripheral_controls::Snapshot, String> {
         permit.with_debug(false, || Ok(()))?;
-        let admission = self
-            .peripheral_observation_worker
-            .acquire()
-            .map_err(|_| "Windows peripheral observation is busy")?;
         let cancellation = permit.clone();
-        let (reply, receiver) = mpsc::sync_channel(1);
         // Native spooler and volume queries are read-only but can block. Keep
         // at most one call in flight and abandon its result after the lease or
         // response deadline expires; the worker holds admission until it exits.
-        std::thread::Builder::new()
-            .name("nickel-windows-peripheral-observation".into())
-            .spawn(move || {
-                let _admission = admission;
-                if cancellation.check_live().is_ok() {
-                    let _ = reply.try_send(nickel_platform::peripheral_service().inspect());
-                }
-            })
-            .map_err(|_| "Windows peripheral observation worker is unavailable".to_owned())?;
-        let native = receiver
-            .recv_timeout(Duration::from_millis(1900))
-            .map_err(|_| "Windows peripheral observation timed out or was cancelled")?
-            .map_err(crate::remote_peripheral_controls::observation_failure)?;
+        let native = run_windows_platform_refresh_worker(
+            Arc::clone(&self.peripheral_observation_worker),
+            Duration::from_millis(1900),
+            move || {
+                cancellation
+                    .check_live()
+                    .map_err(|_| "Windows peripheral observation was cancelled".to_owned())?;
+                Ok(nickel_platform::peripheral_service().inspect())
+            },
+        )
+        .map_err(|error| format!("Windows peripheral observation failed: {error}"))?
+        .map_err(crate::remote_peripheral_controls::observation_failure)?;
         permit.with_debug(false, || Ok(()))?;
         let mut state = self
             .peripheral_state
