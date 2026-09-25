@@ -1,10 +1,12 @@
 //! Production-owner state for the scrubbed MCP peripheral projection.
 use nickel_platform::{
-    PeripheralError, PeripheralFailureClass, PeripheralOutcome, PeripheralSnapshot,
-    PrintJobState as NativeJobState, PrinterState as NativePrinterState, RemotePeripheralControl,
-    VolumeState as NativeVolumeState,
+    PeripheralError, PeripheralFailureClass, PeripheralSnapshot, PrintJobState as NativeJobState,
+    PrinterState as NativePrinterState, VolumeState as NativeVolumeState,
 };
+#[cfg(any(test, target_os = "linux"))]
+use nickel_platform::{PeripheralOutcome, RemotePeripheralControl};
 use nickel_remote_control::peripheral_controls as wire;
+#[cfg(any(test, target_os = "linux"))]
 use nickel_remote_control::semantics::SurfaceSemanticCompletion as Completion;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -48,27 +50,34 @@ pub(crate) struct State {
     observations: VecDeque<Observation>,
 }
 
+// Native IDs are retained only when the Linux mutation owner is available.
+// Windows projects the snapshot and drops this temporary lookup.
+#[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
 struct Observation {
     generation: u64,
     printers: BTreeMap<String, ObservedPrinter>,
 }
 
+#[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
 struct ObservedPrinter {
     native_id: String,
     is_default: bool,
     jobs: BTreeMap<String, ObservedJob>,
 }
 
+#[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
 struct ObservedJob {
     native_id: String,
     state: wire::PrintJobState,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) struct Prepared {
     pub action: RemotePeripheralControl,
     expected: Expected,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 enum Expected {
     DefaultPrinter {
         native_printer: String,
@@ -80,6 +89,7 @@ enum Expected {
 }
 
 impl State {
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn invalidate(&mut self) {
         self.observations.clear();
     }
@@ -206,13 +216,15 @@ impl State {
                 wire::Availability::Unavailable,
             )
         };
-        if self.observations.len() == MAX_OBSERVATIONS {
-            self.observations.pop_front();
+        if control_unavailable_reason.is_none() {
+            if self.observations.len() == MAX_OBSERVATIONS {
+                self.observations.pop_front();
+            }
+            self.observations.push_back(Observation {
+                generation,
+                printers: observed_printers,
+            });
         }
-        self.observations.push_back(Observation {
-            generation,
-            printers: observed_printers,
-        });
         Ok(wire::Snapshot {
             generation,
             observed_at_micros,
@@ -232,6 +244,7 @@ impl State {
         })
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn prepare(&mut self, transaction: wire::Transaction) -> Result<Prepared, String> {
         if !transaction.valid() {
             return Err("invalid peripheral transaction".into());
@@ -299,6 +312,7 @@ impl State {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 impl Prepared {
     pub(crate) fn completion(
         &self,
@@ -361,6 +375,7 @@ fn job_state(state: NativeJobState) -> wire::PrintJobState {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn native_job_state(state: wire::PrintJobState) -> NativeJobState {
     match state {
         wire::PrintJobState::Pending => NativeJobState::Pending,
@@ -507,7 +522,8 @@ mod tests {
 
     #[test]
     fn unavailable_printer_controls_report_owner_limit_without_native_details() {
-        let snapshot = State::default()
+        let mut state = State::default();
+        let snapshot = state
             .observe(
                 raw(),
                 42,
@@ -522,6 +538,7 @@ mod tests {
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.contains("Secret office printer"));
         assert!(!json.contains("/private/path"));
+        assert!(state.observations.is_empty());
     }
 
     #[test]
@@ -554,5 +571,63 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn accepted_controls_require_fresh_native_confirmation_and_invalidation() {
+        let mut state = State::default();
+        let snapshot = state.observe(raw(), 42, None).unwrap();
+        let printer = &snapshot.printer_entries[0];
+        let job = &printer.jobs[0];
+        let cancel = wire::Transaction {
+            generation: snapshot.generation,
+            action: wire::Action::CancelPrintJob {
+                printer_id: printer.id.clone(),
+                job_id: job.id.clone(),
+                prior_state: wire::PrintJobState::Printing,
+            },
+        };
+        let prepared = state.prepare(cancel.clone()).unwrap();
+        assert_eq!(
+            prepared.completion(PeripheralOutcome::Accepted, Some(&raw())),
+            Completion::Requested
+        );
+        let mut after_cancel = raw();
+        after_cancel.printers.as_mut().unwrap()[0].jobs.clear();
+        assert_eq!(
+            prepared.completion(PeripheralOutcome::Accepted, Some(&after_cancel)),
+            Completion::Confirmed
+        );
+        assert_eq!(
+            prepared.completion(PeripheralOutcome::Accepted, None),
+            Completion::Requested
+        );
+        assert!(state.prepare(cancel).is_err());
+
+        let snapshot = state.observe(raw(), 43, None).unwrap();
+        let set_default = wire::Transaction {
+            generation: snapshot.generation,
+            action: wire::Action::SetDefaultPrinter {
+                printer_id: snapshot.printer_entries[0].id.clone(),
+                prior_is_default: false,
+            },
+        };
+        let prepared = state.prepare(set_default).unwrap();
+        let mut after_default = raw();
+        after_default.printers.as_mut().unwrap()[0].is_default = true;
+        assert_eq!(
+            prepared.completion(PeripheralOutcome::Accepted, Some(&after_default)),
+            Completion::Confirmed
+        );
+        let latest = state.observe(raw(), 44, None).unwrap();
+        let invalidated = wire::Transaction {
+            generation: latest.generation,
+            action: wire::Action::SetDefaultPrinter {
+                printer_id: latest.printer_entries[0].id.clone(),
+                prior_is_default: false,
+            },
+        };
+        state.invalidate();
+        assert!(state.prepare(invalidated).is_err());
     }
 }

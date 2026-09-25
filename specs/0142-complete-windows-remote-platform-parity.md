@@ -117,7 +117,10 @@ with an accurate reason and contract evidence.
   and release after a late native completion. Printer mutations remain unavailable because the
   native spooler calls lack a cancellable production owner; the platform contract and scrubbed
   remote snapshot/outcome record that limitation. Shared outcome mapping preserves busy,
-  permission, unsupported, and rejection categories without returning native details.
+  permission, unsupported, and rejection categories without returning native details. The
+  Windows unavailable-control path drops native printer and job lookup IDs after projecting its
+  scrubbed snapshot. A shared fixture also verifies that accepted printer/job actions require
+  fresh native confirmation and that invalidation rejects an old opaque target.
 - The exact Windows workspace strict Clippy command now reaches `nickel` and fails on unused
   code warnings after style findings in the workspace were corrected. Native surface focus/DPI
   and peripheral changing coverage remain pending. Linux tests are excluded by the current
