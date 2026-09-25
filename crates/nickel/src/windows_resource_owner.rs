@@ -2011,6 +2011,66 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires NICKEL_WINDOWS_SURFACE_HWND and NICKEL_WINDOWS_SURFACE_PID for a live Nickel surface"]
+    fn native_live_shell_surface_pointer_uses_current_dpi_and_visible_client() {
+        use windows::Win32::{
+            Foundation::{HWND, RECT},
+            UI::{
+                HiDpi::GetDpiForWindow,
+                WindowsAndMessaging::{
+                    GetClientRect, GetForegroundWindow, GetWindowThreadProcessId,
+                },
+            },
+        };
+        let native = std::env::var("NICKEL_WINDOWS_SURFACE_HWND")
+            .expect("explicit decimal Nickel surface HWND")
+            .parse::<usize>()
+            .expect("decimal HWND");
+        let expected_pid = std::env::var("NICKEL_WINDOWS_SURFACE_PID")
+            .expect("explicit Nickel process ID")
+            .parse::<u32>()
+            .expect("decimal PID");
+        let window = HWND(native as *mut _);
+        let mut observed_pid = 0;
+        // SAFETY: Every native call is a read-only query of the selected HWND.
+        let before_focus = unsafe { GetForegroundWindow() };
+        assert_ne!(
+            unsafe { GetWindowThreadProcessId(window, Some(&mut observed_pid)) },
+            0
+        );
+        assert_eq!(observed_pid, expected_pid);
+        let dpi = unsafe { GetDpiForWindow(window) };
+        assert!(dpi >= 96, "native surface DPI unavailable: {dpi}");
+        let mut rect = RECT::default();
+        unsafe { GetClientRect(window, &mut rect) }.expect("native shell client geometry");
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        assert!(width > 0 && height > 0);
+        let scale = dpi as f32 / 96.0;
+        let logical_width = (f64::from(width) / f64::from(scale)).floor() as i64;
+        let logical_height = (f64::from(height) / f64::from(scale)).floor() as i64;
+        let visible_point = [2_i64, 3, 4, 5].into_iter().find_map(|divisor| {
+            let (client_x, client_y) = shell_surface_client_point(
+                (logical_width / divisor).max(1) as i32,
+                (logical_height / 2).max(1) as i32,
+                logical_width,
+                logical_height,
+                scale,
+            )
+            .ok()?;
+            crate::windows_remote_input::target_point(native, client_x, client_y).ok()
+        });
+        assert!(
+            visible_point.is_some(),
+            "selected Nickel surface has no exposed client point"
+        );
+        eprintln!(
+            "native Nickel surface DPI={dpi}, client={width}x{height}, foreground_at_start={}, foreground_at_end={}",
+            before_focus == window,
+            unsafe { GetForegroundWindow() } == window
+        );
+    }
+
+    #[test]
     fn output_pointer_target_requires_exact_generation_and_global_membership() {
         let mut owner = Owner::default();
         owner

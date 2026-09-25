@@ -134,5 +134,8 @@ with an accurate reason and contract evidence.
 - A native Windows test creates a hidden, non-activating window under per-monitor DPI awareness,
   reads its actual DPI and client bounds, and verifies the production surface coordinate mapper
   stays inside that client area while the window remains outside foreground focus. It passes on
-  Windows. Foreground focus transitions, visible hit testing, and scale changes across monitors
-  remain unverified.
+  Windows. A separate opt-in, read-only native run selected a live Nickel Panel by PID and HWND,
+  observed DPI 96 with a 1920×56 client area, and found an exposed point through the production
+  logical-to-client mapper and native occlusion check. The Panel was not foreground; the run made
+  no focus change. Foreground focus transitions, actual pointer injection, and scale changes across
+  monitors remain unverified.
