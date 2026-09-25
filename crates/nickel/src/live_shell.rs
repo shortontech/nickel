@@ -146,6 +146,9 @@ use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CodexApprovalOwner {
+    // Internal surfaces are owned by the Linux compositor. Windows retains
+    // this variant in fixtures that verify cross-platform approval identity.
+    #[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
     Internal(InternalSurfaceId),
     Winit(crate::winit_shell::SurfaceId),
 }
@@ -436,13 +439,6 @@ impl LockApplication {
             palette: ThemePalette::from_appearance(Appearance::default()),
             effects: Vec::new(),
         }
-    }
-}
-
-#[cfg(test)]
-impl LiveShell {
-    pub(crate) fn lock_password_len(&self) -> usize {
-        self.lock_host.application().password.len()
     }
 }
 

@@ -145,6 +145,7 @@ impl LauncherApplication {
         std::mem::take(&mut self.effects)
     }
 
+    #[cfg(test)]
     pub(crate) fn preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
         preferred_launcher_surface_size(&self.launcher, self.palette, maximum)
     }

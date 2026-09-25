@@ -37,17 +37,26 @@ pub enum ControlAction {
     ToggleWifiSection,
     WifiScroll,
     SetWifiEnabled(bool),
-    ActivateWifi { id: String },
+    ActivateWifi {
+        id: String,
+    },
     ToggleBluetoothSection,
     BluetoothScroll,
     SetBluetoothPowered(bool),
     SetBluetoothDiscovery(bool),
-    ToggleBluetoothDevice { id: String },
+    ToggleBluetoothDevice {
+        id: String,
+    },
     ToggleAudioSection,
     AudioScroll,
     SetAudioVolume(u8),
+    // Emitted by the Linux guarded audio owner; Windows uses its native
+    // volume path and does not currently construct this shell action.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     SetAudioMuted(bool),
-    SelectAudioDevice { id: String },
+    SelectAudioDevice {
+        id: String,
+    },
     SwitchWorkspace(u64),
     CreateWorkspace,
     ToggleShowDesktop,
