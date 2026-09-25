@@ -1,13 +1,29 @@
 //! Production-owner state for the scrubbed MCP peripheral projection.
 use nickel_platform::{
-    PeripheralOutcome, PeripheralSnapshot, PrintJobState as NativeJobState,
-    PrinterState as NativePrinterState, RemotePeripheralControl, VolumeState as NativeVolumeState,
+    PeripheralError, PeripheralFailureClass, PeripheralOutcome, PeripheralSnapshot,
+    PrintJobState as NativeJobState, PrinterState as NativePrinterState, RemotePeripheralControl,
+    VolumeState as NativeVolumeState,
 };
 use nickel_remote_control::peripheral_controls as wire;
 use nickel_remote_control::semantics::SurfaceSemanticCompletion as Completion;
 use std::collections::{BTreeMap, VecDeque};
 
 const MAX_OBSERVATIONS: usize = 16;
+
+/// Preserve the native failure class without returning provider text, which may
+/// contain private printer names, document titles, or volume paths.
+pub(crate) fn observation_failure(error: PeripheralError) -> String {
+    match error.class {
+        PeripheralFailureClass::Authorization => "peripheral observation permission denied",
+        PeripheralFailureClass::Busy => "peripheral observation provider is busy",
+        PeripheralFailureClass::ProviderUnavailable => {
+            "peripheral observation provider is unavailable"
+        }
+        PeripheralFailureClass::InvalidTarget => "peripheral observation target is stale",
+        PeripheralFailureClass::Unknown => "peripheral observation failed",
+    }
+    .into()
+}
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -351,6 +367,28 @@ mod tests {
     use nickel_platform::{
         FilesystemUsage, PeripheralProvider, PrintJob, Printer, RemovableVolume,
     };
+
+    #[test]
+    fn observation_failures_keep_categories_without_private_provider_text() {
+        for (class, category) in [
+            (PeripheralFailureClass::Authorization, "permission denied"),
+            (PeripheralFailureClass::Busy, "provider is busy"),
+            (
+                PeripheralFailureClass::ProviderUnavailable,
+                "provider is unavailable",
+            ),
+            (PeripheralFailureClass::InvalidTarget, "target is stale"),
+            (PeripheralFailureClass::Unknown, "observation failed"),
+        ] {
+            let result = observation_failure(PeripheralError {
+                class,
+                detail: "Secret printer /private/volume".into(),
+            });
+            assert!(result.contains(category));
+            assert!(!result.contains("Secret"));
+            assert!(!result.contains("/private"));
+        }
+    }
 
     fn raw() -> PeripheralSnapshot {
         PeripheralSnapshot {

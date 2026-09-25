@@ -1580,7 +1580,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let native = receiver
             .recv_timeout(Duration::from_millis(1900))
             .map_err(|_| "Windows peripheral observation timed out or was cancelled")?
-            .map_err(|_| "Windows peripheral provider is unavailable")?;
+            .map_err(crate::remote_peripheral_controls::observation_failure)?;
         permit.with_debug(false, || Ok(()))?;
         let mut state = self
             .peripheral_state
