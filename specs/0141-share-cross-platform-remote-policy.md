@@ -95,3 +95,4 @@ pass. The Linux owner retains its native revision, authorization, and commit seq
 Launcher favorites snapshots now use one shared projection as well. It carries the visible
 favorites, unavailable count, catalog generation, and runtime-applied flag without exposing
 hidden stored entries. The shared suite and all three focused Windows favorites-owner tests pass.
+The Windows `cargo build --workspace` passes after these consolidations.

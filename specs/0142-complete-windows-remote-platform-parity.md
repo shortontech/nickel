@@ -139,3 +139,4 @@ with an accurate reason and contract evidence.
   logical-to-client mapper and native occlusion check. The Panel was not foreground; the run made
   no focus change. Foreground focus transitions, actual pointer injection, and scale changes across
   monitors remain unverified.
+- `cargo build --workspace` passes on Windows after the latest shared-policy changes.
