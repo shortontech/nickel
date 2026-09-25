@@ -1339,7 +1339,7 @@ impl WindowsDisplayState {
             observed_at_us: inventory.observed_at_us,
             topology_generation: inventory.topology_generation,
             topology_complete: observed.topology_complete,
-            transaction_supported: observed.topology_complete,
+            transaction_supported: observed.transaction_supported,
             transaction_unavailable_reason: observed.transaction_unavailable_reason.clone(),
             requested: observed.layout.clone(),
             confirmed,
@@ -2830,7 +2830,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .map_err(|_| "Windows display transaction owner is busy")?;
         let inventory = self.list_outputs(permit.clone())?;
         let observed = crate::windows_remote_display_topology::observe(&inventory)?;
-        if !observed.topology_complete {
+        if !observed.transaction_supported {
             return Err(observed
                 .transaction_unavailable_reason
                 .clone()

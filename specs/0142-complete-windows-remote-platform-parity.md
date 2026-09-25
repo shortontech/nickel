@@ -105,7 +105,10 @@ with an accurate reason and contract evidence.
   [ChangeDisplaySettingsEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-changedisplaysettingsexa)
   and [SetDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig).
   Synthetic source-mode transformation and read-only native active/database queries pass on
-  Windows. A native changing round trip remains unverified on a complete multi-monitor fixture.
+  Windows. The read-only native `SetDisplayConfig` validation call also passes. Transaction
+  support is now reported separately from topology completeness and requires readable active and
+  saved modes plus successful native validation. A native changing round trip remains unverified
+  on a complete multi-monitor fixture.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
   request reply expires. Physical input epoch and idle state are rechecked during Apply staging.

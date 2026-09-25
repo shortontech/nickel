@@ -27,6 +27,7 @@ pub(crate) struct Observation {
     pub layout: Layout,
     pub topology_generation: u64,
     pub topology_complete: bool,
+    pub transaction_supported: bool,
     pub transaction_unavailable_reason: Option<String>,
     pub dimensions: BTreeMap<String, (u32, u32)>,
     pub native_names: BTreeMap<String, String>,
@@ -98,16 +99,22 @@ pub(crate) fn observe(inventory: &OutputInventory) -> Result<Observation, String
     let identities = complete_active_target_identities(
         inventory.outputs.iter().map(|output| output.name.clone()),
     );
-    project_inventory(inventory, identities)
+    let readiness = if identities.is_ok() {
+        native_transaction_prerequisites()
+    } else {
+        Ok(())
+    };
+    project_inventory(inventory, identities, readiness)
 }
 
 fn project_inventory(
     inventory: &OutputInventory,
     identities: Result<BTreeMap<String, String>, String>,
+    readiness: Result<(), String>,
 ) -> Result<Observation, String> {
     use nickel_remote_control::{display_layout::Placement, leases::ResourceId};
     let (identities, topology_complete, transaction_unavailable_reason) = match identities {
-        Ok(identities) => (identities, true, None),
+        Ok(identities) => (identities, true, readiness.err()),
         Err(reason) => (
             inventory
                 .outputs
@@ -172,6 +179,7 @@ fn project_inventory(
         layout,
         topology_generation: inventory.topology_generation,
         topology_complete,
+        transaction_supported: topology_complete && transaction_unavailable_reason.is_none(),
         transaction_unavailable_reason,
         dimensions,
         native_names,
@@ -708,6 +716,34 @@ fn native_configuration(
     Ok((paths, modes))
 }
 
+fn native_transaction_prerequisites() -> Result<(), String> {
+    use windows::Win32::Devices::Display::{
+        QDC_VIRTUAL_MODE_AWARE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
+        SDC_VIRTUAL_MODE_AWARE, SetDisplayConfig,
+    };
+    let (active_paths, active_modes) =
+        native_configuration(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE)?;
+    configuration_positions(&active_paths, &active_modes)?;
+    let (saved_paths, saved_modes) =
+        native_configuration(QDC_DATABASE_CURRENT | QDC_VIRTUAL_MODE_AWARE)?;
+    configuration_positions(&saved_paths, &saved_modes)?;
+    // SAFETY: SDC_VALIDATE only checks the captured active configuration and
+    // does not change active or saved display settings.
+    let result = unsafe {
+        SetDisplayConfig(
+            Some(&active_paths),
+            Some(&active_modes),
+            SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE,
+        )
+    };
+    if result != ERROR_SUCCESS.0 as i32 {
+        return Err(format!(
+            "Windows display configuration validation is unavailable ({result})"
+        ));
+    }
+    Ok(())
+}
+
 fn native_paths(flags: QUERY_DISPLAY_CONFIG_FLAGS) -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, String> {
     native_configuration(flags).map(|(paths, _)| paths)
 }
@@ -910,8 +946,10 @@ mod tests {
             }],
             truncated: false,
         };
-        let incomplete = project_inventory(&inventory, Err("extra native target".into())).unwrap();
+        let incomplete =
+            project_inventory(&inventory, Err("extra native target".into()), Ok(())).unwrap();
         assert!(!incomplete.topology_complete);
+        assert!(!incomplete.transaction_supported);
         assert_eq!(
             incomplete.transaction_unavailable_reason.as_deref(),
             Some("extra native target")
@@ -923,10 +961,28 @@ mod tests {
                 r"\\.\DISPLAY1".into(),
                 "adapter:target".into(),
             )])),
+            Ok(()),
         )
         .unwrap();
         assert!(complete.topology_complete);
+        assert!(complete.transaction_supported);
         assert_eq!(complete.layout.primary.id, "adapter:target");
+        let unavailable = project_inventory(
+            &inventory,
+            Ok(BTreeMap::from([(
+                r"\\.\DISPLAY1".into(),
+                "adapter:target".into(),
+            )])),
+            Err("saved Windows display configuration unavailable".into()),
+        )
+        .unwrap();
+        assert!(unavailable.topology_complete);
+        assert!(!unavailable.transaction_supported);
+        assert_eq!(unavailable.layout.primary.id, "adapter:target");
+        assert_eq!(
+            unavailable.transaction_unavailable_reason.as_deref(),
+            Some("saved Windows display configuration unavailable")
+        );
     }
 
     #[test]
@@ -1005,6 +1061,7 @@ mod tests {
             layout: native_layout,
             topology_generation: 1,
             topology_complete: true,
+            transaction_supported: true,
             transaction_unavailable_reason: None,
             dimensions: native_requested
                 .outputs
@@ -1161,6 +1218,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        native_transaction_prerequisites().unwrap();
         assert_eq!(paths.len(), outputs.len());
         for path in &paths {
             let name = source_name(path).unwrap();
