@@ -27,6 +27,8 @@ display transaction API.
   Report confirmed state only from that query; report failures and uncertain results honestly.
 - Support `Apply`, `Keep`, and `Revert` with an owner-held, bounded recovery window. On expiry or
   lost authority, restore the confirmed prior layout when safe and report recovery state.
+- Keep tentative `Apply` changes out of persistent Windows display settings. A process exit
+  during the recovery window must not make the unconfirmed layout the saved configuration.
 - Keep `transaction_supported` false with a specific reason on systems where the required
   native capability or ownership cannot be established.
 
@@ -95,6 +97,13 @@ with an accurate reason and contract evidence.
   [QueryDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-querydisplayconfig)
   and [target device name](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_target_device_name)
   documentation for the path and monitor identity fields used by the probe.
+- The current guarded GDI placement owner stages multiple monitors with
+  `CDS_UPDATEREGISTRY | CDS_NORESET`, as required by
+  [ChangeDisplaySettingsEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-changedisplaysettingsexa).
+  This saves tentative settings before confirmation, leaving a process-exit recovery gap.
+  [SetDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig)
+  supports a temporary supplied configuration without `SDC_SAVE_TO_DATABASE`; that migration
+  and a native round trip remain required before display parity is complete.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
   request reply expires. Physical input epoch and idle state are rechecked during Apply staging.

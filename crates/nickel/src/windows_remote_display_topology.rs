@@ -9,14 +9,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use windows::Win32::{
     Devices::Display::{
         DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ALL_PATHS,
-        QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS, QueryDisplayConfig,
+        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes,
+        QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS, QueryDisplayConfig,
     },
     Foundation::ERROR_SUCCESS,
 };
 
 const MAX_NATIVE_PATHS: usize = 4096;
+const MAX_NATIVE_MODES: usize = 8192;
 type TargetKey = (i32, u32, u32);
 
 pub(crate) struct Observation {
@@ -508,7 +509,58 @@ fn target_identity(key: TargetKey) -> String {
     )
 }
 
-fn native_paths(flags: QUERY_DISPLAY_CONFIG_FLAGS) -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, String> {
+fn source_mode_index(path: &DISPLAYCONFIG_PATH_INFO) -> Result<usize, String> {
+    use windows::Win32::Graphics::Gdi::{
+        DISPLAYCONFIG_PATH_MODE_IDX_INVALID, DISPLAYCONFIG_PATH_SOURCE_MODE_IDX_INVALID,
+        DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE,
+    };
+
+    // SAFETY: QueryDisplayConfig initializes the active path's source union;
+    // the path flag determines which indexed representation it contains.
+    let index = if path.flags & DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE != 0 {
+        unsafe { path.sourceInfo.Anonymous.Anonymous._bitfield >> 16 }
+    } else {
+        unsafe { path.sourceInfo.Anonymous.modeInfoIdx }
+    };
+    if index == DISPLAYCONFIG_PATH_MODE_IDX_INVALID
+        || index == DISPLAYCONFIG_PATH_SOURCE_MODE_IDX_INVALID
+    {
+        return Err("Windows active display source mode is unavailable".into());
+    }
+    usize::try_from(index).map_err(|_| "Windows display source mode index is invalid".into())
+}
+
+fn active_source_modes(
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+) -> Result<BTreeMap<TargetKey, usize>, String> {
+    let mut indices = BTreeMap::new();
+    for path in paths {
+        let index = source_mode_index(path)?;
+        let mode = modes
+            .get(index)
+            .ok_or("Windows active display source mode is missing")?;
+        if mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE
+            || mode.adapterId != path.sourceInfo.adapterId
+            || mode.id != path.sourceInfo.id
+        {
+            return Err("Windows active display source mode changed".into());
+        }
+        // SAFETY: infoType confirms the initialized source-mode union member.
+        let source_mode = unsafe { mode.Anonymous.sourceMode };
+        if source_mode.width == 0 || source_mode.height == 0 {
+            return Err("Windows active display source dimensions are invalid".into());
+        }
+        if indices.insert(target_key(path), index).is_some() {
+            return Err("Windows display target has ambiguous source modes".into());
+        }
+    }
+    Ok(indices)
+}
+
+fn native_configuration(
+    flags: QUERY_DISPLAY_CONFIG_FLAGS,
+) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), String> {
     let mut path_count = 0;
     let mut mode_count = 0;
     // SAFETY: The count pointers are valid writable storage.
@@ -517,8 +569,11 @@ fn native_paths(flags: QUERY_DISPLAY_CONFIG_FLAGS) -> Result<Vec<DISPLAYCONFIG_P
     {
         return Err("Windows DisplayConfig topology is unavailable".into());
     }
-    if path_count == 0 || path_count as usize > MAX_NATIVE_PATHS {
-        return Err("Windows DisplayConfig path count exceeds its bound".into());
+    if path_count == 0
+        || path_count as usize > MAX_NATIVE_PATHS
+        || mode_count as usize > MAX_NATIVE_MODES
+    {
+        return Err("Windows DisplayConfig topology exceeds its bound".into());
     }
     let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
     let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
@@ -538,7 +593,12 @@ fn native_paths(flags: QUERY_DISPLAY_CONFIG_FLAGS) -> Result<Vec<DISPLAYCONFIG_P
         return Err("Windows DisplayConfig changed during observation".into());
     }
     paths.truncate(path_count as usize);
-    Ok(paths)
+    modes.truncate(mode_count as usize);
+    Ok((paths, modes))
+}
+
+fn native_paths(flags: QUERY_DISPLAY_CONFIG_FLAGS) -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, String> {
+    native_configuration(flags).map(|(paths, _)| paths)
 }
 
 fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Result<String, String> {
@@ -601,7 +661,9 @@ pub(crate) fn complete_active_target_identities(
         .filter(|path| path.targetInfo.targetAvailable.as_bool())
         .map(|path| target_key(&path))
         .collect::<Vec<_>>();
-    let active = native_paths(QDC_ONLY_ACTIVE_PATHS)?
+    let (active_paths, active_modes) = native_configuration(QDC_ONLY_ACTIVE_PATHS)?;
+    active_source_modes(&active_paths, &active_modes)?;
+    let active = active_paths
         .into_iter()
         .map(|path| Ok((source_name(&path)?, target_key(&path))))
         .collect::<Result<Vec<_>, String>>()?;
@@ -779,6 +841,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn active_source_modes_reject_missing_or_mismatched_native_modes() {
+        let mut path = DISPLAYCONFIG_PATH_INFO::default();
+        path.sourceInfo.adapterId.HighPart = 3;
+        path.sourceInfo.adapterId.LowPart = 4;
+        path.sourceInfo.id = 5;
+        path.targetInfo.id = 6;
+        path.sourceInfo.Anonymous.modeInfoIdx = 0;
+        let mut mode = DISPLAYCONFIG_MODE_INFO::default();
+        mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
+        mode.adapterId = path.sourceInfo.adapterId;
+        mode.id = path.sourceInfo.id;
+        mode.Anonymous.sourceMode.width = 1920;
+        mode.Anonymous.sourceMode.height = 1080;
+        assert_eq!(active_source_modes(&[path], &[mode]).unwrap().len(), 1);
+        assert!(active_source_modes(&[path], &[]).is_err());
+        mode.id += 1;
+        assert!(active_source_modes(&[path], &[mode]).is_err());
     }
 
     #[test]
