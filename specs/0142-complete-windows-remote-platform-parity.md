@@ -129,3 +129,5 @@ with an accurate reason and contract evidence.
 - The Windows image chooser contract now cites a focused fixture that distinguishes a native
   cancellation from a native failure. The chooser fixture and both platform-contract tests pass
   on Windows. This is fixture evidence; opening and using the native dialog remains unverified.
+- The contract's Windows surface-pointer fixture now has a recorded Windows test run; it passes
+  for logical-to-client coordinate conversion. Native focus and DPI interaction is still pending.
