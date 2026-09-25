@@ -25,6 +25,8 @@ mod windows_remote_codex;
 #[cfg(target_os = "windows")]
 mod windows_remote_control;
 #[cfg(target_os = "windows")]
+mod windows_remote_display_topology;
+#[cfg(target_os = "windows")]
 mod windows_remote_input;
 #[cfg(any(test, target_os = "windows"))]
 #[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]

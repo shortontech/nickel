@@ -2633,29 +2633,40 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         if inventory.truncated || inventory.outputs.is_empty() {
             return Err("complete Windows display layout is unavailable".into());
         }
+        let identities = crate::windows_remote_display_topology::complete_active_target_identities(
+            inventory.outputs.iter().map(|output| output.name.clone()),
+        )?;
         let primary = inventory
             .outputs
             .iter()
             .find(|output| output.primary && output.enabled)
             .ok_or("Windows display layout has no enabled primary output")?;
         let primary = nickel_remote_control::leases::ResourceId {
-            id: primary.name.clone(),
+            id: identities
+                .get(&primary.name)
+                .ok_or("Windows primary display identity changed")?
+                .clone(),
             generation: primary.generation,
         };
         let mut outputs = inventory
             .outputs
             .iter()
-            .map(|output| nickel_remote_control::display_layout::Placement {
-                output: nickel_remote_control::leases::ResourceId {
-                    id: output.name.clone(),
-                    generation: output.generation,
-                },
-                x: output.geometry[0],
-                y: output.geometry[1],
-                enabled: output.enabled,
-                scale_120: output.scale_120,
+            .map(|output| {
+                Ok(nickel_remote_control::display_layout::Placement {
+                    output: nickel_remote_control::leases::ResourceId {
+                        id: identities
+                            .get(&output.name)
+                            .ok_or("Windows display identity changed")?
+                            .clone(),
+                        generation: output.generation,
+                    },
+                    x: output.geometry[0],
+                    y: output.geometry[1],
+                    enabled: output.enabled,
+                    scale_120: output.scale_120,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         outputs.sort_by(|left, right| left.output.id.cmp(&right.output.id));
         let layout = nickel_remote_control::display_layout::Layout { primary, outputs };
         if !layout.valid_representation() {
