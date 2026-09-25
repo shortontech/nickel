@@ -1248,6 +1248,51 @@ struct WindowsDisplayRecovery {
     revert_failed: bool,
 }
 
+enum GuardedDisplayApply<T, E> {
+    DidNotStart(String),
+    Finished(Result<T, E>),
+    AppliedAfterAuthorityLoss { plan: T, reason: String },
+}
+
+fn classify_guarded_display_apply<T, E>(
+    native_attempt: Option<Result<T, E>>,
+    boundary_result: Result<(), String>,
+) -> GuardedDisplayApply<T, E> {
+    match (native_attempt, boundary_result) {
+        (None, Err(error)) => GuardedDisplayApply::DidNotStart(error),
+        (None, Ok(())) => {
+            GuardedDisplayApply::DidNotStart("Windows display application did not start".into())
+        }
+        (Some(Err(failure)), _) => GuardedDisplayApply::Finished(Err(failure)),
+        (Some(Ok(plan)), Err(reason)) => {
+            GuardedDisplayApply::AppliedAfterAuthorityLoss { plan, reason }
+        }
+        (Some(Ok(plan)), Ok(())) => GuardedDisplayApply::Finished(Ok(plan)),
+    }
+}
+
+enum GuardedDisplayRevert {
+    DidNotStart(String),
+    Restored,
+    RestoredAfterAuthorityLoss(String),
+    RestoreFailed(String),
+}
+
+fn classify_guarded_display_revert(
+    native_restore: Option<Result<(), String>>,
+    boundary_result: Result<(), String>,
+) -> GuardedDisplayRevert {
+    match (native_restore, boundary_result) {
+        (None, Err(error)) => GuardedDisplayRevert::DidNotStart(error),
+        (None, Ok(())) => {
+            GuardedDisplayRevert::DidNotStart("Windows display revert did not start".into())
+        }
+        (Some(Err(error)), _) => GuardedDisplayRevert::RestoreFailed(error),
+        (Some(Ok(())), Err(error)) => GuardedDisplayRevert::RestoredAfterAuthorityLoss(error),
+        (Some(Ok(())), Ok(())) => GuardedDisplayRevert::Restored,
+    }
+}
+
 impl WindowsDisplayState {
     fn snapshot(
         &self,
@@ -2812,21 +2857,57 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                     .generation
                     .checked_add(1)
                     .ok_or("Windows display recovery generations exhausted")?;
-                let attempt = permit.with_debug_input_deadline(false, |boundary| {
-                    if !crate::windows_remote_input::physical_input_idle() {
+                let expected_local_input_epoch = local_input_epoch();
+                let mut native_attempt = None;
+                let boundary_result = permit.with_debug_input_deadline(false, |boundary| {
+                    if !crate::windows_remote_input::physical_input_idle()
+                        || local_input_epoch() != expected_local_input_epoch
+                    {
                         return Err("shared input is busy".into());
                     }
                     permit.check_commit_boundary(boundary)?;
-                    Ok(
+                    native_attempt = Some(
                         crate::windows_remote_display_topology::apply_position_change(
                             &observed,
                             &prior,
                             &requested,
                             topology_generation,
-                            || permit.check_commit_boundary(boundary),
+                            || {
+                                if !crate::windows_remote_input::physical_input_idle()
+                                    || local_input_epoch() != expected_local_input_epoch
+                                {
+                                    return Err(
+                                        "shared input changed during display staging".into()
+                                    );
+                                }
+                                permit.check_commit_boundary(boundary)
+                            },
                         ),
-                    )
-                })?;
+                    );
+                    Ok(())
+                });
+                let boundary_result = boundary_result.and_then(|()| {
+                    if !crate::windows_remote_input::physical_input_idle()
+                        || local_input_epoch() != expected_local_input_epoch
+                    {
+                        Err("shared input changed during display application".into())
+                    } else {
+                        Ok(())
+                    }
+                });
+                let attempt = match classify_guarded_display_apply(native_attempt, boundary_result)
+                {
+                    GuardedDisplayApply::DidNotStart(error) => return Err(error),
+                    GuardedDisplayApply::Finished(result) => result,
+                    GuardedDisplayApply::AppliedAfterAuthorityLoss { plan, reason } => {
+                        Err(crate::windows_remote_display_topology::ApplyFailure {
+                            reason: format!(
+                                "Windows display authority expired after native application: {reason}"
+                            ),
+                            recovery: Some(plan),
+                        })
+                    }
+                };
                 let plan = match attempt {
                     Ok(plan) => plan,
                     Err(failure) => {
@@ -2986,21 +3067,27 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                         "Windows display recovery is stale or owned by another lease".into(),
                     );
                 }
-                let mut attempted = false;
-                let restored = permit.with_debug_input_deadline(false, |boundary| {
+                let mut native_restore = None;
+                let boundary_result = permit.with_debug_input_deadline(false, |boundary| {
                     if !crate::windows_remote_input::physical_input_idle() {
                         return Err("shared input is busy".into());
                     }
                     permit.check_commit_boundary(boundary)?;
-                    attempted = true;
-                    pending.plan.restore()
+                    native_restore = Some(pending.plan.restore());
+                    Ok(())
                 });
-                if let Err(error) = restored {
-                    if attempted {
-                        pending.deadline = None;
-                        pending.revert_failed = true;
+                match classify_guarded_display_revert(native_restore, boundary_result) {
+                    GuardedDisplayRevert::DidNotStart(error) => return Err(error),
+                    GuardedDisplayRevert::RestoreFailed(error) => {
+                        pending.deadline = Some(Instant::now());
+                        pending.confirmable = false;
+                        return Err(error);
                     }
-                    return Err(error);
+                    GuardedDisplayRevert::RestoredAfterAuthorityLoss(error) => {
+                        state.pending = None;
+                        return Err(error);
+                    }
+                    GuardedDisplayRevert::Restored => {}
                 }
                 let confirmed = pending.confirmed.clone();
                 let restored_inventory = match self.list_outputs(permit.clone()) {
@@ -9592,6 +9679,44 @@ fn windows_semantic_mutation_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_apply_retains_native_recovery_after_final_authority_loss() {
+        match classify_guarded_display_apply(Some(Ok::<u64, &str>(19)), Err("revoked".into())) {
+            GuardedDisplayApply::AppliedAfterAuthorityLoss { plan, reason } => {
+                assert_eq!(plan, 19);
+                assert_eq!(reason, "revoked");
+            }
+            _ => panic!("successful native apply lost its recovery plan"),
+        }
+        assert!(matches!(
+            classify_guarded_display_apply(
+                Some(Err::<u64, _>("native rejected")),
+                Err("revoked".into())
+            ),
+            GuardedDisplayApply::Finished(Err("native rejected"))
+        ));
+        assert!(matches!(
+            classify_guarded_display_apply::<u64, &str>(None, Err("revoked".into())),
+            GuardedDisplayApply::DidNotStart(reason) if reason == "revoked"
+        ));
+    }
+
+    #[test]
+    fn display_revert_preserves_verified_native_restore_after_authority_loss() {
+        assert!(matches!(
+            classify_guarded_display_revert(Some(Ok(())), Err("revoked".into())),
+            GuardedDisplayRevert::RestoredAfterAuthorityLoss(reason) if reason == "revoked"
+        ));
+        assert!(matches!(
+            classify_guarded_display_revert(Some(Err("native uncertain".into())), Ok(())),
+            GuardedDisplayRevert::RestoreFailed(reason) if reason == "native uncertain"
+        ));
+        assert!(matches!(
+            classify_guarded_display_revert(None, Err("busy".into())),
+            GuardedDisplayRevert::DidNotStart(reason) if reason == "busy"
+        ));
+    }
 
     #[test]
     fn shell_pointer_revalidates_surface_identity_visibility_output_and_scale() {

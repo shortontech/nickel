@@ -95,6 +95,9 @@ with an accurate reason and contract evidence.
   [QueryDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-querydisplayconfig)
   and [target device name](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_target_device_name)
   documentation for the path and monitor identity fields used by the probe.
+- Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
+  its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
+  request reply expires. Physical input epoch and idle state are rechecked during Apply staging.
 - Windows printer and removable-volume reads are available through a bounded observation
   worker. Printer mutations remain unavailable because the native spooler calls lack a
   cancellable production owner; the platform contract and scrubbed remote snapshot/outcome
