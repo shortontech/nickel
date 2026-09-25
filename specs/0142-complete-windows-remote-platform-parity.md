@@ -83,7 +83,9 @@ with an accurate reason and contract evidence.
 ## Current verification record
 
 - Windows fixture tests pass for display topology validation, active-only fallback, surface
-  pointer coordinates, peripheral projection, and the platform contract. The Windows library
+  pointer coordinates and current-observation revalidation across scale, visibility, output,
+  replacement, protection, destruction, and bounds; peripheral projection; and the platform
+  contract. The Windows library
   compiles and formatting passes.
 - A read-only native DisplayConfig probe found connected targets outside the active monitor
   inventory on the current Windows setup. Remote snapshots report incomplete topology and

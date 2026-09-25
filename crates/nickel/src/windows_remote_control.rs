@@ -503,25 +503,44 @@ impl SurfacePointerContext<'_> {
         let protected = self
             .state
             .surface_visible(crate::winit_shell::SurfaceRole::Lock);
-        let current =
-            crate::windows_shell_diagnostics::input_surface(protected, self.native, &observations)
-                .filter(|current| {
-                    current.generation == self.identity.generation
-                        && self.identity.id == format!("windows-shell:{}", current.generation)
-                        && current.output.as_deref() == Some(self.output_name.as_str())
-                })
-                .ok_or("Windows shell surface changed or is protected")?;
-        let geometry = current
-            .geometry
-            .ok_or("Windows shell surface geometry is unavailable")?;
-        crate::windows_resource_owner::shell_surface_client_point(
+        shell_surface_pointer_client_point(
+            protected,
+            self.native,
+            &self.identity,
+            &self.output_name,
+            &observations,
             x,
             y,
-            geometry[2],
-            geometry[3],
-            current.scale_factor,
         )
     }
+}
+
+fn shell_surface_pointer_client_point(
+    protected: bool,
+    native: usize,
+    identity: &nickel_remote_control::leases::ResourceId,
+    output_name: &str,
+    observations: &[crate::windows_shell_diagnostics::SurfaceObservation],
+    x: i32,
+    y: i32,
+) -> Result<(i32, i32), String> {
+    let current = crate::windows_shell_diagnostics::input_surface(protected, native, observations)
+        .filter(|current| {
+            current.generation == identity.generation
+                && identity.id == format!("windows-shell:{}", current.generation)
+                && current.output.as_deref() == Some(output_name)
+        })
+        .ok_or("Windows shell surface changed or is protected")?;
+    let geometry = current
+        .geometry
+        .ok_or("Windows shell surface geometry is unavailable")?;
+    crate::windows_resource_owner::shell_surface_client_point(
+        x,
+        y,
+        geometry[2],
+        geometry[3],
+        current.scale_factor,
+    )
 }
 
 fn resolve_windows_pointer_point<'a>(
@@ -9573,6 +9592,88 @@ fn windows_semantic_mutation_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_pointer_revalidates_surface_identity_visibility_output_and_scale() {
+        use crate::windows_shell_diagnostics::SurfaceObservation;
+        use nickel_remote_control::leases::ResourceId;
+
+        let identity = ResourceId {
+            id: "windows-shell:7".into(),
+            generation: 7,
+        };
+        let mut surface = SurfaceObservation {
+            native: 41,
+            role: crate::winit_shell::SurfaceRole::Launcher,
+            generation: 7,
+            native_visible: true,
+            canonical_visible: true,
+            protected: false,
+            geometry: Some([0, 0, 800, 600]),
+            output: Some("left".into()),
+            scene_generation: Some(1),
+            scale_factor: 1.5,
+            redraw_pending: false,
+            keyboard_focused: false,
+            presentation_generation: 1,
+            presentation_failures: 0,
+            presented_frame_bytes: 0,
+        };
+        let point = |observation: &SurfaceObservation, identity: &ResourceId| {
+            shell_surface_pointer_client_point(
+                false,
+                41,
+                identity,
+                "left",
+                std::slice::from_ref(observation),
+                799,
+                599,
+            )
+        };
+        assert_eq!(point(&surface, &identity), Ok((1199, 899)));
+        surface.scale_factor = 2.0;
+        assert_eq!(point(&surface, &identity), Ok((1598, 1198)));
+
+        surface.output = Some("right".into());
+        assert!(point(&surface, &identity).is_err());
+        surface.output = Some("left".into());
+        surface.canonical_visible = false;
+        assert!(point(&surface, &identity).is_err());
+        surface.canonical_visible = true;
+        surface.native_visible = false;
+        assert!(point(&surface, &identity).is_err());
+        surface.native_visible = true;
+        surface.protected = true;
+        assert!(point(&surface, &identity).is_err());
+        surface.protected = false;
+        surface.generation = 8;
+        assert!(point(&surface, &identity).is_err());
+        let replacement = ResourceId {
+            id: "windows-shell:8".into(),
+            generation: 8,
+        };
+        assert_eq!(point(&surface, &replacement), Ok((1598, 1198)));
+        assert!(
+            shell_surface_pointer_client_point(false, 41, &replacement, "left", &[], 0, 0,)
+                .is_err()
+        );
+        assert!(
+            shell_surface_pointer_client_point(
+                false,
+                41,
+                &replacement,
+                "left",
+                std::slice::from_ref(&surface),
+                800,
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            shell_surface_pointer_client_point(true, 41, &replacement, "left", &[surface], 0, 0,)
+                .is_err()
+        );
+    }
 
     #[test]
     fn shell_semantic_policy_admits_only_guarded_windows_actions() {
