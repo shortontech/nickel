@@ -10,8 +10,9 @@ use windows::Win32::{
     Devices::Display::{
         DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
         DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO,
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes,
-        QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS, QueryDisplayConfig,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TOPOLOGY_ID, DisplayConfigGetDeviceInfo,
+        GetDisplayConfigBufferSizes, QDC_ALL_PATHS, QDC_DATABASE_CURRENT, QDC_ONLY_ACTIVE_PATHS,
+        QUERY_DISPLAY_CONFIG_FLAGS, QueryDisplayConfig,
     },
     Foundation::ERROR_SUCCESS,
 };
@@ -19,6 +20,7 @@ use windows::Win32::{
 const MAX_NATIVE_PATHS: usize = 4096;
 const MAX_NATIVE_MODES: usize = 8192;
 type TargetKey = (i32, u32, u32);
+type SourceGeometry = (i32, i32, u32, u32);
 
 pub(crate) struct Observation {
     pub layout: Layout,
@@ -36,10 +38,12 @@ type NativeMode = (
     bool,
     bool,
 );
+type NativeConfiguration = (Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>);
 
 pub(crate) struct RecoveryPlan {
     modes: Vec<NativeMode>,
     identities: BTreeMap<String, String>,
+    requested_configuration: NativeConfiguration,
 }
 
 pub(crate) struct ApplyFailure {
@@ -65,6 +69,7 @@ impl From<&str> for ApplyFailure {
 fn uncertain_recovery(
     observation: &Observation,
     modes: &[NativeMode],
+    requested_configuration: &NativeConfiguration,
     reason: &str,
 ) -> ApplyFailure {
     ApplyFailure {
@@ -72,17 +77,9 @@ fn uncertain_recovery(
         recovery: Some(RecoveryPlan {
             modes: modes.to_vec(),
             identities: observation.native_names.clone(),
+            requested_configuration: requested_configuration.clone(),
         }),
     }
-}
-
-fn restore_captured_modes(observation: &Observation, modes: &[NativeMode]) -> bool {
-    RecoveryPlan {
-        modes: modes.to_vec(),
-        identities: observation.native_names.clone(),
-    }
-    .restore()
-    .is_ok()
 }
 
 pub(crate) fn observe(inventory: &OutputInventory) -> Result<Observation, String> {
@@ -172,8 +169,8 @@ fn project_inventory(
     })
 }
 
-/// Apply only positions and primary selection. Each DEVMODE begins with the
-/// current native mode, preserving resolution, orientation and refresh rate.
+/// Apply only positions and primary selection. Capture each current DEVMODE
+/// for guarded recovery, then apply a supplied DisplayConfig temporarily.
 /// The caller must hold exclusive remote authority and verify fresh readback.
 pub(crate) fn apply_position_change(
     observation: &Observation,
@@ -183,10 +180,12 @@ pub(crate) fn apply_position_change(
     check_commit: impl Fn() -> Result<(), String>,
 ) -> Result<RecoveryPlan, ApplyFailure> {
     use windows::{
+        Win32::Devices::Display::{
+            QDC_VIRTUAL_MODE_AWARE, SDC_APPLY, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
+            SDC_VIRTUAL_MODE_AWARE, SetDisplayConfig,
+        },
         Win32::Graphics::Gdi::{
-            CDS_NORESET, CDS_SET_PRIMARY, CDS_TEST, CDS_TYPE, CDS_UPDATEREGISTRY,
-            ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_POSITION,
-            ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW,
+            DEVMODEW, DM_POSITION, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW,
         },
         core::PCWSTR,
     };
@@ -240,20 +239,6 @@ pub(crate) fn apply_position_change(
         let mut requested_mode = original;
         requested_mode.Anonymous1.Anonymous2.dmPosition.x = placement.x;
         requested_mode.Anonymous1.Anonymous2.dmPosition.y = placement.y;
-        // SAFETY: The current native mode is preserved except for a validated
-        // desktop position. CDS_TEST does not commit the proposed mode.
-        let tested = unsafe {
-            ChangeDisplaySettingsExW(
-                device,
-                Some(&raw const requested_mode),
-                None,
-                CDS_TEST,
-                None,
-            )
-        };
-        if tested != DISP_CHANGE_SUCCESSFUL {
-            return Err(format!("Windows rejected display placement test: {}", tested.0).into());
-        }
         modes.push((
             wide,
             original,
@@ -263,78 +248,47 @@ pub(crate) fn apply_position_change(
         ));
     }
 
-    let mut staged_any = false;
-    for (wide, _, requested_mode, primary, _) in &modes {
-        if let Err(error) = check_commit() {
-            return if !staged_any || restore_captured_modes(observation, &modes) {
-                Err(error.into())
-            } else {
-                Err(uncertain_recovery(
-                    observation,
-                    &modes,
-                    "Windows display request expired and recovery is uncertain",
-                ))
-            };
-        }
-        let flags = CDS_UPDATEREGISTRY
-            | CDS_NORESET
-            | if *primary {
-                CDS_SET_PRIMARY
-            } else {
-                CDS_TYPE::default()
-            };
-        // SAFETY: The validated mode and device name remain owned by `modes`
-        // for this synchronous staging call.
-        let result = unsafe {
-            ChangeDisplaySettingsExW(
-                PCWSTR(wide.as_ptr()),
-                Some(requested_mode as *const DEVMODEW),
-                None,
-                flags,
-                None,
-            )
-        };
-        if result != DISP_CHANGE_SUCCESSFUL {
-            return if restore_captured_modes(observation, &modes) {
-                Err(format!("Windows rejected display placement: {}", result.0).into())
-            } else {
-                Err(uncertain_recovery(
-                    observation,
-                    &modes,
-                    "Windows display placement failed and recovery is uncertain",
-                ))
-            };
-        }
-        staged_any = true;
+    let (paths, original_modes) =
+        native_configuration(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE)?;
+    let requested_modes = requested_source_modes(observation, requested, &paths, &original_modes)?;
+    let requested_configuration = (paths, requested_modes);
+    check_commit()?;
+    let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE;
+    // SAFETY: The captured paths and modes remain valid for this synchronous
+    // validation call, which does not change the display configuration.
+    let validation = unsafe {
+        SetDisplayConfig(
+            Some(&requested_configuration.0),
+            Some(&requested_configuration.1),
+            SDC_VALIDATE | flags,
+        )
+    };
+    if validation != ERROR_SUCCESS.0 as i32 {
+        return Err(format!("Windows rejected display configuration: {validation}").into());
     }
-    if let Err(error) = check_commit() {
-        return if restore_captured_modes(observation, &modes) {
-            Err(error.into())
-        } else {
-            Err(uncertain_recovery(
-                observation,
-                &modes,
-                "Windows display request expired and recovery is uncertain",
-            ))
-        };
-    }
-    // SAFETY: A null device and mode commit the validated staged positions.
-    let result =
-        unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE::default(), None) };
-    if result == DISP_CHANGE_SUCCESSFUL {
-        Ok(RecoveryPlan {
-            modes,
-            identities: observation.native_names.clone(),
-        })
-    } else if restore_captured_modes(observation, &modes) {
-        Err(format!("Windows rejected display layout commit: {}", result.0).into())
-    } else {
-        Err(uncertain_recovery(
+    check_commit()?;
+    // SAFETY: The validated supplied configuration remains owned by this
+    // synchronous call. Omitting SDC_SAVE_TO_DATABASE keeps Apply temporary.
+    let result = unsafe {
+        SetDisplayConfig(
+            Some(&requested_configuration.0),
+            Some(&requested_configuration.1),
+            SDC_APPLY | flags,
+        )
+    };
+    if result != ERROR_SUCCESS.0 as i32 {
+        return Err(uncertain_recovery(
             observation,
             &modes,
-            "Windows display commit failed and recovery is uncertain",
-        ))
+            &requested_configuration,
+            &format!("Windows display application failed ({result}); recovery is pending"),
+        ));
     }
+    Ok(RecoveryPlan {
+        modes,
+        identities: observation.native_names.clone(),
+        requested_configuration,
+    })
 }
 
 fn restore_modes(modes: &[NativeMode]) -> Result<(), String> {
@@ -395,6 +349,93 @@ fn captured_name(wide: &[u16]) -> Option<String> {
 }
 
 impl RecoveryPlan {
+    pub(crate) fn persist(&self) -> Result<(), String> {
+        use windows::Win32::Devices::Display::{
+            QDC_VIRTUAL_MODE_AWARE, SDC_APPLY, SDC_SAVE_TO_DATABASE,
+            SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VIRTUAL_MODE_AWARE, SetDisplayConfig,
+        };
+        use windows::{
+            Win32::Graphics::Gdi::{
+                DEVMODEW, DM_POSITION, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW,
+            },
+            core::PCWSTR,
+        };
+        let current = complete_active_target_identities(self.identities.values().cloned())?;
+        if self
+            .identities
+            .iter()
+            .any(|(id, name)| current.get(name) != Some(id))
+        {
+            return Err("Windows display targets changed before confirmation".into());
+        }
+        let expected = configuration_positions(
+            &self.requested_configuration.0,
+            &self.requested_configuration.1,
+        )?;
+        let (active_paths, active_modes) =
+            native_configuration(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE)?;
+        if configuration_positions(&active_paths, &active_modes)? != expected {
+            return Err("Windows display source modes changed before confirmation".into());
+        }
+        for (wide, _, requested, _, _) in &self.modes {
+            let mut current = DEVMODEW {
+                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+                ..Default::default()
+            };
+            // SAFETY: The captured device name and writable mode remain valid.
+            if !unsafe {
+                EnumDisplaySettingsW(
+                    PCWSTR(wide.as_ptr()),
+                    ENUM_CURRENT_SETTINGS,
+                    &raw mut current,
+                )
+            }
+            .as_bool()
+                || (current.dmFields & DM_POSITION).0 == 0
+                || current.dmPelsWidth != requested.dmPelsWidth
+                || current.dmPelsHeight != requested.dmPelsHeight
+                || current.dmDisplayFrequency != requested.dmDisplayFrequency
+                || current.dmBitsPerPel != requested.dmBitsPerPel
+            {
+                return Err("Windows display mode changed before confirmation".into());
+            }
+            // SAFETY: DM_POSITION confirms the current position member, and
+            // both modes were initialized by EnumDisplaySettingsW.
+            if unsafe { current.Anonymous1.Anonymous2.dmPosition }
+                != unsafe { requested.Anonymous1.Anonymous2.dmPosition }
+                || unsafe { current.Anonymous1.Anonymous2.dmDisplayOrientation }
+                    != unsafe { requested.Anonymous1.Anonymous2.dmDisplayOrientation }
+                || unsafe { current.Anonymous1.Anonymous2.dmDisplayFixedOutput }
+                    != unsafe { requested.Anonymous1.Anonymous2.dmDisplayFixedOutput }
+            {
+                return Err(
+                    "Windows display placement or orientation changed before confirmation".into(),
+                );
+            }
+        }
+        // SAFETY: The validated supplied paths and modes remain owned by this
+        // recovery plan for the duration of the synchronous confirmation call.
+        let result = unsafe {
+            SetDisplayConfig(
+                Some(&self.requested_configuration.0),
+                Some(&self.requested_configuration.1),
+                SDC_APPLY
+                    | SDC_USE_SUPPLIED_DISPLAY_CONFIG
+                    | SDC_VIRTUAL_MODE_AWARE
+                    | SDC_SAVE_TO_DATABASE,
+            )
+        };
+        if result != ERROR_SUCCESS.0 as i32 {
+            return Err(format!("Windows display confirmation failed ({result})"));
+        }
+        let (saved_paths, saved_modes) =
+            native_configuration(QDC_DATABASE_CURRENT | QDC_VIRTUAL_MODE_AWARE)?;
+        if configuration_positions(&saved_paths, &saved_modes)? != expected {
+            return Err("Windows saved display configuration did not match confirmation".into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn restore(&self) -> Result<(), String> {
         use windows::{
             Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW},
@@ -535,6 +576,7 @@ fn active_source_modes(
     modes: &[DISPLAYCONFIG_MODE_INFO],
 ) -> Result<BTreeMap<TargetKey, usize>, String> {
     let mut indices = BTreeMap::new();
+    let mut used_source_modes = BTreeSet::new();
     for path in paths {
         let index = source_mode_index(path)?;
         let mode = modes
@@ -554,8 +596,79 @@ fn active_source_modes(
         if indices.insert(target_key(path), index).is_some() {
             return Err("Windows display target has ambiguous source modes".into());
         }
+        if !used_source_modes.insert(index) {
+            return Err("Windows display source is cloned or ambiguous".into());
+        }
     }
     Ok(indices)
+}
+
+fn configuration_positions(
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+) -> Result<BTreeMap<TargetKey, SourceGeometry>, String> {
+    let indices = active_source_modes(paths, modes)?;
+    Ok(indices
+        .into_iter()
+        .map(|(target, index)| {
+            // SAFETY: active_source_modes checked every source mode index and type.
+            let source = unsafe { modes[index].Anonymous.sourceMode };
+            (
+                target,
+                (
+                    source.position.x,
+                    source.position.y,
+                    source.width,
+                    source.height,
+                ),
+            )
+        })
+        .collect())
+}
+
+/// Preserve every native path and mode field except desktop source position.
+/// The observed layout must match the native configuration before constructing
+/// a supplied configuration for SetDisplayConfig.
+fn requested_source_modes(
+    observation: &Observation,
+    requested: &Layout,
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+) -> Result<Vec<DISPLAYCONFIG_MODE_INFO>, String> {
+    let indices = active_source_modes(paths, modes)?;
+    if indices.len() != requested.outputs.len() {
+        return Err("Windows display source count changed before staging".into());
+    }
+    let mut prepared = modes.to_vec();
+    for placement in &requested.outputs {
+        let key = paths
+            .iter()
+            .map(target_key)
+            .find(|key| target_identity(*key) == placement.output.id)
+            .ok_or("Windows display target changed before staging")?;
+        let index = indices[&key];
+        // SAFETY: active_source_modes checked infoType and bounds for this index.
+        let mut source = unsafe { prepared[index].Anonymous.sourceMode };
+        let original = observation
+            .layout
+            .outputs
+            .iter()
+            .find(|output| output.output == placement.output)
+            .ok_or("Windows display output retired before staging")?;
+        let size = observation
+            .dimensions
+            .get(&placement.output.id)
+            .ok_or("Windows display dimensions changed before staging")?;
+        if (source.position.x, source.position.y) != (original.x, original.y)
+            || (source.width, source.height) != *size
+        {
+            return Err("Windows display source mode changed before staging".into());
+        }
+        source.position.x = placement.x;
+        source.position.y = placement.y;
+        prepared[index].Anonymous.sourceMode = source;
+    }
+    Ok(prepared)
 }
 
 fn native_configuration(
@@ -577,6 +690,9 @@ fn native_configuration(
     }
     let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
     let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+    let mut topology = DISPLAYCONFIG_TOPOLOGY_ID::default();
+    let topology_id =
+        (flags & QDC_DATABASE_CURRENT == QDC_DATABASE_CURRENT).then_some(&raw mut topology);
     // SAFETY: The vectors have the capacities returned by DisplayConfig and
     // both count pointers remain valid throughout this synchronous call.
     if unsafe {
@@ -586,7 +702,7 @@ fn native_configuration(
             paths.as_mut_ptr(),
             &mut mode_count,
             modes.as_mut_ptr(),
-            None,
+            topology_id,
         )
     } != ERROR_SUCCESS
     {
@@ -864,6 +980,57 @@ mod tests {
     }
 
     #[test]
+    fn supplied_configuration_moves_only_validated_source_positions() {
+        let current = layout("left", 0, 1920);
+        let requested = layout("right", -1920, 0);
+        let mut paths = [DISPLAYCONFIG_PATH_INFO::default(); 2];
+        let mut modes = [DISPLAYCONFIG_MODE_INFO::default(); 2];
+        for index in 0..2 {
+            paths[index].sourceInfo.id = index as u32;
+            paths[index].targetInfo.id = index as u32;
+            paths[index].sourceInfo.Anonymous.modeInfoIdx = index as u32;
+            modes[index].infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
+            modes[index].id = index as u32;
+            modes[index].Anonymous.sourceMode.width = 1920;
+            modes[index].Anonymous.sourceMode.height = 1080;
+            modes[index].Anonymous.sourceMode.position.x = current.outputs[index].x;
+            modes[index].Anonymous.sourceMode.position.y = current.outputs[index].y;
+        }
+        let mut native_layout = current.clone();
+        for (index, output) in native_layout.outputs.iter_mut().enumerate() {
+            output.output.id = target_identity(target_key(&paths[index]));
+        }
+        native_layout.primary = native_layout.outputs[0].output.clone();
+        let mut native_requested = requested.clone();
+        for (index, output) in native_requested.outputs.iter_mut().enumerate() {
+            output.output.id = native_layout.outputs[index].output.id.clone();
+        }
+        native_requested.primary = native_requested.outputs[1].output.clone();
+        let observation = Observation {
+            layout: native_layout,
+            topology_generation: 1,
+            topology_complete: true,
+            transaction_unavailable_reason: None,
+            dimensions: native_requested
+                .outputs
+                .iter()
+                .map(|output| (output.output.id.clone(), (1920, 1080)))
+                .collect(),
+            native_names: BTreeMap::new(),
+        };
+        let prepared =
+            requested_source_modes(&observation, &native_requested, &paths, &modes).unwrap();
+        assert_eq!(
+            unsafe { prepared[0].Anonymous.sourceMode.position.x },
+            -1920
+        );
+        assert_eq!(unsafe { prepared[1].Anonymous.sourceMode.position.x }, 0);
+        assert_eq!(unsafe { modes[0].Anonymous.sourceMode.position.x }, 0);
+        paths[1].sourceInfo.Anonymous.modeInfoIdx = 0;
+        assert!(requested_source_modes(&observation, &native_requested, &paths, &modes).is_err());
+    }
+
+    #[test]
     fn placement_validation_preserves_scale_and_rejects_retired_or_disabled_targets() {
         let current = layout("right", -1920, 0);
         let requested = layout("left", 0, 1920);
@@ -980,6 +1147,39 @@ mod tests {
                 assert!(!reason.is_empty());
                 eprintln!("Windows display transactions unavailable on this fixture: {reason}");
             }
+        }
+    }
+
+    #[test]
+    #[ignore = "reads the current Windows display modes"]
+    fn native_display_source_modes_match_monitor_positions() {
+        use windows::Win32::Devices::Display::QDC_VIRTUAL_MODE_AWARE;
+
+        let outputs = crate::platform::remote_observation::outputs().unwrap();
+        let (paths, modes) =
+            native_configuration(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE).unwrap();
+        let indices = active_source_modes(&paths, &modes).unwrap();
+        let (saved_paths, saved_modes) =
+            native_configuration(QDC_DATABASE_CURRENT | QDC_VIRTUAL_MODE_AWARE).unwrap();
+        assert!(
+            !configuration_positions(&saved_paths, &saved_modes)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(paths.len(), outputs.len());
+        for path in &paths {
+            let name = source_name(path).unwrap();
+            let output = outputs.iter().find(|output| output.name == name).unwrap();
+            // SAFETY: active_source_modes verified the source mode index and type.
+            let source = unsafe { modes[indices[&target_key(path)]].Anonymous.sourceMode };
+            assert_eq!(
+                (source.position.x, source.position.y),
+                (output.bounds.x, output.bounds.y)
+            );
+            assert_eq!(
+                (source.width, source.height),
+                (output.bounds.width, output.bounds.height)
+            );
         }
     }
 

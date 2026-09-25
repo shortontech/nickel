@@ -97,13 +97,13 @@ with an accurate reason and contract evidence.
   [QueryDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-querydisplayconfig)
   and [target device name](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_target_device_name)
   documentation for the path and monitor identity fields used by the probe.
-- The current guarded GDI placement owner stages multiple monitors with
-  `CDS_UPDATEREGISTRY | CDS_NORESET`, as required by
-  [ChangeDisplaySettingsEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-changedisplaysettingsexa).
-  This saves tentative settings before confirmation, leaving a process-exit recovery gap.
-  [SetDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig)
-  supports a temporary supplied configuration without `SDC_SAVE_TO_DATABASE`; that migration
-  and a native round trip remain required before display parity is complete.
+- The display owner now validates and applies a supplied DisplayConfig without
+  `SDC_SAVE_TO_DATABASE`; Keep saves the confirmed layout and queries the saved configuration.
+  Guarded rollback restores the captured prior GDI modes. This closes the earlier tentative-save
+  gap described by [ChangeDisplaySettingsEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-changedisplaysettingsexa)
+  and [SetDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig).
+  Synthetic source-mode transformation and read-only native active/database queries pass on
+  Windows. A native changing round trip remains unverified on a complete multi-monitor fixture.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
   request reply expires. Physical input epoch and idle state are rechecked during Apply staging.

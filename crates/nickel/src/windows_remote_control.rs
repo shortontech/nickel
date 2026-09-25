@@ -3041,9 +3041,93 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                         "Windows display recovery is stale or owned by another lease".into(),
                     );
                 }
-                permit.with_debug(false, || Ok(()))?;
+                let expected_local_input_epoch = local_input_epoch();
+                let mut native_attempt = None;
+                let boundary_result = permit.with_debug_input_deadline(false, |boundary| {
+                    if !crate::windows_remote_input::physical_input_idle()
+                        || local_input_epoch() != expected_local_input_epoch
+                    {
+                        return Err("shared input is busy".into());
+                    }
+                    permit.check_commit_boundary(boundary)?;
+                    native_attempt = Some(pending.plan.persist());
+                    Ok(())
+                });
+                let persist_result = match (native_attempt, boundary_result) {
+                    (None, Err(error)) => return Err(error),
+                    (None, Ok(())) => {
+                        return Err("Windows display confirmation did not start".into());
+                    }
+                    (Some(Err(error)), _) | (Some(Ok(())), Err(error)) => Err(error),
+                    (Some(Ok(())), Ok(())) => Ok(()),
+                };
+                if let Err(error) = persist_result {
+                    let pending = state.pending.as_mut().unwrap();
+                    pending.deadline = Some(Instant::now());
+                    pending.confirmable = false;
+                    return Err(format!(
+                        "Windows display confirmation failed; recovery is pending: {error}"
+                    ));
+                }
+                let confirmed_inventory = match self.list_outputs(permit.clone()) {
+                    Ok(inventory) => inventory,
+                    Err(error) => {
+                        let pending = state.pending.as_mut().unwrap();
+                        pending.deadline = Some(Instant::now());
+                        pending.confirmable = false;
+                        return Err(format!(
+                            "Windows display confirmation readback failed; recovery is pending: {error}"
+                        ));
+                    }
+                };
+                let confirmed = match crate::windows_remote_display_topology::observe(
+                    &confirmed_inventory,
+                ) {
+                    Ok(confirmed) => confirmed,
+                    Err(error) => {
+                        let pending = state.pending.as_mut().unwrap();
+                        pending.deadline = Some(Instant::now());
+                        pending.confirmable = false;
+                        return Err(format!(
+                            "Windows display confirmation readback is incomplete; recovery is pending: {error}"
+                        ));
+                    }
+                };
+                if !confirmed.topology_complete
+                    || !crate::windows_remote_display_topology::matches_physical_layout(
+                        &confirmed.layout,
+                        &pending.requested,
+                    )
+                {
+                    let pending = state.pending.as_mut().unwrap();
+                    pending.deadline = Some(Instant::now());
+                    pending.confirmable = false;
+                    return Err(
+                        "Windows display confirmation readback differed; recovery is pending"
+                            .into(),
+                    );
+                }
+                if !crate::windows_remote_input::physical_input_idle()
+                    || local_input_epoch() != expected_local_input_epoch
+                {
+                    let pending = state.pending.as_mut().unwrap();
+                    pending.deadline = Some(Instant::now());
+                    pending.confirmable = false;
+                    return Err(
+                        "shared input changed during display confirmation; recovery is pending"
+                            .into(),
+                    );
+                }
+                if let Err(error) = permit.check_live() {
+                    let pending = state.pending.as_mut().unwrap();
+                    pending.deadline = Some(Instant::now());
+                    pending.confirmable = false;
+                    return Err(format!(
+                        "Windows display authority expired during confirmation; recovery is pending: {error}"
+                    ));
+                }
                 state.pending = None;
-                Ok(state.snapshot(&inventory, &observed))
+                Ok(state.snapshot(&confirmed_inventory, &confirmed))
             }
             Transaction::Revert {
                 topology_generation,

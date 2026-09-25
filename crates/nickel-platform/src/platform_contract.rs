@@ -152,8 +152,8 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     fixture(
         PlatformFamily::Windows,
         AdapterCapability::RemoteDisplayTransactions,
-        "Windows DisplayConfig identity and guarded GDI placement owner",
-        "windows_remote_display_topology::tests::placement_validation_preserves_scale_and_rejects_retired_or_disabled_targets",
+        "Windows temporary DisplayConfig transaction and guarded recovery owner",
+        "windows_remote_display_topology::tests::supplied_configuration_moves_only_validated_source_positions",
     ),
     unavailable(
         PlatformFamily::Windows,
