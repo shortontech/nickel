@@ -135,7 +135,7 @@ fn run_host_with_parent(
         return ExitCode::FAILURE;
     }
     let mut presenter = auto_present::AutoPresent::new();
-    let Some(shell_window) = ShellWindowGuard::register(pump_messages) else {
+    let Some(shell_window) = ShellWindowGuard::register() else {
         readiness.failed("host-shell-window", "shell window registration failed");
         return ExitCode::FAILURE;
     };
@@ -164,21 +164,6 @@ fn run_host_with_parent(
             return ExitCode::FAILURE;
         }
     };
-    let shell_hook_service = if pump_messages {
-        match connect_shell_hook_service() {
-            Ok(service) => Some(service),
-            Err(error) => {
-                eprintln!("phase=host-shell-hook-service error={error}");
-                readiness.failed("host-shell-hook-service", error);
-                drop(controller);
-                drop(redirect);
-                unsafe { CoUninitialize() };
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        None
-    };
     println!("phase=host-ready");
     let _ = std::io::stdout().flush();
     let keep_alive = (controller, redirect);
@@ -187,7 +172,6 @@ fn run_host_with_parent(
         if unsafe { SetTimer(Some(shell_window.window), 0x71, 250, None) } == 0 {
             eprintln!("phase=auto-present error=SetTimer-failed");
             readiness.failed("auto-present", "SetTimer failed");
-            drop(shell_hook_service);
             drop(keep_alive);
             // SAFETY: Balances this thread's successful CoInitializeEx.
             unsafe { CoUninitialize() };
@@ -208,25 +192,6 @@ fn run_host_with_parent(
                     break;
                 }
                 presenter.tick();
-                let _ = std::io::stdout().flush();
-                continue;
-            }
-            if message.hwnd == shell_window.window && message.message == 0x8070 {
-                // Forward only the documented top-level window lifecycle
-                // events while probing. Forwarding HSHELL_REDRAW (6) caused
-                // the hook service to request another redraw indefinitely.
-                if matches!(message.wParam.0, 1 | 2) {
-                    println!(
-                        "phase=shell-hook-event code={} hwnd={:#x}",
-                        message.wParam.0, message.lParam.0
-                    );
-                    if let Some(service) = shell_hook_service.as_ref() {
-                        match forward_shell_hook(service, message.wParam.0, message.lParam.0) {
-                            Ok(()) => println!("phase=shell-hook-forward result=success"),
-                            Err(error) => println!("phase=shell-hook-forward error={error}"),
-                        }
-                    }
-                }
                 let _ = std::io::stdout().flush();
                 continue;
             }
@@ -287,77 +252,10 @@ fn run_host_with_parent(
             std::thread::park();
         }
     }
-    drop(shell_hook_service);
     drop(keep_alive);
     // SAFETY: COM references are released before leaving this apartment.
     unsafe { CoUninitialize() };
     ExitCode::SUCCESS
-}
-
-#[cfg(target_os = "windows")]
-fn connect_shell_hook_service() -> windows::core::Result<windows::core::IUnknown> {
-    use std::ffi::c_void;
-    use windows::{
-        Win32::System::Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance, IServiceProvider},
-        core::{GUID, HRESULT, IUnknown, Interface},
-    };
-
-    const IMMERSIVE_SHELL: GUID = GUID::from_u128(0xc2f03a33_21f5_47fa_b4bb_156362a2f239);
-    const SHELL_HOOK_SERVICE: GUID = GUID::from_u128(0x4624bd39_5fc3_44a8_a809_163a836e9031);
-    const SHELL_HOOK_INTERFACE: GUID = GUID::from_u128(0x914d9b3a_5e53_4e14_bbba_46062acb35a4);
-    type QueryService = unsafe extern "system" fn(
-        *mut c_void,
-        *const GUID,
-        *const GUID,
-        *mut *mut c_void,
-    ) -> HRESULT;
-
-    // SAFETY: run_host initialized COM on this thread; Windows owns the
-    // registered local server and returns an owned interface reference.
-    let shell: IServiceProvider =
-        unsafe { CoCreateInstance(&IMMERSIVE_SHELL, None, CLSCTX_LOCAL_SERVER) }?;
-    let mut raw = std::ptr::null_mut();
-    // SAFETY: IServiceProvider slot 3 is QueryService, and raw is writable.
-    let query: QueryService = unsafe {
-        let vtable = shell.as_raw().cast::<*const usize>().read();
-        std::mem::transmute(vtable.add(3).read())
-    };
-    unsafe {
-        query(
-            shell.as_raw(),
-            &SHELL_HOOK_SERVICE,
-            &SHELL_HOOK_INTERFACE,
-            &mut raw,
-        )
-    }
-    .ok()?;
-    if raw.is_null() {
-        return Err(windows::core::Error::from_hresult(HRESULT(
-            0x80004003_u32 as i32,
-        )));
-    }
-    println!("phase=host-shell-hook-service interface={raw:p}");
-    // SAFETY: Successful QueryService transferred one owned COM reference.
-    Ok(unsafe { IUnknown::from_raw(raw) })
-}
-
-#[cfg(target_os = "windows")]
-fn forward_shell_hook(
-    service: &windows::core::IUnknown,
-    code: usize,
-    hwnd: isize,
-) -> windows::core::Result<()> {
-    use std::ffi::c_void;
-    use windows::core::{HRESULT, Interface};
-
-    type PostShellHookMessage = unsafe extern "system" fn(*mut c_void, usize, isize) -> HRESULT;
-    // SAFETY: The queried interface's vtable has IUnknown slots 0-2,
-    // Register at 3, Unregister at 4, and PostShellHookMessage at 5.
-    let post: PostShellHookMessage = unsafe {
-        let vtable = service.as_raw().cast::<*const usize>().read();
-        std::mem::transmute(vtable.add(5).read())
-    };
-    unsafe { post(service.as_raw(), code, hwnd) }.ok()
 }
 
 #[cfg(target_os = "windows")]

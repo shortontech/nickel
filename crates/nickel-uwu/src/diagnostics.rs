@@ -348,7 +348,7 @@ fn run_with_immersive_manager(app_id: &str, options: DiagnosticOptions) -> ExitC
     }
 
     let _shell_window = if register_shell_window {
-        match ShellWindowGuard::register(false) {
+        match ShellWindowGuard::register() {
             Some(window) => Some(window),
             None => return ExitCode::FAILURE,
         }

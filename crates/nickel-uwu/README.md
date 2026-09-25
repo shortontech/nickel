@@ -92,9 +92,9 @@ constructing `IamAccess` for the service's privileged window operations.
 The later access-denied messages are propagation of that first failure.
 The private class is not registered under `HKCR\CLSID` on this machine.
 
-Nickel's Windows code currently registers for shell-hook messages but does
-not call `SetShellWindow` or `SetShellWindowEx`. This private Windows contract
-is not a supported Nickel integration yet.
+The managed host registers its hidden window through `SetShellWindowEx` to
+acquire the shell privileges needed by the immersive manager. It does not
+register for shell-hook messages.
 
 ## Shell window and next startup gate
 
@@ -460,10 +460,11 @@ make Calculator's CoreWindow follow a frame resize, so the flag was restored.
 `SetTaskmanWindow` and the private `IImmersiveShellHookService`. The fixture's
 `RegisterShellHookWindow` had succeeded, but its stock `STATIC` window
 procedure discarded hook messages before the `GetMessageW` diagnostic could
-see them. The `--host-pump` mode now subclasses that window, registers it as
-the task manager window, and forwards window-created/destroyed events (codes
-`1` and `2`) through `PostShellHookMessage`. The separate
-`shell-hook-service-probe` confirms the service can be queried without
+see them. An earlier `--host-pump` experiment subclassed that window,
+registered it as the task manager window, and forwarded window-created and
+window-destroyed events (codes `1` and `2`) through
+`PostShellHookMessage`. The separate `shell-hook-service-probe` confirms
+the service can be queried without
 Explorer and reports the current task manager HWND with `--get-taskman`.
 
 With no task manager HWND, launching Calculator produced no observed hook
@@ -471,9 +472,12 @@ events. With one registered, the host received creation events for both its
 `ApplicationFrameWindow` and its `CoreWindow`; forwarding returned `S_OK`.
 Calculator's CoreWindow still stayed separate from its frame until the manual
 discovery, visibility, layout, and uncloak sequence above. Forwarding code `6`
-(`HSHELL_REDRAW`) caused a redraw feedback loop, so the fixture limits both
-queuing and forwarding to codes `1` and `2`. This does not establish a general
-shell-hook policy for Nickel.
+(`HSHELL_REDRAW`) caused a redraw feedback loop. The managed host no longer
+registers a task manager window or queries and forwards through
+`IImmersiveShellHookService`; its automatic presentation loop instead
+reconciles live windows every 250 ms. The probe and these observations remain
+as research history. A cold-login UWP run is still needed to validate the
+removal end to end.
 
 This build's `UwpWindowEventDispatcher::OnShellHookMessage` handles several
 private event codes from `17` through `26`, but does not directly handle `1`
