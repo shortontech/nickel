@@ -7,6 +7,7 @@
 
 use crate::remote_policy::{
     application_scale_policy as policy, requested_application_scale_policy as requested,
+    scale_observation_generation, scale_observation_matches, scale_snapshot,
 };
 use nickel_core::dpi::ApplicationScaleSettings;
 use nickel_platform::{ToolkitCapability, ToolkitFamily, ToolkitScaleBackend};
@@ -273,21 +274,16 @@ impl State {
             prepared.settings.clone(),
             prepared.toolkits.clone(),
         );
-        if self.observed.as_ref() != Some(&value) {
-            self.generation = self
-                .generation
-                .checked_add(1)
-                .ok_or("scale generation exhausted")?;
-        }
+        self.generation =
+            scale_observation_generation(self.generation, self.observed.as_ref(), &value)?;
         self.observed = Some(value);
-        Ok(api::Snapshot {
-            generation: self.generation,
+        Ok(scale_snapshot(
+            self.generation,
             observation_started_at_us,
             observed_at_us,
-            atomic: false,
-            policy: policy(prepared.settings.policy),
-            toolkits: prepared.toolkits.clone(),
-        })
+            &prepared.settings,
+            prepared.toolkits.clone(),
+        ))
     }
 
     pub(crate) fn validate(
@@ -297,18 +293,17 @@ impl State {
         now: Instant,
     ) -> Result<(), String> {
         prepared.prior.ensure_current(now)?;
-        if self.generation == u64::MAX
-            || self.generation != transaction.generation
-            || transaction.prior != policy(prepared.prior.settings.policy)
-            || self.observed.as_ref().is_none_or(|observed| {
-                observed
-                    != &(
-                        prepared.prior.revision.clone(),
-                        prepared.prior.settings.clone(),
-                        prepared.prior.toolkits.clone(),
-                    )
-            })
-        {
+        let current = (
+            prepared.prior.revision.clone(),
+            prepared.prior.settings.clone(),
+            prepared.prior.toolkits.clone(),
+        );
+        if !scale_observation_matches(
+            self.generation,
+            self.observed.as_ref(),
+            &current,
+            transaction,
+        ) {
             return Err(STALE.into());
         }
         Ok(())
@@ -320,23 +315,27 @@ impl State {
         observed_at_us: u64,
     ) -> Result<api::Snapshot, String> {
         let toolkits = toolkits(&committed.settings);
-        self.generation = self
-            .generation
-            .checked_add(1)
-            .ok_or("scale generation exhausted")?;
+        self.generation = scale_observation_generation::<Option<RegularFileRevision>>(
+            self.generation,
+            None,
+            &(
+                committed.revision.clone(),
+                committed.settings.clone(),
+                toolkits.clone(),
+            ),
+        )?;
         self.observed = Some((
             committed.revision.clone(),
             committed.settings.clone(),
             toolkits.clone(),
         ));
-        Ok(api::Snapshot {
-            generation: self.generation,
-            observation_started_at_us: observed_at_us,
+        Ok(scale_snapshot(
+            self.generation,
             observed_at_us,
-            atomic: false,
-            policy: policy(committed.settings.policy),
+            observed_at_us,
+            &committed.settings,
             toolkits,
-        })
+        ))
     }
 }
 

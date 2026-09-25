@@ -1,7 +1,7 @@
 //! Nickel-owned remote settings policy shared by the Linux and Windows owners.
 
 use nickel_core::{
-    dpi::{ApplicationScalePolicy, Scale120},
+    dpi::{ApplicationScalePolicy, ApplicationScaleSettings, Scale120},
     launcher_preferences::LauncherPreferences,
     terminal_settings::{TerminalCursorStyle, TerminalSettings},
 };
@@ -160,6 +160,53 @@ pub(crate) fn requested_application_scale_policy(
     })
 }
 
+pub(crate) type ScaleObservation<R> =
+    (R, ApplicationScaleSettings, Vec<application_scale::Toolkit>);
+
+pub(crate) fn scale_observation_generation<R: PartialEq>(
+    generation: u64,
+    previous: Option<&ScaleObservation<R>>,
+    current: &ScaleObservation<R>,
+) -> Result<u64, String> {
+    if previous == Some(current) {
+        Ok(generation)
+    } else {
+        generation
+            .checked_add(1)
+            .ok_or_else(|| "scale generation exhausted".into())
+    }
+}
+
+pub(crate) fn scale_observation_matches<R: PartialEq>(
+    generation: u64,
+    previous: Option<&ScaleObservation<R>>,
+    current: &ScaleObservation<R>,
+    transaction: &application_scale::Transaction,
+) -> bool {
+    generation != 0
+        && generation != u64::MAX
+        && transaction.generation == generation
+        && transaction.prior == application_scale_policy(current.1.policy)
+        && previous == Some(current)
+}
+
+pub(crate) fn scale_snapshot(
+    generation: u64,
+    observation_started_at_us: u64,
+    observed_at_us: u64,
+    settings: &ApplicationScaleSettings,
+    toolkits: Vec<application_scale::Toolkit>,
+) -> application_scale::Snapshot {
+    application_scale::Snapshot {
+        generation,
+        observation_started_at_us,
+        observed_at_us,
+        atomic: false,
+        policy: application_scale_policy(settings.policy),
+        toolkits,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +298,50 @@ mod tests {
                 requested
             );
         }
+    }
+
+    #[test]
+    fn scale_observation_generation_and_staleness_are_shared() {
+        let current = (1_u8, ApplicationScaleSettings::default(), Vec::new());
+        let next = (2_u8, ApplicationScaleSettings::default(), Vec::new());
+        assert_eq!(scale_observation_generation(0, None, &current), Ok(1));
+        assert_eq!(
+            scale_observation_generation(1, Some(&current), &current),
+            Ok(1)
+        );
+        assert_eq!(
+            scale_observation_generation(1, Some(&current), &next),
+            Ok(2)
+        );
+        assert!(scale_observation_generation(u64::MAX, None, &current).is_err());
+
+        let transaction = application_scale::Transaction {
+            generation: 1,
+            prior: application_scale_policy(current.1.policy),
+            requested: application_scale::Policy::Unchanged,
+        };
+        assert!(scale_observation_matches(
+            1,
+            Some(&current),
+            &current,
+            &transaction
+        ));
+        assert!(!scale_observation_matches(
+            1,
+            Some(&current),
+            &next,
+            &transaction
+        ));
+        assert!(!scale_observation_matches(
+            0,
+            Some(&current),
+            &current,
+            &transaction
+        ));
+        let snapshot = scale_snapshot(1, 10, 20, &current.1, Vec::new());
+        assert_eq!(snapshot.generation, 1);
+        assert_eq!(snapshot.observation_started_at_us, 10);
+        assert_eq!(snapshot.observed_at_us, 20);
+        assert!(!snapshot.atomic);
     }
 }

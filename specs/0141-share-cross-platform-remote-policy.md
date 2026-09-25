@@ -69,6 +69,8 @@ business rules.
 ## Current verification record
 
 Both owners call the three shared policy families in `crates/nickel/src/remote_policy.rs`.
-On Windows, the shared policy tests and the focused terminal, application-scale, and launcher
-favorites owner tests pass. Linux tests and target builds remain unrun under the current user
-instruction. Formatting passes; strict Clippy remains blocked by warnings elsewhere in `nickel`.
+Application-scale observation generation, stale-state matching, and snapshot projection now use
+the same production functions. On Windows, their shared test and focused application-scale owner
+tests pass, along with the earlier terminal and launcher favorites tests. Linux tests and target
+builds remain unrun under the current user instruction. Formatting passes; strict Clippy remains
+blocked by warnings elsewhere in `nickel`.

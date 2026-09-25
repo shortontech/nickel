@@ -5,7 +5,8 @@ use super::{
     remote_settings::{FileRevision, revision},
 };
 use crate::remote_policy::{
-    application_scale_policy as policy, requested_application_scale_policy as requested,
+    requested_application_scale_policy as requested, scale_observation_generation,
+    scale_observation_matches, scale_snapshot,
 };
 use nickel_core::dpi::ApplicationScaleSettings;
 use nickel_platform::{
@@ -125,27 +126,17 @@ impl ScaleState {
     ) -> Result<api::Snapshot, String> {
         let (observation_started_at_us, observed_at_us) =
             value.interval(session_started, delivered_at)?;
-        if self
-            .observed
-            .as_ref()
-            .is_none_or(|(rev, settings, toolkits)| {
-                *rev != value.revision || *settings != value.settings || *toolkits != value.toolkits
-            })
-        {
-            self.generation = self
-                .generation
-                .checked_add(1)
-                .ok_or("scale generation exhausted")?;
-        }
-        let snapshot = api::Snapshot {
-            generation: self.generation,
+        let current = (value.revision, value.settings, value.toolkits);
+        self.generation =
+            scale_observation_generation(self.generation, self.observed.as_ref(), &current)?;
+        let snapshot = scale_snapshot(
+            self.generation,
             observation_started_at_us,
             observed_at_us,
-            atomic: false,
-            policy: policy(value.settings.policy),
-            toolkits: value.toolkits.clone(),
-        };
-        self.observed = Some((value.revision, value.settings, value.toolkits));
+            &current.1,
+            current.2.clone(),
+        );
+        self.observed = Some(current);
         Ok(snapshot)
     }
     fn validate(
@@ -155,19 +146,17 @@ impl ScaleState {
         now: Instant,
     ) -> Result<(), String> {
         value.ensure_fresh(now)?;
-        if transaction.generation == 0
-            || self.generation == u64::MAX
-            || transaction.generation != self.generation
-            || transaction.prior != policy(value.settings.policy)
-            || self
-                .observed
-                .as_ref()
-                .is_none_or(|(rev, settings, toolkits)| {
-                    *rev != value.revision
-                        || *settings != value.settings
-                        || *toolkits != value.toolkits
-                })
-        {
+        let current = (
+            value.revision.clone(),
+            value.settings.clone(),
+            value.toolkits.clone(),
+        );
+        if !scale_observation_matches(
+            self.generation,
+            self.observed.as_ref(),
+            &current,
+            transaction,
+        ) {
             return Err(STALE.into());
         }
         Ok(())
