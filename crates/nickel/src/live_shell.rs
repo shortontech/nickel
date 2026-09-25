@@ -277,6 +277,7 @@ impl UiApplication for RunApplication {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) -> HostEvent {
     if action == ControllerAction::Cancel && !overlay_open {
         HostEvent::Shortcut(Shortcut::Escape)
@@ -861,6 +862,9 @@ fn shortcut_capability_status(
     Some(format!("Global shortcuts unavailable: {reason}."))
 }
 
+// This shared shell implementation includes the compositor-facing API. The
+// Windows winit owner calls its own subset and leaves those Linux methods idle.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 impl LiveShell {
     #[cfg(target_os = "linux")]
     pub fn host_runtime_samples(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<u64>, u64) {
@@ -2651,6 +2655,7 @@ impl LiveShell {
         outcome
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn launcher_host_controller(
         &mut self,
         action: ControllerAction,
@@ -3099,6 +3104,7 @@ impl LiveShell {
 
     /// Dispatches compositor-owned semantic UI events through the same hosts and
     /// effect reducers used by the windowed shell.
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn shell_role_host_ui(
         &mut self,
         role: SurfaceRole,
@@ -3240,6 +3246,7 @@ impl LiveShell {
         }
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn shell_role_host_shortcut(
         &mut self,
         role: SurfaceRole,
@@ -4972,6 +4979,7 @@ impl LiveShell {
         }
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn screenshot_host_event(
         &mut self,
         event: HostEvent,
@@ -4981,6 +4989,7 @@ impl LiveShell {
         self.screenshot_host_event_authorized(event, width, height, None)
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn screenshot_host_event_authorized(
         &mut self,
         event: HostEvent,
@@ -5036,6 +5045,7 @@ impl LiveShell {
         }
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn screenshot_controller(&mut self, action: ControllerAction) -> bool {
         if !self.screenshot.visible() {
             return false;

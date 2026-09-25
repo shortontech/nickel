@@ -9058,36 +9058,6 @@ impl WindowsRemoteControl {
         true
     }
 
-    pub(crate) fn indicator_controller(
-        &mut self,
-        shell: &mut WinitShell,
-        action: nickel_ui::ControllerAction,
-    ) -> bool {
-        let Some(indicator) = self.indicators.values_mut().find(|indicator| {
-            shell
-                .surface(indicator.id)
-                .is_some_and(|surface| surface.window().has_input_focus())
-        }) else {
-            return false;
-        };
-        indicator.host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Controller(action)],
-            ..Default::default()
-        });
-        if indicator.host.application_mut().stop_requested
-            || shell
-                .present_host_frame(
-                    indicator.id,
-                    indicator.host.change_token,
-                    indicator.host.commands(),
-                )
-                .is_err()
-        {
-            self.stop_indicators(shell);
-        }
-        true
-    }
-
     fn handle(&mut self, request: Request) -> ServerMessage {
         let command = match request {
             Request::Query(Query::RemoteControl) => return self.remote_control_snapshot(),

@@ -161,7 +161,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{HELP}");
             Ok(())
         }
-        Command::Capture { .. } => {
+        Command::Capture { path, output } => {
+            let _ = (path, output);
             Err("Nickel compositor screenshots are only available on Unix sessions".into())
         }
     }

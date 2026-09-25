@@ -2556,13 +2556,6 @@ pub fn run() -> Result<(), String> {
         #[cfg(not(target_os = "windows"))]
         if controller_schedule.is_due(now) {
             for action in controller.poll_global(now) {
-                #[cfg(target_os = "windows")]
-                if remote_control
-                    .as_mut()
-                    .is_some_and(|owner| owner.indicator_controller(&mut shell, action))
-                {
-                    continue;
-                }
                 shell.begin_input_observation(Instant::now());
                 let result = handle_controller_action(
                     &mut shell,

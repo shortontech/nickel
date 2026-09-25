@@ -342,6 +342,7 @@ impl LiveShell {
         )
     }
 
+    #[cfg(target_os = "linux")]
     pub fn keyboard_controller(&mut self, action: ControllerAction) -> bool {
         if action == ControllerAction::Cancel {
             return self.set_keyboard_visible(false);
@@ -359,6 +360,7 @@ impl LiveShell {
         )
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn cancel_keyboard_gestures(&mut self) {
         self.keyboard_gesture_leases.clear();
         self.keyboard_resize = None;

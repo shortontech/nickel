@@ -472,6 +472,7 @@ impl ScreenshotTool {
 
     /// Native hosts use normalized input; region selection shares the existing
     /// pointer reducers while keyboard and toolbar actions stay on the UI host.
+    #[cfg(any(test, target_os = "linux"))]
     pub fn host_event_authorized(
         &mut self,
         event: HostEvent,
@@ -622,6 +623,7 @@ impl ScreenshotTool {
         outcome.changed | self.apply_effects()
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn controller_action(&mut self, action: nickel_ui::ControllerAction) -> bool {
         if action == nickel_ui::ControllerAction::Cancel {
             return self.escape();
