@@ -53,10 +53,11 @@ fn npm_shim_target(executable: &Path) -> Option<(PathBuf, PathBuf)> {
         return None;
     }
     let adjacent_node = directory.join("node.exe");
-    let node = adjacent_node
-        .is_file()
-        .then_some(adjacent_node)
-        .unwrap_or_else(|| PathBuf::from("node"));
+    let node = if adjacent_node.is_file() {
+        adjacent_node
+    } else {
+        PathBuf::from("node")
+    };
     Some((node, entrypoint))
 }
 

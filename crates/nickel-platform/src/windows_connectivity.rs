@@ -131,7 +131,7 @@ fn wifi_snapshot_with_handle(handle: HANDLE) -> Result<WifiSnapshot, String> {
     if result != NO_ERROR.0 || interfaces.is_null() {
         return Err(format!("WlanEnumInterfaces failed ({result})"));
     }
-    let snapshot = (|| {
+    let snapshot = {
         // SAFETY: WlanEnumInterfaces returned a non-null allocation containing its reported count.
         let entries = unsafe {
             std::slice::from_raw_parts(
@@ -305,7 +305,7 @@ fn wifi_snapshot_with_handle(handle: HANDLE) -> Result<WifiSnapshot, String> {
             )
         });
         Ok(snapshot)
-    })();
+    };
     // SAFETY: WLAN allocated the interface list; free it exactly once after all reads.
     unsafe { WlanFreeMemory(interfaces.cast()) };
     snapshot

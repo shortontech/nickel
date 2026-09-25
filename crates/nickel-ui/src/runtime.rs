@@ -375,11 +375,7 @@ impl SessionControllerSource {
                                 Some(*through)
                             });
                             if reset.is_some() || revocation.is_some() {
-                                let acknowledgement = reset
-                                    .and_then(|cutoff| {
-                                        lease.map(|lease_epoch| (lease_epoch, cutoff))
-                                    })
-                                    .or(revocation);
+                                let acknowledgement = lease.zip(reset).or(revocation);
                                 lease = None;
                                 role_lease = None;
                                 let Some((lease_epoch, cutoff)) = acknowledgement else {
