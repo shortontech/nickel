@@ -83,6 +83,8 @@ impl LaunchPreparationState {
 const MAX_PENDING_OUTPUT_LAUNCHES: usize = 8;
 const OUTPUT_LAUNCH_PLACEMENT_TTL: Duration = Duration::from_secs(30);
 const OUTPUT_LAUNCH_ROOT_TTL: Duration = Duration::from_secs(2);
+const PERIPHERAL_CONTROL_UNAVAILABLE: &str =
+    "native Windows printer calls lack a cancellable remote owner";
 
 struct LaunchPreparationAdmission;
 
@@ -1701,7 +1703,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         state.observe(
             native,
             self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
-            false,
+            Some(PERIPHERAL_CONTROL_UNAVAILABLE),
         )
     }
     fn control_peripherals(
@@ -1715,6 +1717,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit.with_debug_input(false, || Ok(()))?;
         Ok(nickel_remote_control::peripheral_controls::Outcome {
             completion: nickel_remote_control::semantics::SurfaceSemanticCompletion::Unavailable,
+            unavailable_reason: Some(PERIPHERAL_CONTROL_UNAVAILABLE.into()),
         })
     }
     fn read_application_scale(

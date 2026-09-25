@@ -42,7 +42,7 @@ impl NickelSession {
                 .elapsed()
                 .as_micros()
                 .min(u128::from(u64::MAX)) as u64,
-            true,
+            None,
         )?;
         self.peripheral_authority(permit, false)?;
         Ok(snapshot)
@@ -79,6 +79,7 @@ impl NickelSession {
             Err(_) => {
                 return Ok(Outcome {
                     completion: Completion::Uncertain,
+                    unavailable_reason: None,
                 });
             }
         };
@@ -89,10 +90,14 @@ impl NickelSession {
         {
             return Ok(Outcome {
                 completion: Completion::Uncertain,
+                unavailable_reason: None,
             });
         }
+        let unavailable_reason =
+            crate::remote_peripheral_controls::control_failure_reason(&outcome).map(str::to_owned);
         Ok(Outcome {
             completion: prepared.native.completion(outcome, refreshed.as_ref()),
+            unavailable_reason,
         })
     }
 }

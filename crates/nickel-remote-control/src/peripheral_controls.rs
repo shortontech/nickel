@@ -74,6 +74,8 @@ pub struct Snapshot {
     pub printers: Availability,
     pub removable_volumes: Availability,
     pub printer_controls: Availability,
+    /// Scrubbed explanation when printer mutations are unavailable.
+    pub printer_controls_unavailable_reason: Option<String>,
     pub printer_entries: Vec<Printer>,
     pub removable_volume_entries: Vec<RemovableVolume>,
     pub omitted_printers: u32,
@@ -129,6 +131,8 @@ impl Transaction {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct Outcome {
     pub completion: crate::semantics::SurfaceSemanticCompletion,
+    /// Scrubbed explanation for an unavailable operation.
+    pub unavailable_reason: Option<String>,
 }
 
 #[cfg(test)]

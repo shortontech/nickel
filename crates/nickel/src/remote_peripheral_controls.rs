@@ -25,6 +25,23 @@ pub(crate) fn observation_failure(error: PeripheralError) -> String {
     .into()
 }
 
+/// Keep the native outcome class while discarding details that can include
+/// printer names, document titles, addresses, or volume paths.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn control_failure_reason(outcome: &PeripheralOutcome) -> Option<&'static str> {
+    match outcome {
+        PeripheralOutcome::Busy { .. } => Some("peripheral control provider is busy"),
+        PeripheralOutcome::AuthorizationRequired { .. } => {
+            Some("peripheral control permission denied")
+        }
+        PeripheralOutcome::Unsupported { .. } => Some("peripheral control provider is unavailable"),
+        PeripheralOutcome::Rejected { .. } => Some("peripheral control was rejected"),
+        PeripheralOutcome::Accepted
+        | PeripheralOutcome::Cancelled
+        | PeripheralOutcome::Uncertain => None,
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct State {
     next_generation: u64,
@@ -71,16 +88,16 @@ impl State {
         &mut self,
         native: PeripheralSnapshot,
         observed_at_micros: u64,
-        printer_controls: bool,
+        control_unavailable_reason: Option<&'static str>,
     ) -> Result<wire::Snapshot, String> {
-        self.project(Some(native), observed_at_micros, printer_controls)
+        self.project(Some(native), observed_at_micros, control_unavailable_reason)
     }
 
     fn project(
         &mut self,
         native: Option<PeripheralSnapshot>,
         observed_at_micros: u64,
-        printer_controls: bool,
+        control_unavailable_reason: Option<&'static str>,
     ) -> Result<wire::Snapshot, String> {
         self.next_generation = self
             .next_generation
@@ -201,11 +218,12 @@ impl State {
             observed_at_micros,
             printers,
             removable_volumes,
-            printer_controls: if printer_controls {
+            printer_controls: if control_unavailable_reason.is_none() {
                 wire::Availability::Available
             } else {
                 wire::Availability::Unavailable
             },
+            printer_controls_unavailable_reason: control_unavailable_reason.map(str::to_owned),
             printer_entries,
             removable_volume_entries: volume_entries,
             omitted_printers,
@@ -390,6 +408,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn control_failures_keep_categories_without_private_provider_text() {
+        for (outcome, category) in [
+            (
+                PeripheralOutcome::Busy {
+                    detail: "Secret printer /private/volume".into(),
+                },
+                "provider is busy",
+            ),
+            (
+                PeripheralOutcome::AuthorizationRequired {
+                    detail: "Secret printer /private/volume".into(),
+                },
+                "permission denied",
+            ),
+            (
+                PeripheralOutcome::Unsupported {
+                    detail: "Secret printer /private/volume".into(),
+                },
+                "provider is unavailable",
+            ),
+            (
+                PeripheralOutcome::Rejected {
+                    detail: "Secret printer /private/volume".into(),
+                },
+                "was rejected",
+            ),
+        ] {
+            let reason = control_failure_reason(&outcome).unwrap();
+            assert!(reason.contains(category));
+            assert!(!reason.contains("Secret"));
+            assert!(!reason.contains("/private"));
+        }
+    }
+
     fn raw() -> PeripheralSnapshot {
         PeripheralSnapshot {
             provider: PeripheralProvider::Unsupported {
@@ -433,7 +486,7 @@ mod tests {
     #[test]
     fn projection_scrubs_native_text_paths_and_clamps_capacity() {
         let mut state = State::default();
-        let snapshot = state.observe(raw(), 42, true).unwrap();
+        let snapshot = state.observe(raw(), 42, None).unwrap();
         let json = serde_json::to_string(&snapshot).unwrap();
         for secret in [
             "private-native-printer",
@@ -453,9 +506,28 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_printer_controls_report_owner_limit_without_native_details() {
+        let snapshot = State::default()
+            .observe(
+                raw(),
+                42,
+                Some("native Windows printer calls lack a cancellable remote owner"),
+            )
+            .unwrap();
+        assert_eq!(snapshot.printer_controls, wire::Availability::Unavailable);
+        assert_eq!(
+            snapshot.printer_controls_unavailable_reason.as_deref(),
+            Some("native Windows printer calls lack a cancellable remote owner")
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("Secret office printer"));
+        assert!(!json.contains("/private/path"));
+    }
+
+    #[test]
     fn observation_is_consumed_and_prior_state_is_required() {
         let mut state = State::default();
-        let snapshot = state.observe(raw(), 42, true).unwrap();
+        let snapshot = state.observe(raw(), 42, None).unwrap();
         let printer = &snapshot.printer_entries[0];
         let job = &printer.jobs[0];
         let transaction = wire::Transaction {

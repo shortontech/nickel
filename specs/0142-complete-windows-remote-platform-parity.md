@@ -95,7 +95,9 @@ with an accurate reason and contract evidence.
   documentation for the path and monitor identity fields used by the probe.
 - Windows printer and removable-volume reads are available through a bounded observation
   worker. Printer mutations remain unavailable because the native spooler calls lack a
-  cancellable production owner; the platform contract records that limitation.
+  cancellable production owner; the platform contract and scrubbed remote snapshot/outcome
+  record that limitation. Shared outcome mapping preserves busy, permission, unsupported,
+  and rejection categories without returning native details.
 - The exact Windows workspace strict Clippy command now reaches `nickel` and fails on unused
   code warnings after style findings in the workspace were corrected. Native surface focus/DPI
   and peripheral changing coverage remain pending. Linux tests are excluded by the current
