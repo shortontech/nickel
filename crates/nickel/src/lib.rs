@@ -1715,7 +1715,7 @@ fn handle_shell_input(
     event: InputEvent,
     hover_repaint: &mut Option<(SurfaceRole, Instant)>,
     #[cfg(target_os = "windows")] desktop_context_popup: &mut Option<
-        std::sync::mpsc::Receiver<Option<live_shell::DesktopMessage>>,
+        nickel_file::windows_popup_menu::PopupSession<live_shell::DesktopMessage>,
     >,
 ) -> Result<(), String> {
     let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
@@ -1729,6 +1729,19 @@ fn handle_shell_input(
         state.set_panel_output(output);
     }
     if role == SurfaceRole::Desktop {
+        #[cfg(target_os = "windows")]
+        if matches!(
+            &event,
+            InputEvent::Pointer(PointerEvent::Button {
+                edge: KeyEdge::Pressed,
+                ..
+            })
+        ) && desktop_context_popup.take().is_some()
+        {
+            // A passive desktop does not take native focus on outside clicks.
+            // Cancel its detached popup explicitly instead of activating the wallpaper.
+            state.finish_desktop_native_context_menu(None);
+        }
         #[cfg(target_os = "windows")]
         let native_context_press = matches!(
             &event,
@@ -2478,7 +2491,7 @@ pub fn run() -> Result<(), String> {
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     #[cfg(target_os = "windows")]
     let mut desktop_context_popup: Option<
-        std::sync::mpsc::Receiver<Option<live_shell::DesktopMessage>>,
+        nickel_file::windows_popup_menu::PopupSession<live_shell::DesktopMessage>,
     > = None;
     #[cfg(not(target_os = "windows"))]
     let mut controller = nickel_ui::ControllerInput::new();

@@ -1776,6 +1776,8 @@ impl DesktopApplication {
             last_click: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
+            #[cfg(target_os = "windows")]
+            context_popup_detached: false,
             last_menu_dismissal: None,
             topology_generation: 0,
             directory_generation: 0,

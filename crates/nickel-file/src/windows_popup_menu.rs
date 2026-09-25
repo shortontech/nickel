@@ -1,6 +1,13 @@
 //! Nickel-rendered context menus in a dedicated Windows popup window.
 
-use std::{sync::mpsc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::Duration,
+};
 
 use nickel_ui::{
     AdapterOutcome, Application, Container, FrameOverlay, HostAdapter, HostServices, OverlayAnchor,
@@ -11,7 +18,7 @@ use windows::Win32::{
     Foundation::{HWND, POINT},
     UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GWLP_HWNDPARENT, GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW,
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     },
 };
 use winit::{
@@ -143,6 +150,7 @@ struct PopupAdapter<Message> {
     owner: HWND,
     position: POINT,
     focused: bool,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
@@ -169,9 +177,9 @@ impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
             && let RawWindowHandle::Win32(handle) = handle.as_raw()
         {
             let hwnd = HWND(handle.hwnd.get() as *mut _);
-            // SAFETY: Both HWNDs refer to live windows for this modal popup.
-            // The owner relationship keeps the popup out of Alt+Tab, and the
-            // style update removes its taskbar button.
+            // SAFETY: The popup HWND is live; owner is a live ordinary window
+            // or null for a passive shell surface. TOOLWINDOW keeps both forms
+            // out of Alt+Tab and removes their taskbar button.
             unsafe {
                 let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
                 SetWindowLongPtrW(
@@ -219,6 +227,10 @@ impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
         host: &mut UiHost<PopupApplication<Message>>,
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+        if self.cancelled.load(Ordering::Acquire) {
+            let _ = self.sender.send(None);
+            return Ok(AdapterOutcome::exit());
+        }
         if let Some(choice) = host.application_mut().take_choice() {
             let _ = self.sender.send(Some(choice));
             return Ok(AdapterOutcome::exit());
@@ -236,11 +248,14 @@ impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
 pub fn start<Message: Clone + Send + 'static>(
     menu: OverlayMenu<Message>,
     window: &Window,
-) -> Option<mpsc::Receiver<Option<Message>>> {
+) -> Option<PopupSession<Message>> {
     let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else {
         return None;
     };
-    let owner = handle.hwnd.get() as usize;
+    let native_owner = HWND(handle.hwnd.get() as *mut _);
+    // SAFETY: The invoking winit window is borrowed and live.
+    let owner_style = unsafe { GetWindowLongPtrW(native_owner, GWL_EXSTYLE) } as u32;
+    let owner = popup_owner(handle.hwnd.get() as usize, owner_style);
     let scale = window.scale_factor();
     let mut position = POINT::default();
     // SAFETY: `position` is a valid output buffer for the current cursor.
@@ -248,14 +263,48 @@ pub fn start<Message: Clone + Send + 'static>(
         return None;
     }
     let (sender, receiver) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let popup_cancelled = Arc::clone(&cancelled);
     std::thread::Builder::new()
         .name("nickel-context-popup-owner".into())
         .spawn(move || {
-            let action = run(menu, owner, scale, position);
+            let action = run(menu, owner, scale, position, popup_cancelled);
             let _ = sender.send(action);
         })
         .ok()?;
-    Some(receiver)
+    Some(PopupSession {
+        receiver,
+        cancelled,
+    })
+}
+
+/// Owns an ephemeral popup. Dropping it cancels the popup even when clicking
+/// its passive invoking surface does not produce a native focus-loss event.
+pub struct PopupSession<Message> {
+    receiver: mpsc::Receiver<Option<Message>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl<Message> PopupSession<Message> {
+    pub fn try_recv(&self) -> Result<Option<Message>, mpsc::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+impl<Message> Drop for PopupSession<Message> {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+fn popup_owner(window: usize, extended_style: u32) -> usize {
+    // A desktop/passive surface must not become the popup's activation fallback
+    // or move with its owner group. The popup is independently focusable.
+    if extended_style & WS_EX_NOACTIVATE.0 != 0 {
+        0
+    } else {
+        window
+    }
 }
 
 fn run<Message: Clone + Send + 'static>(
@@ -263,11 +312,16 @@ fn run<Message: Clone + Send + 'static>(
     owner: usize,
     scale: f64,
     mut position: POINT,
+    cancelled: Arc<AtomicBool>,
 ) -> Option<Message> {
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            return None;
+        }
         let application = PopupApplication::new(menu.clone());
         let width = application.size.0 as i32;
         let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::clone(&cancelled);
         let popup = std::thread::Builder::new()
             .name("nickel-context-popup".into())
             .spawn(move || {
@@ -276,6 +330,7 @@ fn run<Message: Clone + Send + 'static>(
                     owner: HWND(owner as *mut _),
                     position,
                     focused: false,
+                    cancelled,
                 };
                 nickel_ui::run_with_adapter_on_any_thread(application, adapter)
                     .map_err(|error| error.to_string())
@@ -299,6 +354,25 @@ fn run<Message: Clone + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_desktop_is_not_a_popup_activation_owner() {
+        assert_eq!(popup_owner(123, WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0), 0);
+        assert_eq!(popup_owner(123, WS_EX_APPWINDOW.0), 123);
+    }
+
+    #[test]
+    fn dropping_popup_session_cancels_without_native_focus_loss() {
+        let (_, receiver) = mpsc::channel::<Option<usize>>();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let session = PopupSession {
+            receiver,
+            cancelled: Arc::clone(&cancelled),
+        };
+        assert!(!cancelled.load(Ordering::Acquire));
+        drop(session);
+        assert!(cancelled.load(Ordering::Acquire));
+    }
 
     #[test]
     fn nickel_popup_maps_leaf_actions_and_nested_items() {

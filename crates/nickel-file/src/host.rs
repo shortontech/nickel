@@ -40,7 +40,7 @@ pub struct FileHostAdapter {
     sync_requested: bool,
     drop_hover_deadline: Option<Instant>,
     #[cfg(target_os = "windows")]
-    context_popup_rx: Option<std::sync::mpsc::Receiver<Option<FileMessage>>>,
+    context_popup_rx: Option<crate::windows_popup_menu::PopupSession<FileMessage>>,
     #[cfg(target_os = "windows")]
     context_popup_poll_at: Option<Instant>,
     #[cfg(target_os = "windows")]

@@ -1,3 +1,7 @@
+#[path = "windows_desktop.rs"]
+mod desktop;
+#[path = "windows_focus.rs"]
+mod focus;
 #[path = "windows_remote_observation.rs"]
 pub(crate) mod remote_observation;
 use std::{
@@ -46,9 +50,8 @@ use windows::{
         System::Shutdown::LockWorkStation,
         System::SystemInformation::GetTickCount64,
         System::Threading::{
-            AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, GetProcessTimes,
-            OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-            QueryFullProcessImageNameW,
+            GetCurrentProcessId, GetCurrentThreadId, GetProcessTimes, OpenProcess,
+            PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
         },
         System::{
             Com::StructuredStorage::PropVariantToStringAlloc,
@@ -65,9 +68,7 @@ use windows::{
             Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
             Controls::MARGINS,
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
-            Input::KeyboardAndMouse::{
-                GetAsyncKeyState, GetCapture, ReleaseCapture, SetActiveWindow, SetCapture, SetFocus,
-            },
+            Input::KeyboardAndMouse::{GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture},
             Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
             Shell::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
@@ -78,11 +79,11 @@ use windows::{
                 SHGetFileInfoW, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                BringWindowToTop, CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL,
-                DefWindowProcW, DestroyIcon, DrawIconEx, EVENT_OBJECT_DESTROY,
-                EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
-                GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor,
-                GetClassLongPtrW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+                CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL, DefWindowProcW,
+                DestroyIcon, DrawIconEx, EVENT_OBJECT_DESTROY, EVENT_SYSTEM_MOVESIZEEND,
+                EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT, GA_ROOTOWNER, GCLP_HICON,
+                GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
+                GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
                 GetLastActivePopup, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW,
                 GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
                 HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
@@ -91,7 +92,7 @@ use windows::{
                 NID_INTEGRATED_TOUCH, NID_READY, PostMessageW, RegisterClassW,
                 RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON, SM_CYICON,
                 SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
                 SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
@@ -3704,6 +3705,10 @@ pub fn configure_desktop_window(
     let Some(hwnd) = window_hwnd(window) else {
         return false;
     };
+    if !desktop::install(hwnd) {
+        tracing::warn!("could not install desktop activation and Z-order policy");
+        return false;
+    }
     // SAFETY: hwnd belongs to the live desktop window. Windows returns a monitor rectangle
     // for that window, and SetWindowPos applies that rectangle while keeping the desktop at the
     // bottom of the Z-order. This also corrects stale runtime geometry after a display-mode change.
@@ -4885,49 +4890,9 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 return false;
             }
             let hwnd = HWND(launcher as *mut c_void);
-            let focus_deadline = Instant::now() + Duration::from_millis(75);
-            // SAFETY: The handle belongs to Nickel's live launcher window.
-            unsafe {
-                let foreground_thread = GetWindowThreadProcessId(foreground, None);
-                let launcher_thread = GetWindowThreadProcessId(hwnd, None);
-                let current_thread = GetCurrentThreadId();
-                let attached_foreground = foreground_thread != 0
-                    && foreground_thread != current_thread
-                    && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
-                let attached_launcher = launcher_thread != 0
-                    && launcher_thread != current_thread
-                    && launcher_thread != foreground_thread
-                    && AttachThreadInput(current_thread, launcher_thread, true).as_bool();
-                let _ = ShowWindow(hwnd, SW_SHOW);
-                let _ = BringWindowToTop(hwnd);
-                let _ = SetActiveWindow(hwnd);
-                let focus_requested = SetForegroundWindow(hwnd).as_bool();
-                let _ = SetFocus(Some(hwnd));
-                if attached_launcher {
-                    let _ = AttachThreadInput(current_thread, launcher_thread, false);
-                }
-                if attached_foreground {
-                    let _ = AttachThreadInput(current_thread, foreground_thread, false);
-                }
-                // SetForegroundWindow reports request admission, not durable foreground
-                // ownership. Reconcile the request against the native fact for a bounded
-                // interval before allowing LiveShell to project launcher keyboard focus.
-                // Roll back the native visibility when Windows rejects or displaces the
-                // request so the visible and internally focused launcher cannot diverge.
-                while GetForegroundWindow() != hwnd && Instant::now() < focus_deadline {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                if GetForegroundWindow() != hwnd {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                    tracing::warn!(
-                        focus_requested,
-                        "Windows did not grant launcher foreground focus before the deadline"
-                    );
-                    return false;
-                }
-            }
-            return true;
+            return focus::show_launcher(hwnd);
         }
+
         ShellCommand::Hide => {
             let foreground = unsafe { GetForegroundWindow() };
             let launcher = LAUNCHER_FOREGROUND_WINDOW.load(Ordering::Relaxed);
@@ -5059,50 +5024,24 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     // manager requests to a currently valid top-level HWND.
     unsafe {
         match action {
-            WindowAction::Activate => {
-                if should_restore_on_activation(
-                    IsIconic(hwnd).as_bool(),
-                    window_covers_monitor(hwnd),
-                ) {
-                    let _ = ShowWindow(hwnd, SW_RESTORE);
-                }
-                let foreground = GetForegroundWindow();
-                let current_thread = GetCurrentThreadId();
-                let foreground_thread = GetWindowThreadProcessId(foreground, None);
-                let target_thread = GetWindowThreadProcessId(hwnd, None);
-                let attached_foreground = foreground_thread != 0
-                    && foreground_thread != current_thread
-                    && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
-                let attached_target = target_thread != 0
-                    && target_thread != current_thread
-                    && target_thread != foreground_thread
-                    && AttachThreadInput(current_thread, target_thread, true).as_bool();
-                let _ = BringWindowToTop(hwnd);
-                let activated = SetForegroundWindow(hwnd).as_bool();
-                if attached_target {
-                    let _ = AttachThreadInput(current_thread, target_thread, false);
-                }
-                if attached_foreground {
-                    let _ = AttachThreadInput(current_thread, foreground_thread, false);
-                }
-                activated
-            }
+            WindowAction::Activate => focus::activate_window(
+                hwnd,
+                should_restore_on_activation(IsIconic(hwnd).as_bool(), window_covers_monitor(hwnd)),
+            ),
             WindowAction::Close => PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).is_ok(),
-            WindowAction::Maximize => {
-                let _ = ShowWindow(
-                    hwnd,
-                    if IsZoomed(hwnd).as_bool() {
-                        SW_RESTORE
-                    } else {
-                        SW_MAXIMIZE
-                    },
-                );
-                true
-            }
+            WindowAction::Maximize => focus::request_show_state(
+                hwnd,
+                if IsZoomed(hwnd).as_bool() {
+                    SW_RESTORE
+                } else {
+                    SW_MAXIMIZE
+                },
+            ),
             WindowAction::Minimize => {
-                let _ = ShowWindow(hwnd, SW_MINIMIZE);
-                park_iconic_window(hwnd);
-                true
+                // collect_window parks the iconic representation once Windows
+                // has actually minimized it. Do not move a still-normal window
+                // while this asynchronous request is pending.
+                focus::request_show_state(hwnd, SW_MINIMIZE)
             }
             WindowAction::Fullscreen => false,
             WindowAction::SnapLeading | WindowAction::SnapTrailing => false,
