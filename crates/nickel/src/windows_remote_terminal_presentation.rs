@@ -5,9 +5,10 @@
 //! authorization checks immediately before replacement. Executable and working
 //! directory values are preserved in the file but never enter the remote API.
 
-use nickel_core::terminal_settings::{
-    PreparedTerminalSettings, TerminalCursorStyle, TerminalSettings, settings_path,
+use crate::remote_policy::{
+    apply_terminal_preferences as apply, terminal_preferences as preferences,
 };
+use nickel_core::terminal_settings::{PreparedTerminalSettings, TerminalSettings, settings_path};
 use nickel_remote_control::terminal_presentation as api;
 use nickel_storage::{RegularFileRevision, regular_file_revision};
 use std::{
@@ -20,48 +21,6 @@ const STALE: &str = "terminal presentation changed; read current state before re
 const UNAVAILABLE: &str =
     "terminal presentation unavailable or uncertain; read current state before retrying";
 const MAX_OBSERVATION_AGE: Duration = Duration::from_secs(1);
-
-fn cursor(value: TerminalCursorStyle) -> api::CursorStyle {
-    match value {
-        TerminalCursorStyle::Block => api::CursorStyle::Block,
-        TerminalCursorStyle::Beam => api::CursorStyle::Beam,
-        TerminalCursorStyle::Underline => api::CursorStyle::Underline,
-    }
-}
-
-fn core_cursor(value: api::CursorStyle) -> TerminalCursorStyle {
-    match value {
-        api::CursorStyle::Block => TerminalCursorStyle::Block,
-        api::CursorStyle::Beam => TerminalCursorStyle::Beam,
-        api::CursorStyle::Underline => TerminalCursorStyle::Underline,
-    }
-}
-
-fn preferences(settings: &TerminalSettings) -> api::Preferences {
-    api::Preferences {
-        font_family: settings.font_family.clone(),
-        font_size_tenths: settings.font_size_tenths,
-        scrollback_lines: settings.scrollback_lines,
-        cursor_style: cursor(settings.cursor_style),
-        foreground: settings.foreground,
-        background: settings.background,
-        close_on_successful_exit: settings.close_on_successful_exit,
-    }
-}
-
-fn apply(settings: &mut TerminalSettings, requested: &api::Preferences) -> Result<(), String> {
-    if !requested.valid() {
-        return Err("terminal presentation value is outside its supported range".into());
-    }
-    settings.font_family.clone_from(&requested.font_family);
-    settings.font_size_tenths = requested.font_size_tenths;
-    settings.scrollback_lines = requested.scrollback_lines;
-    settings.cursor_style = core_cursor(requested.cursor_style);
-    settings.foreground = requested.foreground;
-    settings.background = requested.background;
-    settings.close_on_successful_exit = requested.close_on_successful_exit;
-    Ok(())
-}
 
 pub(crate) struct PreparedRead {
     started_at: Instant,

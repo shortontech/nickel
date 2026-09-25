@@ -4,7 +4,10 @@ use super::{
     NickelSession, RemoteDesktopBridge, RemoteDesktopRequest,
     remote_settings::{FileRevision, revision},
 };
-use nickel_core::dpi::{ApplicationScalePolicy, ApplicationScaleSettings, Scale120};
+use crate::remote_policy::{
+    application_scale_policy as policy, requested_application_scale_policy as requested,
+};
+use nickel_core::dpi::ApplicationScaleSettings;
 use nickel_platform::{
     LinuxToolkitScaleBackend, PreparedToolkitCommand, RunningToolkitCommand, ToolkitFamily,
     ToolkitScaleBackend,
@@ -21,27 +24,6 @@ const MAX_OBSERVATION_AGE: Duration = Duration::from_secs(1);
 const STALE: &str = "application scale changed; read current state before retrying";
 const UNAVAILABLE: &str =
     "application scale unavailable or uncertain; read current state before retrying";
-fn policy(value: ApplicationScalePolicy) -> api::Policy {
-    match value {
-        ApplicationScalePolicy::FollowNickel => api::Policy::FollowNickel,
-        ApplicationScalePolicy::Unchanged => api::Policy::Unchanged,
-        ApplicationScalePolicy::Custom(scale) => api::Policy::Custom {
-            scale_120: scale.units(),
-        },
-    }
-}
-fn requested(value: api::Policy) -> Result<ApplicationScalePolicy, String> {
-    Ok(match value {
-        api::Policy::FollowNickel => ApplicationScalePolicy::FollowNickel,
-        api::Policy::Unchanged => ApplicationScalePolicy::Unchanged,
-        api::Policy::Custom { scale_120 } => {
-            if !(60..=480).contains(&scale_120) || scale_120 % 30 != 0 {
-                return Err("unsupported application scale".into());
-            }
-            ApplicationScalePolicy::Custom(Scale120::new(scale_120).unwrap())
-        }
-    })
-}
 fn family(value: ToolkitFamily) -> api::Family {
     match value {
         ToolkitFamily::Gtk => api::Family::Gtk,

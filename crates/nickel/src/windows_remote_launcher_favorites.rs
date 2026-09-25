@@ -4,12 +4,13 @@
 //! request. The owner supplies and later revalidates the production launcher's
 //! exact application-ID catalog before committing the staged replacement.
 
+use crate::remote_policy::{FavoriteCatalog, favorite_projection as projection};
 use nickel_core::launcher_preferences::{
     LauncherPreferences, PreparedLauncherPreferences, preferences_path,
 };
 use nickel_remote_control::launcher_favorites::{self as api, Change, Snapshot, Transaction};
 use nickel_storage::{RegularFileRevision, regular_file_revision};
-use std::{collections::HashSet, io, path::PathBuf, time::Instant};
+use std::{io, path::PathBuf, time::Instant};
 
 const MAX_CATALOG_APPLICATIONS: usize = 4_096;
 const STALE: &str = "launcher favorites or application catalog changed; read current favorites";
@@ -55,7 +56,9 @@ impl Catalog {
             application_ids: retained,
         })
     }
+}
 
+impl FavoriteCatalog for Catalog {
     fn exact(&self, id: &str) -> Option<&str> {
         self.application_ids
             .iter()
@@ -63,24 +66,12 @@ impl Catalog {
             .map(String::as_str)
     }
 
-    fn canonical(&self, stored: &str) -> Option<&str> {
+    fn resolve(&self, stored: &str) -> Option<&str> {
         self.application_ids
             .iter()
             .find(|candidate| candidate.eq_ignore_ascii_case(stored))
             .map(String::as_str)
     }
-}
-
-fn projection(preferences: &LauncherPreferences, catalog: &Catalog) -> (Vec<String>, usize) {
-    let mut favorites = Vec::new();
-    let mut unavailable = 0;
-    for stored in preferences.favorites() {
-        match catalog.canonical(stored) {
-            Some(id) if !favorites.iter().any(|entry| entry == id) => favorites.push(id.to_owned()),
-            _ => unavailable += 1,
-        }
-    }
-    (favorites, unavailable)
 }
 
 pub(crate) struct PreparedRead {
@@ -230,55 +221,7 @@ fn changed_preferences(
     catalog: &Catalog,
     change: &Change,
 ) -> Result<LauncherPreferences, String> {
-    let mut favorites = prior.favorites().to_vec();
-    match change {
-        Change::Add { application_id } => {
-            let id = catalog
-                .exact(application_id)
-                .ok_or("installed application is unavailable")?;
-            if !favorites
-                .iter()
-                .any(|stored| stored.eq_ignore_ascii_case(id))
-            {
-                if favorites.len() == api::MAX_FAVORITES {
-                    return Err("favorite limit reached".into());
-                }
-                favorites.push(id.to_owned());
-            }
-        }
-        Change::Remove { application_id } => {
-            let id = catalog
-                .exact(application_id)
-                .ok_or("installed application is unavailable")?;
-            favorites.retain(|stored| !stored.eq_ignore_ascii_case(id));
-        }
-        Change::Reorder { application_ids } => {
-            if !api::valid_ids(application_ids) {
-                return Err("invalid favorites reorder".into());
-            }
-            let (visible, _) = projection(prior, catalog);
-            if application_ids.len() != visible.len()
-                || !application_ids.iter().all(|id| visible.contains(id))
-            {
-                return Err(
-                    "reorder must contain each current installed favorite exactly once".into(),
-                );
-            }
-            let mut ordered = application_ids.iter();
-            let mut emitted = HashSet::new();
-            for stored in &mut favorites {
-                if let Some(id) = catalog.canonical(stored)
-                    && visible.iter().any(|visible| visible == id)
-                    && emitted.insert(id.to_owned())
-                {
-                    *stored = ordered.next().ok_or(STALE)?.clone();
-                }
-            }
-        }
-    }
-    let mut requested = prior.clone();
-    requested.replace_favorites(favorites);
-    Ok(requested)
+    crate::remote_policy::changed_favorites(prior, catalog, change, STALE)
 }
 
 #[derive(Default)]

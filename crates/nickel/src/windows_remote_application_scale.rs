@@ -5,7 +5,10 @@
 //! while the two external toolkit capabilities are reported unavailable. Their
 //! existing ownership and pending-intent journal fields are preserved verbatim.
 
-use nickel_core::dpi::{ApplicationScalePolicy, ApplicationScaleSettings, Scale120};
+use crate::remote_policy::{
+    application_scale_policy as policy, requested_application_scale_policy as requested,
+};
+use nickel_core::dpi::ApplicationScaleSettings;
 use nickel_platform::{ToolkitCapability, ToolkitFamily, ToolkitScaleBackend};
 use nickel_remote_control::application_scale as api;
 use nickel_storage::{RegularFileRevision, regular_file_revision};
@@ -19,31 +22,6 @@ const STALE: &str = "application scale changed; read current state before retryi
 const UNAVAILABLE: &str =
     "application scale unavailable or uncertain; read current state before retrying";
 const MAX_OBSERVATION_AGE: Duration = Duration::from_secs(1);
-
-fn policy(value: ApplicationScalePolicy) -> api::Policy {
-    match value {
-        ApplicationScalePolicy::FollowNickel => api::Policy::FollowNickel,
-        ApplicationScalePolicy::Unchanged => api::Policy::Unchanged,
-        ApplicationScalePolicy::Custom(scale) => api::Policy::Custom {
-            scale_120: scale.units(),
-        },
-    }
-}
-
-fn requested(value: api::Policy) -> Result<ApplicationScalePolicy, String> {
-    Ok(match value {
-        api::Policy::FollowNickel => ApplicationScalePolicy::FollowNickel,
-        api::Policy::Unchanged => ApplicationScalePolicy::Unchanged,
-        api::Policy::Custom { scale_120 } => {
-            if !(60..=480).contains(&scale_120) || scale_120 % 30 != 0 {
-                return Err("unsupported application scale".into());
-            }
-            ApplicationScalePolicy::Custom(
-                Scale120::new(scale_120).ok_or("unsupported application scale")?,
-            )
-        }
-    })
-}
 
 fn family(value: ToolkitFamily) -> api::Family {
     match value {
@@ -365,7 +343,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_core::dpi::ToolkitScaleIntent;
+    use nickel_core::dpi::{ApplicationScalePolicy, Scale120, ToolkitScaleIntent};
 
     fn transaction(
         generation: u64,

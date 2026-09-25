@@ -1,5 +1,6 @@
 //! Installed favorites preparation is bounded/off-owner; rename retains original authority.
 use super::NickelSession;
+use crate::remote_policy::FavoriteCatalog;
 use nickel_core::launcher_preferences::{
     LauncherPreferences, PreparedLauncherPreferences, preferences_path,
 };
@@ -21,28 +22,29 @@ pub(super) struct PreparedRead {
     favorites: Vec<String>,
     unavailable: usize,
 }
+struct LinuxCatalog<'a>(&'a [crate::model::Application]);
+
+impl FavoriteCatalog for LinuxCatalog<'_> {
+    fn resolve(&self, stored: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|app| app.matches_native_id(stored))
+            .map(crate::model::Application::id)
+    }
+
+    fn exact(&self, requested: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|app| app.id() == requested)
+            .map(crate::model::Application::id)
+    }
+}
+
 fn projection(
     preferences: &LauncherPreferences,
     catalog: &[crate::model::Application],
 ) -> (Vec<String>, usize) {
-    let mut favorites = Vec::new();
-    let mut unavailable = 0;
-    for stored in preferences.favorites() {
-        let found = catalog
-            .iter()
-            .find(|app| app.matches_native_id(stored))
-            .map(crate::model::Application::id)
-            .filter(|id| {
-                !id.is_empty()
-                    && id.len() <= api::MAX_APPLICATION_ID_BYTES
-                    && !id.chars().any(char::is_control)
-            });
-        match found {
-            Some(id) if !favorites.iter().any(|entry| entry == id) => favorites.push(id.to_owned()),
-            _ => unavailable += 1,
-        }
-    }
-    (favorites, unavailable)
+    crate::remote_policy::favorite_projection(preferences, &LinuxCatalog(catalog))
 }
 impl PreparedRead {
     pub fn prepare() -> Result<Self, String> {
@@ -173,54 +175,7 @@ fn changed_preferences(
     catalog: &[crate::model::Application],
     change: &Change,
 ) -> Result<LauncherPreferences, String> {
-    let exact = |id: &str| {
-        catalog
-            .iter()
-            .find(|app| app.id() == id)
-            .ok_or_else(|| "installed application is unavailable".to_owned())
-    };
-    let mut favorites = prior.favorites().to_vec();
-    match change {
-        Change::Add { application_id } => {
-            let app = exact(application_id)?;
-            if !favorites.iter().any(|stored| app.matches_native_id(stored)) {
-                if favorites.len() == api::MAX_FAVORITES {
-                    return Err("favorite limit reached".into());
-                }
-                favorites.push(application_id.clone());
-            }
-        }
-        Change::Remove { application_id } => {
-            let app = exact(application_id)?;
-            favorites.retain(|stored| !app.matches_native_id(stored));
-        }
-        Change::Reorder { application_ids } => {
-            if !api::valid_ids(application_ids) {
-                return Err("invalid favorites reorder".into());
-            }
-            let (visible, _) = projection(prior, catalog);
-            if application_ids.len() != visible.len()
-                || !application_ids.iter().all(|id| visible.contains(id))
-            {
-                return Err(
-                    "reorder must contain each current installed favorite exactly once".into(),
-                );
-            }
-            let mut ordered = application_ids.iter();
-            let mut emitted = std::collections::HashSet::new();
-            for stored in &mut favorites {
-                if let Some(app) = catalog.iter().find(|app| app.matches_native_id(stored))
-                    && visible.iter().any(|id| id == app.id())
-                    && emitted.insert(app.id())
-                {
-                    *stored = ordered.next().ok_or(STALE)?.clone();
-                }
-            }
-        }
-    }
-    let mut requested = prior.clone();
-    requested.replace_favorites(favorites);
-    Ok(requested)
+    crate::remote_policy::changed_favorites(prior, &LinuxCatalog(catalog), change, STALE)
 }
 #[derive(Default)]
 pub(super) struct FavoritesState {

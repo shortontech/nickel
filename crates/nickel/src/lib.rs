@@ -3,6 +3,8 @@ mod remote_default_associations;
 mod remote_indicator;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod remote_peripheral_controls;
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+mod remote_policy;
 mod remote_preferred_applications;
 mod remote_surface_authority;
 mod remote_terminal_launch_policy;

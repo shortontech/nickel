@@ -1,8 +1,9 @@
 //! Terminal presentation settings are staged off-thread and committed by the desktop owner.
 use super::NickelSession;
-use nickel_core::terminal_settings::{
-    PreparedTerminalSettings, TerminalCursorStyle, TerminalSettings, settings_path,
+use crate::remote_policy::{
+    apply_terminal_preferences as apply, terminal_preferences as preferences,
 };
+use nickel_core::terminal_settings::{PreparedTerminalSettings, TerminalSettings, settings_path};
 use nickel_remote_control::{
     DesktopPermit,
     terminal_presentation::{CursorStyle, Preferences, Snapshot, Transaction},
@@ -12,48 +13,6 @@ use std::{io, path::PathBuf};
 
 const STALE: &str = "terminal presentation changed; read current state before retrying";
 const UNAVAILABLE: &str = "terminal presentation unavailable; read current state before retrying";
-
-fn cursor(value: TerminalCursorStyle) -> CursorStyle {
-    match value {
-        TerminalCursorStyle::Block => CursorStyle::Block,
-        TerminalCursorStyle::Beam => CursorStyle::Beam,
-        TerminalCursorStyle::Underline => CursorStyle::Underline,
-    }
-}
-
-fn core_cursor(value: CursorStyle) -> TerminalCursorStyle {
-    match value {
-        CursorStyle::Block => TerminalCursorStyle::Block,
-        CursorStyle::Beam => TerminalCursorStyle::Beam,
-        CursorStyle::Underline => TerminalCursorStyle::Underline,
-    }
-}
-
-fn preferences(settings: &TerminalSettings) -> Preferences {
-    Preferences {
-        font_family: settings.font_family.clone(),
-        font_size_tenths: settings.font_size_tenths,
-        scrollback_lines: settings.scrollback_lines,
-        cursor_style: cursor(settings.cursor_style),
-        foreground: settings.foreground,
-        background: settings.background,
-        close_on_successful_exit: settings.close_on_successful_exit,
-    }
-}
-
-fn apply(settings: &mut TerminalSettings, requested: &Preferences) -> Result<(), String> {
-    if !requested.valid() {
-        return Err("terminal presentation value is outside its supported range".into());
-    }
-    settings.font_family.clone_from(&requested.font_family);
-    settings.font_size_tenths = requested.font_size_tenths;
-    settings.scrollback_lines = requested.scrollback_lines;
-    settings.cursor_style = core_cursor(requested.cursor_style);
-    settings.foreground = requested.foreground;
-    settings.background = requested.background;
-    settings.close_on_successful_exit = requested.close_on_successful_exit;
-    Ok(())
-}
 
 pub(super) struct PreparedRead {
     path: PathBuf,
