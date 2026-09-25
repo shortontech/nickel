@@ -228,6 +228,9 @@ impl LiveShell {
     }
 }
 
+// Windows projects semantic effects but does not consume their payloads;
+// the Linux compositor owns their guarded application.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) enum RemoteShellEffect {
     Launcher(LauncherShellEffect),
     Panel(PanelAction, Option<String>),
@@ -395,6 +398,7 @@ impl LiveShell {
 }
 
 impl LiveShell {
+    #[cfg(target_os = "linux")]
     pub(crate) fn resolve_remote_installed_launch(
         &mut self,
         effect: &RemoteShellEffect,
@@ -436,6 +440,7 @@ impl LiveShell {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn stage_remote_shell_effect(
         &mut self,
         effect: RemoteShellEffect,

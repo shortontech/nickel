@@ -4923,6 +4923,7 @@ impl LiveShell {
             .session_host
             .capture_desktop(self.screenshot_output.as_deref())
         {
+            #[cfg(target_os = "linux")]
             crate::session_host::DesktopCapturePoll::Pending => {
                 self.screenshot_capture_pending = true;
                 false

@@ -8,6 +8,7 @@ use crate::platform::{self, SecureStorageState, SessionRequestError, ShellComman
 
 /// Copy effects and admission failures may coexist in a batch. A rejected cut
 /// never revokes a successful copy/cut that already supplied replacement text.
+#[cfg(target_os = "linux")]
 pub(crate) fn record_clipboard_outcome(
     slot: &mut Option<Result<String, String>>,
     outcome: &mut nickel_ui::HostEventOutcome,
@@ -28,6 +29,7 @@ pub(crate) fn record_clipboard_outcome(
 }
 
 pub(crate) enum DesktopCapturePoll {
+    #[cfg(target_os = "linux")]
     Pending,
     Ready(Result<platform::DesktopCapture, String>),
 }
@@ -41,6 +43,9 @@ use std::sync::{
 #[cfg(target_os = "linux")]
 use crate::session::{NickelSession, SessionAuthority, SessionAuthorityRequest};
 
+// Windows remote controls use WindowsDesktopAuthority; the reusable shell host
+// keeps the compositor methods for Linux and standalone shell fixtures.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub trait SessionHost: Send + Sync {
     fn stages_effects(&self) -> bool {
         false
@@ -126,6 +131,8 @@ pub trait SessionHost: Send + Sync {
     }
 }
 
+// Unit tests replace this native adapter with TestSessionHost.
+#[cfg_attr(test, allow(dead_code))]
 #[derive(Default)]
 pub struct PlatformSessionHost;
 
@@ -480,10 +487,15 @@ impl SessionHost for TestSessionHost {
 
 /// A bounded effect collector installed only during one remote shell reduction.
 /// The owner executes its commands with fresh authority before acknowledging.
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) struct StagedSessionHost {
+    // Windows fixtures construct the collector; only the Linux owner reads
+    // through to the original session host during guarded effect delivery.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     original: std::sync::Arc<dyn SessionHost>,
     commands: std::sync::Mutex<Vec<ShellCommand>>,
 }
+#[cfg(any(test, target_os = "linux"))]
 impl StagedSessionHost {
     pub(crate) fn new(original: std::sync::Arc<dyn SessionHost>) -> Self {
         Self {
@@ -495,6 +507,7 @@ impl StagedSessionHost {
         std::mem::take(&mut *self.commands.lock().unwrap())
     }
 }
+#[cfg(any(test, target_os = "linux"))]
 impl SessionHost for StagedSessionHost {
     fn stages_effects(&self) -> bool {
         true
