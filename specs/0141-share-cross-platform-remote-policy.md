@@ -74,4 +74,8 @@ the same production functions. On Windows, their shared test and focused applica
 tests pass, along with the earlier terminal and launcher favorites tests. Linux tests and target
 builds remain unrun under the current user instruction. Windows formatting and the exact strict
 workspace Clippy command pass. Linux-only acceptance targets have Windows entry points so the
-workspace check can compile on Windows.
+workspace check can compile on Windows. The expanded shared policy table covers terminal
+validation before mutation, private launch fields, every supported custom scale step, alias
+resolution, duplicate Add, hidden favorite preservation, and incomplete or repeated reorders.
+All six shared policy tests pass on Windows. `cargo test --workspace --no-run` builds every
+workspace test target on Windows; it does not execute the suite.

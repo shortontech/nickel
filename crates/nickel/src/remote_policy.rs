@@ -266,6 +266,52 @@ mod tests {
     }
 
     #[test]
+    fn favorite_edit_cases_share_one_policy() {
+        let mut prior = LauncherPreferences::default();
+        prior.replace_favorites(["One".into(), "hidden".into(), "two".into()]);
+        let cases = [
+            (
+                launcher_favorites::Change::Add {
+                    application_id: "one".into(),
+                },
+                Some(vec!["One", "hidden", "two"]),
+            ),
+            (
+                launcher_favorites::Change::Remove {
+                    application_id: "one".into(),
+                },
+                Some(vec!["hidden", "two"]),
+            ),
+            (
+                launcher_favorites::Change::Reorder {
+                    application_ids: vec!["two".into(), "one".into()],
+                },
+                Some(vec!["two", "hidden", "one"]),
+            ),
+            (
+                launcher_favorites::Change::Reorder {
+                    application_ids: vec!["one".into()],
+                },
+                None,
+            ),
+            (
+                launcher_favorites::Change::Reorder {
+                    application_ids: vec!["one".into(), "one".into()],
+                },
+                None,
+            ),
+        ];
+        for (change, expected) in cases {
+            let result = changed_favorites(&prior, &Catalog, &change, "stale");
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap().favorites(), expected),
+                None => assert!(result.is_err(), "{change:?} unexpectedly succeeded"),
+            }
+        }
+        assert_eq!(prior.favorites(), ["One", "hidden", "two"]);
+    }
+
+    #[test]
     fn terminal_presentation_keeps_private_launch_fields() {
         let mut settings = TerminalSettings {
             default_shell: Some("private-shell".into()),
@@ -284,14 +330,64 @@ mod tests {
     }
 
     #[test]
+    fn terminal_presentation_validates_requested_values_before_mutation() {
+        let initial = TerminalSettings {
+            default_shell: Some("private-shell".into()),
+            initial_working_directory: Some("private-directory".into()),
+            ..TerminalSettings::default()
+        };
+        let mut valid = terminal_preferences(&initial);
+        valid.font_size_tenths = 60;
+        valid.scrollback_lines = terminal_presentation::MAX_SCROLLBACK_LINES;
+        valid.cursor_style = terminal_presentation::CursorStyle::Underline;
+        let mut upper = valid.clone();
+        upper.font_size_tenths = 720;
+        for requested in [valid, upper] {
+            let mut settings = initial.clone();
+            apply_terminal_preferences(&mut settings, &requested).unwrap();
+            assert_eq!(terminal_preferences(&settings), requested);
+            assert_eq!(settings.default_shell, initial.default_shell);
+            assert_eq!(
+                settings.initial_working_directory,
+                initial.initial_working_directory
+            );
+        }
+
+        let baseline = terminal_preferences(&initial);
+        let mut invalid = Vec::new();
+        let mut empty_family = baseline.clone();
+        empty_family.font_family.clear();
+        invalid.push(empty_family);
+        let mut control_family = baseline.clone();
+        control_family.font_family.push('\n');
+        invalid.push(control_family);
+        let mut oversized_family = baseline.clone();
+        oversized_family.font_family = "x".repeat(terminal_presentation::MAX_FONT_FAMILY_BYTES + 1);
+        invalid.push(oversized_family);
+        for size in [59, 721] {
+            let mut value = baseline.clone();
+            value.font_size_tenths = size;
+            invalid.push(value);
+        }
+        let mut excess_scrollback = baseline;
+        excess_scrollback.scrollback_lines = terminal_presentation::MAX_SCROLLBACK_LINES + 1;
+        invalid.push(excess_scrollback);
+        for requested in invalid {
+            let mut settings = initial.clone();
+            assert!(apply_terminal_preferences(&mut settings, &requested).is_err());
+            assert_eq!(settings, initial);
+        }
+    }
+
+    #[test]
     fn application_scale_accepts_only_supported_steps() {
-        for scale_120 in [59, 61, 481, 75] {
+        for scale_120 in [0, 59, 61, 75, 481, u32::MAX] {
             assert!(
                 requested_application_scale_policy(application_scale::Policy::Custom { scale_120 })
                     .is_err()
             );
         }
-        for scale_120 in [60, 120, 480] {
+        for scale_120 in (60..=480).step_by(30) {
             let requested = application_scale::Policy::Custom { scale_120 };
             assert_eq!(
                 application_scale_policy(requested_application_scale_policy(requested).unwrap()),

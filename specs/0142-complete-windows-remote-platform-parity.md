@@ -122,5 +122,7 @@ with an accurate reason and contract evidence.
   scrubbed snapshot. A shared fixture also verifies that accepted printer/job actions require
   fresh native confirmation and that invalidation rejects an old opaque target.
 - The exact Windows workspace strict Clippy command and formatting check pass. Focused Windows
-  screenshot controller and screenshot command tests pass. Native surface focus/DPI and peripheral
-  changing coverage remain pending. Linux tests are excluded by the current user instruction.
+  screenshot controller and screenshot command tests pass. All 17 focused Windows remote-owner
+  tests pass. `cargo test --workspace --no-run` builds every workspace test target on Windows;
+  it does not execute the suite. Native surface focus/DPI and peripheral changing coverage remain
+  pending. Linux tests are excluded by the current user instruction.
