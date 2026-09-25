@@ -11,6 +11,9 @@ pub enum AdapterCapability {
     PathIcon,
     Appearance,
     HiddenFilesPreference,
+    RemoteDisplayTransactions,
+    RemotePeripheralControls,
+    RemoteSurfacePointer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +30,7 @@ pub struct PlatformContract {
     pub fixture: &'static str,
     pub evidence: ContractEvidence,
     pub live_evidence: Option<&'static str>,
+    pub available: bool,
 }
 
 const fn fixture(
@@ -42,6 +46,24 @@ const fn fixture(
         fixture,
         evidence: ContractEvidence::FixtureOnly,
         live_evidence: None,
+        available: true,
+    }
+}
+
+const fn unavailable(
+    platform: PlatformFamily,
+    capability: AdapterCapability,
+    reason: &'static str,
+    fixture: &'static str,
+) -> PlatformContract {
+    PlatformContract {
+        platform,
+        capability,
+        adapter: reason,
+        fixture,
+        evidence: ContractEvidence::FixtureOnly,
+        live_evidence: None,
+        available: false,
     }
 }
 
@@ -80,9 +102,27 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
     fixture(
+        PlatformFamily::Linux,
+        AdapterCapability::RemoteDisplayTransactions,
+        "Linux compositor output layout owner",
+        "platform_contract::tests::matrix_is_complete_and_truthful",
+    ),
+    fixture(
+        PlatformFamily::Linux,
+        AdapterCapability::RemotePeripheralControls,
+        "Linux bounded peripheral control owner",
+        "platform_contract::tests::matrix_is_complete_and_truthful",
+    ),
+    fixture(
+        PlatformFamily::Linux,
+        AdapterCapability::RemoteSurfacePointer,
+        "Linux compositor surface pointer owner",
+        "platform_contract::tests::matrix_is_complete_and_truthful",
+    ),
+    fixture(
         PlatformFamily::Windows,
         AdapterCapability::ImageFileDialog,
-        "unsupported until a native adapter is implemented",
+        "Windows common item dialog",
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
     fixture(
@@ -109,6 +149,24 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "Explorer registry preference",
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
+    unavailable(
+        PlatformFamily::Windows,
+        AdapterCapability::RemoteDisplayTransactions,
+        "no production Windows display reconfiguration owner",
+        "platform_contract::tests::matrix_is_complete_and_truthful",
+    ),
+    unavailable(
+        PlatformFamily::Windows,
+        AdapterCapability::RemotePeripheralControls,
+        "native Windows peripheral mutations lack a cancellable owner",
+        "platform_contract::tests::matrix_is_complete_and_truthful",
+    ),
+    fixture(
+        PlatformFamily::Windows,
+        AdapterCapability::RemoteSurfacePointer,
+        "Windows shell surface pointer owner",
+        "windows_resource_owner::tests::shell_surface_pointer_coordinates_use_logical_client_space",
+    ),
 ];
 
 #[cfg(test)]
@@ -129,7 +187,7 @@ mod tests {
                 ContractEvidence::LiveVerified => assert!(contract.live_evidence.is_some()),
             }
         }
-        assert_eq!(keys.len(), 2 * 5);
+        assert_eq!(keys.len(), 2 * 8);
     }
 
     #[test]
@@ -141,15 +199,31 @@ mod tests {
         assert_eq!(
             lines.next(),
             Some(
-                "platform\tcapability\tadapter\tfixture_evidence\tcompile_evidence\tevidence_level\tlive_evidence\tlive_status"
+                "platform\tcapability\tadapter\tfixture_evidence\tcompile_evidence\tevidence_level\tlive_evidence\tlive_status\tavailable"
             )
         );
         let rows = lines
             .map(|line| line.split('\t').collect::<Vec<_>>())
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), PLATFORM_CONTRACTS.len());
-        for row in rows {
-            assert_eq!(row.len(), 8);
+        for (row, contract) in rows.into_iter().zip(PLATFORM_CONTRACTS) {
+            assert_eq!(row.len(), 9);
+            let platform = match contract.platform {
+                PlatformFamily::Linux => "linux",
+                PlatformFamily::Windows => "windows",
+            };
+            let capability = match contract.capability {
+                AdapterCapability::ImageFileDialog => "image_file_dialog",
+                AdapterCapability::ExternalUrl => "external_url",
+                AdapterCapability::PathIcon => "path_icon",
+                AdapterCapability::Appearance => "appearance",
+                AdapterCapability::HiddenFilesPreference => "hidden_files_preference",
+                AdapterCapability::RemoteDisplayTransactions => "remote_display_transactions",
+                AdapterCapability::RemotePeripheralControls => "remote_peripheral_controls",
+                AdapterCapability::RemoteSurfacePointer => "remote_surface_pointer",
+            };
+            assert_eq!(row[0], platform);
+            assert_eq!(row[1], capability);
             assert_eq!(row[5], "fixture_only");
             assert_eq!(row[6], "none");
             assert!(!row[3].is_empty());
@@ -159,6 +233,8 @@ mod tests {
                 "unexpected live status: {}",
                 row[7]
             );
+            assert!(matches!(row[8], "true" | "false"));
+            assert_eq!(row[8] == "true", contract.available);
         }
     }
 }

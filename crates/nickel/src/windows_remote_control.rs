@@ -3,6 +3,7 @@ use crate::remote_indicator::{IndicatorGrant, RemoteIndicator};
 use crate::winit_shell::{DisplayGeometry, ShellEvent, SurfaceId, WinitShell, WinitWindowCompat};
 use nickel_remote_control::{
     DesktopAuthority, DesktopPermit, RemoteAiControlSettings, RemoteControlRuntime,
+    leases::ResourceScopeAuthority,
 };
 use nickel_session_protocol::{Command, ErrorCode, Query, Request, ServerMessage};
 use std::{
@@ -484,9 +485,47 @@ struct DiagnosticCommit {
     expected_local_input_epoch: u64,
 }
 
+struct SurfacePointerContext<'a> {
+    shell: &'a WinitShell,
+    state: &'a crate::live_shell::LiveShell,
+    identity: nickel_remote_control::leases::ResourceId,
+    ancestors: Vec<nickel_remote_control::leases::ResourceId>,
+    output_name: String,
+    output: nickel_remote_control::leases::ResourceId,
+    native: usize,
+}
+
+impl SurfacePointerContext<'_> {
+    fn client_point(&self, x: i32, y: i32) -> Result<(i32, i32), String> {
+        let observations = self.shell.remote_shell_surface_observations(self.state);
+        let protected = self
+            .state
+            .surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        let current =
+            crate::windows_shell_diagnostics::input_surface(protected, self.native, &observations)
+                .filter(|current| {
+                    current.generation == self.identity.generation
+                        && self.identity.id == format!("windows-shell:{}", current.generation)
+                        && current.output.as_deref() == Some(self.output_name.as_str())
+                })
+                .ok_or("Windows shell surface changed or is protected")?;
+        let geometry = current
+            .geometry
+            .ok_or("Windows shell surface geometry is unavailable")?;
+        crate::windows_resource_owner::shell_surface_client_point(
+            x,
+            y,
+            geometry[2],
+            geometry[3],
+            current.scale_factor,
+        )
+    }
+}
+
 fn resolve_windows_pointer_point<'a>(
     resources: &'a crate::windows_resource_owner::Owner,
     scope: &'a nickel_remote_control::leases::ResourceScope,
+    surface: Option<&'a SurfacePointerContext<'_>>,
     target: &nickel_remote_control::pointer::PointerTarget,
     x: i32,
     y: i32,
@@ -499,13 +538,51 @@ fn resolve_windows_pointer_point<'a>(
 > {
     use crate::windows_resource_owner::PointerTargetResource;
 
-    let resource = resources
-        .pointer_target_resource(scope, target, x, y)
-        .ok_or("Windows pointer target is unavailable or outside its authority")?;
+    let resource = if matches!(
+        target,
+        nickel_remote_control::pointer::PointerTarget::Surface { .. }
+    ) {
+        let surface = surface.ok_or("Windows shell surface owner is unavailable")?;
+        if !matches!(target, nickel_remote_control::pointer::PointerTarget::Surface {
+            surface_id, generation
+        } if surface_id == &surface.identity.id && *generation == surface.identity.generation)
+            || resources.output_generation(&surface.output_name) != Some(surface.output.generation)
+        {
+            return Err("Windows shell surface identity or output changed".into());
+        }
+        let (client_x, client_y) = surface.client_point(x, y)?;
+        let evidence = nickel_remote_control::leases::ResourceEvidence {
+            surface: Some(&surface.identity),
+            window: None,
+            verified_application: None,
+            output: Some(&surface.output),
+            authorized_surface_ancestors: &surface.ancestors,
+            protected: false,
+        };
+        if !scope.covers(&evidence) {
+            return Err("Windows shell surface is outside the lease authority".into());
+        }
+        PointerTargetResource::Surface {
+            native: surface.native,
+            client_x,
+            client_y,
+            evidence,
+        }
+    } else {
+        resources
+            .pointer_target_resource(scope, target, x, y)
+            .ok_or("Windows pointer target is unavailable or outside its authority")?
+    };
     let point = match &resource {
         PointerTargetResource::Window { native, .. } => {
             crate::windows_remote_input::target_point(*native, x, y)?
         }
+        PointerTargetResource::Surface {
+            native,
+            client_x,
+            client_y,
+            ..
+        } => crate::windows_remote_input::target_point(*native, *client_x, *client_y)?,
         PointerTargetResource::Global {
             x,
             y,
@@ -532,14 +609,15 @@ fn move_to_windows_pointer_target(
     resources: &crate::windows_resource_owner::Owner,
     prepared: &crate::platform::remote_observation::Prepared,
     scope: &nickel_remote_control::leases::ResourceScope,
+    surface: Option<&SurfacePointerContext<'_>>,
     target: &nickel_remote_control::pointer::PointerTarget,
     x: i32,
     y: i32,
 ) -> Result<(), String> {
-    let (point, _) = resolve_windows_pointer_point(resources, scope, target, x, y)?;
+    let (point, _) = resolve_windows_pointer_point(resources, scope, surface, target, x, y)?;
     crate::windows_remote_input::move_pointer(point.0, point.1)?;
     prepared.revalidate()?;
-    let (confirmed, _) = resolve_windows_pointer_point(resources, scope, target, x, y)?;
+    let (confirmed, _) = resolve_windows_pointer_point(resources, scope, surface, target, x, y)?;
     if confirmed != point {
         return Err("Windows pointer target changed during movement".into());
     }
@@ -1123,7 +1201,8 @@ struct WindowsDesktopAuthority {
     started: Instant,
     desktop_session: Option<u32>,
     capture_generation: std::sync::atomic::AtomicU64,
-    peripheral_generation: std::sync::atomic::AtomicU64,
+    peripheral_state: std::sync::Mutex<crate::remote_peripheral_controls::State>,
+    peripheral_observation_worker: Arc<WindowsPlatformRefreshWorker>,
     settings_worker: Arc<WindowsSettingsWorker>,
     platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
 }
@@ -1480,30 +1559,38 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::peripheral_controls::Snapshot, String> {
         permit.with_debug(false, || Ok(()))?;
-        let generation = self
-            .peripheral_generation
-            .fetch_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |generation| generation.checked_add(1),
-            )
-            .map_err(|_| "Windows peripheral observation generation exhausted")?
-            .checked_add(1)
-            .ok_or("Windows peripheral observation generation exhausted")?;
+        let admission = self
+            .peripheral_observation_worker
+            .acquire()
+            .map_err(|_| "Windows peripheral observation is busy")?;
+        let cancellation = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        // Native spooler and volume queries are read-only but can block. Keep
+        // at most one call in flight and abandon its result after the lease or
+        // response deadline expires; the worker holds admission until it exits.
+        std::thread::Builder::new()
+            .name("nickel-windows-peripheral-observation".into())
+            .spawn(move || {
+                let _admission = admission;
+                if cancellation.check_live().is_ok() {
+                    let _ = reply.try_send(nickel_platform::peripheral_service().inspect());
+                }
+            })
+            .map_err(|_| "Windows peripheral observation worker is unavailable".to_owned())?;
+        let native = receiver
+            .recv_timeout(Duration::from_millis(1900))
+            .map_err(|_| "Windows peripheral observation timed out or was cancelled")?
+            .map_err(|_| "Windows peripheral provider is unavailable")?;
         permit.with_debug(false, || Ok(()))?;
-        Ok(nickel_remote_control::peripheral_controls::Snapshot {
-            generation,
-            observed_at_micros: self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
-            printers: nickel_remote_control::peripheral_controls::Availability::Unavailable,
-            removable_volumes:
-                nickel_remote_control::peripheral_controls::Availability::Unavailable,
-            printer_controls: nickel_remote_control::peripheral_controls::Availability::Unavailable,
-            printer_entries: Vec::new(),
-            removable_volume_entries: Vec::new(),
-            omitted_printers: 0,
-            omitted_print_jobs: 0,
-            omitted_removable_volumes: 0,
-        })
+        let mut state = self
+            .peripheral_state
+            .try_lock()
+            .map_err(|_| "Windows peripheral projection is busy")?;
+        state.observe(
+            native,
+            self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            false,
+        )
     }
     fn control_peripherals(
         &self,
@@ -2435,12 +2522,6 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         y: i32,
         action: nickel_remote_control::pointer::PointerAction,
     ) -> Result<(), String> {
-        if matches!(
-            target,
-            nickel_remote_control::pointer::PointerTarget::Surface { .. }
-        ) {
-            return Err("Nickel-surface pointer targets are unavailable on Windows".into());
-        }
         let _admission = crate::platform::remote_observation::Admission::acquire()?;
         let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
             &permit,
@@ -3097,6 +3178,7 @@ pub(crate) struct WindowsRemoteControl {
     local_input_epoch: u64,
     keyboard_hold: Option<WindowsKeyboardHold>,
     pointer_hold: Option<WindowsPointerHold>,
+    active_shell_pointer_surfaces: std::collections::BTreeSet<(String, u64)>,
     desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     appearance: crate::windows_remote_settings::AppearanceState,
     application_scale: crate::windows_remote_application_scale::State,
@@ -3221,13 +3303,17 @@ impl WindowsRemoteControl {
         let started = Instant::now();
         let settings_worker = Arc::new(WindowsSettingsWorker::default());
         let platform_refresh_worker = Arc::new(WindowsPlatformRefreshWorker::default());
+        let peripheral_observation_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         let authority = Arc::new(WindowsDesktopAuthority {
             cleanup_wake,
             sender: sender.clone(),
             started,
             desktop_session,
             capture_generation: std::sync::atomic::AtomicU64::new(0),
-            peripheral_generation: std::sync::atomic::AtomicU64::new(0),
+            peripheral_state: std::sync::Mutex::new(
+                crate::remote_peripheral_controls::State::default(),
+            ),
+            peripheral_observation_worker,
             settings_worker: settings_worker.clone(),
             platform_refresh_worker: platform_refresh_worker.clone(),
         });
@@ -3287,6 +3373,7 @@ impl WindowsRemoteControl {
             local_input_epoch: local_input_epoch(),
             keyboard_hold: None,
             pointer_hold: None,
+            active_shell_pointer_surfaces: Default::default(),
             desktop_events: Default::default(),
             appearance: Default::default(),
             application_scale: Default::default(),
@@ -3494,6 +3581,21 @@ impl WindowsRemoteControl {
             &mut nickel_core::optional_features::OptionalFeatureSettings,
         )>,
     ) {
+        self.active_shell_pointer_surfaces = shell
+            .as_ref()
+            .map(|(shell, state)| {
+                let protected = !self.desktop_unlocked
+                    || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+                crate::windows_shell_diagnostics::project(
+                    protected,
+                    shell.remote_shell_surface_observations(state),
+                )
+                .0
+                .into_iter()
+                .map(|surface| (surface.id, surface.generation))
+                .collect()
+            })
+            .unwrap_or_default();
         if let Some((_, state)) = shell.as_mut() {
             for (pending, allow) in state.take_remote_lease_decisions() {
                 let reply = self.handle(Request::Command(Command::DecideRemoteLease {
@@ -3768,7 +3870,9 @@ impl WindowsRemoteControl {
                     request,
                     reply,
                 } => {
-                    let result = self.perform_pointer_action(permit, *prepared, request);
+                    let current_shell = shell.as_ref().map(|(shell, state)| (&**shell, &**state));
+                    let result =
+                        self.perform_pointer_action(current_shell, permit, *prepared, request);
                     self.sync_input_ownership_event();
                     let _ = reply.try_send(result);
                 }
@@ -5477,7 +5581,15 @@ impl WindowsRemoteControl {
         let expired = self.pointer_hold.as_ref().is_some_and(|held| {
             Instant::now() >= held.deadline
                 || held.authority.check_live().is_err()
-                || !self.resources.pointer_target_identity_is_live(&held.target)
+                || match &held.target {
+                    nickel_remote_control::pointer::PointerTarget::Surface {
+                        surface_id,
+                        generation,
+                    } => !self
+                        .active_shell_pointer_surfaces
+                        .contains(&(surface_id.clone(), *generation)),
+                    _ => !self.resources.pointer_target_identity_is_live(&held.target),
+                }
         });
         if expired {
             crate::windows_remote_input::release_all();
@@ -6420,6 +6532,7 @@ impl WindowsRemoteControl {
 
     fn perform_pointer_action(
         &mut self,
+        shell: Option<(&WinitShell, &crate::live_shell::LiveShell)>,
         permit: DesktopPermit,
         mut prepared: crate::platform::remote_observation::Prepared,
         request: PointerOwnerAction,
@@ -6456,8 +6569,58 @@ impl WindowsRemoteControl {
         }
         self.reconcile_prepared_resources(&permit, &mut prepared)?;
         let scope = permit.resource_scope()?;
-        let (_, target_resource) =
-            resolve_windows_pointer_point(&self.resources, &scope, &target, x, y)?;
+        let surface = match &target {
+            nickel_remote_control::pointer::PointerTarget::Surface {
+                surface_id,
+                generation,
+            } => {
+                let (shell, state) = shell.ok_or("Windows shell surface owner is unavailable")?;
+                let observation =
+                    self.current_shell_surface(shell, state, surface_id, *generation)?;
+                let output_name = observation
+                    .output
+                    .as_deref()
+                    .ok_or("Windows shell surface output is unavailable")?;
+                let identity = nickel_remote_control::leases::ResourceId {
+                    id: surface_id.clone(),
+                    generation: *generation,
+                };
+                let ancestors = self.shell_surface_ancestors(shell, state, &identity)?;
+                if !self.resources.shell_surface_authorized(
+                    &scope,
+                    &identity,
+                    Some(output_name),
+                    &ancestors,
+                ) {
+                    return Err("Windows shell surface is outside the lease authority".into());
+                }
+                let output = nickel_remote_control::leases::ResourceId {
+                    id: output_name.to_owned(),
+                    generation: self
+                        .resources
+                        .output_generation(output_name)
+                        .ok_or("Windows shell surface output has retired")?,
+                };
+                Some(SurfacePointerContext {
+                    shell,
+                    state,
+                    identity,
+                    ancestors,
+                    output_name: output_name.to_owned(),
+                    output,
+                    native: observation.native,
+                })
+            }
+            _ => None,
+        };
+        let (_, target_resource) = resolve_windows_pointer_point(
+            &self.resources,
+            &scope,
+            surface.as_ref(),
+            &target,
+            x,
+            y,
+        )?;
 
         match action {
             nickel_remote_control::pointer::PointerAction::Move
@@ -6479,6 +6642,7 @@ impl WindowsRemoteControl {
                         &self.resources,
                         &prepared,
                         &scope,
+                        surface.as_ref(),
                         &target,
                         x,
                         y,
@@ -6497,6 +6661,7 @@ impl WindowsRemoteControl {
                                 &self.resources,
                                 &prepared,
                                 &scope,
+                                surface.as_ref(),
                                 &target,
                                 x,
                                 y,
@@ -6532,6 +6697,7 @@ impl WindowsRemoteControl {
                         &self.resources,
                         &prepared,
                         &scope,
+                        surface.as_ref(),
                         &target,
                         x,
                         y,
@@ -6571,6 +6737,7 @@ impl WindowsRemoteControl {
                         &self.resources,
                         &prepared,
                         &scope,
+                        surface.as_ref(),
                         &target,
                         x,
                         y,
@@ -6603,6 +6770,7 @@ impl WindowsRemoteControl {
                             &self.resources,
                             &prepared,
                             &scope,
+                            surface.as_ref(),
                             &target,
                             x,
                             y,
@@ -9299,6 +9467,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(16);
         let settings_worker = Arc::new(WindowsSettingsWorker::default());
         let platform_refresh_worker = Arc::new(WindowsPlatformRefreshWorker::default());
+        let peripheral_observation_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         WindowsRemoteControl {
             _transport: None,
             receiver,
@@ -9322,7 +9491,10 @@ mod tests {
                 started: Instant::now(),
                 desktop_session: None,
                 capture_generation: std::sync::atomic::AtomicU64::new(0),
-                peripheral_generation: std::sync::atomic::AtomicU64::new(0),
+                peripheral_state: std::sync::Mutex::new(
+                    crate::remote_peripheral_controls::State::default(),
+                ),
+                peripheral_observation_worker,
                 settings_worker,
                 platform_refresh_worker,
             }),
@@ -9331,6 +9503,7 @@ mod tests {
             local_input_epoch: local_input_epoch(),
             keyboard_hold: None,
             pointer_hold: None,
+            active_shell_pointer_surfaces: Default::default(),
             desktop_events: Default::default(),
             appearance: Default::default(),
             application_scale: Default::default(),
@@ -9371,7 +9544,7 @@ mod tests {
         let unavailable = windows_unavailable_diagnostic_domains();
         assert!(!unavailable.contains(&Domain::WindowsOutputPixelCapture));
         assert!(!unavailable.contains(&Domain::WindowsNonWindowPointerTargets));
-        assert!(unavailable.contains(&Domain::WindowsSettingsWorker));
+        assert!(!unavailable.contains(&Domain::WindowsSettingsWorker));
     }
     #[test]
     fn windows_owner_preserves_pending_request_when_trusted_chrome_is_unavailable() {

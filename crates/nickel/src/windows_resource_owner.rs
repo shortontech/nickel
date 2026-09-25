@@ -116,9 +116,41 @@ pub(crate) fn client_pointer_coordinate(
     Ok(())
 }
 
+/// Convert a logical shell surface coordinate into its native client coordinate.
+pub(crate) fn shell_surface_client_point(
+    x: i32,
+    y: i32,
+    width: i64,
+    height: i64,
+    scale: f32,
+) -> Result<(i32, i32), String> {
+    if x < 0
+        || y < 0
+        || i64::from(x) >= width
+        || i64::from(y) >= height
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err("Windows pointer coordinate is outside the shell surface".into());
+    }
+    let physical = |coordinate: i32| {
+        let value = f64::from(coordinate) * f64::from(scale);
+        (value.is_finite() && value >= 0.0 && value <= f64::from(i32::MAX))
+            .then(|| value.round() as i32)
+            .ok_or_else(|| "Windows shell surface coordinate is invalid".to_owned())
+    };
+    Ok((physical(x)?, physical(y)?))
+}
+
 pub(crate) enum PointerTargetResource<'a> {
     Window {
         native: usize,
+        evidence: ResourceEvidence<'a>,
+    },
+    Surface {
+        native: usize,
+        client_x: i32,
+        client_y: i32,
         evidence: ResourceEvidence<'a>,
     },
     Global {
@@ -132,7 +164,9 @@ pub(crate) enum PointerTargetResource<'a> {
 impl PointerTargetResource<'_> {
     pub(crate) fn evidence(&self) -> &ResourceEvidence<'_> {
         match self {
-            Self::Window { evidence, .. } | Self::Global { evidence, .. } => evidence,
+            Self::Window { evidence, .. }
+            | Self::Surface { evidence, .. }
+            | Self::Global { evidence, .. } => evidence,
         }
     }
 }
@@ -1872,6 +1906,20 @@ mod tests {
             assert!(client_pointer_coordinate(point.0, point.1, 800, 600).is_err());
         }
         assert!(client_pointer_coordinate(0, 0, 0, 600).is_err());
+    }
+
+    #[test]
+    fn shell_surface_pointer_coordinates_use_logical_client_space() {
+        assert_eq!(shell_surface_client_point(0, 0, 800, 600, 1.5), Ok((0, 0)));
+        assert_eq!(
+            shell_surface_client_point(799, 599, 800, 600, 1.5),
+            Ok((1199, 899))
+        );
+        for point in [(-1, 0), (0, -1), (800, 0), (0, 600)] {
+            assert!(shell_surface_client_point(point.0, point.1, 800, 600, 1.5).is_err());
+        }
+        assert!(shell_surface_client_point(0, 0, 800, 600, 0.0).is_err());
+        assert!(shell_surface_client_point(i32::MAX, 0, i64::MAX, 600, 2.0).is_err());
     }
 
     #[test]
