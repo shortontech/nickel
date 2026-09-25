@@ -79,3 +79,18 @@ display transaction API.
 Completion requires supported Windows remote operations to be observed and verified by their
 production owner. An operation without a safe native owner must remain explicitly unavailable
 with an accurate reason and contract evidence.
+
+## Current verification record
+
+- Windows fixture tests pass for display topology validation, active-only fallback, surface
+  pointer coordinates, peripheral projection, and the platform contract. The Windows library
+  compiles and formatting passes.
+- A read-only native DisplayConfig probe found connected targets outside the active monitor
+  inventory on the current Windows setup. Remote snapshots report incomplete topology and
+  refuse layout transactions there. The opt-in native display mutation test has not run.
+- Windows printer and removable-volume reads are available through a bounded observation
+  worker. Printer mutations remain unavailable because the native spooler calls lack a
+  cancellable production owner; the platform contract records that limitation.
+- Strict Clippy currently fails on warnings in `nickel` after three dependent-crate
+  findings were corrected. Native surface focus/DPI and peripheral changing coverage remain
+  pending. Linux tests are excluded by the current user instruction.

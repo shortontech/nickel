@@ -75,6 +75,15 @@ fn uncertain_recovery(
     }
 }
 
+fn restore_captured_modes(observation: &Observation, modes: &[NativeMode]) -> bool {
+    RecoveryPlan {
+        modes: modes.to_vec(),
+        identities: observation.native_names.clone(),
+    }
+    .restore()
+    .is_ok()
+}
+
 pub(crate) fn observe(inventory: &OutputInventory) -> Result<Observation, String> {
     if inventory.truncated || inventory.outputs.is_empty() {
         return Err("complete Windows display layout is unavailable".into());
@@ -207,9 +216,27 @@ pub(crate) fn apply_position_change(
         {
             return Err("Windows display mode changed before staging".into());
         }
-        original.dmFields |= DM_POSITION;
+        let expected_size = observation
+            .dimensions
+            .get(&placement.output.id)
+            .ok_or("Windows display dimensions changed before staging")?;
+        if (original.dmFields & DM_POSITION).0 == 0
+            || original.dmPelsWidth != expected_size.0
+            || original.dmPelsHeight != expected_size.1
+        {
+            return Err("Windows display mode no longer matches the observed output".into());
+        }
+        let prior_placement = prior
+            .outputs
+            .iter()
+            .find(|output| output.output == placement.output)
+            .ok_or("Windows display output retired before staging")?;
+        // SAFETY: DM_POSITION confirms this DEVMODE union member is initialized.
+        let original_position = unsafe { original.Anonymous1.Anonymous2.dmPosition };
+        if original_position.x != prior_placement.x || original_position.y != prior_placement.y {
+            return Err("Windows display placement changed before staging".into());
+        }
         let mut requested_mode = original;
-        requested_mode.dmFields |= DM_POSITION;
         requested_mode.Anonymous1.Anonymous2.dmPosition.x = placement.x;
         requested_mode.Anonymous1.Anonymous2.dmPosition.y = placement.y;
         // SAFETY: The current native mode is preserved except for a validated
@@ -238,7 +265,7 @@ pub(crate) fn apply_position_change(
     let mut staged_any = false;
     for (wide, _, requested_mode, primary, _) in &modes {
         if let Err(error) = check_commit() {
-            return if !staged_any || restore_modes(&modes).is_ok() {
+            return if !staged_any || restore_captured_modes(observation, &modes) {
                 Err(error.into())
             } else {
                 Err(uncertain_recovery(
@@ -267,7 +294,7 @@ pub(crate) fn apply_position_change(
             )
         };
         if result != DISP_CHANGE_SUCCESSFUL {
-            return if restore_modes(&modes).is_ok() {
+            return if restore_captured_modes(observation, &modes) {
                 Err(format!("Windows rejected display placement: {}", result.0).into())
             } else {
                 Err(uncertain_recovery(
@@ -280,7 +307,7 @@ pub(crate) fn apply_position_change(
         staged_any = true;
     }
     if let Err(error) = check_commit() {
-        return if restore_modes(&modes).is_ok() {
+        return if restore_captured_modes(observation, &modes) {
             Err(error.into())
         } else {
             Err(uncertain_recovery(
@@ -298,7 +325,7 @@ pub(crate) fn apply_position_change(
             modes,
             identities: observation.native_names.clone(),
         })
-    } else if restore_modes(&modes).is_ok() {
+    } else if restore_captured_modes(observation, &modes) {
         Err(format!("Windows rejected display layout commit: {}", result.0).into())
     } else {
         Err(uncertain_recovery(
@@ -350,6 +377,22 @@ fn restore_modes(modes: &[NativeMode]) -> Result<(), String> {
         .ok_or_else(|| "Windows display recovery commit failed".into())
 }
 
+fn active_primary_name() -> Result<String, String> {
+    crate::platform::remote_observation::outputs()
+        .map_err(|_| "Windows display primary readback is unavailable".to_owned())?
+        .into_iter()
+        .find(|output| output.primary)
+        .map(|output| output.name)
+        .ok_or_else(|| "Windows display primary readback is unavailable".to_owned())
+}
+
+fn captured_name(wide: &[u16]) -> Option<String> {
+    let (&0, units) = wide.split_last()? else {
+        return None;
+    };
+    String::from_utf16(units).ok()
+}
+
 impl RecoveryPlan {
     pub(crate) fn restore(&self) -> Result<(), String> {
         use windows::{
@@ -377,9 +420,19 @@ impl RecoveryPlan {
                 || mode.dmPelsWidth != requested.dmPelsWidth
                 || mode.dmPelsHeight != requested.dmPelsHeight
                 || mode.dmDisplayFrequency != requested.dmDisplayFrequency
+                || mode.dmBitsPerPel != requested.dmBitsPerPel
                 || (mode.dmFields & windows::Win32::Graphics::Gdi::DM_POSITION).0 == 0
             {
                 return Err("Windows display mode changed before recovery".into());
+            }
+            // SAFETY: EnumDisplaySettingsW initialized the display union and
+            // both captured modes came from the same initialized native mode.
+            if unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation }
+                != unsafe { requested.Anonymous1.Anonymous2.dmDisplayOrientation }
+                || unsafe { mode.Anonymous1.Anonymous2.dmDisplayFixedOutput }
+                    != unsafe { requested.Anonymous1.Anonymous2.dmDisplayFixedOutput }
+            {
+                return Err("Windows display orientation changed before recovery".into());
             }
             // SAFETY: EnumDisplaySettingsW initialized the current position,
             // and both captured modes came from initialized native modes.
@@ -393,6 +446,14 @@ impl RecoveryPlan {
             {
                 return Err("Windows display placement changed outside the recovery owner".into());
             }
+        }
+        let current_primary = active_primary_name()?;
+        let known_primary = self.modes.iter().any(|(wide, _, _, requested, original)| {
+            (*requested || *original)
+                && captured_name(wide).is_some_and(|name| name == current_primary)
+        });
+        if !known_primary {
+            return Err("Windows display primary changed outside the recovery owner".into());
         }
         restore_modes(&self.modes)?;
         for (wide, original, _, _, _) in &self.modes {
@@ -417,6 +478,16 @@ impl RecoveryPlan {
             if restored.x != expected.x || restored.y != expected.y {
                 return Err("Windows display recovery readback did not match".into());
             }
+        }
+        let expected_primary = self
+            .modes
+            .iter()
+            .find(|(_, _, _, _, original_primary)| *original_primary)
+            .and_then(|(wide, _, _, _, _)| captured_name(wide))
+            .ok_or("Windows original primary display is unavailable")?;
+        let actual_primary = active_primary_name()?;
+        if actual_primary != expected_primary {
+            return Err("Windows display recovery primary readback did not match".into());
         }
         Ok(())
     }
