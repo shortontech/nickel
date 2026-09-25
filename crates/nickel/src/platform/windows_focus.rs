@@ -8,10 +8,15 @@ use windows::Win32::{
     Foundation::HWND,
     System::Threading::GetCurrentThreadId,
     UI::{
-        Input::KeyboardAndMouse::SetFocus,
+        Input::KeyboardAndMouse::{
+            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+            SendInput, SetFocus, VK_MENU,
+        },
         WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId, SHOW_WINDOW_CMD, SW_HIDE, SW_RESTORE,
-            SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow, ShowWindowAsync,
+            GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
+            HWND_TOP, IsWindow, SHOW_WINDOW_CMD, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
+            SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+            SetWindowPos, ShowWindow, ShowWindowAsync, WS_EX_NOACTIVATE,
         },
     },
 };
@@ -30,7 +35,7 @@ pub(super) fn show_launcher(window: HWND) -> bool {
     // attach input queues or wait/sleep for another application to deactivate.
     let (requested, focused) = unsafe {
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
-        let requested = SetForegroundWindow(window).as_bool();
+        let requested = request_foreground(window);
         let focused = GetForegroundWindow() == window;
         if focused {
             let _ = SetFocus(Some(window));
@@ -60,17 +65,84 @@ pub(super) fn activate_window(window: HWND, restore: bool) -> bool {
     // SAFETY: The caller revalidates the enumerated HWND. ShowWindowAsync posts
     // restoration to the owner, so a hung app cannot block Nickel here. Keep
     // input queues separate for the subsequent foreground request as well.
-    let requested = unsafe {
+    let requested = {
         if restore && !request_show_state(window, SW_RESTORE) {
             return false;
         }
-        SetForegroundWindow(window).as_bool()
+        let requested = request_foreground(window);
+        let raised = requested && raise_window(window);
+        tracing::debug!(window = ?window, requested, raised, "application activation and raise dispatched");
+        requested && raised
     };
     // Request admission is not proof of activation. The normal window feed
     // observes the actual foreground window after Windows processes the request.
     tracing::debug!(window = ?window, requested, elapsed_ms = started.elapsed().as_millis(),
         "application foreground request completed");
     requested
+}
+
+fn request_foreground(window: HWND) -> bool {
+    // SAFETY: All queries validate the HWND; passive shell surfaces must never
+    // be activated, including through the recovery path.
+    unsafe {
+        if !IsWindow(Some(window)).as_bool()
+            || GetWindowLongPtrW(window, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 != 0
+        {
+            return false;
+        }
+        if SetForegroundWindow(window).as_bool() {
+            return true;
+        }
+        // A hook-owned shortcut does not grant foreground permission. Windows
+        // unlocks foreground changes on Alt input. Only recover an explicit
+        // user activation, and never release or chord a physically held modifier.
+        if [0x10, 0x11, 0x12, 0x5b, 0x5c]
+            .iter()
+            .any(|key| GetAsyncKeyState(*key) < 0)
+        {
+            return false;
+        }
+        let mut input = [INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    ..Default::default()
+                },
+            },
+        }; 2];
+        input[1].Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
+        // Send both edges as one batch so recovery never deliberately leaves
+        // Alt down. The shortcut adapter ignores injected keyboard events.
+        let sent = SendInput(&input, std::mem::size_of::<INPUT>() as i32);
+        if sent != 2 {
+            if sent == 1 {
+                let _ = SendInput(&input[1..], std::mem::size_of::<INPUT>() as i32);
+            }
+            tracing::warn!(sent, "foreground recovery input rejected");
+            return false;
+        }
+        let requested = SetForegroundWindow(window).as_bool();
+        tracing::debug!(window = ?window, requested, "foreground recovery completed");
+        requested
+    }
+}
+
+fn raise_window(window: HWND) -> bool {
+    // SAFETY: Raise the validated app in its existing Z-order band without
+    // resizing, moving, activating synchronously, or making it topmost.
+    unsafe {
+        SetWindowPos(
+            window,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        )
+        .is_ok()
+    }
 }
 
 pub(super) fn request_show_state(window: HWND, command: SHOW_WINDOW_CMD) -> bool {
@@ -95,6 +167,50 @@ mod tests {
         },
         core::w,
     };
+
+    #[test]
+    #[ignore = "live foreground test: set NICKEL_FOCUS_TEST_HWND to a decimal window handle"]
+    fn explicitly_selected_live_window_receives_foreground() {
+        let address: usize = std::env::var("NICKEL_FOCUS_TEST_HWND")
+            .expect("explicit target HWND")
+            .parse()
+            .expect("decimal HWND");
+        let window = HWND(address as *mut _);
+        // SAFETY: Read-only diagnostic of the current foreground HWND.
+        eprintln!("foreground before activation: {:?}", unsafe {
+            GetForegroundWindow()
+        });
+        let requested = activate_window(window, false);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { GetForegroundWindow() } != window && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(requested, "native switch request rejected");
+        assert_eq!(unsafe { GetForegroundWindow() }, window);
+        if let Ok(other) = std::env::var("NICKEL_FOCUS_TEST_OTHER_HWND") {
+            use windows::Win32::UI::WindowsAndMessaging::{GW_HWNDNEXT, GetWindow};
+            let other = HWND(other.parse::<usize>().expect("decimal comparison HWND") as *mut _);
+            let mut below = false;
+            while !below && Instant::now() < deadline {
+                let mut cursor = window;
+                for _ in 0..1000 {
+                    // SAFETY: Read-only traversal of the live native Z-order.
+                    let Ok(next) = (unsafe { GetWindow(cursor, GW_HWNDNEXT) }) else {
+                        break;
+                    };
+                    if next == other {
+                        below = true;
+                        break;
+                    }
+                    cursor = next;
+                }
+                if !below {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            assert!(below, "selected app must be above the comparison window");
+        }
+    }
 
     #[test]
     fn unresponsive_window_does_not_block_activation_or_launcher_ownership_check() {
@@ -135,6 +251,7 @@ mod tests {
             let window = HWND(address as *mut _);
             let launcher_rejected = !show_launcher(window);
             let _ = activate_window(window, true);
+            let _ = raise_window(window);
             let _ = request_show_state(window, SW_MAXIMIZE);
             let _ = request_show_state(window, SW_MINIMIZE);
             let _ = done_tx.send(launcher_rejected);

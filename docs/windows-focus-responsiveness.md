@@ -80,3 +80,43 @@ the menu, and Alt+Tab between applications; repeat on each monitor.
 
 Live validation: the user confirmed that desktop menu dismissal and switching
 away from the wallpaper work after rebuilding and restarting Nickel.
+
+## Background task-switch activation
+
+Subsequent live Alt+Tab testing showed immediate `SetForegroundWindow`
+rejections (`requested=false`, `elapsed_ms=0`) for Chrome and Terminal.
+Receiving a shortcut through a low-level hook does not guarantee foreground
+permission for Nickel's UI thread. Removing input-queue attachment exposed
+this missing activation path.
+
+An attempted `SwitchToThisWindow` fallback proved insufficient in user testing
+and was removed. Focus-only live checks also missed the user's more precise
+report: an app could receive focus without being raised above other windows.
+
+Application activation now explicitly raises the selected window with
+`SetWindowPos(HWND_TOP, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOMOVE |
+SWP_NOSIZE)`. This preserves the ordinary window band rather than making apps
+topmost, and posts cross-thread positioning instead of waiting for the owner.
+
+Launcher and application focus share one recovery path. When an ordinary
+request fails, the target is valid and activatable, and no Shift, Ctrl, Alt,
+or Super key is held, Nickel sends a paired Alt press/release and retries
+foreground admission once. Windows documents Alt as releasing the foreground
+lock in [LockSetForegroundWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-locksetforegroundwindow).
+Both edges are submitted together; partial submission attempts a release.
+Injected input is ignored by shortcut recognition. Rejected input or focus
+requests remain failures. Passive desktop surfaces are never activated.
+No explicit input-queue attachment or focus polling is used in production.
+
+Validation: the unresponsive-window regression, now including asynchronous
+raising, passed in 0.01 seconds. The native desktop topmost-rejection test also
+passed. The opt-in live test verifies foreground ownership and, when given a
+comparison window, actual Z-order within two seconds. Chrome-to-Terminal and
+Terminal-to-Chrome checks both passed. These are asynchronous effects, so the
+test waits for both instead of treating request dispatch as completion.
+
+Set decimal `NICKEL_FOCUS_TEST_HWND` and `NICKEL_FOCUS_TEST_OTHER_HWND`, then run
+`cargo test -p nickel --lib explicitly_selected_live_window_receives_foreground
+-- --ignored --nocapture`. This changes focus and is excluded from normal tests.
+The user confirmed that the rebuilt shell works after testing the changes for
+Alt+Tab, panel clicks, and the Windows key.
