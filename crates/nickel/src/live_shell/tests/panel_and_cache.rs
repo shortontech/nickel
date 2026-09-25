@@ -1160,7 +1160,14 @@
         });
         assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
 
+        // Windows routes this shortcut to the real LockWorkStation API. The
+        // protected-state assertion belongs to the Linux shell reducer here.
+        #[cfg(not(target_os = "windows"))]
         shell.global_shortcut(GlobalShortcut::LockState { locked: true });
+        #[cfg(target_os = "windows")]
+        {
+            shell.locked = true;
+        }
         shell.global_shortcut(GlobalShortcut::AudioChanged {
             available: true,
             volume_percent: 47,
