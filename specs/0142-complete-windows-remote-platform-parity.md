@@ -99,8 +99,10 @@ with an accurate reason and contract evidence.
   documentation for the path and monitor identity fields used by the probe.
 - The display owner now validates and applies a supplied DisplayConfig without
   `SDC_SAVE_TO_DATABASE`; Keep saves the confirmed layout and queries the saved configuration.
-  Guarded rollback restores the captured prior GDI modes. This closes the earlier tentative-save
-  gap described by [ChangeDisplaySettingsEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-changedisplaysettingsexa)
+  Guarded rollback restores the captured active DisplayConfig temporarily. If Keep attempted a
+  database write, rollback first restores the separately captured saved configuration. This
+  closes the earlier tentative-save gap described by
+  [ChangeDisplaySettingsEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-changedisplaysettingsexa)
   and [SetDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig).
   Synthetic source-mode transformation and read-only native active/database queries pass on
   Windows. A native changing round trip remains unverified on a complete multi-monitor fixture.

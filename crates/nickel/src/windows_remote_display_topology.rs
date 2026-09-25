@@ -6,6 +6,7 @@
 use nickel_remote_control::diagnostics::OutputInventory;
 use nickel_remote_control::display_layout::Layout;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::{
     Devices::Display::{
         DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
@@ -43,12 +44,15 @@ type NativeConfiguration = (Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE
 pub(crate) struct RecoveryPlan {
     modes: Vec<NativeMode>,
     identities: BTreeMap<String, String>,
+    original_configuration: NativeConfiguration,
+    saved_configuration: NativeConfiguration,
     requested_configuration: NativeConfiguration,
+    persistence_attempted: AtomicBool,
 }
 
 pub(crate) struct ApplyFailure {
     pub reason: String,
-    pub recovery: Option<RecoveryPlan>,
+    pub recovery: Option<Box<RecoveryPlan>>,
 }
 
 impl From<String> for ApplyFailure {
@@ -69,16 +73,21 @@ impl From<&str> for ApplyFailure {
 fn uncertain_recovery(
     observation: &Observation,
     modes: &[NativeMode],
+    original_configuration: &NativeConfiguration,
+    saved_configuration: &NativeConfiguration,
     requested_configuration: &NativeConfiguration,
     reason: &str,
 ) -> ApplyFailure {
     ApplyFailure {
         reason: reason.into(),
-        recovery: Some(RecoveryPlan {
+        recovery: Some(Box::new(RecoveryPlan {
             modes: modes.to_vec(),
             identities: observation.native_names.clone(),
+            original_configuration: original_configuration.clone(),
+            saved_configuration: saved_configuration.clone(),
             requested_configuration: requested_configuration.clone(),
-        }),
+            persistence_attempted: AtomicBool::new(false),
+        })),
     }
 }
 
@@ -181,7 +190,7 @@ pub(crate) fn apply_position_change(
 ) -> Result<RecoveryPlan, ApplyFailure> {
     use windows::{
         Win32::Devices::Display::{
-            QDC_VIRTUAL_MODE_AWARE, SDC_APPLY, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
+            QDC_VIRTUAL_MODE_AWARE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
             SDC_VIRTUAL_MODE_AWARE, SetDisplayConfig,
         },
         Win32::Graphics::Gdi::{
@@ -250,7 +259,10 @@ pub(crate) fn apply_position_change(
 
     let (paths, original_modes) =
         native_configuration(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE)?;
+    let saved_configuration = native_configuration(QDC_DATABASE_CURRENT | QDC_VIRTUAL_MODE_AWARE)?;
+    configuration_positions(&saved_configuration.0, &saved_configuration.1)?;
     let requested_modes = requested_source_modes(observation, requested, &paths, &original_modes)?;
+    let original_configuration = (paths.clone(), original_modes);
     let requested_configuration = (paths, requested_modes);
     check_commit()?;
     let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE;
@@ -267,69 +279,48 @@ pub(crate) fn apply_position_change(
         return Err(format!("Windows rejected display configuration: {validation}").into());
     }
     check_commit()?;
-    // SAFETY: The validated supplied configuration remains owned by this
-    // synchronous call. Omitting SDC_SAVE_TO_DATABASE keeps Apply temporary.
-    let result = unsafe {
-        SetDisplayConfig(
-            Some(&requested_configuration.0),
-            Some(&requested_configuration.1),
-            SDC_APPLY | flags,
-        )
-    };
-    if result != ERROR_SUCCESS.0 as i32 {
+    if let Err(error) = apply_supplied_configuration(&requested_configuration, false) {
         return Err(uncertain_recovery(
             observation,
             &modes,
+            &original_configuration,
+            &saved_configuration,
             &requested_configuration,
-            &format!("Windows display application failed ({result}); recovery is pending"),
+            &format!("{error}; recovery is pending"),
         ));
     }
     Ok(RecoveryPlan {
         modes,
         identities: observation.native_names.clone(),
+        original_configuration,
+        saved_configuration,
         requested_configuration,
+        persistence_attempted: AtomicBool::new(false),
     })
 }
 
-fn restore_modes(modes: &[NativeMode]) -> Result<(), String> {
-    use windows::{
-        Win32::Graphics::Gdi::{
-            CDS_NORESET, CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW,
-            DEVMODEW, DISP_CHANGE_SUCCESSFUL,
-        },
-        core::PCWSTR,
+fn apply_supplied_configuration(
+    configuration: &NativeConfiguration,
+    save: bool,
+) -> Result<(), String> {
+    use windows::Win32::Devices::Display::{
+        SDC_APPLY, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VIRTUAL_MODE_AWARE,
+        SetDisplayConfig,
     };
-    let mut staged = true;
-    for (wide, original, _, _, original_primary) in modes {
-        let flags = CDS_UPDATEREGISTRY
-            | CDS_NORESET
-            | if *original_primary {
-                CDS_SET_PRIMARY
-            } else {
-                CDS_TYPE::default()
-            };
-        // SAFETY: The captured mode and device name remain owned by this
-        // synchronous recovery loop.
-        let result = unsafe {
-            ChangeDisplaySettingsExW(
-                PCWSTR(wide.as_ptr()),
-                Some(original as *const DEVMODEW),
-                None,
-                flags,
-                None,
-            )
+    let flags = SDC_APPLY
+        | SDC_USE_SUPPLIED_DISPLAY_CONFIG
+        | SDC_VIRTUAL_MODE_AWARE
+        | if save {
+            SDC_SAVE_TO_DATABASE
+        } else {
+            Default::default()
         };
-        staged &= result == DISP_CHANGE_SUCCESSFUL;
-    }
-    if !staged {
-        return Err("Windows display recovery staging failed".into());
-    }
-    // SAFETY: A null device and mode commit all staged recovery settings.
-    let committed =
-        unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE::default(), None) };
-    (committed == DISP_CHANGE_SUCCESSFUL)
+    // SAFETY: The captured paths and modes remain owned by the caller through
+    // the synchronous SetDisplayConfig call.
+    let result = unsafe { SetDisplayConfig(Some(&configuration.0), Some(&configuration.1), flags) };
+    (result == ERROR_SUCCESS.0 as i32)
         .then_some(())
-        .ok_or_else(|| "Windows display recovery commit failed".into())
+        .ok_or_else(|| format!("Windows display configuration failed ({result})"))
 }
 
 fn active_primary_name() -> Result<String, String> {
@@ -350,10 +341,7 @@ fn captured_name(wide: &[u16]) -> Option<String> {
 
 impl RecoveryPlan {
     pub(crate) fn persist(&self) -> Result<(), String> {
-        use windows::Win32::Devices::Display::{
-            QDC_VIRTUAL_MODE_AWARE, SDC_APPLY, SDC_SAVE_TO_DATABASE,
-            SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VIRTUAL_MODE_AWARE, SetDisplayConfig,
-        };
+        use windows::Win32::Devices::Display::QDC_VIRTUAL_MODE_AWARE;
         use windows::{
             Win32::Graphics::Gdi::{
                 DEVMODEW, DM_POSITION, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW,
@@ -413,21 +401,8 @@ impl RecoveryPlan {
                 );
             }
         }
-        // SAFETY: The validated supplied paths and modes remain owned by this
-        // recovery plan for the duration of the synchronous confirmation call.
-        let result = unsafe {
-            SetDisplayConfig(
-                Some(&self.requested_configuration.0),
-                Some(&self.requested_configuration.1),
-                SDC_APPLY
-                    | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-                    | SDC_VIRTUAL_MODE_AWARE
-                    | SDC_SAVE_TO_DATABASE,
-            )
-        };
-        if result != ERROR_SUCCESS.0 as i32 {
-            return Err(format!("Windows display confirmation failed ({result})"));
-        }
+        self.persistence_attempted.store(true, Ordering::SeqCst);
+        apply_supplied_configuration(&self.requested_configuration, true)?;
         let (saved_paths, saved_modes) =
             native_configuration(QDC_DATABASE_CURRENT | QDC_VIRTUAL_MODE_AWARE)?;
         if configuration_positions(&saved_paths, &saved_modes)? != expected {
@@ -497,7 +472,27 @@ impl RecoveryPlan {
         if !known_primary {
             return Err("Windows display primary changed outside the recovery owner".into());
         }
-        restore_modes(&self.modes)?;
+        let saved_result = if self.persistence_attempted.load(Ordering::SeqCst) {
+            apply_supplied_configuration(&self.saved_configuration, true).and_then(|()| {
+                use windows::Win32::Devices::Display::QDC_VIRTUAL_MODE_AWARE;
+                let (paths, modes) =
+                    native_configuration(QDC_DATABASE_CURRENT | QDC_VIRTUAL_MODE_AWARE)?;
+                if configuration_positions(&paths, &modes)?
+                    != configuration_positions(
+                        &self.saved_configuration.0,
+                        &self.saved_configuration.1,
+                    )?
+                {
+                    return Err("Windows saved display recovery did not match".into());
+                }
+                Ok(())
+            })
+        } else {
+            Ok(())
+        };
+        let active_result = apply_supplied_configuration(&self.original_configuration, false);
+        saved_result?;
+        active_result?;
         for (wide, original, _, _, _) in &self.modes {
             let mut mode = DEVMODEW {
                 dmSize: std::mem::size_of::<DEVMODEW>() as u16,
@@ -1258,7 +1253,7 @@ mod tests {
             Ok(plan) => plan,
             Err(failure) => {
                 if let Some(plan) = failure.recovery {
-                    let _guard = Restore(Some(plan));
+                    let _guard = Restore(Some(*plan));
                 }
                 panic!("{}", failure.reason);
             }

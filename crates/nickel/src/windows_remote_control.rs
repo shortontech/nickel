@@ -2904,7 +2904,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                             reason: format!(
                                 "Windows display authority expired after native application: {reason}"
                             ),
-                            recovery: Some(plan),
+                            recovery: Some(Box::new(plan)),
                         })
                     }
                 };
@@ -2918,7 +2918,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                                 generation,
                                 confirmed: prior.clone(),
                                 requested: requested.clone(),
-                                plan,
+                                plan: *plan,
                                 deadline: Some(Instant::now()),
                                 confirmable: false,
                                 revert_failed: false,
