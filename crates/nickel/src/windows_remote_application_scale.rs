@@ -7,7 +7,8 @@
 
 use crate::remote_policy::{
     application_scale_policy as policy, requested_application_scale_policy as requested,
-    scale_observation_generation, scale_observation_matches, scale_snapshot,
+    scale_observation_generation, scale_observation_matches, scale_outcome, scale_snapshot,
+    scale_toolkits,
 };
 use nickel_core::dpi::ApplicationScaleSettings;
 use nickel_platform::{ToolkitCapability, ToolkitFamily, ToolkitScaleBackend};
@@ -23,13 +24,6 @@ const STALE: &str = "application scale changed; read current state before retryi
 const UNAVAILABLE: &str =
     "application scale unavailable or uncertain; read current state before retrying";
 const MAX_OBSERVATION_AGE: Duration = Duration::from_secs(1);
-
-fn family(value: ToolkitFamily) -> api::Family {
-    match value {
-        ToolkitFamily::Gtk => api::Family::Gtk,
-        ToolkitFamily::Qt => api::Family::Qt,
-    }
-}
 
 #[derive(Default)]
 struct WindowsToolkitScaleBackend;
@@ -57,30 +51,9 @@ impl ToolkitScaleBackend for WindowsToolkitScaleBackend {
 }
 
 fn toolkits(settings: &ApplicationScaleSettings) -> Vec<api::Toolkit> {
-    WindowsToolkitScaleBackend
-        .capabilities()
-        .into_iter()
-        .map(|capability| {
-            let (owned, pending) = match capability.family {
-                ToolkitFamily::Gtk => (
-                    settings.owned_gtk_applied.is_some(),
-                    settings.pending_gtk.is_some(),
-                ),
-                ToolkitFamily::Qt => (
-                    settings.owned_qt_applied.is_some(),
-                    settings.pending_qt.is_some(),
-                ),
-            };
-            api::Toolkit {
-                family: family(capability.family),
-                available: false,
-                observed: None,
-                owned,
-                pending,
-                restart_required: capability.restart_required,
-            }
-        })
-        .collect()
+    scale_toolkits(settings, WindowsToolkitScaleBackend.capabilities(), |_| {
+        None
+    })
 }
 
 pub(crate) struct PreparedRead {
@@ -173,25 +146,7 @@ impl PreparedChange {
             || Ok(()),
         )?;
         let staged = settings.stage(&prior.path).map_err(|_| UNAVAILABLE)?;
-        let outcomes = report
-            .outcomes
-            .into_iter()
-            .map(|outcome| {
-                use nickel_platform::ToolkitOutcomeKind as Kind;
-                api::Outcome {
-                    family: family(outcome.family),
-                    kind: match outcome.kind {
-                        Kind::Unchanged => api::OutcomeKind::Unchanged,
-                        Kind::Confirmed => api::OutcomeKind::Confirmed,
-                        Kind::ExternalConflict => api::OutcomeKind::ExternalConflict,
-                        Kind::Unavailable => api::OutcomeKind::Unavailable,
-                        Kind::Failed => api::OutcomeKind::Failed,
-                        Kind::Uncertain => api::OutcomeKind::Uncertain,
-                    },
-                    restart_required: outcome.restart_required,
-                }
-            })
-            .collect();
+        let outcomes = report.outcomes.into_iter().map(scale_outcome).collect();
         Ok(Self {
             prior,
             requested: settings,

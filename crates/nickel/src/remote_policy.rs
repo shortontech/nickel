@@ -5,6 +5,7 @@ use nickel_core::{
     launcher_preferences::LauncherPreferences,
     terminal_settings::{TerminalCursorStyle, TerminalSettings},
 };
+use nickel_platform::{ToolkitCapability, ToolkitFamily, ToolkitOutcome, ToolkitOutcomeKind};
 use nickel_remote_control::{application_scale, launcher_favorites, terminal_presentation};
 use std::collections::HashSet;
 
@@ -158,6 +159,63 @@ pub(crate) fn requested_application_scale_policy(
             )
         }
     })
+}
+
+fn toolkit_family(value: ToolkitFamily) -> application_scale::Family {
+    match value {
+        ToolkitFamily::Gtk => application_scale::Family::Gtk,
+        ToolkitFamily::Qt => application_scale::Family::Qt,
+    }
+}
+
+pub(crate) fn scale_toolkits(
+    settings: &ApplicationScaleSettings,
+    capabilities: impl IntoIterator<Item = ToolkitCapability>,
+    mut read: impl FnMut(ToolkitFamily) -> Option<String>,
+) -> Vec<application_scale::Toolkit> {
+    capabilities
+        .into_iter()
+        .map(|capability| {
+            let (owned, pending) = match capability.family {
+                ToolkitFamily::Gtk => (
+                    settings.owned_gtk_applied.is_some(),
+                    settings.pending_gtk.is_some(),
+                ),
+                ToolkitFamily::Qt => (
+                    settings.owned_qt_applied.is_some(),
+                    settings.pending_qt.is_some(),
+                ),
+            };
+            application_scale::Toolkit {
+                family: toolkit_family(capability.family),
+                available: capability.available,
+                observed: capability
+                    .available
+                    .then(|| read(capability.family))
+                    .flatten(),
+                owned,
+                pending,
+                restart_required: capability.restart_required,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn scale_outcome(outcome: ToolkitOutcome) -> application_scale::Outcome {
+    application_scale::Outcome {
+        family: toolkit_family(outcome.family),
+        kind: match outcome.kind {
+            ToolkitOutcomeKind::Unchanged => application_scale::OutcomeKind::Unchanged,
+            ToolkitOutcomeKind::Confirmed => application_scale::OutcomeKind::Confirmed,
+            ToolkitOutcomeKind::ExternalConflict => {
+                application_scale::OutcomeKind::ExternalConflict
+            }
+            ToolkitOutcomeKind::Unavailable => application_scale::OutcomeKind::Unavailable,
+            ToolkitOutcomeKind::Failed => application_scale::OutcomeKind::Failed,
+            ToolkitOutcomeKind::Uncertain => application_scale::OutcomeKind::Uncertain,
+        },
+        restart_required: outcome.restart_required,
+    }
 }
 
 pub(crate) type ScaleObservation<R> =
@@ -439,5 +497,97 @@ mod tests {
         assert_eq!(snapshot.observation_started_at_us, 10);
         assert_eq!(snapshot.observed_at_us, 20);
         assert!(!snapshot.atomic);
+    }
+
+    #[test]
+    fn toolkit_projection_preserves_ownership_and_reads_only_available_adapters() {
+        use nickel_core::dpi::ToolkitScaleIntent;
+
+        let settings = ApplicationScaleSettings {
+            owned_gtk_applied: Some("2".into()),
+            pending_qt: Some(ToolkitScaleIntent {
+                previous: "1".into(),
+                requested: "2".into(),
+                restoring: false,
+                terminal: false,
+            }),
+            ..ApplicationScaleSettings::default()
+        };
+        let capabilities = [
+            ToolkitCapability {
+                family: ToolkitFamily::Gtk,
+                available: false,
+                live: false,
+                restart_required: true,
+            },
+            ToolkitCapability {
+                family: ToolkitFamily::Qt,
+                available: true,
+                live: true,
+                restart_required: false,
+            },
+        ];
+        let mut reads = Vec::new();
+        let projected = scale_toolkits(&settings, capabilities, |family| {
+            reads.push(family);
+            Some("2".into())
+        });
+        assert_eq!(reads, [ToolkitFamily::Qt]);
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].family, application_scale::Family::Gtk);
+        assert!(!projected[0].available);
+        assert_eq!(projected[0].observed, None);
+        assert!(projected[0].owned);
+        assert!(!projected[0].pending);
+        assert!(projected[0].restart_required);
+        assert_eq!(projected[1].family, application_scale::Family::Qt);
+        assert!(projected[1].available);
+        assert_eq!(projected[1].observed.as_deref(), Some("2"));
+        assert!(!projected[1].owned);
+        assert!(projected[1].pending);
+        assert!(!projected[1].restart_required);
+    }
+
+    #[test]
+    fn toolkit_outcome_categories_use_the_same_wire_mapping() {
+        let cases = [
+            (
+                ToolkitOutcomeKind::Unchanged,
+                application_scale::OutcomeKind::Unchanged,
+            ),
+            (
+                ToolkitOutcomeKind::Confirmed,
+                application_scale::OutcomeKind::Confirmed,
+            ),
+            (
+                ToolkitOutcomeKind::ExternalConflict,
+                application_scale::OutcomeKind::ExternalConflict,
+            ),
+            (
+                ToolkitOutcomeKind::Unavailable,
+                application_scale::OutcomeKind::Unavailable,
+            ),
+            (
+                ToolkitOutcomeKind::Failed,
+                application_scale::OutcomeKind::Failed,
+            ),
+            (
+                ToolkitOutcomeKind::Uncertain,
+                application_scale::OutcomeKind::Uncertain,
+            ),
+        ];
+        for (native, expected) in cases {
+            let projected = scale_outcome(ToolkitOutcome {
+                family: ToolkitFamily::Qt,
+                kind: native,
+                restart_required: true,
+            });
+            assert_eq!(projected.family, application_scale::Family::Qt);
+            assert_eq!(
+                std::mem::discriminant(&projected.kind),
+                std::mem::discriminant(&expected)
+            );
+            assert!(projected.restart_required);
+        }
     }
 }

@@ -77,5 +77,12 @@ workspace Clippy command pass. Linux-only acceptance targets have Windows entry 
 workspace check can compile on Windows. The expanded shared policy table covers terminal
 validation before mutation, private launch fields, every supported custom scale step, alias
 resolution, duplicate Add, hidden favorite preservation, and incomplete or repeated reorders.
-All six shared policy tests pass on Windows. `cargo test --workspace --no-run` builds every
+The shared policy tests pass on Windows. `cargo test --workspace --no-run` builds every
 workspace test target on Windows; it does not execute the suite.
+
+The owners now also use shared toolkit capability projection, ownership and pending-intent
+projection, and native-to-remote outcome mapping. Windows passes an unavailable backend; Linux
+supplies its existing backend reads and retains its worker/commit owner. Eight shared policy tests
+and both focused Windows application-scale owner tests pass. Formatting and the exact Windows
+workspace strict Clippy command pass after this consolidation. The Linux path has not been built
+or tested under the current user instruction.

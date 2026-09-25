@@ -6,7 +6,7 @@ use super::{
 };
 use crate::remote_policy::{
     requested_application_scale_policy as requested, scale_observation_generation,
-    scale_observation_matches, scale_snapshot,
+    scale_observation_matches, scale_outcome, scale_snapshot, scale_toolkits,
 };
 use nickel_core::dpi::ApplicationScaleSettings;
 use nickel_platform::{
@@ -25,12 +25,6 @@ const MAX_OBSERVATION_AGE: Duration = Duration::from_secs(1);
 const STALE: &str = "application scale changed; read current state before retrying";
 const UNAVAILABLE: &str =
     "application scale unavailable or uncertain; read current state before retrying";
-fn family(value: ToolkitFamily) -> api::Family {
-    match value {
-        ToolkitFamily::Gtk => api::Family::Gtk,
-        ToolkitFamily::Qt => api::Family::Qt,
-    }
-}
 pub(super) struct Observation {
     started_at: Instant,
     completed_at: Instant,
@@ -44,35 +38,11 @@ impl Observation {
         let started_at = Instant::now();
         let before = revision(&path).map_err(|_| UNAVAILABLE)?;
         let settings = ApplicationScaleSettings::load(&path).map_err(|_| UNAVAILABLE)?;
-        let toolkits = backend
-            .capabilities()
-            .into_iter()
-            .take(2)
-            .map(|cap| {
-                let (owned, pending) = match cap.family {
-                    ToolkitFamily::Gtk => (
-                        settings.owned_gtk_applied.is_some(),
-                        settings.pending_gtk.is_some(),
-                    ),
-                    ToolkitFamily::Qt => (
-                        settings.owned_qt_applied.is_some(),
-                        settings.pending_qt.is_some(),
-                    ),
-                };
-                api::Toolkit {
-                    family: family(cap.family),
-                    available: cap.available,
-                    observed: if cap.available {
-                        backend.read(cap.family).ok()
-                    } else {
-                        None
-                    },
-                    owned,
-                    pending,
-                    restart_required: cap.restart_required,
-                }
-            })
-            .collect();
+        let toolkits = scale_toolkits(
+            &settings,
+            backend.capabilities().into_iter().take(2),
+            |family| backend.read(family).ok(),
+        );
         if revision(&path).map_err(|_| UNAVAILABLE)? != before {
             return Err(STALE.into());
         }
@@ -364,25 +334,7 @@ pub(super) fn transact(
         || backend.permit.check_live(),
     )?;
     let snapshot = backend.observe()?;
-    let outcomes = report
-        .outcomes
-        .into_iter()
-        .map(|outcome| {
-            use nickel_platform::ToolkitOutcomeKind as K;
-            api::Outcome {
-                family: family(outcome.family),
-                kind: match outcome.kind {
-                    K::Unchanged => api::OutcomeKind::Unchanged,
-                    K::Confirmed => api::OutcomeKind::Confirmed,
-                    K::ExternalConflict => api::OutcomeKind::ExternalConflict,
-                    K::Unavailable => api::OutcomeKind::Unavailable,
-                    K::Failed => api::OutcomeKind::Failed,
-                    K::Uncertain => api::OutcomeKind::Uncertain,
-                },
-                restart_required: outcome.restart_required,
-            }
-        })
-        .collect();
+    let outcomes = report.outcomes.into_iter().map(scale_outcome).collect();
     Ok(api::TransactionOutcome { snapshot, outcomes })
 }
 impl NickelSession {
