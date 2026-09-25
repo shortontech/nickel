@@ -126,3 +126,6 @@ with an accurate reason and contract evidence.
   tests pass. `cargo test --workspace --no-run` builds every workspace test target on Windows;
   it does not execute the suite. Native surface focus/DPI and peripheral changing coverage remain
   pending. Linux tests are excluded by the current user instruction.
+- The Windows image chooser contract now cites a focused fixture that distinguishes a native
+  cancellation from a native failure. The chooser fixture and both platform-contract tests pass
+  on Windows. This is fixture evidence; opening and using the native dialog remains unverified.

@@ -123,7 +123,7 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         PlatformFamily::Windows,
         AdapterCapability::ImageFileDialog,
         "Windows common item dialog",
-        "platform_contract::tests::matrix_is_complete_and_truthful",
+        "windows_file_dialog::tests::image_chooser_distinguishes_cancel_from_native_failure",
     ),
     fixture(
         PlatformFamily::Windows,

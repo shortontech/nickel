@@ -92,12 +92,8 @@ fn show_image_dialog(owner: Option<HWND>) -> Result<FileDialogOutcome, String> {
         dialog
             .SetOptions(options | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM)
             .map_err(|error| format!("configure image chooser options: {error}"))?;
-        match dialog.Show(owner) {
-            Ok(()) => {}
-            Err(error) if error.code().0 == 0x8007_04c7_u32 as i32 => {
-                return Ok(FileDialogOutcome::Cancelled);
-            }
-            Err(error) => return Err(format!("show image chooser: {error}")),
+        if let Some(outcome) = classify_show_result(dialog.Show(owner))? {
+            return Ok(outcome);
         }
         let item = dialog
             .GetResult()
@@ -111,5 +107,38 @@ fn show_image_dialog(owner: Option<HWND>) -> Result<FileDialogOutcome, String> {
         path.map(PathBuf::from)
             .map(FileDialogOutcome::Selected)
             .map_err(|error| format!("decode selected image path: {error}"))
+    }
+}
+
+fn classify_show_result(
+    result: windows::core::Result<()>,
+) -> Result<Option<FileDialogOutcome>, String> {
+    match result {
+        Ok(()) => Ok(None),
+        Err(error) if error.code().0 == 0x8007_04c7_u32 as i32 => {
+            Ok(Some(FileDialogOutcome::Cancelled))
+        }
+        Err(error) => Err(format!("show image chooser: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::core::{Error, HRESULT};
+
+    #[test]
+    fn image_chooser_distinguishes_cancel_from_native_failure() {
+        assert!(classify_show_result(Ok(())).unwrap().is_none());
+        assert!(matches!(
+            classify_show_result(Err(Error::from_hresult(HRESULT(0x8007_04c7_u32 as i32))))
+                .unwrap(),
+            Some(FileDialogOutcome::Cancelled)
+        ));
+        assert!(
+            classify_show_result(Err(Error::from_hresult(HRESULT(0x8000_4005_u32 as i32))))
+                .unwrap_err()
+                .starts_with("show image chooser:")
+        );
     }
 }
