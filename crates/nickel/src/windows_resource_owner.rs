@@ -1923,6 +1923,94 @@ mod tests {
     }
 
     #[test]
+    fn native_hidden_surface_dpi_maps_into_client_without_taking_focus() {
+        use windows::{
+            Win32::UI::{
+                HiDpi::{
+                    DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                    GetDpiForWindow, SetThreadDpiAwarenessContext,
+                },
+                WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, GetClientRect, GetForegroundWindow,
+                    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+                },
+            },
+            core::w,
+        };
+
+        struct NativeFixture {
+            window: windows::Win32::Foundation::HWND,
+            previous_dpi_context: DPI_AWARENESS_CONTEXT,
+        }
+        impl Drop for NativeFixture {
+            fn drop(&mut self) {
+                // SAFETY: This test owns the hidden window and pairs the thread DPI context.
+                unsafe {
+                    let _ = DestroyWindow(self.window);
+                    if !self.previous_dpi_context.is_invalid() {
+                        let _ = SetThreadDpiAwarenessContext(self.previous_dpi_context);
+                    }
+                }
+            }
+        }
+
+        // SAFETY: The thread DPI context is restored by NativeFixture. STATIC is
+        // a system window class; this hidden window never activates or receives input.
+        let previous_dpi_context =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        let window = unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("Nickel DPI fixture"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                320,
+                240,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("hidden native window");
+        let fixture = NativeFixture {
+            window,
+            previous_dpi_context,
+        };
+        let dpi = unsafe { GetDpiForWindow(fixture.window) };
+        assert!(dpi >= 96, "native window DPI unavailable: {dpi}");
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        unsafe { GetClientRect(fixture.window, &mut rect) }.expect("native client geometry");
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        assert!(width > 0 && height > 0);
+        let scale = dpi as f32 / 96.0;
+        let logical_width = (f64::from(width) / f64::from(scale)).floor() as i64;
+        let logical_height = (f64::from(height) / f64::from(scale)).floor() as i64;
+        let (x, y) = shell_surface_client_point(
+            (logical_width / 2) as i32,
+            (logical_height / 2) as i32,
+            logical_width,
+            logical_height,
+            scale,
+        )
+        .expect("native DPI maps logical point");
+        assert!(x >= 0 && x < width && y >= 0 && y < height);
+        assert!(
+            shell_surface_client_point(
+                logical_width as i32,
+                0,
+                logical_width,
+                logical_height,
+                scale
+            )
+            .is_err()
+        );
+        assert_ne!(unsafe { GetForegroundWindow() }, fixture.window);
+    }
+
+    #[test]
     fn output_pointer_target_requires_exact_generation_and_global_membership() {
         let mut owner = Owner::default();
         owner

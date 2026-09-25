@@ -124,10 +124,15 @@ with an accurate reason and contract evidence.
 - The exact Windows workspace strict Clippy command and formatting check pass. Focused Windows
   screenshot controller and screenshot command tests pass. All 17 focused Windows remote-owner
   tests pass. `cargo test --workspace --no-run` builds every workspace test target on Windows;
-  it does not execute the suite. Native surface focus/DPI and peripheral changing coverage remain
-  pending. Linux tests are excluded by the current user instruction.
+  it does not execute the suite. Full native surface focus/DPI interaction and peripheral changing
+  coverage remain pending. Linux tests are excluded by the current user instruction.
 - The Windows image chooser contract now cites a focused fixture that distinguishes a native
   cancellation from a native failure. The chooser fixture and both platform-contract tests pass
   on Windows. This is fixture evidence; opening and using the native dialog remains unverified.
 - The contract's Windows surface-pointer fixture now has a recorded Windows test run; it passes
-  for logical-to-client coordinate conversion. Native focus and DPI interaction is still pending.
+  for logical-to-client coordinate conversion.
+- A native Windows test creates a hidden, non-activating window under per-monitor DPI awareness,
+  reads its actual DPI and client bounds, and verifies the production surface coordinate mapper
+  stays inside that client area while the window remains outside foreground focus. It passes on
+  Windows. Foreground focus transitions, visible hit testing, and scale changes across monitors
+  remain unverified.
