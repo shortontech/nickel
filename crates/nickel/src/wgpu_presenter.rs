@@ -624,14 +624,13 @@ impl Frame {
             .clamp(0.0, self.height as f32) as u32;
         if ex > sx && ey > sy {
             let scissor = (sx, sy, ex - sx, ey - sy);
-            if let Some(last) = self.draws.last_mut() {
-                if last.end == start
-                    && last.scissor == scissor
-                    && Arc::ptr_eq(&last.texture, &texture)
-                {
-                    last.end += 6;
-                    return;
-                }
+            if let Some(last) = self.draws.last_mut()
+                && last.end == start
+                && last.scissor == scissor
+                && Arc::ptr_eq(&last.texture, &texture)
+            {
+                last.end += 6;
+                return;
             }
             self.draws.push(Draw {
                 start,

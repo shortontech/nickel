@@ -96,9 +96,8 @@ fn generated_operation_lifecycles_release_admission_and_fence_stale_tails() {
     for mut seed in SEEDS {
         let mut reducer = WindowOperationReducer::default();
         let mut trace = BoundedTrace::new(STEPS_PER_SEED * 3);
-        let mut generation = 1;
-
-        for _ in 0..STEPS_PER_SEED {
+        for step in 0..STEPS_PER_SEED {
+            let generation = step as u64 + 1;
             let (operation, acquisition) = begin(&mut reducer, generation);
             assert_occupied(&mut reducer, operation);
 
@@ -174,7 +173,6 @@ fn generated_operation_lifecycles_release_admission_and_fence_stale_tails() {
                 }
             }
             assert!(reducer.operation(operation).is_none());
-            generation += 1;
         }
 
         assert_eq!(trace.dropped(), 0);

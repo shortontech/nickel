@@ -119,7 +119,7 @@ impl Application for RemoteIndicator {
                         Text::new(nickel_i18n::system_value(
                             "ui-remote-state",
                             "value",
-                            &lease_status(grant.suspended, grant.connected),
+                            lease_status(grant.suspended, grant.connected),
                         ))
                         .color(self.theme.text.primary)
                         .wrap(true),

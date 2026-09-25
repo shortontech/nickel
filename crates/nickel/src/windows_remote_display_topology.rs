@@ -869,7 +869,7 @@ mod tests {
             available_targets.len(),
             all_paths.len()
         );
-        for path in all_paths.iter().filter(|path| {
+        if let Some(path) = all_paths.iter().find(|path| {
             path.targetInfo.targetAvailable.as_bool() && !active_targets.contains(&target_key(path))
         }) {
             let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
@@ -889,7 +889,6 @@ mod tests {
                 target.monitorDevicePath[0] != 0,
                 target.monitorFriendlyDeviceName[0] != 0
             );
-            break;
         }
         let identities =
             complete_active_target_identities(outputs.iter().map(|output| output.name.clone()));

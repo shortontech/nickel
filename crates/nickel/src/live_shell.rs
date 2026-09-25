@@ -4140,9 +4140,10 @@ impl LiveShell {
                     return;
                 };
                 let targets = validated_application_close_targets(target, &self.windows);
-                let dispatched = targets.into_iter().fold(false, |dispatched, window| {
-                    self.try_send_window_action(window, WindowAction::Close) || dispatched
-                });
+                let mut dispatched = false;
+                for window in targets {
+                    dispatched |= self.try_send_window_action(window, WindowAction::Close);
+                }
                 if dispatched {
                     self.dismiss_window_menu();
                 }
@@ -4604,7 +4605,7 @@ impl LiveShell {
                     if locked && !platform::lock_workstation() {
                         tracing::warn!("native Windows workstation lock request failed");
                     }
-                    return true;
+                    true
                 }
                 #[cfg(not(target_os = "windows"))]
                 {

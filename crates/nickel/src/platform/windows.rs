@@ -2913,14 +2913,14 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             } else {
                 8
             };
-            if current_release || now.saturating_sub(operation.last_update) >= minimum_interval {
-                if coordinator.update(point, now).is_err() {
-                    return if current_release {
-                        HookDisposition::Suppress
-                    } else {
-                        HookDisposition::Forward
-                    };
-                }
+            if (current_release || now.saturating_sub(operation.last_update) >= minimum_interval)
+                && coordinator.update(point, now).is_err()
+            {
+                return if current_release {
+                    HookDisposition::Suppress
+                } else {
+                    HookDisposition::Forward
+                };
             }
             if current_release {
                 coordinator.release(operation.completion);
@@ -3108,11 +3108,10 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
         && let Some(drag) = *delegated
         && drag.released
         && now.saturating_sub(drag.released_at) >= 2_000
+        && let Ok(mut tombstones) = NATIVE_SYSTEM_DRAG_TOMBSTONES.lock()
     {
-        if let Ok(mut tombstones) = NATIVE_SYSTEM_DRAG_TOMBSTONES.lock() {
-            tombstones.insert(drag.fingerprint.window, drag);
-            delegated.take();
-        }
+        tombstones.insert(drag.fingerprint.window, drag);
+        delegated.take();
     }
     if let Ok(mut tombstones) = NATIVE_SYSTEM_DRAG_TOMBSTONES.lock() {
         tombstones.retain(|window, drag| {
@@ -3124,10 +3123,11 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
                 if unsafe { PostMessageW(target, WM_LBUTTONUP, WPARAM(0), LPARAM(0)) }.is_ok() {
                     drag.completion_posted = true;
                 }
-            } else if !drag.active && !drag.completion_posted {
-                if unsafe { PostMessageW(target, WM_CANCELMODE, WPARAM(0), LPARAM(0)) }.is_ok() {
-                    drag.completion_posted = true;
-                }
+            } else if !drag.active
+                && !drag.completion_posted
+                && unsafe { PostMessageW(target, WM_CANCELMODE, WPARAM(0), LPARAM(0)) }.is_ok()
+            {
+                drag.completion_posted = true;
             }
             true
         });
@@ -3841,10 +3841,11 @@ pub fn observe_nickel_window_key(super_side: Option<u8>, pressed: bool) {
     let chorded = NICKEL_WINDOW_SUPER_CHORDED.swap(false, Ordering::AcqRel);
     let hook_dispatched = SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire)
         != NICKEL_WINDOW_TOGGLE_GENERATION.load(Ordering::Acquire);
-    if !chorded && !hook_dispatched {
-        if let Some(sender) = SHORTCUT_SENDER.get() {
-            let _ = sender.send(GlobalShortcut::ToggleLauncher);
-        }
+    if !chorded
+        && !hook_dispatched
+        && let Some(sender) = SHORTCUT_SENDER.get()
+    {
+        let _ = sender.send(GlobalShortcut::ToggleLauncher);
     }
 }
 
@@ -6857,7 +6858,7 @@ mod tests {
                 fingerprint: fingerprint(generation as isize, 13),
                 generation: generation as u64,
             };
-            let mut drag = contested_drag();
+            let drag = contested_drag();
             let settlement = Settlement::new(
                 NativeRequest {
                     id: NativeRequestId(generation as u64),

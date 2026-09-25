@@ -96,6 +96,7 @@ with an accurate reason and contract evidence.
 - Windows printer and removable-volume reads are available through a bounded observation
   worker. Printer mutations remain unavailable because the native spooler calls lack a
   cancellable production owner; the platform contract records that limitation.
-- Strict Clippy currently fails on warnings in `nickel` after three dependent-crate
-  findings were corrected. Native surface focus/DPI and peripheral changing coverage remain
-  pending. Linux tests are excluded by the current user instruction.
+- The exact Windows workspace strict Clippy command now reaches `nickel` and fails on unused
+  code warnings after style findings in the workspace were corrected. Native surface focus/DPI
+  and peripheral changing coverage remain pending. Linux tests are excluded by the current
+  user instruction.

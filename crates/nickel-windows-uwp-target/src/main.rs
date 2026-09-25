@@ -203,13 +203,11 @@ mod target {
                 if last_heartbeat.elapsed() >= Duration::from_secs(1) {
                     let visible = window.Visible()?;
                     record(&format!("event-loop-heartbeat visible={visible}"));
-                    if visible {
-                        if let Some(presenter) = &presenter {
-                            match presenter.present(tick) {
-                                Ok(()) => record(&format!("present-ok frame={tick}")),
-                                Err(error) => {
-                                    record(&format!("present-failed frame={tick} error={error}"))
-                                }
+                    if visible && let Some(presenter) = &presenter {
+                        match presenter.present(tick) {
+                            Ok(()) => record(&format!("present-ok frame={tick}")),
+                            Err(error) => {
+                                record(&format!("present-failed frame={tick} error={error}"))
                             }
                         }
                     }
