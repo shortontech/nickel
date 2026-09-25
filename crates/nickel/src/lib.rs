@@ -56,9 +56,11 @@ use nickel_core::optional_features::{
 use nickel_input::{
     AggregateModifier, InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent,
 };
+#[cfg(any(test, target_os = "linux"))]
+use nickel_ui::ControllerAction;
 use nickel_ui::{
-    Application, ControllerAction, HostBatch, HostChangeToken, HostEvent, HostEventOutcome,
-    HostFailure, HostFailureStage, UiHost,
+    Application, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, HostFailure,
+    HostFailureStage, UiHost,
 };
 use std::{
     collections::HashSet,
@@ -476,6 +478,7 @@ struct EmbeddedUiSurface<A: Application> {
     change_token: HostChangeToken,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct EmbeddedControllerTransition {
     open_keyboard: bool,
@@ -597,6 +600,7 @@ impl<A: Application> EmbeddedUiSurface<A> {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn step_embedded_codex_controller(
     host: &mut EmbeddedUiSurface<ChatApplication>,
     project_menu: bool,
@@ -2089,10 +2093,12 @@ fn log_unroutable_launcher_input(
     );
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn controller_launcher_shortcut(action: ControllerAction) -> Option<platform::GlobalShortcut> {
     (action == ControllerAction::Launcher).then_some(platform::GlobalShortcut::ToggleLauncher)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn controller_target_role(
     launcher_visible: bool,
     focused_role: Option<SurfaceRole>,
@@ -2102,6 +2108,7 @@ fn controller_target_role(
         .or(focused_role)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn modal_controller_target(
     screenshot_visible: bool,
     keyboard_visible: bool,
@@ -2115,6 +2122,7 @@ fn modal_controller_target(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn handle_controller_action(
     shell: &mut WinitShell,
     state: &mut LiveShell,
