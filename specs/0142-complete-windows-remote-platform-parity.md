@@ -175,6 +175,11 @@ with an accurate reason and contract evidence.
 - After the Windows peripheral owner and truncation changes, `cargo test --workspace --no-run`
   compiled every workspace test target and `cargo build --workspace` passed on Windows. The broad
   test suite was not executed; focused Windows suites and opt-in native reads are recorded above.
+- After the native display owner test and the observation/transaction contract split,
+  `cargo test --workspace --no-run` again compiled every workspace test target on Windows and
+  `cargo build --workspace` passed. The broad test suite remains unexecuted because an unrelated
+  Windows test invokes `LockWorkStation`; only the focused suites and opt-in native tests noted
+  here were run.
 - Focused Windows suites now pass end to end: display topology (6 fixtures; 3 native opt-in tests
   ignored by default), peripheral projection/control contracts (8), resource ownership and pointer
   bounds (23; 1 live opt-in test ignored by default), and shell diagnostics (12). These fixture
