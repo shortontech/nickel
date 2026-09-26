@@ -10374,6 +10374,161 @@ mod tests {
         });
     }
     #[test]
+    #[ignore = "requires NICKEL_WINDOWS_OWNER_SURFACE_POINTER_MOVE_TEST=1 for an opt-in native pointer move"]
+    fn native_shell_surface_pointer_moves_through_desktop_owner() {
+        use nickel_remote_control::{DesktopAuthority, DesktopPermit};
+        use windows::Win32::{
+            Foundation::POINT,
+            UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow},
+        };
+
+        assert_eq!(
+            std::env::var("NICKEL_WINDOWS_OWNER_SURFACE_POINTER_MOVE_TEST").as_deref(),
+            Ok("1")
+        );
+        struct RejectingHost;
+        impl crate::session_host::SessionHost for RejectingHost {
+            fn dispatch(
+                &self,
+                _: crate::platform::ShellCommand,
+            ) -> Result<(), crate::platform::SessionRequestError> {
+                Err(crate::platform::SessionRequestError::Send)
+            }
+        }
+
+        let mut shell = WinitShell::new_with_options(
+            Instant::now(),
+            crate::winit_shell::ShellOptions {
+                create_desktop_surfaces: false,
+                bar_on_all_displays: false,
+                ..Default::default()
+            },
+        )
+        .expect("temporary Windows shell event loop");
+        assert_eq!(shell.surfaces().count(), 0);
+        crate::wait_for_initial_display(&mut shell).expect("display for temporary shell");
+        shell
+            .create_shell_surfaces()
+            .expect("temporary shell surfaces");
+        let mut state =
+            crate::live_shell::LiveShell::new_with_session_host(Arc::new(RejectingHost))
+                .expect("temporary shell state");
+        crate::sync_visibility(&mut shell, &state);
+        let observations = shell.remote_shell_surface_observations(&state);
+        let panel = observations
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Panel)
+            .expect("one temporary Nickel Panel");
+        assert!(panel.native_visible && panel.canonical_visible);
+        let identity = nickel_remote_control::leases::ResourceId {
+            id: format!("windows-shell:{}", panel.generation),
+            generation: panel.generation,
+        };
+        let output_name = panel.output.as_deref().expect("Panel output");
+        let geometry = panel.geometry.expect("Panel geometry");
+        let (x, y, screen_x, screen_y) = [2_i64, 3, 4, 5]
+            .into_iter()
+            .find_map(|divisor| {
+                let x = (geometry[2] / divisor).max(1) as i32;
+                let y = (geometry[3] / 2).max(1) as i32;
+                let (client_x, client_y) = shell_surface_pointer_client_point(
+                    false,
+                    panel.native,
+                    &identity,
+                    output_name,
+                    &observations,
+                    x,
+                    y,
+                )
+                .ok()?;
+                let (screen_x, screen_y) =
+                    crate::windows_remote_input::target_point(panel.native, client_x, client_y)
+                        .ok()?;
+                Some((x, y, screen_x, screen_y))
+            })
+            .expect("Panel has an exposed client point");
+        assert!(crate::windows_remote_input::physical_input_idle());
+        let mut previous = POINT::default();
+        // SAFETY: GetCursorPos writes to an initialized point packet.
+        unsafe { GetCursorPos(&mut previous) }.expect("original cursor position");
+        struct RestoreCursor {
+            position: POINT,
+            active: bool,
+        }
+        impl Drop for RestoreCursor {
+            fn drop(&mut self) {
+                if self.active {
+                    let _ =
+                        crate::windows_remote_input::move_pointer(self.position.x, self.position.y);
+                }
+            }
+        }
+        let mut restore = RestoreCursor {
+            position: previous,
+            active: true,
+        };
+        // SAFETY: This read-only query observes the current foreground window.
+        let before_focus = unsafe { GetForegroundWindow() };
+
+        let mut owner = owner();
+        owner.desktop_session = Some(
+            nickel_platform::process_identity::WindowsProcessIdentity::probe(std::process::id())
+                .expect("native test process identity")
+                .session_id(),
+        );
+        owner.reconcile_desktop_authority();
+        assert!(owner.desktop_unlocked);
+        let (control, client, lease) = native_debug_lease(&owner, "Windows Panel pointer fixture");
+        let permit =
+            DesktopPermit::from_active_lease(control, client.client_id, client.token, lease)
+                .unwrap();
+        let authority = Arc::clone(&owner.authority);
+        let target = nickel_remote_control::pointer::PointerTarget::Surface {
+            surface_id: identity.id,
+            generation: identity.generation,
+        };
+        std::thread::scope(|scope| {
+            let (reply, receiver) = mpsc::sync_channel(1);
+            scope.spawn(move || {
+                let result = authority.pointer_action(
+                    permit,
+                    target,
+                    x,
+                    y,
+                    nickel_remote_control::pointer::PointerAction::Move,
+                );
+                let _ = reply.send(result);
+            });
+            let started = Instant::now();
+            let result = loop {
+                owner.poll_with_shell(Some((&mut shell, &mut state)), None);
+                match receiver.try_recv() {
+                    Ok(result) => break result,
+                    Err(mpsc::TryRecvError::Empty)
+                        if started.elapsed() < Duration::from_secs(4) =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("Windows pointer owner did not finish: {error}"),
+                }
+            };
+            result.expect("authenticated Panel pointer move");
+        });
+        assert_eq!(
+            crate::windows_remote_input::global_pointer_hit(screen_x, screen_y).unwrap(),
+            crate::windows_remote_input::GlobalPointerHit::Window(panel.native)
+        );
+        crate::windows_remote_input::move_pointer(previous.x, previous.y)
+            .expect("restore original cursor position");
+        let mut restored = POINT::default();
+        // SAFETY: GetCursorPos writes to an initialized point packet.
+        unsafe { GetCursorPos(&mut restored) }.expect("restored cursor position");
+        assert_eq!((restored.x, restored.y), (previous.x, previous.y));
+        restore.active = false;
+        // SAFETY: This read-only query observes the current foreground window.
+        assert_eq!(unsafe { GetForegroundWindow() }, before_focus);
+    }
+    #[test]
     fn settings_worker_is_single_flight_and_exposes_only_coarse_lifecycle() {
         let worker = Arc::new(WindowsSettingsWorker::default());
         let initial = worker.snapshot().unwrap();

@@ -107,8 +107,9 @@ const fn native_input(
     }
 }
 
-/// Declarative adapter coverage. Native read and input evidence exercise the
-/// adapter, without claiming that an authenticated remote request completed.
+/// Declarative adapter coverage. Native read and input evidence may exercise
+/// an in-process authenticated owner; neither implies that the network listener
+/// accepted a complete remote request.
 pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     fixture(
         PlatformFamily::Linux,
@@ -231,7 +232,7 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         AdapterCapability::RemoteSurfacePointer,
         "Windows shell surface pointer owner",
         "windows_resource_owner::tests::shell_surface_pointer_coordinates_use_logical_client_space",
-        "windows_resource_owner::tests::native_live_shell_surface_pointer_uses_current_dpi_and_visible_client [NICKEL_WINDOWS_SURFACE_POINTER_MOVE_TEST=1]",
+        "windows_remote_control::tests::native_shell_surface_pointer_moves_through_desktop_owner [NICKEL_WINDOWS_OWNER_SURFACE_POINTER_MOVE_TEST=1]",
     ),
 ];
 

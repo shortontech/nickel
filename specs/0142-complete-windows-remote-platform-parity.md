@@ -169,9 +169,17 @@ with an accurate reason and contract evidence.
   adapter to move to the exposed point, confirmed the WindowFromPoint hit, restored the prior cursor
   position, and kept foreground focus unchanged. A first attempt stopped at the physical-input-idle
   guard before movement; the next guarded attempt passed. The test Nickel process used
-  `--no-desktop-windows` and was closed afterward. The contract records this as
-  `native_input_verified`, while an authenticated owner pointer request, focus changes on a
-  Nickel-owned surface, click/drag input, and scale changes across monitors remain unverified.
+  `--no-desktop-windows` and was closed afterward. An additional opt-in native test created a
+  temporary Nickel shell without desktop surfaces, acquired a live Full Control & Debug lease,
+  and sent a Surface Move through `WindowsDesktopAuthority::pointer_action` and the production
+  owner poll. The owner moved to the visible Panel point; the test confirmed the native hit,
+  restored and checked the original cursor position, and kept foreground focus unchanged. The
+  initial fixture attempt correctly revoked its permit because the test owner lacked a desktop
+  session; the fixture now supplies the process session. A later attempt correctly refused movement
+  while physical input was active; the next
+  idle attempt passed and checked cursor restoration. The contract cites
+  this owner-level `native_input_verified` result. A network listener request, focus changes on
+  a Nickel-owned surface, click/drag input, and scale changes across monitors remain unverified.
 - After the Windows peripheral owner and truncation changes, `cargo test --workspace --no-run`
   compiled every workspace test target and `cargo build --workspace` passed on Windows. The broad
   test suite was not executed; focused Windows suites and opt-in native reads are recorded above.

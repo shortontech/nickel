@@ -535,9 +535,15 @@ impl WinitShell {
     }
 
     pub fn new_with_options(started: Instant, options: ShellOptions) -> Result<Self, String> {
-        let events = EventLoop::<ShellUserEvent>::with_user_event()
-            .build()
-            .map_err(|error| error.to_string())?;
+        let mut builder = EventLoop::<ShellUserEvent>::with_user_event();
+        #[cfg(all(test, target_os = "windows"))]
+        {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            // Native owner fixtures run on a Rust test thread. Shipped shell
+            // startup continues to require the main thread.
+            builder.with_any_thread(true);
+        }
+        let events = builder.build().map_err(|error| error.to_string())?;
         #[cfg(target_os = "windows")]
         let external_events = Arc::new(Mutex::new(VecDeque::new()));
         tracing::info!(
