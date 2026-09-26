@@ -117,6 +117,13 @@ with an accurate reason and contract evidence.
   Windows placement validation also rejects a requested layout with a nonprimary output at the
   desktop origin, where the position-based native path cannot identify the requested primary
   unambiguously. The focused validation fixture passes.
+  An opt-in native read through `WindowsDesktopAuthority::read_display_layout`, a live in-process
+  Full Control & Debug lease, and the production output reconciliation path passed. It reported
+  one output, incomplete topology, `transaction_supported=false`, and the specific inactive
+  target reason. An authenticated Apply request through the same owner and production output
+  reconciliation path returned that exact reason without changing the display. This verifies
+  the production owner's read and refusal on the current fixture; it does not verify a changing
+  transaction.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
   request reply expires. Physical input epoch and idle state are rechecked during Apply staging.

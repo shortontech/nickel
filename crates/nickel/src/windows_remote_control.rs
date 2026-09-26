@@ -10284,6 +10284,116 @@ mod tests {
             "remote authority was stopped"
         );
     }
+
+    #[test]
+    #[ignore = "reads native Windows outputs through the authenticated desktop owner"]
+    fn native_display_owner_read_reports_transaction_prerequisites() {
+        use nickel_remote_control::{DesktopAuthority, DesktopPermit};
+
+        let mut owner = owner();
+        let control = owner.remote_control.control();
+        let (client, lease) = {
+            let mut control = control.lock().unwrap();
+            control.set_enabled(true);
+            let client = control
+                .connect_identity("Windows display read fixture")
+                .unwrap();
+            let now = Instant::now();
+            let watch = control
+                .reserve_connection_watch(&client.client_id, &client.token, now)
+                .unwrap();
+            control
+                .activate_connection_watch(&client.client_id, &client.token, watch, false, now)
+                .unwrap();
+            let request = nickel_remote_control::lease_requests::LeaseRequest {
+                renewal: None,
+                scope: nickel_remote_control::leases::ResourceScope::FullSession,
+                duration: Some(Duration::from_secs(120)),
+                allow_resumption: false,
+                full_debug: true,
+            };
+            control
+                .request_lease(&client.client_id, &client.token, request.clone(), now)
+                .unwrap();
+            let generation = control
+                .lease_requests()
+                .pending_generation(&client.client_id)
+                .unwrap();
+            let lease = control
+                .approve_lease_local(&client.client_id, &request, generation, now)
+                .unwrap();
+            (client, lease)
+        };
+        let permit = DesktopPermit::from_active_lease(
+            control.clone(),
+            client.client_id,
+            client.token,
+            lease,
+        )
+        .unwrap();
+        let authority = Arc::clone(&owner.authority);
+        std::thread::scope(|scope| {
+            let read_authority = Arc::clone(&authority);
+            let read_permit = permit.clone();
+            let read = scope.spawn(move || read_authority.read_display_layout(read_permit));
+            let request = owner
+                .receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("native output observation request");
+            let OwnerRequest::Observation {
+                permit: observation_permit,
+                prepared,
+                kind: ObservationKind::Outputs,
+                reply,
+            } = request
+            else {
+                panic!("display read requested the wrong owner observation");
+            };
+            let observed =
+                owner.observe_resources(observation_permit, *prepared, ObservationKind::Outputs);
+            reply.try_send(observed).unwrap();
+            let snapshot = read.join().unwrap().expect("native display owner read");
+            assert!(snapshot.requested.valid_representation());
+            assert_eq!(
+                snapshot.transaction_supported,
+                snapshot.topology_complete && snapshot.transaction_unavailable_reason.is_none()
+            );
+            if !snapshot.transaction_supported {
+                assert!(snapshot.transaction_unavailable_reason.is_some());
+                let expected_reason = snapshot.transaction_unavailable_reason.clone().unwrap();
+                let transaction = nickel_remote_control::display_layout::Transaction::Apply {
+                    topology_generation: snapshot.topology_generation,
+                    prior: snapshot.requested.clone(),
+                    requested: snapshot.requested.clone(),
+                };
+                let apply =
+                    scope.spawn(move || authority.display_layout_transaction(permit, transaction));
+                let request = owner
+                    .receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("native transaction output observation request");
+                let OwnerRequest::Observation {
+                    permit,
+                    prepared,
+                    kind: ObservationKind::Outputs,
+                    reply,
+                } = request
+                else {
+                    panic!("display transaction requested the wrong owner observation");
+                };
+                let observed = owner.observe_resources(permit, *prepared, ObservationKind::Outputs);
+                reply.try_send(observed).unwrap();
+                assert_eq!(apply.join().unwrap().unwrap_err(), expected_reason);
+            }
+            eprintln!(
+                "native display owner: outputs={}, topology_complete={}, transaction_supported={}, reason={:?}",
+                snapshot.requested.outputs.len(),
+                snapshot.topology_complete,
+                snapshot.transaction_supported,
+                snapshot.transaction_unavailable_reason
+            );
+        });
+    }
     #[test]
     fn settings_worker_is_single_flight_and_exposes_only_coarse_lifecycle() {
         let worker = Arc::new(WindowsSettingsWorker::default());
