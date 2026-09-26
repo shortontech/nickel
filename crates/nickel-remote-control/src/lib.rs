@@ -1935,6 +1935,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shipped_runtime_keeps_remote_listener_disabled() {
+        struct EmptyDesktop;
+        impl DesktopAuthority for EmptyDesktop {
+            fn keyboard_action(
+                &self,
+                _: DesktopPermit,
+                _: &str,
+                _: u64,
+                _: keyboard::KeyboardAction,
+            ) -> Result<(), String> {
+                unreachable!()
+            }
+            fn pointer_action(
+                &self,
+                _: DesktopPermit,
+                _: pointer::PointerTarget,
+                _: i32,
+                _: i32,
+                _: pointer::PointerAction,
+            ) -> Result<(), String> {
+                unreachable!()
+            }
+            fn diagnostic_snapshot(
+                &self,
+                _: DesktopPermit,
+            ) -> Result<diagnostics::DiagnosticSnapshot, String> {
+                unreachable!()
+            }
+            fn list_windows(&self, _: DesktopPermit) -> Result<Vec<WindowSummary>, String> {
+                unreachable!()
+            }
+            fn window_action(
+                &self,
+                _: DesktopPermit,
+                _: &str,
+                _: u64,
+                _: window_actions::WindowAction,
+            ) -> Result<window_actions::WindowOutcome, String> {
+                unreachable!()
+            }
+        }
+
+        let mut runtime = RemoteControlRuntime::default();
+        let mut settings = RemoteAiControlSettings::default();
+        settings.generation = 1;
+        runtime.apply(&settings, std::sync::Arc::new(EmptyDesktop));
+        assert_eq!(runtime.status().effective, EffectiveState::Disabled);
+        assert!(!runtime.status().requested_enabled);
+        assert_eq!(runtime.status().acknowledged_generation, 1);
+        assert_eq!(
+            runtime.status().diagnostic.as_deref(),
+            Some("MCP server is disabled in this build")
+        );
+        assert!(!runtime.control().lock().unwrap().enabled());
+    }
+
+    #[test]
     fn held_input_uses_fresh_requests_without_reopening_cancelled_gestures() {
         let now = std::time::Instant::now();
         let control = std::sync::Arc::new(std::sync::Mutex::new(ControlPlane::default()));

@@ -158,8 +158,10 @@ with an accurate reason and contract evidence.
   scrubbed remote projection. The current Windows fixture reported two printers and one removable
   volume, with only generated opaque IDs in the remote entries. The platform contract now records
   remote peripheral observations as available separately from unavailable remote mutations. It
-  records the bounded native read as `native_read_verified` while retaining the pending status for
-  a complete live remote request; neither a changing peripheral operation nor a complete live
-  remote request was verified. The opt-in test now calls the same bounded native read helper as
-  the Windows desktop authority, preventing its native observation path from drifting from the
-  production request.
+  records the bounded native read as `native_read_verified`. A complete live remote request is
+  unavailable in this build because `RemoteControlRuntime::apply` deliberately disables the MCP
+  listener on both platforms. The contract's `available` field describes the adapter, not endpoint
+  reachability; the focused Windows `shipped_runtime_keeps_remote_listener_disabled` test passes.
+  No changing peripheral operation or complete live request was verified. The
+  opt-in test calls the same bounded native read helper as the Windows desktop
+  authority, preventing its native observation path from drifting from the production request.
