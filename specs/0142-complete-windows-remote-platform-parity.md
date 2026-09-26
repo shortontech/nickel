@@ -137,8 +137,10 @@ with an accurate reason and contract evidence.
   Windows. A separate opt-in, read-only native run selected a live Nickel Panel by PID and HWND,
   observed DPI 96 with a 1920×56 client area, and found an exposed point through the production
   logical-to-client mapper and native occlusion check. The Panel was not foreground; the run made
-  no focus change. Foreground focus transitions, actual pointer injection, and scale changes across
-  monitors remain unverified.
+  no focus change. A separate opt-in native focus test used Nickel's Windows focus adapter to
+  activate an offscreen fixture and restore the prior foreground window; it passed. Focus changes
+  on a Nickel-owned surface, actual pointer injection, and scale changes across monitors remain
+  unverified.
 - `cargo build --workspace` passes on Windows after the latest shared-policy changes.
 - Focused Windows suites now pass end to end: display topology (6 fixtures; 3 native opt-in tests
   ignored by default), peripheral projection/control contracts (6), resource ownership and pointer

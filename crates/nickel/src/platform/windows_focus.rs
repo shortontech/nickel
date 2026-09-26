@@ -213,6 +213,71 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires NICKEL_WINDOWS_NATIVE_FOCUS_TEST=1; briefly changes foreground focus"]
+    fn native_focus_fixture_restores_previous_foreground() {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SW_SHOWNOACTIVATE};
+
+        assert_eq!(
+            std::env::var("NICKEL_WINDOWS_NATIVE_FOCUS_TEST").as_deref(),
+            Ok("1")
+        );
+        struct Restore {
+            previous: HWND,
+            fixture: HWND,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: Both HWND values were observed or created by this test.
+                if unsafe { IsWindow(Some(self.previous)) }.as_bool() {
+                    let _ = activate_window(self.previous, false);
+                }
+                let _ = unsafe { DestroyWindow(self.fixture) };
+            }
+        }
+
+        // SAFETY: STATIC is a system class. The offscreen fixture is initially
+        // hidden and is destroyed by Restore even when an assertion fails.
+        let previous = unsafe { GetForegroundWindow() };
+        let fixture = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("Nickel native focus fixture"),
+                WS_OVERLAPPEDWINDOW,
+                -32000,
+                -32000,
+                160,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("native focus fixture window");
+        let restore = Restore { previous, fixture };
+        let _ = unsafe { ShowWindow(fixture, SW_SHOWNOACTIVATE) };
+        assert_eq!(unsafe { GetForegroundWindow() }, previous);
+        assert!(
+            activate_window(fixture, false),
+            "native focus request rejected"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { GetForegroundWindow() } != fixture && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(unsafe { GetForegroundWindow() }, fixture);
+        drop(restore);
+        if unsafe { IsWindow(Some(previous)) }.as_bool() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while unsafe { GetForegroundWindow() } != previous && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(unsafe { GetForegroundWindow() }, previous);
+        }
+    }
+
+    #[test]
     fn unresponsive_window_does_not_block_activation_or_launcher_ownership_check() {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
