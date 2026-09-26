@@ -89,14 +89,19 @@ with an accurate reason and contract evidence.
   replacement, protection, destruction, and bounds; peripheral projection; and the platform
   contract. The Windows library
   compiles and formatting passes.
-- A read-only native DisplayConfig probe found connected targets outside the active monitor
+- A read-only native DisplayConfig probe found an available target outside the active monitor
   inventory on the current Windows setup. Remote snapshots report incomplete topology and
   refuse layout transactions there. On 2026-09-25, the probe found one active monitor, two
   available targets, and 150 possible paths; the inactive available target returned a monitor
-  device path and friendly name. The opt-in native display mutation test has not run. See the
+  device path and friendly name; its monitor device path differs from the active target's path.
+  A repeat read-only probe now reports the specific reason
+  `Windows available display target is inactive`. The opt-in native display mutation test has
+  not run. [Windows documents](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_path_target_info)
+  `targetAvailable` as availability, which alone does not prove physical connection.
   [QueryDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-querydisplayconfig)
-  and [target device name](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_target_device_name)
-  documentation for the path and monitor identity fields used by the probe.
+  does not return source or target mode information for inactive paths, which this owner would
+  need to stage and verify their placement. The probe read the path and friendly name through
+  [target device information](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_target_device_name).
 - The display owner now validates and applies a supplied DisplayConfig without
   `SDC_SAVE_TO_DATABASE`; Keep saves the confirmed layout and queries the saved configuration.
   Guarded rollback restores the captured active DisplayConfig temporarily. If Keep attempted a

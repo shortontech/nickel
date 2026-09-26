@@ -1,7 +1,7 @@
 //! Read-only DisplayConfig identity and completeness checks for remote layouts.
 //! The existing monitor inventory contains active monitors only. It cannot be
-//! presented as a complete transactional layout while a connected target is
-//! disabled or while a cloned source obscures target identity.
+//! presented as a complete transactional layout while an available target is
+//! inactive or while a cloned source obscures target identity.
 
 use nickel_remote_control::diagnostics::OutputInventory;
 use nickel_remote_control::display_layout::Layout;
@@ -775,11 +775,11 @@ fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Result<String, String> {
 }
 
 fn complete_active_targets(
-    connected: impl IntoIterator<Item = TargetKey>,
+    available: impl IntoIterator<Item = TargetKey>,
     active: impl IntoIterator<Item = (String, TargetKey)>,
     monitor_names: impl IntoIterator<Item = String>,
 ) -> Result<BTreeMap<String, String>, String> {
-    let connected = connected.into_iter().collect::<BTreeSet<_>>();
+    let available = available.into_iter().collect::<BTreeSet<_>>();
     let mut active_targets = BTreeSet::new();
     let mut named = BTreeMap::new();
     for (name, target) in active {
@@ -787,23 +787,30 @@ fn complete_active_targets(
             return Err("Windows display source is cloned or ambiguous".into());
         }
     }
-    if connected.is_empty()
-        || connected != active_targets
-        || named.keys().cloned().collect::<BTreeSet<_>>()
-            != monitor_names.into_iter().collect::<BTreeSet<_>>()
+    if available.is_empty() {
+        return Err("Windows has no available display targets".into());
+    }
+    if active_targets.is_subset(&available) && available != active_targets {
+        return Err("Windows available display target is inactive".into());
+    }
+    if available != active_targets {
+        return Err("Windows active display target changed or is unavailable".into());
+    }
+    if named.keys().cloned().collect::<BTreeSet<_>>()
+        != monitor_names.into_iter().collect::<BTreeSet<_>>()
     {
-        return Err("Windows active monitors do not cover every connected display target".into());
+        return Err("Windows active monitor inventory does not match display sources".into());
     }
     Ok(named)
 }
 
 /// Return stable adapter/target IDs only when the active monitor inventory is
-/// the complete connected topology. Disabled connected targets require a
+/// the complete available topology. Inactive available targets require a
 /// separate owner that can observe their placement and scale accurately.
 pub(crate) fn complete_active_target_identities(
     monitor_names: impl IntoIterator<Item = String>,
 ) -> Result<BTreeMap<String, String>, String> {
-    let connected = native_paths(QDC_ALL_PATHS)?
+    let available = native_paths(QDC_ALL_PATHS)?
         .into_iter()
         .filter(|path| path.targetInfo.targetAvailable.as_bool())
         .map(|path| target_key(&path))
@@ -814,11 +821,11 @@ pub(crate) fn complete_active_target_identities(
         .into_iter()
         .map(|path| Ok((source_name(&path)?, target_key(&path))))
         .collect::<Result<Vec<_>, String>>()?;
-    complete_active_targets(connected, active, monitor_names)
+    complete_active_targets(available, active, monitor_names)
 }
 
 /// Validate the subset that the current GDI placement API can preserve: all
-/// connected targets remain enabled at their observed scale, while positions
+/// available targets remain enabled at their observed scale, while positions
 /// and primary selection may change. Dimensions come from the same fresh
 /// monitor observation as `current` and are keyed by stable target identity.
 pub(crate) fn validate_position_change(
@@ -993,12 +1000,22 @@ mod tests {
         let active = [(names[0].clone(), left), (names[1].clone(), right)];
         let mapped = complete_active_targets([left, right], active.clone(), names.clone()).unwrap();
         assert_ne!(mapped[&names[0]], mapped[&names[1]]);
-        assert!(
-            complete_active_targets([left, right, (1, 2, 5)], active.clone(), names.clone())
-                .is_err()
+        assert_eq!(
+            complete_active_targets([], active.clone(), names.clone()).unwrap_err(),
+            "Windows has no available display targets"
         );
-        assert!(
-            complete_active_targets([left, right], active.clone(), [names[0].clone()]).is_err()
+        assert_eq!(
+            complete_active_targets([left, right, (1, 2, 5)], active.clone(), names.clone())
+                .unwrap_err(),
+            "Windows available display target is inactive"
+        );
+        assert_eq!(
+            complete_active_targets([left, right], active.clone(), [names[0].clone()]).unwrap_err(),
+            "Windows active monitor inventory does not match display sources"
+        );
+        assert_eq!(
+            complete_active_targets([left], active.clone(), names.clone()).unwrap_err(),
+            "Windows active display target changed or is unavailable"
         );
         assert!(
             complete_active_targets(
@@ -1186,11 +1203,28 @@ mod tests {
             };
             // SAFETY: The initialized packet is writable for this read-only query.
             let result = unsafe { DisplayConfigGetDeviceInfo(&raw mut target.header) };
+            let matches_active_monitor_path = result == 0
+                && target.monitorDevicePath[0] != 0
+                && active_paths.iter().any(|active| {
+                    let mut active_name = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+                        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                            size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                            adapterId: active.targetInfo.adapterId,
+                            id: active.targetInfo.id,
+                        },
+                        ..Default::default()
+                    };
+                    // SAFETY: The initialized packet is writable for this read-only query.
+                    (unsafe { DisplayConfigGetDeviceInfo(&raw mut active_name.header) }) == 0
+                        && active_name.monitorDevicePath == target.monitorDevicePath
+                });
             eprintln!(
-                "inactive available target: query={}, monitor_path_present={}, friendly_name_present={}",
+                "inactive available target: query={}, monitor_path_present={}, friendly_name_present={}, matches_active_monitor_path={}",
                 result,
                 target.monitorDevicePath[0] != 0,
-                target.monitorFriendlyDeviceName[0] != 0
+                target.monitorFriendlyDeviceName[0] != 0,
+                matches_active_monitor_path
             );
         }
         let identities =
