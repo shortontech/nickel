@@ -140,3 +140,13 @@ with an accurate reason and contract evidence.
   no focus change. Foreground focus transitions, actual pointer injection, and scale changes across
   monitors remain unverified.
 - `cargo build --workspace` passes on Windows after the latest shared-policy changes.
+- Focused Windows suites now pass end to end: display topology (6 fixtures; 3 native opt-in tests
+  ignored by default), peripheral projection/control contracts (6), resource ownership and pointer
+  bounds (23; 1 live opt-in test ignored by default), and shell diagnostics (12). These fixture
+  results include stale identity, protection, bounds, recovery, native-owner limitations, and
+  scrubbed observations; they do not substitute for a changing display or peripheral run.
+- An opt-in native peripheral read passed through the production bounded refresh worker and
+  scrubbed remote projection. The current Windows fixture reported two printers and one removable
+  volume, with only generated opaque IDs in the remote entries. The platform contract now records
+  remote peripheral observations as available separately from unavailable remote mutations;
+  neither a changing peripheral operation nor a complete live remote request was verified.

@@ -10034,6 +10034,65 @@ mod tests {
             9
         );
     }
+
+    #[test]
+    #[ignore = "reads native Windows printers and removable volumes through the bounded owner worker"]
+    fn native_peripheral_observation_projects_only_opaque_remote_ids() {
+        let worker = Arc::new(WindowsPlatformRefreshWorker::default());
+        let native =
+            run_windows_platform_refresh_worker(worker, Duration::from_millis(1900), || {
+                Ok(nickel_platform::peripheral_service().inspect())
+            })
+            .expect("bounded native peripheral observation")
+            .map_err(crate::remote_peripheral_controls::observation_failure)
+            .expect("native peripheral provider returned a scrubbed failure");
+        let printer_ids = native
+            .printers
+            .as_ref()
+            .map(|printers| {
+                printers
+                    .iter()
+                    .map(|printer| printer.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let volume_ids = native
+            .volumes
+            .as_ref()
+            .map(|volumes| {
+                volumes
+                    .iter()
+                    .map(|volume| volume.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut state = crate::remote_peripheral_controls::State::default();
+        let projected = state
+            .observe(native, 1, Some(PERIPHERAL_CONTROL_UNAVAILABLE))
+            .expect("scrubbed native peripheral projection");
+        assert_eq!(
+            projected.printer_controls,
+            nickel_remote_control::peripheral_controls::Availability::Unavailable
+        );
+        for printer in &projected.printer_entries {
+            assert!(printer.id.starts_with("printer-"));
+            assert!(!printer_ids.contains(&printer.id));
+            for job in &printer.jobs {
+                assert!(job.id.starts_with("job-"));
+            }
+        }
+        for volume in &projected.removable_volume_entries {
+            assert!(volume.id.starts_with("volume-"));
+            assert!(!volume_ids.contains(&volume.id));
+        }
+        eprintln!(
+            "native peripheral availability: printers={:?}, volumes={:?}, projected printers={}, projected volumes={}",
+            projected.printers,
+            projected.removable_volumes,
+            projected.printer_entries.len(),
+            projected.removable_volume_entries.len()
+        );
+    }
     #[test]
     fn settings_worker_is_single_flight_and_exposes_only_coarse_lifecycle() {
         let worker = Arc::new(WindowsSettingsWorker::default());

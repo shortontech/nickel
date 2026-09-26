@@ -12,6 +12,7 @@ pub enum AdapterCapability {
     Appearance,
     HiddenFilesPreference,
     RemoteDisplayTransactions,
+    RemotePeripheralObservations,
     RemotePeripheralControls,
     RemoteSurfacePointer,
 }
@@ -109,6 +110,12 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     ),
     fixture(
         PlatformFamily::Linux,
+        AdapterCapability::RemotePeripheralObservations,
+        "Linux bounded peripheral observation owner",
+        "remote_peripheral_controls::tests::projection_scrubs_native_text_paths_and_clamps_capacity",
+    ),
+    fixture(
+        PlatformFamily::Linux,
         AdapterCapability::RemotePeripheralControls,
         "Linux bounded peripheral control owner",
         "platform_contract::tests::matrix_is_complete_and_truthful",
@@ -155,6 +162,12 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "Windows temporary DisplayConfig transaction and guarded recovery owner",
         "windows_remote_display_topology::tests::supplied_configuration_moves_only_validated_source_positions",
     ),
+    fixture(
+        PlatformFamily::Windows,
+        AdapterCapability::RemotePeripheralObservations,
+        "Windows bounded printer and volume observation owner",
+        "remote_peripheral_controls::tests::projection_scrubs_native_text_paths_and_clamps_capacity",
+    ),
     unavailable(
         PlatformFamily::Windows,
         AdapterCapability::RemotePeripheralControls,
@@ -187,7 +200,7 @@ mod tests {
                 ContractEvidence::LiveVerified => assert!(contract.live_evidence.is_some()),
             }
         }
-        assert_eq!(keys.len(), 2 * 8);
+        assert_eq!(keys.len(), 2 * 9);
     }
 
     #[test]
@@ -219,6 +232,7 @@ mod tests {
                 AdapterCapability::Appearance => "appearance",
                 AdapterCapability::HiddenFilesPreference => "hidden_files_preference",
                 AdapterCapability::RemoteDisplayTransactions => "remote_display_transactions",
+                AdapterCapability::RemotePeripheralObservations => "remote_peripheral_observations",
                 AdapterCapability::RemotePeripheralControls => "remote_peripheral_controls",
                 AdapterCapability::RemoteSurfacePointer => "remote_surface_pointer",
             };
