@@ -96,3 +96,8 @@ Launcher favorites snapshots now use one shared projection as well. It carries t
 favorites, unavailable count, catalog generation, and runtime-applied flag without exposing
 hidden stored entries. The shared suite and all three focused Windows favorites-owner tests pass.
 The Windows `cargo build --workspace` passes after these consolidations.
+
+The three policy families now have one production implementation each and both platform
+owners call them, so this specification is complete. Linux execution was excluded by the
+user's instruction; the Windows build, shared policy suite, focused Windows owner tests,
+formatting, and strict Clippy passed.
