@@ -868,6 +868,9 @@ pub(crate) fn validate_position_change(
             .iter()
             .find(|observed| observed.output == placement.output)
             .ok_or("Windows display target retired")?;
+        if placement.output != requested.primary && placement.x == 0 && placement.y == 0 {
+            return Err("Windows primary display placement is ambiguous".into());
+        }
         if !observed.enabled || !placement.enabled {
             return Err("Windows display enable changes require a DisplayConfig owner".into());
         }
@@ -1145,6 +1148,14 @@ mod tests {
         ]);
         assert!(
             validate_position_change(7, 7, &current, &requested, &current, &dimensions).is_ok()
+        );
+        let mut ambiguous_primary = requested.clone();
+        ambiguous_primary.outputs[1].x = 0;
+        ambiguous_primary.outputs[1].y = 0;
+        assert_eq!(
+            validate_position_change(7, 7, &current, &ambiguous_primary, &current, &dimensions)
+                .unwrap_err(),
+            "Windows primary display placement is ambiguous"
         );
         let mut changed_scale = requested.clone();
         changed_scale.outputs[1].scale_120 = 120;

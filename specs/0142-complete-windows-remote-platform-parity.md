@@ -114,6 +114,9 @@ with an accurate reason and contract evidence.
   support is now reported separately from topology completeness and requires readable active and
   saved modes plus successful native validation. A native changing round trip remains unverified
   on a complete multi-monitor fixture.
+  Windows placement validation also rejects a requested layout with a nonprimary output at the
+  desktop origin, where the position-based native path cannot identify the requested primary
+  unambiguously. The focused validation fixture passes.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
   request reply expires. Physical input epoch and idle state are rechecked during Apply staging.
