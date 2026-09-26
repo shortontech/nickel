@@ -21,6 +21,7 @@ pub enum AdapterCapability {
 pub enum ContractEvidence {
     FixtureOnly,
     NativeReadVerified,
+    NativeInputVerified,
     LiveVerified,
 }
 
@@ -87,8 +88,26 @@ const fn native_read(
     }
 }
 
-/// Declarative adapter coverage. A native read verifies observation through an
-/// adapter; it does not claim that a remote request or mutation completed.
+const fn native_input(
+    platform: PlatformFamily,
+    capability: AdapterCapability,
+    adapter: &'static str,
+    fixture: &'static str,
+    native_evidence: &'static str,
+) -> PlatformContract {
+    PlatformContract {
+        platform,
+        capability,
+        adapter,
+        fixture,
+        evidence: ContractEvidence::NativeInputVerified,
+        live_evidence: Some(native_evidence),
+        available: true,
+    }
+}
+
+/// Declarative adapter coverage. Native read and input evidence exercise the
+/// adapter, without claiming that an authenticated remote request completed.
 pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     fixture(
         PlatformFamily::Linux,
@@ -193,11 +212,12 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "native Windows peripheral mutations lack a cancellable owner",
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
-    fixture(
+    native_input(
         PlatformFamily::Windows,
         AdapterCapability::RemoteSurfacePointer,
         "Windows shell surface pointer owner",
         "windows_resource_owner::tests::shell_surface_pointer_coordinates_use_logical_client_space",
+        "windows_resource_owner::tests::native_live_shell_surface_pointer_uses_current_dpi_and_visible_client [NICKEL_WINDOWS_SURFACE_POINTER_MOVE_TEST=1]",
     ),
 ];
 
@@ -216,7 +236,9 @@ mod tests {
             assert!(!contract.fixture.is_empty());
             match contract.evidence {
                 ContractEvidence::FixtureOnly => assert!(contract.live_evidence.is_none()),
-                ContractEvidence::NativeReadVerified | ContractEvidence::LiveVerified => {
+                ContractEvidence::NativeReadVerified
+                | ContractEvidence::NativeInputVerified
+                | ContractEvidence::LiveVerified => {
                     assert!(contract.live_evidence.is_some())
                 }
             }
@@ -265,6 +287,7 @@ mod tests {
                 match contract.evidence {
                     ContractEvidence::FixtureOnly => "fixture_only",
                     ContractEvidence::NativeReadVerified => "native_read_verified",
+                    ContractEvidence::NativeInputVerified => "native_input_verified",
                     ContractEvidence::LiveVerified => "live_verified",
                 }
             );

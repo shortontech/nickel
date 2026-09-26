@@ -145,9 +145,14 @@ with an accurate reason and contract evidence.
   observed DPI 96 with a 1920×56 client area, and found an exposed point through the production
   logical-to-client mapper and native occlusion check. The Panel was not foreground; the run made
   no focus change. A separate opt-in native focus test used Nickel's Windows focus adapter to
-  activate an offscreen fixture and restore the prior foreground window; it passed. Focus changes
-  on a Nickel-owned surface, actual pointer injection, and scale changes across monitors remain
-  unverified.
+  activate an offscreen fixture and restore the prior foreground window; it passed. With
+  `NICKEL_WINDOWS_SURFACE_POINTER_MOVE_TEST=1`, the live Panel test also used Nickel's native input
+  adapter to move to the exposed point, confirmed the WindowFromPoint hit, restored the prior cursor
+  position, and kept foreground focus unchanged. A first attempt stopped at the physical-input-idle
+  guard before movement; the next guarded attempt passed. The test Nickel process used
+  `--no-desktop-windows` and was closed afterward. The contract records this as
+  `native_input_verified`, while an authenticated owner pointer request, focus changes on a
+  Nickel-owned surface, click/drag input, and scale changes across monitors remain unverified.
 - After the Windows peripheral owner and truncation changes, `cargo test --workspace --no-run`
   compiled every workspace test target and `cargo build --workspace` passed on Windows. The broad
   test suite was not executed; focused Windows suites and opt-in native reads are recorded above.

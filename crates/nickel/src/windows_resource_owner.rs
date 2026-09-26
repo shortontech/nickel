@@ -2014,11 +2014,11 @@ mod tests {
     #[ignore = "requires NICKEL_WINDOWS_SURFACE_HWND and NICKEL_WINDOWS_SURFACE_PID for a live Nickel surface"]
     fn native_live_shell_surface_pointer_uses_current_dpi_and_visible_client() {
         use windows::Win32::{
-            Foundation::{HWND, RECT},
+            Foundation::{HWND, POINT, RECT},
             UI::{
                 HiDpi::GetDpiForWindow,
                 WindowsAndMessaging::{
-                    GetClientRect, GetForegroundWindow, GetWindowThreadProcessId,
+                    GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
                 },
             },
         };
@@ -2063,6 +2063,42 @@ mod tests {
             visible_point.is_some(),
             "selected Nickel surface has no exposed client point"
         );
+        if std::env::var("NICKEL_WINDOWS_SURFACE_POINTER_MOVE_TEST").as_deref() == Ok("1") {
+            struct RestoreCursor {
+                position: (i32, i32),
+                active: bool,
+            }
+            impl Drop for RestoreCursor {
+                fn drop(&mut self) {
+                    if self.active {
+                        let _ = crate::windows_remote_input::move_pointer(
+                            self.position.0,
+                            self.position.1,
+                        );
+                    }
+                }
+            }
+
+            assert!(crate::windows_remote_input::physical_input_idle());
+            let mut previous = POINT::default();
+            // SAFETY: GetCursorPos only writes the initialized position packet.
+            unsafe { GetCursorPos(&mut previous) }.expect("original cursor position");
+            let mut restore = RestoreCursor {
+                position: (previous.x, previous.y),
+                active: true,
+            };
+            let (screen_x, screen_y) = visible_point.unwrap();
+            crate::windows_remote_input::move_pointer(screen_x, screen_y)
+                .expect("native pointer move to Nickel surface");
+            assert_eq!(
+                crate::windows_remote_input::global_pointer_hit(screen_x, screen_y).unwrap(),
+                crate::windows_remote_input::GlobalPointerHit::Window(native)
+            );
+            crate::windows_remote_input::move_pointer(restore.position.0, restore.position.1)
+                .expect("restore original cursor position");
+            restore.active = false;
+            assert_eq!(unsafe { GetForegroundWindow() }, before_focus);
+        }
         eprintln!(
             "native Nickel surface DPI={dpi}, client={width}x{height}, foreground_at_start={}, foreground_at_end={}",
             before_focus == window,
