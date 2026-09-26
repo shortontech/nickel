@@ -1,0 +1,16 @@
+[package]
+name = "nickel-windows-shell-setup"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+] }
+
+[[bin]]
+name = "nickel-shell-setup"
+path = "src/main.rs"

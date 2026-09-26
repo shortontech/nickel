@@ -3631,6 +3631,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-windows-shell-setup"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "nickel-windows-uwp-target"
 version = "0.1.0"
 dependencies = [

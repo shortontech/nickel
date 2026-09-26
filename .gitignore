@@ -1,2 +1,4 @@
 /target/
+/packaging/windows/bin/
+/packaging/windows/obj/
 specs

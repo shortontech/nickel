@@ -30,6 +30,11 @@ replacing it. See the
 [UwU research notes](crates/nickel-uwu/README.md) for the implementation,
 diagnostic commands, and the underlying COM research.
 
+Tagged releases include a per-user x86-64 MSI. Its optional **Make Nickel the default shell**
+feature is disabled by default; selecting it starts Nickel instead of Explorer at the next sign-in.
+Removing the feature or uninstalling Nickel restores the normal Windows shell fallback. See the
+[Windows installer notes](packaging/windows/README.md) for packaging and native acceptance details.
+
 ### Linux nested session
 
 Run Nickel inside an existing Linux desktop, like a desktop-shaped ship in a
