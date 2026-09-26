@@ -23,6 +23,7 @@ pub enum ContractEvidence {
     FixtureOnly,
     NativeReadVerified,
     NativeInputVerified,
+    NativeMutationVerified,
     LiveVerified,
 }
 
@@ -107,7 +108,25 @@ const fn native_input(
     }
 }
 
-/// Declarative adapter coverage. Native read and input evidence may exercise
+const fn native_mutation(
+    platform: PlatformFamily,
+    capability: AdapterCapability,
+    adapter: &'static str,
+    fixture: &'static str,
+    native_evidence: &'static str,
+) -> PlatformContract {
+    PlatformContract {
+        platform,
+        capability,
+        adapter,
+        fixture,
+        evidence: ContractEvidence::NativeMutationVerified,
+        live_evidence: Some(native_evidence),
+        available: true,
+    }
+}
+
+/// Declarative adapter coverage. Native read, input, and mutation evidence may exercise
 /// an in-process authenticated owner; neither implies that the network listener
 /// accepted a complete remote request.
 pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
@@ -208,11 +227,12 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "windows_remote_display_topology::tests::incomplete_native_topology_still_exposes_active_layout_without_transactions",
         "windows_remote_control::tests::native_display_owner_read_reports_transaction_prerequisites",
     ),
-    fixture(
+    native_mutation(
         PlatformFamily::Windows,
         AdapterCapability::RemoteDisplayTransactions,
         "Windows temporary DisplayConfig transaction and guarded recovery owner",
         "windows_remote_display_topology::tests::supplied_configuration_moves_only_validated_source_positions",
+        "windows_remote_control::tests::native_display_owner_apply_keep_and_revert_restore_prior_layout [NICKEL_WINDOWS_DISPLAY_OWNER_MUTATION_TEST=1]",
     ),
     native_read(
         PlatformFamily::Windows,
@@ -253,6 +273,7 @@ mod tests {
                 ContractEvidence::FixtureOnly => assert!(contract.live_evidence.is_none()),
                 ContractEvidence::NativeReadVerified
                 | ContractEvidence::NativeInputVerified
+                | ContractEvidence::NativeMutationVerified
                 | ContractEvidence::LiveVerified => {
                     assert!(contract.live_evidence.is_some())
                 }
@@ -304,6 +325,7 @@ mod tests {
                     ContractEvidence::FixtureOnly => "fixture_only",
                     ContractEvidence::NativeReadVerified => "native_read_verified",
                     ContractEvidence::NativeInputVerified => "native_input_verified",
+                    ContractEvidence::NativeMutationVerified => "native_mutation_verified",
                     ContractEvidence::LiveVerified => "live_verified",
                 }
             );

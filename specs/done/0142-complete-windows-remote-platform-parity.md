@@ -89,14 +89,14 @@ with an accurate reason and contract evidence.
   replacement, protection, destruction, and bounds; peripheral projection; and the platform
   contract. The Windows library
   compiles and formatting passes.
-- A read-only native DisplayConfig probe found an available target outside the active monitor
-  inventory on the current Windows setup. Remote snapshots report incomplete topology and
-  refuse layout transactions there. On 2026-09-25, the probe found one active monitor, two
+- An earlier read-only native DisplayConfig probe found an available target outside the active monitor
+  inventory on the Windows setup. Remote snapshots reported incomplete topology and
+  refused layout transactions there. On 2026-09-25, the probe found one active monitor, two
   available targets, and 150 possible paths; the inactive available target returned a monitor
   device path and friendly name; its monitor device path differs from the active target's path.
-  A repeat read-only probe on 2026-09-25 still found one active and two available targets and reports the specific reason
-  `Windows available display target is inactive`. The opt-in native display mutation test has
-  not run. [Windows documents](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_path_target_info)
+  A repeat read-only probe on 2026-09-25 still found one active and two available targets and reported the specific reason
+  `Windows available display target is inactive`. The second display was subsequently activated.
+  [Windows documents](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_path_target_info)
   `targetAvailable` as availability, which alone does not prove physical connection.
   [QueryDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-querydisplayconfig)
   does not return source or target mode information for inactive paths, which this owner would
@@ -112,20 +112,19 @@ with an accurate reason and contract evidence.
   Synthetic source-mode transformation and read-only native active/database queries pass on
   Windows. The read-only native `SetDisplayConfig` validation call also passes. Transaction
   support is now reported separately from topology completeness and requires readable active and
-  saved modes plus successful native validation. A native changing round trip remains unverified
-  on a complete multi-monitor fixture.
+  saved modes plus successful native validation. The two-active-output fixture subsequently
+  passed a guarded native position Apply/readback/restore round trip.
   Windows placement validation also rejects a requested layout with a nonprimary output at the
   desktop origin, where the position-based native path cannot identify the requested primary
   unambiguously. The focused validation fixture passes.
   An opt-in native read through `WindowsDesktopAuthority::read_display_layout`, a live in-process
   Full Control & Debug lease, and the production output reconciliation path passed. It reported
   one output, incomplete topology, `transaction_supported=false`, and the specific inactive
-  target reason. An authenticated Apply request through the same owner and production output
+  target reason at that time. An authenticated Apply request through the same owner and production output
   reconciliation path returned that exact reason without changing the display. This verifies
-  the production owner's read and refusal on the current fixture; it does not verify a changing
-  transaction. The platform contract now records display observation separately as
-  `native_read_verified`; display transactions remain `fixture_only` until a changing native
-  round trip passes. Linux display observation retains fixture evidence under the user's Linux
+  the production owner's read and refusal on the earlier incomplete fixture. The platform contract
+  records display observation separately as `native_read_verified`; the later owner-level changing
+  transaction is recorded as `native_mutation_verified`. Linux display observation retains fixture evidence under the user's Linux
   test exclusion.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
@@ -200,7 +199,8 @@ with an accurate reason and contract evidence.
   ignored by default), peripheral projection/control contracts (8), resource ownership and pointer
   bounds (23; 1 live opt-in test ignored by default), and shell diagnostics (12). These fixture
   results include stale identity, protection, bounds, recovery, native-owner limitations, and
-  scrubbed observations; they do not substitute for a changing display or peripheral run.
+  scrubbed observations. The changing display run is recorded below; peripheral mutations remain
+  unavailable by contract.
 - The added peripheral fixture verifies that an empty printer and volume inventory stays
   available, while a printer provider failure leaves volume availability intact and omits the
   provider's private diagnostic text. A second fixture caught and verifies the corrected
@@ -222,14 +222,23 @@ with an accurate reason and contract evidence.
   authority was disabled. No listener, visible shell, pointer movement, or peripheral mutation
   was involved. This production-owner read is the contract's `native_read_verified` evidence.
 
-## Remaining completion gates
+## Excluded verification
 
-- The current Windows fixture has one active target and another available but inactive target.
-  A complete active multi-output fixture is needed to run the existing opt-in native display
-  position round trip. An opt-in owner-level `Apply`/`Revert`/`Apply`/`Keep` test now compiles and
-  refuses incomplete topology before mutation. It holds guarded recovery for a pending Apply and
-  a separate test-only copy that restores both captured active and saved configurations after
-  Keep. Its shared request pump passed the live read and refusal fixture. Positive owner-level
-  transaction results still need a safe native run on a complete fixture.
+- The Windows fixture now has two active targets. The opt-in native display position round trip
+  passed with a vertical offset; a horizontal gap request was normalized by Windows and correctly
+  failed exact readback before guarded restoration. The opt-in owner-level
+  `Apply`/`Revert`/`Apply`/`Keep` test passed with a live Full Control & Debug lease and production
+  output reconciliation. It restored both captured active and saved configurations after Keep.
+  Display changes can cause transient window/work-area evidence invalidation, so display
+  observations retry that one condition for up to two seconds within the recovery window.
+  Fresh topology reads between transaction steps handle output-generation changes as Windows
+  settles. Standalone monitor enumeration now enters per-monitor DPI awareness to compare
+  physical geometry with DisplayConfig; transaction readiness refuses a mismatch. The MCP
+  listener remains disabled in this build, so no network request was tested.
+- After the DPI and settled-observation changes, the seven focused Windows display-topology
+  fixtures and both platform-contract tests pass. The guarded native display helper and owner
+  round trips pass on the two-output fixture. `cargo fmt --all --check`, strict workspace Clippy,
+  `cargo test --workspace --no-run`, and `cargo build --workspace` pass on Windows. The workspace
+  test suite was compiled but not executed because an unrelated test calls `LockWorkStation`.
 - The Linux target is not installed on this Windows host, and the user has excluded Linux tests.
   The Linux target build and Linux execution requested by this specification remain unverified.

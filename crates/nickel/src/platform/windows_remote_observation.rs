@@ -533,6 +533,9 @@ unsafe extern "system" fn collect_monitor(
     BOOL(1)
 }
 pub(crate) fn outputs() -> Result<Vec<Output>, String> {
+    // Monitor rectangles must use the same physical coordinate space as
+    // DisplayConfig even when this helper is called outside Prepared::prepare.
+    let _dpi = DpiContext::enter()?;
     let mut state = MonitorCollector {
         outputs: Vec::new(),
         failed: false,

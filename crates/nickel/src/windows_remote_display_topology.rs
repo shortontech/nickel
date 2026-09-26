@@ -100,7 +100,7 @@ pub(crate) fn observe(inventory: &OutputInventory) -> Result<Observation, String
         inventory.outputs.iter().map(|output| output.name.clone()),
     );
     let readiness = if identities.is_ok() {
-        native_transaction_prerequisites()
+        native_transaction_prerequisites(inventory)
     } else {
         Ok(())
     };
@@ -738,14 +738,51 @@ fn native_configuration(
     Ok((paths, modes))
 }
 
-fn native_transaction_prerequisites() -> Result<(), String> {
+fn validate_source_geometry(
+    inventory: &OutputInventory,
+    sources: &BTreeMap<String, SourceGeometry>,
+) -> Result<(), String> {
+    if inventory.outputs.len() != sources.len() {
+        return Err("Windows DisplayConfig sources do not match active monitors".into());
+    }
+    for output in &inventory.outputs {
+        let expected = sources
+            .get(&output.name)
+            .ok_or("Windows DisplayConfig source identity differs from active monitor")?;
+        let observed = (
+            output.geometry[0],
+            output.geometry[1],
+            u32::try_from(output.geometry[2])
+                .map_err(|_| "Windows active monitor width is invalid")?,
+            u32::try_from(output.geometry[3])
+                .map_err(|_| "Windows active monitor height is invalid")?,
+        );
+        if !output.enabled || *expected != observed {
+            return Err("Windows DisplayConfig source geometry differs from active monitor".into());
+        }
+    }
+    Ok(())
+}
+
+fn native_transaction_prerequisites(inventory: &OutputInventory) -> Result<(), String> {
     use windows::Win32::Devices::Display::{
         QDC_VIRTUAL_MODE_AWARE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
         SDC_VIRTUAL_MODE_AWARE, SetDisplayConfig,
     };
     let (active_paths, active_modes) =
         native_configuration(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE)?;
-    configuration_positions(&active_paths, &active_modes)?;
+    let active_positions = configuration_positions(&active_paths, &active_modes)?;
+    let mut named_positions = BTreeMap::new();
+    for path in &active_paths {
+        let source = source_name(path)?;
+        let geometry = *active_positions
+            .get(&target_key(path))
+            .ok_or("Windows active display source geometry is unavailable")?;
+        if named_positions.insert(source, geometry).is_some() {
+            return Err("Windows DisplayConfig source identity is ambiguous".into());
+        }
+    }
+    validate_source_geometry(inventory, &named_positions)?;
     let (saved_paths, saved_modes) =
         native_configuration(QDC_DATABASE_CURRENT | QDC_VIRTUAL_MODE_AWARE)?;
     configuration_positions(&saved_paths, &saved_modes)?;
@@ -961,6 +998,39 @@ mod tests {
         }
     }
 
+    fn native_inventory() -> OutputInventory {
+        let outputs = crate::platform::remote_observation::outputs().unwrap();
+        OutputInventory {
+            observation_generation: 1,
+            observed_at_us: 0,
+            topology_generation: 1,
+            outputs: outputs
+                .into_iter()
+                .enumerate()
+                .map(|(index, output)| OutputDiagnostic {
+                    name: output.name,
+                    generation: index as u64 + 1,
+                    geometry: [
+                        output.bounds.x,
+                        output.bounds.y,
+                        i32::try_from(output.bounds.width).unwrap(),
+                        i32::try_from(output.bounds.height).unwrap(),
+                    ],
+                    work_area: [
+                        output.work_area.x,
+                        output.work_area.y,
+                        i32::try_from(output.work_area.width).unwrap(),
+                        i32::try_from(output.work_area.height).unwrap(),
+                    ],
+                    scale_120: output.scale_120,
+                    primary: output.primary,
+                    enabled: true,
+                })
+                .collect(),
+            truncated: false,
+        }
+    }
+
     #[test]
     fn incomplete_native_topology_still_exposes_active_layout_without_transactions() {
         let inventory = OutputInventory {
@@ -1040,6 +1110,37 @@ mod tests {
             .unwrap()
             .reason,
             "saved Windows display configuration unavailable"
+        );
+    }
+
+    #[test]
+    fn source_geometry_must_match_active_monitor_before_native_transaction() {
+        let inventory = OutputInventory {
+            observation_generation: 1,
+            observed_at_us: 0,
+            topology_generation: 1,
+            outputs: vec![OutputDiagnostic {
+                name: r"\\.\DISPLAY1".into(),
+                generation: 1,
+                geometry: [0, 0, 1280, 720],
+                work_area: [0, 0, 1280, 700],
+                scale_120: 120,
+                primary: true,
+                enabled: true,
+            }],
+            truncated: false,
+        };
+        let mut sources = BTreeMap::from([(r"\\.\DISPLAY1".into(), (0, 0, 1280, 720))]);
+        assert!(validate_source_geometry(&inventory, &sources).is_ok());
+        sources.insert(r"\\.\DISPLAY1".into(), (0, 0, 1920, 1080));
+        assert_eq!(
+            validate_source_geometry(&inventory, &sources).unwrap_err(),
+            "Windows DisplayConfig source geometry differs from active monitor"
+        );
+        sources.insert(r"\\.\DISPLAY1".into(), (8, 0, 1280, 720));
+        assert_eq!(
+            validate_source_geometry(&inventory, &sources).unwrap_err(),
+            "Windows DisplayConfig source geometry differs from active monitor"
         );
     }
 
@@ -1299,10 +1400,10 @@ mod tests {
 
     #[test]
     #[ignore = "reads the current Windows display modes"]
-    fn native_display_source_modes_match_monitor_positions() {
+    fn native_display_source_modes_gate_transaction_support() {
         use windows::Win32::Devices::Display::QDC_VIRTUAL_MODE_AWARE;
 
-        let outputs = crate::platform::remote_observation::outputs().unwrap();
+        let inventory = native_inventory();
         let (paths, modes) =
             native_configuration(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE).unwrap();
         let indices = active_source_modes(&paths, &modes).unwrap();
@@ -1313,21 +1414,38 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        native_transaction_prerequisites().unwrap();
-        assert_eq!(paths.len(), outputs.len());
+        let readiness = native_transaction_prerequisites(&inventory);
+        assert_eq!(paths.len(), inventory.outputs.len());
+        let mut named = BTreeMap::new();
         for path in &paths {
             let name = source_name(path).unwrap();
-            let output = outputs.iter().find(|output| output.name == name).unwrap();
             // SAFETY: active_source_modes verified the source mode index and type.
             let source = unsafe { modes[indices[&target_key(path)]].Anonymous.sourceMode };
-            assert_eq!(
-                (source.position.x, source.position.y),
-                (output.bounds.x, output.bounds.y)
+            named.insert(
+                name,
+                (
+                    source.position.x,
+                    source.position.y,
+                    source.width,
+                    source.height,
+                ),
             );
+        }
+        if let Err(reason) = validate_source_geometry(&inventory, &named) {
             assert_eq!(
-                (source.width, source.height),
-                (output.bounds.width, output.bounds.height)
+                readiness.unwrap_err(),
+                reason,
+                "transaction readiness must refuse mismatched source geometry"
             );
+            let observed = observe(&inventory).unwrap();
+            assert!(!observed.transaction_supported);
+            assert_eq!(
+                observed.transaction_unavailable_reason.as_deref(),
+                Some(reason.as_str())
+            );
+            eprintln!("Windows display transactions unavailable on this fixture: {reason}");
+        } else {
+            readiness.unwrap();
         }
     }
 
@@ -1336,44 +1454,10 @@ mod tests {
     #[test]
     #[ignore = "requires NICKEL_WINDOWS_DISPLAY_MUTATION_TEST=1 and a reversible multi-monitor setup"]
     fn native_display_position_round_trip_restores_original_modes() {
-        use nickel_remote_control::diagnostics::OutputDiagnostic;
-
         assert_eq!(
             std::env::var("NICKEL_WINDOWS_DISPLAY_MUTATION_TEST").as_deref(),
             Ok("1")
         );
-        fn inventory() -> OutputInventory {
-            let outputs = crate::platform::remote_observation::outputs().unwrap();
-            OutputInventory {
-                observation_generation: 1,
-                observed_at_us: 0,
-                topology_generation: 1,
-                outputs: outputs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, output)| OutputDiagnostic {
-                        name: output.name,
-                        generation: index as u64 + 1,
-                        geometry: [
-                            output.bounds.x,
-                            output.bounds.y,
-                            i32::try_from(output.bounds.width).unwrap(),
-                            i32::try_from(output.bounds.height).unwrap(),
-                        ],
-                        work_area: [
-                            output.work_area.x,
-                            output.work_area.y,
-                            i32::try_from(output.work_area.width).unwrap(),
-                            i32::try_from(output.work_area.height).unwrap(),
-                        ],
-                        scale_120: output.scale_120,
-                        primary: output.primary,
-                        enabled: true,
-                    })
-                    .collect(),
-                truncated: false,
-            }
-        }
         struct Restore(Option<RecoveryPlan>);
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -1386,8 +1470,14 @@ mod tests {
             }
         }
 
-        let before = observe(&inventory()).expect("a complete active display topology is required");
-        assert!(before.layout.outputs.len() >= 2);
+        let before =
+            observe(&native_inventory()).expect("a complete active display topology is required");
+        assert!(
+            before.transaction_supported && before.layout.outputs.len() >= 2,
+            "complete multi-output native transaction fixture required: {:?}",
+            before.transaction_unavailable_reason
+        );
+        assert!(crate::windows_remote_input::physical_input_idle());
         let mut requested = before.layout.clone();
         let primary = requested.primary.clone();
         let secondary = requested
@@ -1395,7 +1485,10 @@ mod tests {
             .iter_mut()
             .find(|output| output.output != primary)
             .unwrap();
-        secondary.x = secondary.x.checked_add(8).unwrap();
+        secondary.y = secondary.y.checked_add(8).unwrap();
+        if secondary.x == 0 && secondary.y == 0 {
+            secondary.y = secondary.y.checked_sub(16).unwrap();
+        }
         let plan = match apply_position_change(
             &before,
             &before.layout,
@@ -1412,11 +1505,17 @@ mod tests {
             }
         };
         let mut guard = Restore(Some(plan));
-        let applied = observe(&inventory()).unwrap();
-        assert!(matches_physical_layout(&applied.layout, &requested));
+        let applied = observe(&native_inventory()).unwrap();
+        assert!(
+            matches_physical_layout(&applied.layout, &requested),
+            "Windows did not apply the requested position: before={:?}, requested={:?}, applied={:?}",
+            before.layout,
+            requested,
+            applied.layout
+        );
         guard.0.as_ref().unwrap().restore().unwrap();
         guard.0 = None;
-        let restored = observe(&inventory()).unwrap();
+        let restored = observe(&native_inventory()).unwrap();
         assert!(matches_physical_layout(&restored.layout, &before.layout));
     }
 }

@@ -1712,6 +1712,27 @@ impl WindowsDesktopAuthority {
         }
     }
 }
+fn settled_display_outputs(
+    authority: &WindowsDesktopAuthority,
+    permit: DesktopPermit,
+) -> Result<nickel_remote_control::diagnostics::OutputInventory, String> {
+    // SetDisplayConfig can move windows and work areas while the next
+    // observation is being prepared. Retry only that transient evidence
+    // invalidation, within a small part of the recovery window.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match authority.list_outputs(permit.clone()) {
+            Err(error)
+                if error == "Windows desktop evidence is unavailable or changed"
+                    && Instant::now() < deadline =>
+            {
+                permit.check_live()?;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            result => return result,
+        }
+    }
+}
 impl DesktopAuthority for WindowsDesktopAuthority {
     fn connection_cleanup_wake(&self) -> Option<nickel_remote_control::ConnectionCleanupWake> {
         Some(self.cleanup_wake.clone())
@@ -2849,7 +2870,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .display_state
             .try_lock()
             .map_err(|_| "Windows display transaction owner is busy")?;
-        let inventory = self.list_outputs(permit.clone())?;
+        let inventory = settled_display_outputs(self, permit.clone())?;
         let observed = crate::windows_remote_display_topology::observe(&inventory)?;
         permit.check_live()?;
         Ok(state.snapshot(&inventory, &observed))
@@ -2865,7 +2886,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .display_state
             .try_lock()
             .map_err(|_| "Windows display transaction owner is busy")?;
-        let inventory = self.list_outputs(permit.clone())?;
+        let inventory = settled_display_outputs(self, permit.clone())?;
         let observed = crate::windows_remote_display_topology::observe(&inventory)?;
         if !observed.transaction_supported {
             return Err(observed
@@ -3007,7 +3028,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                         )
                     };
                 }
-                let confirmed_inventory = match self.list_outputs(permit.clone()) {
+                let confirmed_inventory = match settled_display_outputs(self, permit.clone()) {
                     Ok(inventory) => inventory,
                     Err(error) => {
                         state.pending.as_mut().unwrap().deadline = Some(Instant::now());
@@ -3123,7 +3144,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                             .into(),
                     );
                 }
-                let confirmed_inventory = match self.list_outputs(permit.clone()) {
+                let confirmed_inventory = match settled_display_outputs(self, permit.clone()) {
                     Ok(inventory) => inventory,
                     Err(error) => {
                         let pending = state.pending.as_mut().unwrap();
@@ -3237,7 +3258,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                     GuardedDisplayRevert::Restored => {}
                 }
                 let confirmed = pending.confirmed.clone();
-                let restored_inventory = match self.list_outputs(permit.clone()) {
+                let restored_inventory = match settled_display_outputs(self, permit.clone()) {
                     Ok(inventory) => inventory,
                     Err(error) => {
                         pending.deadline = Some(Instant::now());
@@ -10401,13 +10422,13 @@ mod tests {
                 .iter_mut()
                 .find(|output| output.output != primary)
                 .expect("secondary display");
-            secondary.x = secondary
-                .x
+            secondary.y = secondary
+                .y
                 .checked_add(8)
                 .expect("secondary position range");
             if secondary.x == 0 && secondary.y == 0 {
-                secondary.x = secondary
-                    .x
+                secondary.y = secondary
+                    .y
                     .checked_sub(16)
                     .expect("alternate secondary position");
             }
@@ -10506,11 +10527,21 @@ mod tests {
             applied.recovery.state,
             nickel_remote_control::display_layout::RecoveryState::AwaitingConfirmation
         );
+        let current_after_apply = native_display_owner_request(&mut owner, |authority| {
+            authority.read_display_layout(permit())
+        })
+        .expect("native display owner current layout before Revert");
+        assert!(
+            crate::windows_remote_display_topology::matches_physical_layout(
+                &current_after_apply.requested,
+                &requested
+            )
+        );
         let reverted = native_display_owner_request(&mut owner, |authority| {
             authority.display_layout_transaction(
                 permit(),
                 nickel_remote_control::display_layout::Transaction::Revert {
-                    topology_generation: applied.topology_generation,
+                    topology_generation: current_after_apply.topology_generation,
                     recovery_generation: applied.recovery.generation,
                 },
             )
@@ -10526,13 +10557,17 @@ mod tests {
             reverted.recovery.state,
             nickel_remote_control::display_layout::RecoveryState::Confirmed
         );
-        let requested_again = shifted_secondary(reverted.requested.clone());
+        let current_after_revert = native_display_owner_request(&mut owner, |authority| {
+            authority.read_display_layout(permit())
+        })
+        .expect("native display owner current layout before second Apply");
+        let requested_again = shifted_secondary(current_after_revert.requested.clone());
         let applied_again = native_display_owner_request(&mut owner, |authority| {
             authority.display_layout_transaction(
                 permit(),
                 nickel_remote_control::display_layout::Transaction::Apply {
-                    topology_generation: reverted.topology_generation,
-                    prior: reverted.requested.clone(),
+                    topology_generation: current_after_revert.topology_generation,
+                    prior: current_after_revert.requested.clone(),
                     requested: requested_again.clone(),
                 },
             )
@@ -10541,6 +10576,16 @@ mod tests {
         assert_eq!(
             applied_again.recovery.state,
             nickel_remote_control::display_layout::RecoveryState::AwaitingConfirmation
+        );
+        let current_after_second_apply = native_display_owner_request(&mut owner, |authority| {
+            authority.read_display_layout(permit())
+        })
+        .expect("native display owner current layout before Keep");
+        assert!(
+            crate::windows_remote_display_topology::matches_physical_layout(
+                &current_after_second_apply.requested,
+                &requested_again
+            )
         );
         let saved_plan = owner
             .authority
@@ -10560,7 +10605,7 @@ mod tests {
             authority.display_layout_transaction(
                 permit(),
                 nickel_remote_control::display_layout::Transaction::Keep {
-                    topology_generation: applied_again.topology_generation,
+                    topology_generation: current_after_second_apply.topology_generation,
                     recovery_generation: applied_again.recovery.generation,
                 },
             )
