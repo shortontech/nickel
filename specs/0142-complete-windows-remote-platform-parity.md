@@ -94,7 +94,7 @@ with an accurate reason and contract evidence.
   refuse layout transactions there. On 2026-09-25, the probe found one active monitor, two
   available targets, and 150 possible paths; the inactive available target returned a monitor
   device path and friendly name; its monitor device path differs from the active target's path.
-  A repeat read-only probe now reports the specific reason
+  A repeat read-only probe on 2026-09-25 still found one active and two available targets and reports the specific reason
   `Windows available display target is inactive`. The opt-in native display mutation test has
   not run. [Windows documents](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_path_target_info)
   `targetAvailable` as availability, which alone does not prove physical connection.
@@ -129,8 +129,8 @@ with an accurate reason and contract evidence.
 - The exact Windows workspace strict Clippy command and formatting check pass. Focused Windows
   screenshot controller and screenshot command tests pass. All 17 focused Windows remote-owner
   tests pass. `cargo test --workspace --no-run` builds every workspace test target on Windows;
-  it does not execute the suite. Full native surface focus/DPI interaction and peripheral changing
-  coverage remain pending. Linux tests are excluded by the current user instruction.
+  it does not execute the suite. Native focus and DPI results are recorded below. Peripheral
+  changing coverage remains pending. Linux tests are excluded by the current user instruction.
 - The Windows image chooser contract now cites a focused fixture that distinguishes a native
   cancellation from a native failure. The chooser fixture and both platform-contract tests pass
   on Windows. This is fixture evidence; opening and using the native dialog remains unverified.
