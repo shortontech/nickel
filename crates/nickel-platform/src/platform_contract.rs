@@ -20,6 +20,7 @@ pub enum AdapterCapability {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContractEvidence {
     FixtureOnly,
+    NativeReadVerified,
     LiveVerified,
 }
 
@@ -68,9 +69,26 @@ const fn unavailable(
     }
 }
 
-/// Declarative adapter coverage. `FixtureOnly` is deliberate: a cross-compiled
-/// test or pure parsing fixture is not evidence that a native portal, registry,
-/// shell, window manager, or physical display was exercised.
+const fn native_read(
+    platform: PlatformFamily,
+    capability: AdapterCapability,
+    adapter: &'static str,
+    fixture: &'static str,
+    native_evidence: &'static str,
+) -> PlatformContract {
+    PlatformContract {
+        platform,
+        capability,
+        adapter,
+        fixture,
+        evidence: ContractEvidence::NativeReadVerified,
+        live_evidence: Some(native_evidence),
+        available: true,
+    }
+}
+
+/// Declarative adapter coverage. A native read verifies observation through an
+/// adapter; it does not claim that a remote request or mutation completed.
 pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     fixture(
         PlatformFamily::Linux,
@@ -162,11 +180,12 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "Windows temporary DisplayConfig transaction and guarded recovery owner",
         "windows_remote_display_topology::tests::supplied_configuration_moves_only_validated_source_positions",
     ),
-    fixture(
+    native_read(
         PlatformFamily::Windows,
         AdapterCapability::RemotePeripheralObservations,
         "Windows bounded printer and volume observation owner",
         "remote_peripheral_controls::tests::projection_scrubs_native_text_paths_and_clamps_capacity",
+        "windows_remote_control::tests::native_peripheral_observation_projects_only_opaque_remote_ids",
     ),
     unavailable(
         PlatformFamily::Windows,
@@ -197,7 +216,9 @@ mod tests {
             assert!(!contract.fixture.is_empty());
             match contract.evidence {
                 ContractEvidence::FixtureOnly => assert!(contract.live_evidence.is_none()),
-                ContractEvidence::LiveVerified => assert!(contract.live_evidence.is_some()),
+                ContractEvidence::NativeReadVerified | ContractEvidence::LiveVerified => {
+                    assert!(contract.live_evidence.is_some())
+                }
             }
         }
         assert_eq!(keys.len(), 2 * 9);
@@ -239,8 +260,15 @@ mod tests {
             assert_eq!(row[0], platform);
             assert_eq!(row[1], capability);
             assert_eq!(row[3], contract.fixture);
-            assert_eq!(row[5], "fixture_only");
-            assert_eq!(row[6], "none");
+            assert_eq!(
+                row[5],
+                match contract.evidence {
+                    ContractEvidence::FixtureOnly => "fixture_only",
+                    ContractEvidence::NativeReadVerified => "native_read_verified",
+                    ContractEvidence::LiveVerified => "live_verified",
+                }
+            );
+            assert_eq!(row[6], contract.live_evidence.unwrap_or("none"));
             assert!(!row[3].is_empty());
             assert!(!row[4].is_empty());
             assert!(

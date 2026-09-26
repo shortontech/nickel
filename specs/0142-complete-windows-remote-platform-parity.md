@@ -157,5 +157,7 @@ with an accurate reason and contract evidence.
 - An opt-in native peripheral read passed through the production bounded refresh worker and
   scrubbed remote projection. The current Windows fixture reported two printers and one removable
   volume, with only generated opaque IDs in the remote entries. The platform contract now records
-  remote peripheral observations as available separately from unavailable remote mutations;
-  neither a changing peripheral operation nor a complete live remote request was verified.
+  remote peripheral observations as available separately from unavailable remote mutations. It
+  records the bounded native read as `native_read_verified` while retaining the pending status for
+  a complete live remote request; neither a changing peripheral operation nor a complete live
+  remote request was verified.
