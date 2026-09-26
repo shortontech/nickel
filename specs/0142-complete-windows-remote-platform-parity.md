@@ -130,7 +130,9 @@ with an accurate reason and contract evidence.
   cancellation from a native failure. The chooser fixture and both platform-contract tests pass
   on Windows. This is fixture evidence; opening and using the native dialog remains unverified.
 - The contract's Windows surface-pointer fixture now has a recorded Windows test run; it passes
-  for logical-to-client coordinate conversion.
+  for logical-to-client coordinate conversion. The pointer owner also reprojects current shell
+  ancestry at each target resolution, including after cursor movement, and rejects a changed
+  parent incarnation before input injection. A Windows fixture passed for parent replacement.
 - A native Windows test creates a hidden, non-activating window under per-monitor DPI awareness,
   reads its actual DPI and client bounds, and verifies the production surface coordinate mapper
   stays inside that client area while the window remains outside foreground focus. It passes on

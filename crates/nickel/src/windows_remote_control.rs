@@ -513,6 +513,36 @@ impl SurfacePointerContext<'_> {
             y,
         )
     }
+
+    fn check_ancestry(&self) -> Result<(), String> {
+        let protected = self
+            .state
+            .surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        let current = projected_shell_surface_ancestors(
+            protected,
+            self.shell.remote_shell_surface_observations(self.state),
+            &self.identity,
+        )?;
+        if current != self.ancestors {
+            return Err("Windows shell surface ancestry changed".into());
+        }
+        Ok(())
+    }
+}
+
+fn projected_shell_surface_ancestors(
+    protected: bool,
+    observations: impl IntoIterator<Item = crate::windows_shell_diagnostics::SurfaceObservation>,
+    identity: &nickel_remote_control::leases::ResourceId,
+) -> Result<Vec<nickel_remote_control::leases::ResourceId>, String> {
+    let (surfaces, truncated) = crate::windows_shell_diagnostics::project(protected, observations);
+    if truncated {
+        return Err("Windows shell surface ancestry exceeds its bound".into());
+    }
+    Ok(
+        crate::remote_surface_authority::SurfaceAuthority::from_shell_surfaces(&surfaces)?
+            .ancestors(identity),
+    )
 }
 
 fn shell_surface_pointer_client_point(
@@ -572,6 +602,7 @@ fn resolve_windows_pointer_point<'a>(
             return Err("Windows shell surface identity or output changed".into());
         }
         let (client_x, client_y) = surface.client_point(x, y)?;
+        surface.check_ancestry()?;
         let evidence = nickel_remote_control::leases::ResourceEvidence {
             surface: Some(&surface.identity),
             window: None,
@@ -7396,16 +7427,10 @@ impl WindowsRemoteControl {
     ) -> Result<Vec<nickel_remote_control::leases::ResourceId>, String> {
         let protected =
             !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
-        let (surfaces, truncated) = crate::windows_shell_diagnostics::project(
+        projected_shell_surface_ancestors(
             protected,
             shell.remote_shell_surface_observations(state),
-        );
-        if truncated {
-            return Err("Windows shell surface ancestry exceeds its bound".into());
-        }
-        Ok(
-            crate::remote_surface_authority::SurfaceAuthority::from_shell_surfaces(&surfaces)?
-                .ancestors(identity),
+            identity,
         )
     }
 
@@ -9804,6 +9829,28 @@ mod tests {
             )
         };
         assert_eq!(point(&surface, &identity), Ok((1199, 899)));
+        let panel = SurfaceObservation {
+            native: 42,
+            role: crate::winit_shell::SurfaceRole::Panel,
+            generation: 6,
+            geometry: Some([0, 0, 800, 56]),
+            ..surface.clone()
+        };
+        let captured_ancestors =
+            projected_shell_surface_ancestors(false, [panel.clone(), surface.clone()], &identity)
+                .unwrap();
+        assert_eq!(captured_ancestors.len(), 1);
+        let replacement_panel = SurfaceObservation {
+            generation: 9,
+            ..panel
+        };
+        let current_ancestors = projected_shell_surface_ancestors(
+            false,
+            [replacement_panel, surface.clone()],
+            &identity,
+        )
+        .unwrap();
+        assert_ne!(current_ancestors, captured_ancestors);
         surface.scale_factor = 2.0;
         assert_eq!(point(&surface, &identity), Ok((1598, 1198)));
 
