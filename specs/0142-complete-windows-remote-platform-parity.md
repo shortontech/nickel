@@ -148,7 +148,9 @@ with an accurate reason and contract evidence.
   activate an offscreen fixture and restore the prior foreground window; it passed. Focus changes
   on a Nickel-owned surface, actual pointer injection, and scale changes across monitors remain
   unverified.
-- `cargo build --workspace` passes on Windows after the latest shared-policy changes.
+- After the Windows peripheral owner and truncation changes, `cargo test --workspace --no-run`
+  compiled every workspace test target and `cargo build --workspace` passed on Windows. The broad
+  test suite was not executed; focused Windows suites and opt-in native reads are recorded above.
 - Focused Windows suites now pass end to end: display topology (6 fixtures; 3 native opt-in tests
   ignored by default), peripheral projection/control contracts (8), resource ownership and pointer
   bounds (23; 1 live opt-in test ignored by default), and shell diagnostics (12). These fixture
