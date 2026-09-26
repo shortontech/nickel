@@ -176,8 +176,8 @@ with an accurate reason and contract evidence.
   restored and checked the original cursor position, and kept foreground focus unchanged. The
   initial fixture attempt correctly revoked its permit because the test owner lacked a desktop
   session; the fixture now supplies the process session. A later attempt correctly refused movement
-  while physical input was active; the next
-  idle attempt passed and checked cursor restoration. The contract cites
+  while physical input was active; the next idle attempt passed and checked cursor restoration.
+  The contract cites
   this owner-level `native_input_verified` result. A network listener request, focus changes on
   a Nickel-owned surface, click/drag input, and scale changes across monitors remain unverified.
 - After the Windows peripheral owner and truncation changes, `cargo test --workspace --no-run`
@@ -221,3 +221,12 @@ with an accurate reason and contract evidence.
   the opaque remote snapshot, rejection of a lease without Debug access, and rejection after
   authority was disabled. No listener, visible shell, pointer movement, or peripheral mutation
   was involved. This production-owner read is the contract's `native_read_verified` evidence.
+
+## Remaining completion gates
+
+- The current Windows fixture has one active target and another available but inactive target.
+  A complete active multi-output fixture is needed to run the existing opt-in native display
+  position round trip. Positive owner-level `Apply`, `Keep`, and `Revert` results still need an
+  opt-in test and a safe native run; the current owner-level test verifies read and refusal only.
+- The Linux target is not installed on this Windows host, and the user has excluded Linux tests.
+  The Linux target build and Linux execution requested by this specification remain unverified.
