@@ -120,6 +120,9 @@ with an accurate reason and contract evidence.
   The native Apply helper also refuses an incomplete or transaction-unavailable observation before
   any staging, even if a future caller bypasses the desktop owner's early check. The focused
   Windows fixture and strict Clippy pass.
+  Apply and Keep recheck the recovery deadline after synchronous native work and readback, so a
+  slow call cannot report a usable confirmation window after it has expired. An expired Keep
+  leaves the guarded rollback pending, including when the native save had already succeeded.
 - Windows printer and removable-volume reads use the tested single-flight bounded platform
   observation worker. Its fixture test covers deadline expiry, rejection of overlapping reads,
   and release after a late native completion. Printer mutations remain unavailable because the

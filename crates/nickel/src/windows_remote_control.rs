@@ -1274,6 +1274,10 @@ struct WindowsDesktopAuthority {
 
 const WINDOWS_DISPLAY_RECOVERY_DURATION: Duration = Duration::from_secs(15);
 
+fn windows_display_recovery_expired(deadline: Option<Instant>) -> bool {
+    deadline.is_none_or(|deadline| Instant::now() >= deadline)
+}
+
 #[derive(Default)]
 struct WindowsDisplayState {
     generation: u64,
@@ -3045,6 +3049,13 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                     state.pending.as_mut().unwrap().deadline = Some(Instant::now());
                     return Err(error);
                 }
+                if windows_display_recovery_expired(state.pending.as_ref().unwrap().deadline) {
+                    state.pending.as_mut().unwrap().deadline = Some(Instant::now());
+                    return Err(
+                        "Windows display recovery window expired during Apply readback; recovery is pending"
+                            .into(),
+                    );
+                }
                 Ok(state.snapshot(&confirmed_inventory, &confirmed))
             }
             Transaction::Keep {
@@ -3066,9 +3077,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                         &observed.layout,
                         &pending.requested,
                     )
-                    || pending
-                        .deadline
-                        .is_none_or(|deadline| Instant::now() >= deadline)
+                    || windows_display_recovery_expired(pending.deadline)
                 {
                     return Err(
                         "Windows display recovery is stale or owned by another lease".into(),
@@ -3083,6 +3092,9 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                         return Err("shared input is busy".into());
                     }
                     permit.check_commit_boundary(boundary)?;
+                    if windows_display_recovery_expired(pending.deadline) {
+                        return Err("Windows display confirmation window expired".into());
+                    }
                     native_attempt = Some(pending.plan.persist());
                     Ok(())
                 });
@@ -3101,6 +3113,15 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                     return Err(format!(
                         "Windows display confirmation failed; recovery is pending: {error}"
                     ));
+                }
+                if windows_display_recovery_expired(state.pending.as_ref().unwrap().deadline) {
+                    let pending = state.pending.as_mut().unwrap();
+                    pending.deadline = Some(Instant::now());
+                    pending.confirmable = false;
+                    return Err(
+                        "Windows display confirmation window expired during persistence; recovery is pending"
+                            .into(),
+                    );
                 }
                 let confirmed_inventory = match self.list_outputs(permit.clone()) {
                     Ok(inventory) => inventory,
@@ -3158,6 +3179,15 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                     return Err(format!(
                         "Windows display authority expired during confirmation; recovery is pending: {error}"
                     ));
+                }
+                if windows_display_recovery_expired(state.pending.as_ref().unwrap().deadline) {
+                    let pending = state.pending.as_mut().unwrap();
+                    pending.deadline = Some(Instant::now());
+                    pending.confirmable = false;
+                    return Err(
+                        "Windows display confirmation window expired during readback; recovery is pending"
+                            .into(),
+                    );
                 }
                 state.pending = None;
                 Ok(state.snapshot(&confirmed_inventory, &confirmed))
@@ -9760,6 +9790,18 @@ fn windows_semantic_mutation_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_confirmation_window_expires_even_while_owner_is_busy() {
+        let now = Instant::now();
+        assert!(windows_display_recovery_expired(None));
+        assert!(windows_display_recovery_expired(Some(
+            now - Duration::from_millis(1)
+        )));
+        assert!(!windows_display_recovery_expired(Some(
+            now + WINDOWS_DISPLAY_RECOVERY_DURATION
+        )));
+    }
 
     #[test]
     fn display_apply_retains_native_recovery_after_final_authority_loss() {
