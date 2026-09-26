@@ -188,6 +188,10 @@ with an accurate reason and contract evidence.
   `cargo build --workspace` passed. The broad test suite remains unexecuted because an unrelated
   Windows test invokes `LockWorkStation`; only the focused suites and opt-in native tests noted
   here were run.
+- The portable remote-protocol fixtures were run on Windows for typed Surface pointer targets,
+  exact resource generations and protected scopes, conflicting input ownership, bounded display
+  layout representation, and opaque peripheral transaction schemas. All six focused tests pass.
+  These are shared protocol checks on Windows; Linux execution remains excluded by instruction.
 - Focused Windows suites now pass end to end: display topology (6 fixtures; 3 native opt-in tests
   ignored by default), peripheral projection/control contracts (8), resource ownership and pointer
   bounds (23; 1 live opt-in test ignored by default), and shell diagnostics (12). These fixture
