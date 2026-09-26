@@ -11,6 +11,7 @@ pub enum AdapterCapability {
     PathIcon,
     Appearance,
     HiddenFilesPreference,
+    RemoteDisplayObservation,
     RemoteDisplayTransactions,
     RemotePeripheralObservations,
     RemotePeripheralControls,
@@ -141,6 +142,12 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     ),
     fixture(
         PlatformFamily::Linux,
+        AdapterCapability::RemoteDisplayObservation,
+        "Linux compositor output layout observation owner",
+        "platform_contract::tests::matrix_is_complete_and_truthful",
+    ),
+    fixture(
+        PlatformFamily::Linux,
         AdapterCapability::RemoteDisplayTransactions,
         "Linux compositor output layout owner",
         "platform_contract::tests::matrix_is_complete_and_truthful",
@@ -193,6 +200,13 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "Explorer registry preference",
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
+    native_read(
+        PlatformFamily::Windows,
+        AdapterCapability::RemoteDisplayObservation,
+        "Windows DisplayConfig and native output observation owner",
+        "windows_remote_display_topology::tests::incomplete_native_topology_still_exposes_active_layout_without_transactions",
+        "windows_remote_control::tests::native_display_owner_read_reports_transaction_prerequisites",
+    ),
     fixture(
         PlatformFamily::Windows,
         AdapterCapability::RemoteDisplayTransactions,
@@ -243,7 +257,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(keys.len(), 2 * 9);
+        assert_eq!(keys.len(), 2 * 10);
     }
 
     #[test]
@@ -274,6 +288,7 @@ mod tests {
                 AdapterCapability::PathIcon => "path_icon",
                 AdapterCapability::Appearance => "appearance",
                 AdapterCapability::HiddenFilesPreference => "hidden_files_preference",
+                AdapterCapability::RemoteDisplayObservation => "remote_display_observation",
                 AdapterCapability::RemoteDisplayTransactions => "remote_display_transactions",
                 AdapterCapability::RemotePeripheralObservations => "remote_peripheral_observations",
                 AdapterCapability::RemotePeripheralControls => "remote_peripheral_controls",

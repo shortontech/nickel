@@ -123,7 +123,10 @@ with an accurate reason and contract evidence.
   target reason. An authenticated Apply request through the same owner and production output
   reconciliation path returned that exact reason without changing the display. This verifies
   the production owner's read and refusal on the current fixture; it does not verify a changing
-  transaction.
+  transaction. The platform contract now records display observation separately as
+  `native_read_verified`; display transactions remain `fixture_only` until a changing native
+  round trip passes. Linux display observation retains fixture evidence under the user's Linux
+  test exclusion.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
   request reply expires. Physical input epoch and idle state are rechecked during Apply staging.
