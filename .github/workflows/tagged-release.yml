@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  RUSTC_WRAPPER: ""
+
 jobs:
   windows-installer:
     name: Windows x86-64 MSI
