@@ -9791,6 +9791,48 @@ fn windows_semantic_mutation_kind(
 mod tests {
     use super::*;
 
+    fn native_debug_lease(
+        owner: &WindowsRemoteControl,
+        label: &str,
+    ) -> (
+        Arc<std::sync::Mutex<nickel_remote_control::ControlPlane>>,
+        nickel_remote_control::IssuedCapability,
+        u64,
+    ) {
+        let control = owner.remote_control.control();
+        let (client, lease) = {
+            let mut control = control.lock().unwrap();
+            control.set_enabled(true);
+            let client = control.connect_identity(label).unwrap();
+            let now = Instant::now();
+            let watch = control
+                .reserve_connection_watch(&client.client_id, &client.token, now)
+                .unwrap();
+            control
+                .activate_connection_watch(&client.client_id, &client.token, watch, false, now)
+                .unwrap();
+            let request = nickel_remote_control::lease_requests::LeaseRequest {
+                renewal: None,
+                scope: nickel_remote_control::leases::ResourceScope::FullSession,
+                duration: Some(Duration::from_secs(120)),
+                allow_resumption: false,
+                full_debug: true,
+            };
+            control
+                .request_lease(&client.client_id, &client.token, request.clone(), now)
+                .unwrap();
+            let generation = control
+                .lease_requests()
+                .pending_generation(&client.client_id)
+                .unwrap();
+            let lease = control
+                .approve_lease_local(&client.client_id, &request, generation, now)
+                .unwrap();
+            (client, lease)
+        };
+        (control, client, lease)
+    }
+
     #[test]
     fn display_confirmation_window_expires_even_while_owner_is_busy() {
         let now = Instant::now();
@@ -10192,39 +10234,8 @@ mod tests {
         use nickel_remote_control::{DesktopAuthority, DesktopPermit};
 
         let owner = owner();
-        let control = owner.remote_control.control();
-        let (client, lease) = {
-            let mut control = control.lock().unwrap();
-            control.set_enabled(true);
-            let client = control
-                .connect_identity("Windows peripheral read fixture")
-                .unwrap();
-            let now = Instant::now();
-            let watch = control
-                .reserve_connection_watch(&client.client_id, &client.token, now)
-                .unwrap();
-            control
-                .activate_connection_watch(&client.client_id, &client.token, watch, false, now)
-                .unwrap();
-            let request = nickel_remote_control::lease_requests::LeaseRequest {
-                renewal: None,
-                scope: nickel_remote_control::leases::ResourceScope::FullSession,
-                duration: Some(Duration::from_secs(120)),
-                allow_resumption: false,
-                full_debug: true,
-            };
-            control
-                .request_lease(&client.client_id, &client.token, request.clone(), now)
-                .unwrap();
-            let generation = control
-                .lease_requests()
-                .pending_generation(&client.client_id)
-                .unwrap();
-            let lease = control
-                .approve_lease_local(&client.client_id, &request, generation, now)
-                .unwrap();
-            (client, lease)
-        };
+        let (control, client, lease) =
+            native_debug_lease(&owner, "Windows peripheral read fixture");
         let limited_lease = control
             .lock()
             .unwrap()
@@ -10291,39 +10302,7 @@ mod tests {
         use nickel_remote_control::{DesktopAuthority, DesktopPermit};
 
         let mut owner = owner();
-        let control = owner.remote_control.control();
-        let (client, lease) = {
-            let mut control = control.lock().unwrap();
-            control.set_enabled(true);
-            let client = control
-                .connect_identity("Windows display read fixture")
-                .unwrap();
-            let now = Instant::now();
-            let watch = control
-                .reserve_connection_watch(&client.client_id, &client.token, now)
-                .unwrap();
-            control
-                .activate_connection_watch(&client.client_id, &client.token, watch, false, now)
-                .unwrap();
-            let request = nickel_remote_control::lease_requests::LeaseRequest {
-                renewal: None,
-                scope: nickel_remote_control::leases::ResourceScope::FullSession,
-                duration: Some(Duration::from_secs(120)),
-                allow_resumption: false,
-                full_debug: true,
-            };
-            control
-                .request_lease(&client.client_id, &client.token, request.clone(), now)
-                .unwrap();
-            let generation = control
-                .lease_requests()
-                .pending_generation(&client.client_id)
-                .unwrap();
-            let lease = control
-                .approve_lease_local(&client.client_id, &request, generation, now)
-                .unwrap();
-            (client, lease)
-        };
+        let (control, client, lease) = native_debug_lease(&owner, "Windows display read fixture");
         let permit = DesktopPermit::from_active_lease(
             control.clone(),
             client.client_id,
