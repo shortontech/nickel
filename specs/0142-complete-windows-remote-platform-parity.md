@@ -192,6 +192,10 @@ with an accurate reason and contract evidence.
   exact resource generations and protected scopes, conflicting input ownership, bounded display
   layout representation, and opaque peripheral transaction schemas. All six focused tests pass.
   These are shared protocol checks on Windows; Linux execution remains excluded by instruction.
+- The eight focused Windows peripheral projection/control fixtures pass after the owner-level
+  pointer test. `rustup target list --installed` on this Windows host lists only
+  `x86_64-pc-windows-msvc`; a Linux target build is not available locally, and the Linux host was
+  not accessed under the user's instruction.
 - Focused Windows suites now pass end to end: display topology (6 fixtures; 3 native opt-in tests
   ignored by default), peripheral projection/control contracts (8), resource ownership and pointer
   bounds (23; 1 live opt-in test ignored by default), and shell diagnostics (12). These fixture
