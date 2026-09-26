@@ -17,10 +17,10 @@
     <ui:WixUI Id="WixUI_FeatureTree" />
 
     <StandardDirectory Id="LocalAppDataFolder">
-      <Directory Id="INSTALLFOLDER" Name="Nickel" />
+      <Directory Id="InstallFolder" Name="Nickel" />
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
-      <Directory Id="PROGRAMMENUDIR" Name="Nickel" />
+      <Directory Id="ProgramMenuNickel" Name="Nickel" />
     </StandardDirectory>
 
     <Feature Id="NickelFeature"
@@ -79,46 +79,57 @@
   </Package>
 
   <Fragment>
-    <ComponentGroup Id="NickelFiles" Directory="INSTALLFOLDER">
+    <ComponentGroup Id="NickelFiles" Directory="InstallFolder">
       <Component Id="NickelExecutable" Guid="81EC88BA-5012-4B48-BEB4-BBA60E8DAB14">
-        <File Id="NickelExe" Source="$(PayloadDir)\nickel.exe" KeyPath="yes">
+        <File Id="NickelExe" Source="$(PayloadDir)\nickel.exe">
           <Shortcut Id="NickelStartMenuShortcut"
-                    Directory="PROGRAMMENUDIR"
+                    Directory="ProgramMenuNickel"
                     Name="Nickel"
                     Description="Start the Nickel desktop"
-                    WorkingDirectory="INSTALLFOLDER" />
+                    WorkingDirectory="InstallFolder" />
         </File>
+        <RegistryValue Root="HKCU" Key="Software\Nickel\Installer\Components"
+                       Name="Nickel" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="NickelSettingsExecutable" Guid="E121D8E8-B064-440C-A122-D02D0C638084">
-        <File Id="NickelSettingsExe" Source="$(PayloadDir)\nickel-settings.exe" KeyPath="yes">
+        <File Id="NickelSettingsExe" Source="$(PayloadDir)\nickel-settings.exe">
           <Shortcut Id="NickelSettingsStartMenuShortcut"
-                    Directory="PROGRAMMENUDIR"
+                    Directory="ProgramMenuNickel"
                     Name="Nickel Settings"
                     Description="Configure Nickel"
-                    WorkingDirectory="INSTALLFOLDER" />
+                    WorkingDirectory="InstallFolder" />
         </File>
+        <RegistryValue Root="HKCU" Key="Software\Nickel\Installer\Components"
+                       Name="Settings" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="NickelTerminalExecutable" Guid="44ABC6CB-01CF-4901-B42F-78BF83165413">
-        <File Id="NickelTerminalExe" Source="$(PayloadDir)\nickel-terminal.exe" KeyPath="yes">
+        <File Id="NickelTerminalExe" Source="$(PayloadDir)\nickel-terminal.exe">
           <Shortcut Id="NickelTerminalStartMenuShortcut"
-                    Directory="PROGRAMMENUDIR"
+                    Directory="ProgramMenuNickel"
                     Name="Nickel Terminal"
                     Description="Open Nickel Terminal"
-                    WorkingDirectory="INSTALLFOLDER" />
+                    WorkingDirectory="InstallFolder" />
         </File>
+        <RegistryValue Root="HKCU" Key="Software\Nickel\Installer\Components"
+                       Name="Terminal" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="NickelShellSetupExecutable" Guid="5E90B55F-B6C2-47FF-9D08-1892014954E4">
-        <File Id="NickelShellSetupExe" Source="$(PayloadDir)\nickel-shell-setup.exe" KeyPath="yes" />
+        <File Id="NickelShellSetupExe" Source="$(PayloadDir)\nickel-shell-setup.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Nickel\Installer\Components"
+                       Name="ShellSetup" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="NickelLicenseFiles" Guid="45A8544A-8632-4957-9564-E115A8558D85">
-        <File Id="LicenseMit" Source="$(PayloadDir)\LICENSE-MIT" KeyPath="yes" />
+        <File Id="LicenseMit" Source="$(PayloadDir)\LICENSE-MIT" />
         <File Id="LicenseApache" Source="$(PayloadDir)\LICENSE-APACHE" />
         <File Id="CargoLock" Source="$(PayloadDir)\Cargo.lock" />
         <File Id="Notice" Source="$(PayloadDir)\NOTICE.md" />
         <File Id="ThirdPartyLicenses" Source="$(PayloadDir)\THIRD_PARTY_LICENSES.txt" />
+        <RemoveFolder Id="RemoveNickelInstallFolder" Directory="InstallFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Nickel\Installer\Components"
+                       Name="Licenses" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="NickelStartMenuFolder" Guid="04B20720-E90F-4335-B474-E9E112CFC533">
-        <RemoveFolder Id="RemoveNickelStartMenuFolder" Directory="PROGRAMMENUDIR" On="uninstall" />
+        <RemoveFolder Id="RemoveNickelStartMenuFolder" Directory="ProgramMenuNickel" On="uninstall" />
         <RegistryValue Root="HKCU"
                        Key="Software\Nickel\Installer"
                        Name="StartMenuFolder"
@@ -129,7 +140,7 @@
     </ComponentGroup>
 
     <Component Id="ShellSelectionMarker"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="7A40460E-50D6-48F5-965D-243D78144481">
       <RegistryValue Root="HKCU"
                      Key="Software\Nickel\Installer"
