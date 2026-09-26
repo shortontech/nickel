@@ -10143,6 +10143,105 @@ mod tests {
             projected.removable_volume_entries.len()
         );
     }
+
+    #[test]
+    #[ignore = "reads native Windows printers and removable volumes through a live in-process lease"]
+    fn native_peripheral_owner_read_requires_live_debug_authority() {
+        use nickel_remote_control::{DesktopAuthority, DesktopPermit};
+
+        let owner = owner();
+        let control = owner.remote_control.control();
+        let (client, lease) = {
+            let mut control = control.lock().unwrap();
+            control.set_enabled(true);
+            let client = control
+                .connect_identity("Windows peripheral read fixture")
+                .unwrap();
+            let now = Instant::now();
+            let watch = control
+                .reserve_connection_watch(&client.client_id, &client.token, now)
+                .unwrap();
+            control
+                .activate_connection_watch(&client.client_id, &client.token, watch, false, now)
+                .unwrap();
+            let request = nickel_remote_control::lease_requests::LeaseRequest {
+                renewal: None,
+                scope: nickel_remote_control::leases::ResourceScope::FullSession,
+                duration: Some(Duration::from_secs(120)),
+                allow_resumption: false,
+                full_debug: true,
+            };
+            control
+                .request_lease(&client.client_id, &client.token, request.clone(), now)
+                .unwrap();
+            let generation = control
+                .lease_requests()
+                .pending_generation(&client.client_id)
+                .unwrap();
+            let lease = control
+                .approve_lease_local(&client.client_id, &request, generation, now)
+                .unwrap();
+            (client, lease)
+        };
+        let limited_lease = control
+            .lock()
+            .unwrap()
+            .leases_mut()
+            .approve_local(
+                client.client_id.clone(),
+                nickel_remote_control::leases::ResourceScope::FullSession,
+                Instant::now(),
+                Some(Instant::now() + Duration::from_secs(120)),
+                false,
+                false,
+            )
+            .unwrap();
+        let limited_permit = DesktopPermit::from_active_lease(
+            control.clone(),
+            client.client_id.clone(),
+            client.token.clone(),
+            limited_lease,
+        )
+        .unwrap();
+        assert_eq!(
+            owner
+                .authority
+                .read_peripheral_controls(limited_permit)
+                .unwrap_err(),
+            "lease is missing, expired, suspended, or outside the resource boundary"
+        );
+        let permit = DesktopPermit::from_active_lease(
+            control.clone(),
+            client.client_id,
+            client.token,
+            lease,
+        )
+        .unwrap();
+        let snapshot = owner
+            .authority
+            .read_peripheral_controls(permit.clone())
+            .expect("authorized bounded native peripheral read");
+        assert!(
+            snapshot
+                .printer_entries
+                .iter()
+                .all(|printer| printer.id.starts_with("printer-"))
+        );
+        assert!(
+            snapshot
+                .removable_volume_entries
+                .iter()
+                .all(|volume| volume.id.starts_with("volume-"))
+        );
+        control.lock().unwrap().set_enabled(false);
+        assert_eq!(
+            owner
+                .authority
+                .read_peripheral_controls(permit)
+                .unwrap_err(),
+            "remote authority was stopped"
+        );
+    }
     #[test]
     fn settings_worker_is_single_flight_and_exposes_only_coarse_lifecycle() {
         let worker = Arc::new(WindowsSettingsWorker::default());

@@ -185,7 +185,7 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         AdapterCapability::RemotePeripheralObservations,
         "Windows bounded printer and volume observation owner",
         "remote_peripheral_controls::tests::projection_scrubs_native_text_paths_and_clamps_capacity",
-        "windows_remote_control::tests::native_peripheral_observation_projects_only_opaque_remote_ids",
+        "windows_remote_control::tests::native_peripheral_owner_read_requires_live_debug_authority",
     ),
     unavailable(
         PlatformFamily::Windows,

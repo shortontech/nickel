@@ -165,3 +165,8 @@ with an accurate reason and contract evidence.
   No changing peripheral operation or complete live request was verified. The
   opt-in test calls the same bounded native read helper as the Windows desktop
   authority, preventing its native observation path from drifting from the production request.
+- An additional opt-in native Windows test exercised `WindowsDesktopAuthority::read_peripheral_controls`
+  directly with an in-process live Full Control & Debug lease and connection watch. It verified
+  the opaque remote snapshot, rejection of a lease without Debug access, and rejection after
+  authority was disabled. No listener, visible shell, pointer movement, or peripheral mutation
+  was involved. This production-owner read is the contract's `native_read_verified` evidence.
