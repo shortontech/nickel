@@ -132,6 +132,12 @@ impl State {
                             .saturating_sub(wire::MAX_PRINTERS)
                             .min(u32::MAX as usize) as u32,
                     );
+                    omitted_jobs = printers.iter().skip(wire::MAX_PRINTERS).fold(
+                        omitted_jobs,
+                        |count, printer| {
+                            count.saturating_add(printer.jobs.len().min(u32::MAX as usize) as u32)
+                        },
+                    );
                     let mut retained_jobs = 0_usize;
                     for (printer_index, printer) in
                         printers.into_iter().take(wire::MAX_PRINTERS).enumerate()
@@ -518,6 +524,51 @@ mod tests {
             Some(100)
         );
         assert_eq!(state.observations.len(), 1);
+    }
+
+    #[test]
+    fn empty_devices_and_partial_provider_failure_keep_independent_availability() {
+        let mut state = State::default();
+        let mut empty = raw();
+        empty.printers = Ok(Vec::new());
+        empty.volumes = Ok(Vec::new());
+        let observed = state
+            .observe(empty, 41, Some("controls unavailable"))
+            .unwrap();
+        assert_eq!(observed.printers, wire::Availability::Available);
+        assert_eq!(observed.removable_volumes, wire::Availability::Available);
+        assert!(observed.printer_entries.is_empty());
+        assert!(observed.removable_volume_entries.is_empty());
+
+        let mut partial = raw();
+        partial.printers = Err("Secret printer /private/device".into());
+        partial.volumes = Ok(Vec::new());
+        let observed = state
+            .observe(partial, 42, Some("controls unavailable"))
+            .unwrap();
+        assert_eq!(observed.printers, wire::Availability::Unavailable);
+        assert_eq!(observed.removable_volumes, wire::Availability::Available);
+        assert!(observed.printer_entries.is_empty());
+        assert!(observed.removable_volume_entries.is_empty());
+        assert!(
+            !serde_json::to_string(&observed)
+                .unwrap()
+                .contains("Secret printer")
+        );
+    }
+
+    #[test]
+    fn printer_limit_counts_jobs_on_omitted_printers() {
+        let mut native = raw();
+        let printer = native.printers.as_ref().unwrap()[0].clone();
+        native.printers = Ok(vec![printer; wire::MAX_PRINTERS + 1]);
+        native.omitted_printers = 2;
+        native.omitted_jobs = 4;
+
+        let projected = State::default().observe(native, 42, None).unwrap();
+        assert_eq!(projected.printer_entries.len(), wire::MAX_PRINTERS);
+        assert_eq!(projected.omitted_printers, 3);
+        assert_eq!(projected.omitted_print_jobs, 5);
     }
 
     #[test]

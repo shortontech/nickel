@@ -150,10 +150,14 @@ with an accurate reason and contract evidence.
   unverified.
 - `cargo build --workspace` passes on Windows after the latest shared-policy changes.
 - Focused Windows suites now pass end to end: display topology (6 fixtures; 3 native opt-in tests
-  ignored by default), peripheral projection/control contracts (6), resource ownership and pointer
+  ignored by default), peripheral projection/control contracts (8), resource ownership and pointer
   bounds (23; 1 live opt-in test ignored by default), and shell diagnostics (12). These fixture
   results include stale identity, protection, bounds, recovery, native-owner limitations, and
   scrubbed observations; they do not substitute for a changing display or peripheral run.
+- The added peripheral fixture verifies that an empty printer and volume inventory stays
+  available, while a printer provider failure leaves volume availability intact and omits the
+  provider's private diagnostic text. A second fixture caught and verifies the corrected
+  `omitted_print_jobs` count when a printer is truncated by the remote limit. Both pass on Windows.
 - An opt-in native peripheral read passed through the production bounded refresh worker and
   scrubbed remote projection. The current Windows fixture reported two printers and one removable
   volume, with only generated opaque IDs in the remote entries. The platform contract now records
