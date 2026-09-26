@@ -207,6 +207,14 @@ pub(crate) fn apply_position_change(
         core::PCWSTR,
     };
 
+    if !observation.transaction_supported || !observation.topology_complete {
+        return Err(observation
+            .transaction_unavailable_reason
+            .as_deref()
+            .unwrap_or("complete Windows display topology is unavailable")
+            .into());
+    }
+
     validate_position_change(
         requested_topology_generation,
         observation.topology_generation,
@@ -961,6 +969,19 @@ mod tests {
             incomplete.transaction_unavailable_reason.as_deref(),
             Some("extra native target")
         );
+        assert_eq!(
+            apply_position_change(
+                &incomplete,
+                &incomplete.layout,
+                &incomplete.layout,
+                incomplete.topology_generation,
+                || panic!("incomplete topology reached the native commit boundary"),
+            )
+            .err()
+            .unwrap()
+            .reason,
+            "extra native target"
+        );
         assert_eq!(incomplete.layout.primary.id, r"\\.\DISPLAY1");
         let complete = project_inventory(
             &inventory,
@@ -989,6 +1010,19 @@ mod tests {
         assert_eq!(
             unavailable.transaction_unavailable_reason.as_deref(),
             Some("saved Windows display configuration unavailable")
+        );
+        assert_eq!(
+            apply_position_change(
+                &unavailable,
+                &unavailable.layout,
+                &unavailable.layout,
+                unavailable.topology_generation,
+                || panic!("unavailable transaction reached the native commit boundary"),
+            )
+            .err()
+            .unwrap()
+            .reason,
+            "saved Windows display configuration unavailable"
         );
     }
 

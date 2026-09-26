@@ -117,6 +117,9 @@ with an accurate reason and contract evidence.
 - Windows fixture tests cover final-authority loss after a native Apply or Revert. Apply retains
   its recovery plan for immediate rollback; a verified Revert clears recovery state even if the
   request reply expires. Physical input epoch and idle state are rechecked during Apply staging.
+  The native Apply helper also refuses an incomplete or transaction-unavailable observation before
+  any staging, even if a future caller bypasses the desktop owner's early check. The focused
+  Windows fixture and strict Clippy pass.
 - Windows printer and removable-volume reads use the tested single-flight bounded platform
   observation worker. Its fixture test covers deadline expiry, rejection of overlapping reads,
   and release after a late native completion. Printer mutations remain unavailable because the
