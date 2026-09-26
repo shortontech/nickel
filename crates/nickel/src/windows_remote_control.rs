@@ -9833,6 +9833,45 @@ mod tests {
         (control, client, lease)
     }
 
+    fn native_display_owner_request(
+        owner: &mut WindowsRemoteControl,
+        operation: impl FnOnce(
+            Arc<WindowsDesktopAuthority>,
+        )
+            -> Result<nickel_remote_control::display_layout::Snapshot, String>
+        + Send,
+    ) -> Result<nickel_remote_control::display_layout::Snapshot, String> {
+        std::thread::scope(|scope| {
+            let authority = Arc::clone(&owner.authority);
+            let (reply, receiver) = mpsc::sync_channel(1);
+            scope.spawn(move || {
+                let _ = reply.send(operation(authority));
+            });
+            let started = Instant::now();
+            loop {
+                if let Ok(result) = receiver.try_recv() {
+                    return result;
+                }
+                match owner.receiver.recv_timeout(Duration::from_millis(10)) {
+                    Ok(OwnerRequest::Observation {
+                        permit,
+                        prepared,
+                        kind: ObservationKind::Outputs,
+                        reply,
+                    }) => {
+                        let result =
+                            owner.observe_resources(permit, *prepared, ObservationKind::Outputs);
+                        let _ = reply.try_send(result);
+                    }
+                    Ok(_) => panic!("display owner requested an unexpected observation"),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                        if started.elapsed() < Duration::from_secs(6) => {}
+                    Err(error) => panic!("display owner did not finish: {error}"),
+                }
+            }
+        })
+    }
+
     #[test]
     fn display_confirmation_window_expires_even_while_owner_is_busy() {
         let now = Instant::now();
@@ -10310,68 +10349,148 @@ mod tests {
             lease,
         )
         .unwrap();
-        let authority = Arc::clone(&owner.authority);
-        std::thread::scope(|scope| {
-            let read_authority = Arc::clone(&authority);
-            let read_permit = permit.clone();
-            let read = scope.spawn(move || read_authority.read_display_layout(read_permit));
-            let request = owner
-                .receiver
-                .recv_timeout(Duration::from_secs(2))
-                .expect("native output observation request");
-            let OwnerRequest::Observation {
-                permit: observation_permit,
-                prepared,
-                kind: ObservationKind::Outputs,
-                reply,
-            } = request
-            else {
-                panic!("display read requested the wrong owner observation");
+        let read_permit = permit.clone();
+        let snapshot = native_display_owner_request(&mut owner, move |authority| {
+            authority.read_display_layout(read_permit)
+        })
+        .expect("native display owner read");
+        assert!(snapshot.requested.valid_representation());
+        assert_eq!(
+            snapshot.transaction_supported,
+            snapshot.topology_complete && snapshot.transaction_unavailable_reason.is_none()
+        );
+        if !snapshot.transaction_supported {
+            assert!(snapshot.transaction_unavailable_reason.is_some());
+            let expected_reason = snapshot.transaction_unavailable_reason.clone().unwrap();
+            let transaction = nickel_remote_control::display_layout::Transaction::Apply {
+                topology_generation: snapshot.topology_generation,
+                prior: snapshot.requested.clone(),
+                requested: snapshot.requested.clone(),
             };
-            let observed =
-                owner.observe_resources(observation_permit, *prepared, ObservationKind::Outputs);
-            reply.try_send(observed).unwrap();
-            let snapshot = read.join().unwrap().expect("native display owner read");
-            assert!(snapshot.requested.valid_representation());
             assert_eq!(
-                snapshot.transaction_supported,
-                snapshot.topology_complete && snapshot.transaction_unavailable_reason.is_none()
+                native_display_owner_request(&mut owner, move |authority| {
+                    authority.display_layout_transaction(permit, transaction)
+                })
+                .unwrap_err(),
+                expected_reason
             );
-            if !snapshot.transaction_supported {
-                assert!(snapshot.transaction_unavailable_reason.is_some());
-                let expected_reason = snapshot.transaction_unavailable_reason.clone().unwrap();
-                let transaction = nickel_remote_control::display_layout::Transaction::Apply {
-                    topology_generation: snapshot.topology_generation,
-                    prior: snapshot.requested.clone(),
-                    requested: snapshot.requested.clone(),
-                };
-                let apply =
-                    scope.spawn(move || authority.display_layout_transaction(permit, transaction));
-                let request = owner
-                    .receiver
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("native transaction output observation request");
-                let OwnerRequest::Observation {
-                    permit,
-                    prepared,
-                    kind: ObservationKind::Outputs,
-                    reply,
-                } = request
-                else {
-                    panic!("display transaction requested the wrong owner observation");
-                };
-                let observed = owner.observe_resources(permit, *prepared, ObservationKind::Outputs);
-                reply.try_send(observed).unwrap();
-                assert_eq!(apply.join().unwrap().unwrap_err(), expected_reason);
+        }
+        eprintln!(
+            "native display owner: outputs={}, topology_complete={}, transaction_supported={}, reason={:?}",
+            snapshot.requested.outputs.len(),
+            snapshot.topology_complete,
+            snapshot.transaction_supported,
+            snapshot.transaction_unavailable_reason
+        );
+    }
+    #[test]
+    #[ignore = "requires NICKEL_WINDOWS_DISPLAY_OWNER_MUTATION_TEST=1 and a reversible multi-monitor setup"]
+    fn native_display_owner_apply_and_revert_restore_prior_layout() {
+        use nickel_remote_control::{DesktopAuthority, DesktopPermit};
+
+        assert_eq!(
+            std::env::var("NICKEL_WINDOWS_DISPLAY_OWNER_MUTATION_TEST").as_deref(),
+            Ok("1")
+        );
+        struct RestorePending(Arc<std::sync::Mutex<WindowsDisplayState>>);
+        impl Drop for RestorePending {
+            fn drop(&mut self) {
+                let mut state = self.0.lock().unwrap();
+                if let Some(pending) = state.pending.take() {
+                    pending
+                        .plan
+                        .restore()
+                        .expect("restore pending native display layout");
+                }
             }
-            eprintln!(
-                "native display owner: outputs={}, topology_complete={}, transaction_supported={}, reason={:?}",
-                snapshot.requested.outputs.len(),
-                snapshot.topology_complete,
-                snapshot.transaction_supported,
-                snapshot.transaction_unavailable_reason
-            );
-        });
+        }
+
+        let mut owner = owner();
+        owner.desktop_session = Some(
+            nickel_platform::process_identity::WindowsProcessIdentity::probe(std::process::id())
+                .expect("native test process identity")
+                .session_id(),
+        );
+        owner.reconcile_desktop_authority();
+        assert!(owner.desktop_unlocked);
+        let (control, client, lease) =
+            native_debug_lease(&owner, "Windows display owner round trip");
+        let permit = || {
+            DesktopPermit::from_active_lease(
+                control.clone(),
+                client.client_id.clone(),
+                client.token.clone(),
+                lease,
+            )
+            .unwrap()
+        };
+        let before = native_display_owner_request(&mut owner, |authority| {
+            authority.read_display_layout(permit())
+        })
+        .expect("native display owner read");
+        assert!(
+            before.transaction_supported && before.requested.outputs.len() >= 2,
+            "complete multi-output native transaction fixture required: {:?}",
+            before.transaction_unavailable_reason
+        );
+        let mut requested = before.requested.clone();
+        let secondary = requested
+            .outputs
+            .iter_mut()
+            .find(|output| output.output != requested.primary)
+            .expect("secondary display");
+        secondary.x = secondary
+            .x
+            .checked_add(8)
+            .expect("secondary position range");
+        if secondary.x == 0 && secondary.y == 0 {
+            secondary.x = secondary
+                .x
+                .checked_sub(16)
+                .expect("alternate secondary position");
+        }
+        let _restore = RestorePending(Arc::clone(&owner.authority.display_state));
+        let applied = native_display_owner_request(&mut owner, |authority| {
+            authority.display_layout_transaction(
+                permit(),
+                nickel_remote_control::display_layout::Transaction::Apply {
+                    topology_generation: before.topology_generation,
+                    prior: before.requested.clone(),
+                    requested: requested.clone(),
+                },
+            )
+        })
+        .expect("native display owner Apply");
+        assert!(
+            crate::windows_remote_display_topology::matches_physical_layout(
+                &applied.requested,
+                &requested
+            )
+        );
+        assert_eq!(
+            applied.recovery.state,
+            nickel_remote_control::display_layout::RecoveryState::AwaitingConfirmation
+        );
+        let reverted = native_display_owner_request(&mut owner, |authority| {
+            authority.display_layout_transaction(
+                permit(),
+                nickel_remote_control::display_layout::Transaction::Revert {
+                    topology_generation: applied.topology_generation,
+                    recovery_generation: applied.recovery.generation,
+                },
+            )
+        })
+        .expect("native display owner Revert");
+        assert!(
+            crate::windows_remote_display_topology::matches_physical_layout(
+                &reverted.requested,
+                &before.requested
+            )
+        );
+        assert_eq!(
+            reverted.recovery.state,
+            nickel_remote_control::display_layout::RecoveryState::Confirmed
+        );
     }
     #[test]
     #[ignore = "requires NICKEL_WINDOWS_OWNER_SURFACE_POINTER_MOVE_TEST=1 for an opt-in native pointer move"]
