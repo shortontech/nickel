@@ -1247,6 +1247,18 @@ fn run_windows_platform_refresh_worker<T: Send + 'static>(
             }
         })?
 }
+
+fn observe_windows_native_peripherals(
+    worker: Arc<WindowsPlatformRefreshWorker>,
+    check_live: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<nickel_platform::PeripheralSnapshot, String> {
+    run_windows_platform_refresh_worker(worker, Duration::from_millis(1900), move || {
+        check_live()?;
+        Ok(nickel_platform::peripheral_service().inspect())
+    })
+    .map_err(|error| format!("Windows peripheral observation failed: {error}"))?
+    .map_err(crate::remote_peripheral_controls::observation_failure)
+}
 struct WindowsDesktopAuthority {
     cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     sender: SyncSender<OwnerRequest>,
@@ -1772,18 +1784,14 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         // Native spooler and volume queries are read-only but can block. Keep
         // at most one call in flight and abandon its result after the lease or
         // response deadline expires; the worker holds admission until it exits.
-        let native = run_windows_platform_refresh_worker(
+        let native = observe_windows_native_peripherals(
             Arc::clone(&self.peripheral_observation_worker),
-            Duration::from_millis(1900),
             move || {
                 cancellation
                     .check_live()
-                    .map_err(|_| "Windows peripheral observation was cancelled".to_owned())?;
-                Ok(nickel_platform::peripheral_service().inspect())
+                    .map_err(|_| "Windows peripheral observation was cancelled".to_owned())
             },
-        )
-        .map_err(|error| format!("Windows peripheral observation failed: {error}"))?
-        .map_err(crate::remote_peripheral_controls::observation_failure)?;
+        )?;
         permit.with_debug(false, || Ok(()))?;
         let mut state = self
             .peripheral_state
@@ -10086,13 +10094,8 @@ mod tests {
     #[ignore = "reads native Windows printers and removable volumes through the bounded owner worker"]
     fn native_peripheral_observation_projects_only_opaque_remote_ids() {
         let worker = Arc::new(WindowsPlatformRefreshWorker::default());
-        let native =
-            run_windows_platform_refresh_worker(worker, Duration::from_millis(1900), || {
-                Ok(nickel_platform::peripheral_service().inspect())
-            })
-            .expect("bounded native peripheral observation")
-            .map_err(crate::remote_peripheral_controls::observation_failure)
-            .expect("native peripheral provider returned a scrubbed failure");
+        let native = observe_windows_native_peripherals(worker, || Ok(()))
+            .expect("bounded native peripheral observation");
         let printer_ids = native
             .printers
             .as_ref()

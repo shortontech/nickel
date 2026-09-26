@@ -160,4 +160,6 @@ with an accurate reason and contract evidence.
   remote peripheral observations as available separately from unavailable remote mutations. It
   records the bounded native read as `native_read_verified` while retaining the pending status for
   a complete live remote request; neither a changing peripheral operation nor a complete live
-  remote request was verified.
+  remote request was verified. The opt-in test now calls the same bounded native read helper as
+  the Windows desktop authority, preventing its native observation path from drifting from the
+  production request.
