@@ -226,9 +226,10 @@ with an accurate reason and contract evidence.
 
 - The current Windows fixture has one active target and another available but inactive target.
   A complete active multi-output fixture is needed to run the existing opt-in native display
-  position round trip. An opt-in owner-level `Apply`/`Revert` test is now compiled and guarded to
-  refuse incomplete topology before mutation; its shared request pump passed the live read and
-  refusal fixture. Positive owner-level `Apply`/`Revert` results still need a safe native run on
-  a complete fixture; an owner-level `Keep` test still needs to be added and run.
+  position round trip. An opt-in owner-level `Apply`/`Revert`/`Apply`/`Keep` test now compiles and
+  refuses incomplete topology before mutation. It holds guarded recovery for a pending Apply and
+  a separate test-only copy that restores both captured active and saved configurations after
+  Keep. Its shared request pump passed the live read and refusal fixture. Positive owner-level
+  transaction results still need a safe native run on a complete fixture.
 - The Linux target is not installed on this Windows host, and the user has excluded Linux tests.
   The Linux target build and Linux execution requested by this specification remain unverified.

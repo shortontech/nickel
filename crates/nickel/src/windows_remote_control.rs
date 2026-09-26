@@ -10385,13 +10385,34 @@ mod tests {
     }
     #[test]
     #[ignore = "requires NICKEL_WINDOWS_DISPLAY_OWNER_MUTATION_TEST=1 and a reversible multi-monitor setup"]
-    fn native_display_owner_apply_and_revert_restore_prior_layout() {
+    fn native_display_owner_apply_keep_and_revert_restore_prior_layout() {
         use nickel_remote_control::{DesktopAuthority, DesktopPermit};
 
         assert_eq!(
             std::env::var("NICKEL_WINDOWS_DISPLAY_OWNER_MUTATION_TEST").as_deref(),
             Ok("1")
         );
+        fn shifted_secondary(
+            mut layout: nickel_remote_control::display_layout::Layout,
+        ) -> nickel_remote_control::display_layout::Layout {
+            let primary = layout.primary.clone();
+            let secondary = layout
+                .outputs
+                .iter_mut()
+                .find(|output| output.output != primary)
+                .expect("secondary display");
+            secondary.x = secondary
+                .x
+                .checked_add(8)
+                .expect("secondary position range");
+            if secondary.x == 0 && secondary.y == 0 {
+                secondary.x = secondary
+                    .x
+                    .checked_sub(16)
+                    .expect("alternate secondary position");
+            }
+            layout
+        }
         struct RestorePending(Arc<std::sync::Mutex<WindowsDisplayState>>);
         impl Drop for RestorePending {
             fn drop(&mut self) {
@@ -10401,6 +10422,35 @@ mod tests {
                         .plan
                         .restore()
                         .expect("restore pending native display layout");
+                }
+            }
+        }
+        struct RestoreSaved {
+            state: Arc<std::sync::Mutex<WindowsDisplayState>>,
+            plan: Option<crate::windows_remote_display_topology::RecoveryPlan>,
+        }
+        impl RestoreSaved {
+            fn restore(&mut self) -> Result<(), String> {
+                if let Some(plan) = &self.plan {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Windows display test recovery lock was poisoned")?;
+                    plan.restore()?;
+                    state.pending = None;
+                    self.plan = None;
+                }
+                Ok(())
+            }
+        }
+        impl Drop for RestoreSaved {
+            fn drop(&mut self) {
+                if let Err(error) = self.restore() {
+                    if std::thread::panicking() {
+                        eprintln!("Windows display test saved recovery failed: {error}");
+                    } else {
+                        panic!("Windows display test saved recovery failed: {error}");
+                    }
                 }
             }
         }
@@ -10433,22 +10483,7 @@ mod tests {
             "complete multi-output native transaction fixture required: {:?}",
             before.transaction_unavailable_reason
         );
-        let mut requested = before.requested.clone();
-        let secondary = requested
-            .outputs
-            .iter_mut()
-            .find(|output| output.output != requested.primary)
-            .expect("secondary display");
-        secondary.x = secondary
-            .x
-            .checked_add(8)
-            .expect("secondary position range");
-        if secondary.x == 0 && secondary.y == 0 {
-            secondary.x = secondary
-                .x
-                .checked_sub(16)
-                .expect("alternate secondary position");
-        }
+        let requested = shifted_secondary(before.requested.clone());
         let _restore = RestorePending(Arc::clone(&owner.authority.display_state));
         let applied = native_display_owner_request(&mut owner, |authority| {
             authority.display_layout_transaction(
@@ -10490,6 +10525,69 @@ mod tests {
         assert_eq!(
             reverted.recovery.state,
             nickel_remote_control::display_layout::RecoveryState::Confirmed
+        );
+        let requested_again = shifted_secondary(reverted.requested.clone());
+        let applied_again = native_display_owner_request(&mut owner, |authority| {
+            authority.display_layout_transaction(
+                permit(),
+                nickel_remote_control::display_layout::Transaction::Apply {
+                    topology_generation: reverted.topology_generation,
+                    prior: reverted.requested.clone(),
+                    requested: requested_again.clone(),
+                },
+            )
+        })
+        .expect("native display owner second Apply");
+        assert_eq!(
+            applied_again.recovery.state,
+            nickel_remote_control::display_layout::RecoveryState::AwaitingConfirmation
+        );
+        let saved_plan = owner
+            .authority
+            .display_state
+            .lock()
+            .unwrap()
+            .pending
+            .as_ref()
+            .expect("native display recovery plan")
+            .plan
+            .clone_for_test_saved_recovery();
+        let mut restore_saved = RestoreSaved {
+            state: Arc::clone(&owner.authority.display_state),
+            plan: Some(saved_plan),
+        };
+        let kept = native_display_owner_request(&mut owner, |authority| {
+            authority.display_layout_transaction(
+                permit(),
+                nickel_remote_control::display_layout::Transaction::Keep {
+                    topology_generation: applied_again.topology_generation,
+                    recovery_generation: applied_again.recovery.generation,
+                },
+            )
+        })
+        .expect("native display owner Keep");
+        assert_eq!(
+            kept.recovery.state,
+            nickel_remote_control::display_layout::RecoveryState::Confirmed
+        );
+        assert!(
+            crate::windows_remote_display_topology::matches_physical_layout(
+                &kept.requested,
+                &requested_again
+            )
+        );
+        restore_saved
+            .restore()
+            .expect("restore original active and saved display configurations");
+        let restored = native_display_owner_request(&mut owner, |authority| {
+            authority.read_display_layout(permit())
+        })
+        .expect("native display owner restored read");
+        assert!(
+            crate::windows_remote_display_topology::matches_physical_layout(
+                &restored.requested,
+                &before.requested
+            )
         );
     }
     #[test]

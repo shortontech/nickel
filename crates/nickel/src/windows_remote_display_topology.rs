@@ -356,6 +356,20 @@ fn captured_name(wide: &[u16]) -> Option<String> {
 }
 
 impl RecoveryPlan {
+    #[cfg(test)]
+    pub(crate) fn clone_for_test_saved_recovery(&self) -> Self {
+        // A Keep attempt may have updated the database before a test fails.
+        // Always restore both captured configurations from this test guard.
+        Self {
+            modes: self.modes.clone(),
+            identities: self.identities.clone(),
+            original_configuration: self.original_configuration.clone(),
+            saved_configuration: self.saved_configuration.clone(),
+            requested_configuration: self.requested_configuration.clone(),
+            persistence_attempted: AtomicBool::new(true),
+        }
+    }
+
     pub(crate) fn persist(&self) -> Result<(), String> {
         use windows::Win32::Devices::Display::QDC_VIRTUAL_MODE_AWARE;
         use windows::{
