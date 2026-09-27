@@ -119,6 +119,10 @@ and additive ordering match the taskbar slots. The callback executes in the
 contributor's JS host under its own grants. The
 [example control section](../assets/plugins/example-control-section/) is a
 working package.
+For a quick edit loop, run
+`nickel-plugin dev assets/plugins/example-control-section` (or use the
+[task action example](../assets/plugins/example-task-action/)). The command
+stages the extension in an isolated profile and reloads it after edits.
 Settings measures the retained native component tree in each extension's own
 account. The target plugin's rendered UI measurement also includes contributed
 nodes, so these category totals overlap; they should not be added to estimate
