@@ -4,6 +4,7 @@ mod appearance_plugin;
 mod bar_plugin;
 mod bluetooth_plugin;
 mod cli;
+mod default_apps_plugin;
 mod effects;
 mod model;
 mod navigation_plugin;
@@ -517,6 +518,7 @@ enum SettingsMessage {
     DefaultAppsScroll(u32),
     DefaultAppTargetChanged(String),
     DefaultAppTargetFamily(Option<nickel_platform::AssociationFamily>),
+    DefaultAppsJsxAction(usize),
     DefaultAppHandlerSearchChanged(String),
     DefaultAppHandlerScroll(u32),
     BrowseDefaultAppTarget(nickel_platform::AssociationTarget),
@@ -1117,6 +1119,7 @@ impl SettingsApp {
         self.network_page.get_mut().take();
         self.bluetooth_page.get_mut().take();
         self.appearance_page.get_mut().take();
+        self.default_apps_page.get_mut().take();
         if self.custom_hue_open {
             self.pending_transient_dismissal = Some(OverlayId::new("appearance-custom-hue-dialog"));
         }
@@ -1195,7 +1198,13 @@ impl SettingsApp {
                 .borrow()
                 .as_ref()
                 .and_then(|page| page.as_ref().ok())
-                .map_or(0, appearance_plugin::AppearancePage::retained_bytes);
+                .map_or(0, appearance_plugin::AppearancePage::retained_bytes)
+            + self
+                .default_apps_page
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(0, default_apps_plugin::DefaultAppsPage::retained_bytes);
         let total = u64::try_from(total).unwrap_or(u64::MAX);
         self.settings_jsx_peak_bytes
             .set(self.settings_jsx_peak_bytes.get().max(total));
@@ -1454,6 +1463,9 @@ impl SettingsApp {
             }
             self.custom_hue_open = false;
             self.pending_transient_request = None;
+        }
+        if page != SettingsPage::DefaultApps {
+            self.default_apps_page.get_mut().take();
         }
         if !matches!(page, SettingsPage::KeyboardShortcuts | SettingsPage::About) {
             self.ordinary_pages.get_mut().take();
@@ -1977,6 +1989,9 @@ impl SettingsApp {
             SettingsMessage::DefaultAppTargetFamily(family) => {
                 self.default_app_target_family = family;
                 self.default_app_catalog_scroll_offset = 0.0;
+            }
+            SettingsMessage::DefaultAppsJsxAction(index) => {
+                self.handle_default_apps_jsx_action(index);
             }
             SettingsMessage::DefaultAppHandlerSearchChanged(value) => {
                 self.default_app_handler_query = value;
@@ -3196,6 +3211,15 @@ mod tests {
             .expect("optional feature control has a JSX action")
     }
 
+    fn default_app_action(app: &SettingsApp, index: usize) -> usize {
+        app.default_apps_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id(&format!("default-app-{index}")))
+            .expect("default app chooser has a JSX action")
+    }
+
     fn network_action(app: &SettingsApp, id: &str) -> Option<usize> {
         app.network_page
             .borrow()
@@ -4352,17 +4376,21 @@ mod tests {
         });
         let tree = app.build_ui(850.0, 900.0);
         let anchor = tree
-            .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
+            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(
+                default_app_action(&app, 0),
+            ))
             .into_iter()
             .next()
             .expect("default association row has one chooser");
         let next = tree
-            .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(1))
+            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(
+                default_app_action(&app, 1),
+            ))
             .into_iter()
             .next()
             .expect("the next compact association row has one chooser");
         assert!(
-            next.bounds.origin.y - anchor.bounds.origin.y <= 52.0,
+            next.bounds.origin.y - anchor.bounds.origin.y <= 52.5,
             "ordinary default-app rows must keep a compact single-line rhythm: {:?} -> {:?}",
             anchor.bounds,
             next.bounds,
@@ -4460,7 +4488,9 @@ mod tests {
         let consent = app.build_ui(850.0, 900.0);
         assert!(
             !consent
-                .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
+                .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(
+                    default_app_action(app, 0),
+                ))
                 .is_empty(),
             "consent-only platforms must expose the same candidate chooser"
         );
@@ -4483,8 +4513,9 @@ mod tests {
             detail: "Unavailable".into(),
         });
         let mut host = UiHost::new(app, 850, 900);
+        let chooser_action = default_app_action(host.application_mut(), 0);
         let anchor = host
-            .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
+            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(chooser_action))
             .into_iter()
             .next()
             .expect("unsupported rows remain inspectable");

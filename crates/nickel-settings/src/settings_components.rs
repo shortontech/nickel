@@ -12,6 +12,7 @@ use crate::SettingsMessage;
 #[derive(Clone, Debug)]
 pub(super) enum Node {
     Stack(Vec<Node>),
+    CompactList(Vec<Node>),
     Fragment(Vec<Node>),
     Card {
         label: String,
@@ -21,6 +22,7 @@ pub(super) enum Node {
     Row {
         label: String,
         value: String,
+        compact: bool,
         trailing: Option<Box<Node>>,
     },
     Inline(Vec<Node>),
@@ -71,9 +73,10 @@ impl Node {
                 + children.iter().map(Self::heap_bytes).sum::<usize>()
         };
         match self {
-            Self::Stack(children) | Self::Fragment(children) | Self::Inline(children) => {
-                children_bytes(children)
-            }
+            Self::Stack(children)
+            | Self::CompactList(children)
+            | Self::Fragment(children)
+            | Self::Inline(children) => children_bytes(children),
             Self::Card {
                 label,
                 value,
@@ -82,6 +85,7 @@ impl Node {
             Self::Row {
                 label,
                 value,
+                compact: _,
                 trailing,
             } => {
                 label.capacity()
@@ -160,6 +164,7 @@ impl Node {
         };
         Ok(match kind {
             "settings-stack" | "settings-features" => Self::Stack(children()?),
+            "settings-compact-list" => Self::CompactList(children()?),
             "settings-fragment" => Self::Fragment(children()?),
             "settings-card" => Self::Card {
                 label: text(value, "label", 256)?,
@@ -174,6 +179,10 @@ impl Node {
                 Self::Row {
                     label: text(value, "label", 256)?,
                     value: text(value, "value", 65_535)?,
+                    compact: value
+                        .get("compact")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     trailing: children.pop().map(Box::new),
                 }
             }
@@ -279,6 +288,14 @@ impl Node {
                         .collect::<Vec<_>>(),
                 ),
             ),
+            Self::CompactList(children) => AnyView::new(
+                Column::new().fill_width().gap(0.0).children(
+                    children
+                        .iter()
+                        .map(|child| child.view(theme, input_placeholder, action_message))
+                        .collect::<Vec<_>>(),
+                ),
+            ),
             Self::Fragment(children) => AnyView::new(
                 Column::new().fill_width().gap(8.0).children(
                     children
@@ -302,9 +319,11 @@ impl Node {
             Self::Row {
                 label,
                 value,
+                compact,
                 trailing,
             } => {
                 let row = SettingsRow::new(theme, label, value);
+                let row = if *compact { row.compact() } else { row };
                 AnyView::new(if let Some(trailing) = trailing {
                     row.trailing(trailing.view(theme, input_placeholder, action_message))
                 } else {
@@ -408,6 +427,7 @@ impl Node {
         match self {
             Self::Input { .. } => true,
             Self::Stack(children)
+            | Self::CompactList(children)
             | Self::Fragment(children)
             | Self::Inline(children)
             | Self::Card { children, .. } => children.iter().any(Self::contains_input),
@@ -422,7 +442,10 @@ impl Node {
             Self::Switch { id, action, .. } if id == target => *action,
             Self::Button { id, action, .. } if id.as_deref() == Some(target) => *action,
             Self::Input { id, action, .. } if id == target => Some(*action),
-            Self::Stack(children) | Self::Fragment(children) | Self::Inline(children) => children
+            Self::Stack(children)
+            | Self::CompactList(children)
+            | Self::Fragment(children)
+            | Self::Inline(children) => children
                 .iter()
                 .find_map(|child| child.action_for_id(target)),
             Self::Card { children, .. } => children

@@ -72,3 +72,10 @@ preview, color, input, slider, select, switch, and popover widgets. It validates
 typed requests before opening the file picker or saving settings. Invalid hue
 input leaves the dialog open for correction. Native controls remain available
 if JSX fails. Build it with the same command and its source filename.
+
+`settings-default-apps.jsx` renders the curated default association rows. A
+chooser request includes the current target identity, which Rust checks before
+opening the host-owned handler picker. The large searchable association catalog
+and the picker remain native until their virtual list and transient focus
+behavior can move through the plugin API. Build it with the same command and
+its source filename.

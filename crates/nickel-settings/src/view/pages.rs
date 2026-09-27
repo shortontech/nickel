@@ -427,6 +427,19 @@ impl SettingsApp {
                 </Container>
             }
         });
+        let curated = if self.settings_jsx_enabled {
+            let data = crate::default_apps_plugin::projection(self);
+            self.default_apps_page
+                .borrow_mut()
+                .get_or_insert_with(crate::default_apps_plugin::DefaultAppsPage::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| page.render(&data, theme))
+                .ok()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| AnyView::new(Column::new().gap(2.0).children(rows)));
         let target_query = self.default_app_target_query.trim().to_lowercase();
         let matching_targets = self
             .default_app_targets
@@ -560,7 +573,7 @@ impl SettingsApp {
         ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
                 <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsPageScroll} offset={0.0} theme={theme}>
-                    <Column gap={10.0}><Column gap={2.0} children={rows} />{advanced}{family_filters}{target_results}</Column>
+                    <Column gap={10.0}>{curated}{advanced}{family_filters}{target_results}</Column>
                 </VerticalScroll>
             </Column>
         }

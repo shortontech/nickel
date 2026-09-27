@@ -21,6 +21,7 @@ pub(super) enum Script {
     Network,
     Bluetooth,
     Appearance,
+    DefaultApps,
 }
 
 pub(super) fn manifest() -> Result<&'static PluginManifest, String> {
@@ -98,6 +99,9 @@ pub(super) fn source(script: Script) -> Result<&'static str, String> {
         Script::Appearance => {
             include_str!("../../../assets/plugins/settings/settings-appearance.js")
         }
+        Script::DefaultApps => {
+            include_str!("../../../assets/plugins/settings/settings-default-apps.js")
+        }
     })
 }
 
@@ -123,6 +127,7 @@ mod tests {
             Script::Network,
             Script::Bluetooth,
             Script::Appearance,
+            Script::DefaultApps,
         ] {
             JsxRuntime::new(source(script).unwrap(), None).unwrap();
         }
