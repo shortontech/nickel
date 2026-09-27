@@ -11,7 +11,99 @@ use serde::{Deserialize, Serialize};
 pub const PLUGIN_API_VERSION: u16 = 1;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_PLUGIN_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PLUGIN_DIRECTORIES: usize = 64;
 const MAX_ACTIVATION_SETTINGS_BYTES: usize = 16 * 1024;
+
+/// Installed packages and package errors found immediately below one root.
+#[derive(Default)]
+pub struct PluginCatalog {
+    pub packages: BTreeMap<String, PluginPackageDescriptor>,
+    pub failures: Vec<PluginPackageFailure>,
+}
+
+/// A package inspected at discovery time without retaining its script.
+pub struct PluginPackageDescriptor {
+    pub directory: std::path::PathBuf,
+    pub manifest: PluginManifest,
+}
+
+impl PluginPackageDescriptor {
+    pub fn load(&self) -> Result<PluginPackage, String> {
+        let package = PluginPackage::load(&self.directory)?;
+        if package.manifest != self.manifest {
+            return Err("plugin manifest changed after discovery".into());
+        }
+        Ok(package)
+    }
+}
+
+pub struct PluginPackageFailure {
+    pub directory: String,
+    pub reason: String,
+}
+
+impl PluginCatalog {
+    pub fn discover_default() -> Result<Self, String> {
+        let root = nickel_storage::config_path("plugins")
+            .map_err(|error| format!("could not locate plugin directory: {error}"))?;
+        Self::discover(root)
+    }
+
+    pub fn discover(root: impl AsRef<Path>) -> Result<Self, String> {
+        let root = root.as_ref();
+        let metadata = match std::fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(format!("could not inspect plugin directory: {error}")),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("plugin root must be an ordinary directory".into());
+        }
+        let mut entries = std::fs::read_dir(root)
+            .map_err(|error| format!("could not enumerate plugins: {error}"))?
+            .take(MAX_PLUGIN_DIRECTORIES + 1)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("could not enumerate plugins: {error}"))?;
+        if entries.len() > MAX_PLUGIN_DIRECTORIES {
+            return Err(format!(
+                "plugin root exceeds {MAX_PLUGIN_DIRECTORIES} entries"
+            ));
+        }
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut catalog = Self::default();
+        for entry in entries {
+            let directory = entry.file_name().to_string_lossy().into_owned();
+            let loaded = (|| {
+                if !valid_identifier(&directory) {
+                    return Err("plugin directory name is not a valid ID".into());
+                }
+                let kind = entry
+                    .file_type()
+                    .map_err(|error| format!("could not inspect package: {error}"))?;
+                if !kind.is_dir() || kind.is_symlink() {
+                    return Err("plugin package must be an ordinary directory".into());
+                }
+                let package = PluginPackage::load(entry.path())?;
+                if package.manifest.id != directory {
+                    return Err("plugin manifest ID does not match its directory".into());
+                }
+                Ok(PluginPackageDescriptor {
+                    directory: entry.path(),
+                    manifest: package.manifest,
+                })
+            })();
+            match loaded {
+                Ok(package) => {
+                    catalog.packages.insert(directory, package);
+                }
+                Err(reason) => catalog
+                    .failures
+                    .push(PluginPackageFailure { directory, reason }),
+            }
+        }
+        Ok(catalog)
+    }
+}
 
 /// A validated plugin directory ready to start in the JavaScript runtime.
 #[derive(Clone, Debug)]
@@ -462,6 +554,71 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_valid_packages_and_reports_invalid_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        let valid = root.path().join("org.nickel.hello-panel");
+        std::fs::create_dir(&valid).unwrap();
+        std::fs::write(valid.join("plugin.json"), VALID).unwrap();
+        std::fs::write(valid.join("main.js"), "function App() {}").unwrap();
+        let invalid = root.path().join("org.example.mismatch");
+        std::fs::create_dir(&invalid).unwrap();
+        std::fs::write(invalid.join("plugin.json"), VALID).unwrap();
+        std::fs::write(invalid.join("main.js"), "function App() {}").unwrap();
+        let catalog = PluginCatalog::discover(root.path()).unwrap();
+        assert_eq!(catalog.packages.len(), 1);
+        assert!(catalog.packages.contains_key("org.nickel.hello-panel"));
+        assert!(
+            catalog.packages["org.nickel.hello-panel"]
+                .load()
+                .unwrap()
+                .source
+                .contains("function App")
+        );
+        assert_eq!(catalog.failures.len(), 1);
+        assert_eq!(catalog.failures[0].directory, "org.example.mismatch");
+        assert!(catalog.failures[0].reason.contains("does not match"));
+
+        std::fs::write(
+            valid.join("plugin.json"),
+            VALID.replace("Hello Panel", "Changed Panel"),
+        )
+        .unwrap();
+        assert!(
+            catalog.packages["org.nickel.hello-panel"]
+                .load()
+                .unwrap_err()
+                .contains("changed after discovery")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_linked_package_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("org.example.linked")).unwrap();
+        let catalog = PluginCatalog::discover(root.path()).unwrap();
+        assert!(catalog.packages.is_empty());
+        assert_eq!(catalog.failures.len(), 1);
+        assert!(catalog.failures[0].reason.contains("ordinary directory"));
+    }
+
+    #[test]
+    fn discovery_bounds_the_number_of_directory_entries() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_PLUGIN_DIRECTORIES {
+            std::fs::create_dir(root.path().join(format!("org.example.plugin-{index}"))).unwrap();
+        }
+        assert!(
+            PluginCatalog::discover(root.path())
+                .err()
+                .is_some_and(|error| error.contains("exceeds 64 entries"))
+        );
+    }
 
     #[test]
     fn loads_a_bounded_plugin_package_from_disk() {

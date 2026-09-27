@@ -158,6 +158,10 @@ path = "src/bin/nickel-nested.rs"
 required-features = ["backend-winit"]
 
 [[bin]]
+name = "nickel-plugin"
+path = "src/bin/nickel-plugin.rs"
+
+[[bin]]
 name = "nickel-login"
 path = "src/bin/nickel-login.rs"
 
