@@ -20,6 +20,8 @@ Usage:
   nickel-test-input outputs
   nickel-test-input output-set NAME enabled|disabled
   nickel-test-input surfaces
+  nickel-test-input plugins
+  nickel-test-input plugin-set ID enabled|disabled
   nickel-test-input readiness
   nickel-test-input keyboard-status
   nickel-test-input semantic keyboard KEY_ID
@@ -74,6 +76,11 @@ enum Parsed {
         enabled: bool,
     },
     Surfaces,
+    Plugins,
+    PluginSet {
+        id: String,
+        enabled: bool,
+    },
     Readiness,
     OutputConnect {
         name: String,
@@ -134,6 +141,15 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
             },
         }),
         [command] if command == "surfaces" => Ok(Parsed::Surfaces),
+        [command] if command == "plugins" => Ok(Parsed::Plugins),
+        [command, id, state] if command == "plugin-set" => Ok(Parsed::PluginSet {
+            id: id.clone(),
+            enabled: match state.as_str() {
+                "enabled" => true,
+                "disabled" => false,
+                _ => return Err(format!("unknown plugin state {state:?}")),
+            },
+        }),
         [command] if command == "readiness" => Ok(Parsed::Readiness),
         [command] if command == "keyboard-status" => Ok(Parsed::KeyboardStatus),
         [command, kind, key] if command == "semantic" && kind == "keyboard" => {
@@ -746,6 +762,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Parsed::OutputSet { name, enabled } => Some((name.clone(), *enabled)),
         _ => None,
     };
+    let plugin_set = match &parsed {
+        Parsed::PluginSet { id, enabled } => Some((id.clone(), *enabled)),
+        _ => None,
+    };
     if let Parsed::GroupedWindowsScenario(application_id) = &parsed {
         return run_grouped_windows_scenario(application_id);
     }
@@ -783,6 +803,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(Request::Query(
                 nickel_session_protocol::Query::ShellSurfaces,
             )),
+            None,
+        ),
+        Parsed::Plugins => (
+            Some(Request::Query(nickel_session_protocol::Query::Plugins)),
+            None,
+        ),
+        Parsed::PluginSet { .. } => (
+            Some(Request::Query(nickel_session_protocol::Query::Plugins)),
             None,
         ),
         Parsed::Readiness => (
@@ -993,6 +1021,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("output update response has the wrong request ID".into());
         }
     }
+    if let Some((id, enabled)) = plugin_set {
+        let ServerMessage::Plugins(snapshot) = response_envelope.message.clone() else {
+            return Err("plugin query returned the wrong response".into());
+        };
+        if !snapshot.plugins.iter().any(|plugin| plugin.id == id) {
+            return Err(format!("unknown plugin {id:?}").into());
+        }
+        request_id += 1;
+        socket.send_to(
+            &encode(&ClientEnvelope {
+                token: token.clone(),
+                request_id,
+                request: Request::Command(Command::SetPluginEnabled {
+                    id,
+                    enabled,
+                    observed_generation: snapshot.activation_generation,
+                }),
+            })?,
+            &control,
+        )?;
+        length = socket.recv(&mut response)?;
+        response_envelope = decode::<ServerEnvelope>(&response[..length])?;
+        if response_envelope.request_id != request_id {
+            return Err("plugin update response has the wrong request ID".into());
+        }
+    }
     if let ServerMessage::ShellSemanticTarget(target) = response_envelope.message.clone() {
         request_id += 1;
         socket.send_to(
@@ -1039,6 +1093,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ServerMessage::Ack => Ok(()),
         ServerMessage::OnScreenKeyboard(snapshot) => {
+            println!("{}", serde_json::to_string(&snapshot)?);
+            Ok(())
+        }
+        ServerMessage::Plugins(snapshot) => {
             println!("{}", serde_json::to_string(&snapshot)?);
             Ok(())
         }
@@ -1190,6 +1248,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::Outputs
         | Parsed::OutputSet { .. }
         | Parsed::Surfaces
+        | Parsed::Plugins
+        | Parsed::PluginSet { .. }
         | Parsed::Readiness
         | Parsed::OutputConnect { .. }
         | Parsed::OutputDisconnect(_)
@@ -1246,6 +1306,11 @@ mod tests {
             Ok(Parsed::RuntimeDiagnostics)
         ));
         assert!(matches!(parse(["readiness".into()]), Ok(Parsed::Readiness)));
+        assert!(matches!(parse(["plugins".into()]), Ok(Parsed::Plugins)));
+        assert!(matches!(
+            parse(["plugin-set".into(), "org.nickel.launcher".into(), "disabled".into()]),
+            Ok(Parsed::PluginSet { id, enabled: false }) if id == "org.nickel.launcher"
+        ));
         assert!(matches!(
             parse([
                 "capture-output".into(),

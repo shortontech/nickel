@@ -60,6 +60,7 @@ fn run() -> Result<(), String> {
     command
         .arg("--test-control")
         .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_CONFIG_HOME", runtime.join("config"))
         .env("NICKEL_TEST_CONTROL_ENV_FILE", &capability_file)
         .env("NICKEL_NESTED_SIZE", "960x640")
         // This harness exercises compositor-owned UI, not the independent
@@ -125,7 +126,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor became ready, exposed shell surfaces, accepted keyboard and kernel-uinput controller ingress across reconnect, reported idle diagnostics, and shut down cleanly"
+            "PASS: nested compositor became ready, ran bundled launcher and taskbar plugins, disabled and restored the launcher with native fallback, exposed shell surfaces, accepted keyboard and kernel-uinput controller ingress across reconnect, reported idle diagnostics, and shut down cleanly"
     );
     Ok(())
 }
@@ -181,7 +182,63 @@ fn exercise(
             ));
         }
     }
+    let plugin_output = checked(test_input, &environment, &["plugins"])?;
+    let plugins: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&plugin_output).map_err(|error| error.to_string())?;
+    for id in ["org.nickel.taskbar", "org.nickel.launcher"] {
+        let plugin = plugins
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .ok_or_else(|| format!("missing bundled plugin {id}"))?;
+        if !plugin.desired_enabled
+            || plugin.health != nickel_session_protocol::PluginRuntimeHealth::Running
+        {
+            return Err(format!("bundled plugin {id} is not running: {:?}", plugin.health));
+        }
+    }
     assert_no_shell_child(compositor.id())?;
+    let disabled = checked(
+        test_input,
+        &environment,
+        &["plugin-set", "org.nickel.launcher", "disabled"],
+    )?;
+    let disabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
+    let launcher_status = disabled
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "org.nickel.launcher")
+        .ok_or("launcher missing after disable")?;
+    if launcher_status.desired_enabled
+        || launcher_status.health != nickel_session_protocol::PluginRuntimeHealth::Disabled
+        || launcher_status.memory.native_ui_bytes.is_some()
+    {
+        return Err("launcher did not retire and clear reported UI memory".into());
+    }
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
+    let enabled = checked(
+        test_input,
+        &environment,
+        &["plugin-set", "org.nickel.launcher", "enabled"],
+    )?;
+    let enabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&enabled).map_err(|error| error.to_string())?;
+    let launcher_status = enabled
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "org.nickel.launcher")
+        .ok_or("launcher missing after re-enable")?;
+    if !launcher_status.desired_enabled
+        || launcher_status.health != nickel_session_protocol::PluginRuntimeHealth::Running
+    {
+        return Err("launcher did not resume after re-enable".into());
+    }
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
     let toggled = checked(test_input, &environment, &["surfaces"])?;
