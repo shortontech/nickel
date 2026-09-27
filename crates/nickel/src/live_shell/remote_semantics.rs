@@ -59,6 +59,27 @@ fn observe_only(mut projection: Projection) -> Projection {
     projection
 }
 
+fn plugin_projection(
+    host: &nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    allowed: impl Fn(&str, nickel_ui::ActionKind) -> bool,
+) -> Result<Projection, String> {
+    let mut nodes = host
+        .bounded_semantic_nodes(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
+        .map_err(|_| "shell semantics are protected or exceed budget")?;
+    for node in &mut nodes {
+        let leaf = node.id.as_str().rsplit('/').next().unwrap_or_default();
+        node.actions.retain(|action| {
+            allowed(leaf, *action)
+                && (*action == nickel_ui::ActionKind::SetValue
+                    || host
+                        .message_for_semantic_action(&node.id, *action)
+                        .is_some())
+        });
+        node.enabled = !node.actions.is_empty();
+    }
+    Ok((host.resolved_frame_generation(), nodes))
+}
+
 fn launcher_activate(action: &LauncherAction) -> RemoteActionDisposition {
     match action {
         LauncherAction::SetView(_)
@@ -169,9 +190,10 @@ impl LiveShell {
                         self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
                     }
                     .ok_or("panel plugin viewport is unavailable")?;
-                    return Ok(observe_only(project(host, |_| {
-                        RemoteActionDisposition::Unavailable
-                    })?));
+                    return plugin_projection(host, |leaf, action| {
+                        matches!(action, nickel_ui::ActionKind::Activate)
+                            && matches!(leaf, "taskbar-launcher" | "taskbar-control")
+                    });
                 }
                 if output == self.panel_output.as_deref() {
                     project(&self.panel_host, panel_activate)
@@ -185,13 +207,33 @@ impl LiveShell {
                     )
                 }
             }
-            SurfaceRole::Launcher if self.run_visible => project(&self.run_host, run_activate),
-            SurfaceRole::Launcher => project(&self.launcher_host, launcher_activate),
+            SurfaceRole::Launcher if self.run_visible => {
+                if let Some(host) = self.plugin_run_host.as_ref() {
+                    plugin_projection(host, |leaf, action| {
+                        leaf == "run-command" && action == nickel_ui::ActionKind::SetValue
+                    })
+                } else {
+                    project(&self.run_host, run_activate)
+                }
+            }
+            SurfaceRole::Launcher => {
+                if let Some(host) = self.plugin_launcher_host.as_ref() {
+                    plugin_projection(host, |leaf, action| {
+                        leaf == "launcher-query" && action == nickel_ui::ActionKind::SetValue
+                    })
+                } else {
+                    project(&self.launcher_host, launcher_activate)
+                }
+            }
             SurfaceRole::ControlCenter => project(&self.control_host, control_activate),
             SurfaceRole::Notification => {
-                Ok(observe_only(project(&self.notification_host, |_| {
-                    RemoteActionDisposition::Unavailable
-                })?))
+                if let Some(host) = self.plugin_notification_host.as_ref() {
+                    Ok(observe_only(plugin_projection(host, |_, _| false)?))
+                } else {
+                    Ok(observe_only(project(&self.notification_host, |_| {
+                        RemoteActionDisposition::Unavailable
+                    })?))
+                }
             }
             SurfaceRole::VolumeOsd => project(&self.volume_osd_host, |_| {
                 RemoteActionDisposition::Unavailable
@@ -314,6 +356,14 @@ impl LiveShell {
         }
         let mut effects = Vec::new();
         let host = match role {
+            SurfaceRole::Launcher if self.run_visible && self.plugin_run_host.is_some() => {
+                let plugin = self.plugin_run_host.as_mut().expect("run plugin exists");
+                let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
+                if !plugin.application_mut().take_effects().is_empty() {
+                    return Err("run plugin requested an unguarded effect".into());
+                }
+                outcome
+            }
             SurfaceRole::Launcher if self.run_visible => {
                 let outcome = mutate(
                     &mut self.run_host,
@@ -329,6 +379,29 @@ impl LiveShell {
                             effects.push(RemoteShellEffect::Launcher(LauncherShellEffect::Dismiss))
                         }
                     }
+                }
+                outcome
+            }
+            SurfaceRole::Launcher if self.plugin_launcher_host.is_some() => {
+                let plugin = self
+                    .plugin_launcher_host
+                    .as_mut()
+                    .expect("launcher plugin exists");
+                let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
+                let requested = plugin.application_mut().take_effects();
+                let [crate::plugin_panel::PluginEffect::SetLauncherQuery(query)] =
+                    requested.as_slice()
+                else {
+                    return Err("launcher plugin requested an unguarded effect".into());
+                };
+                self.apply_launcher_action(LauncherAction::SetQuery(query.clone()));
+                if self.sync_plugin_launcher()
+                    && let Some(plugin) = self.plugin_launcher_host.as_mut()
+                {
+                    plugin.step(HostBatch {
+                        application_changed: true,
+                        ..HostBatch::default()
+                    });
                 }
                 outcome
             }
@@ -366,6 +439,37 @@ impl LiveShell {
                         .into_iter()
                         .map(RemoteShellEffect::Control),
                 );
+                outcome
+            }
+            SurfaceRole::Taskbar if self.plugin_taskbar_host.is_some() => {
+                let previous = self.panel_output.clone();
+                let token = self.panel_change_token;
+                self.switch_panel_output(output.map(str::to_owned));
+                let result: Result<_, String> = (|| {
+                    let plugin = self
+                        .plugin_taskbar_host
+                        .as_mut()
+                        .ok_or("panel plugin viewport is unavailable")?;
+                    let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
+                    let requested = plugin.application_mut().take_effects();
+                    let panel_action = match requested.as_slice() {
+                        [crate::plugin_panel::PluginEffect::ToggleLauncher] => {
+                            TaskbarAction::Launcher
+                        }
+                        [crate::plugin_panel::PluginEffect::ToggleControlCenter] => {
+                            TaskbarAction::Control
+                        }
+                        _ => return Err("taskbar plugin requested an unguarded effect".into()),
+                    };
+                    Ok((outcome, panel_action))
+                })();
+                self.switch_panel_output(previous);
+                self.panel_change_token = token;
+                let (outcome, panel_action) = result?;
+                effects.push(RemoteShellEffect::Panel(
+                    panel_action,
+                    output.map(str::to_owned),
+                ));
                 outcome
             }
             SurfaceRole::Taskbar => {
@@ -511,6 +615,80 @@ impl LiveShell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_taskbar_remote_controls_use_the_jsx_tree_and_guarded_effects() {
+        let mut shell = LiveShell::new().expect("live shell");
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        let (generation, nodes) = shell
+            .bounded_shell_semantics(SurfaceRole::Taskbar, None)
+            .expect("active taskbar semantics");
+        let launcher = nodes
+            .iter()
+            .position(|node| node.id.as_str().ends_with("/taskbar-launcher"))
+            .expect("JSX launcher button");
+        assert_eq!(
+            nodes[launcher].actions,
+            vec![nickel_ui::ActionKind::Activate]
+        );
+        assert!(nodes.iter().any(|node| {
+            node.id.as_str().ends_with("/taskbar-control")
+                && node.actions == [nickel_ui::ActionKind::Activate]
+        }));
+        assert!(nodes.iter().all(|node| {
+            !node.id.as_str().contains("/taskbar-item-") || node.actions.is_empty()
+        }));
+        let outcome = shell
+            .perform_bounded_shell_action(
+                SurfaceRole::Taskbar,
+                None,
+                generation,
+                launcher,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                2048,
+            )
+            .expect("guarded plugin action");
+        assert!(matches!(
+            outcome.effects.as_slice(),
+            [RemoteShellEffect::Panel(TaskbarAction::Launcher, None)]
+        ));
+    }
+
+    #[test]
+    fn bundled_run_remote_text_mutation_uses_the_jsx_form() {
+        let mut shell = LiveShell::new().expect("live shell");
+        shell.run_visible = true;
+        shell.launcher_visible = true;
+        let _ = shell.scene(SurfaceRole::Launcher, 620, 180);
+        let (generation, nodes) = shell
+            .bounded_shell_semantics(SurfaceRole::Launcher, None)
+            .expect("active Run semantics");
+        let command = nodes
+            .iter()
+            .position(|node| node.id.as_str().ends_with("/run-command"))
+            .expect("JSX Run field");
+        assert_eq!(nodes[command].actions, [nickel_ui::ActionKind::SetValue]);
+        let outcome = shell
+            .perform_bounded_shell_action(
+                SurfaceRole::Launcher,
+                None,
+                generation,
+                command,
+                nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                    "echo ready".into(),
+                )),
+                2048,
+            )
+            .expect("guarded Run input");
+        assert!(outcome.effects.is_empty());
+        let (_, updated) = shell
+            .bounded_shell_semantics(SurfaceRole::Launcher, None)
+            .unwrap();
+        assert!(updated.iter().any(|node| {
+            node.id.as_str().ends_with("/run-command")
+                && node.value == Some(nickel_ui::SemanticValueSnapshot::Text("echo ready".into()))
+        }));
+    }
 
     fn assert_advertised_actions_are_guarded<A: UiApplication>(
         host: &nickel_ui::UiHost<A>,
