@@ -5299,6 +5299,24 @@ impl LiveShell {
         if self.window_menu.is_some() || self.application_menu_target.is_some() {
             return self.window_menu_host_controller(action);
         }
+        if self.task_switcher_group.is_some() && self.preview_plugin_active() {
+            use nickel_core::hotkeys::HotkeyAction;
+            return match action {
+                ControllerAction::Left | ControllerAction::Up => {
+                    self.apply_task_switch_action(HotkeyAction::SwitchPrevious)
+                }
+                ControllerAction::Right | ControllerAction::Down => {
+                    self.apply_task_switch_action(HotkeyAction::SwitchNext)
+                }
+                ControllerAction::Confirm => {
+                    self.apply_task_switch_action(HotkeyAction::CommitSwitch)
+                }
+                ControllerAction::Cancel => {
+                    self.apply_task_switch_action(HotkeyAction::CancelSwitch)
+                }
+                _ => false,
+            };
+        }
         if self.preview_plugin_active() {
             if action == ControllerAction::Cancel {
                 self.close_window_preview();
@@ -5372,13 +5390,14 @@ impl LiveShell {
                     None,
                 )
                 .changed;
-            let group = self.preview_group.and_then(|index| {
-                self.panel_groups()
-                    .get(index)
-                    .map(|task| task.window_group())
-            });
+            let group = self.preview_plugin_group();
             let hovered = group.and_then(|group| {
-                group.windows.iter().take(12).find_map(|window| {
+                let limit = if self.task_switcher_group.is_some() {
+                    5
+                } else {
+                    12
+                };
+                group.windows.iter().take(limit).find_map(|window| {
                     let bounds = self.preview_plugin_bounds(PreviewAction::Activate(window.id))?;
                     (x >= bounds.origin.x
                         && y >= bounds.origin.y
@@ -5494,7 +5513,11 @@ impl LiveShell {
         match action {
             PreviewAction::Activate(window) => {
                 self.send_window_action(window, WindowAction::Activate);
-                self.close_window_preview();
+                if self.task_switcher_group.is_some() {
+                    self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
+                } else {
+                    self.close_window_preview();
+                }
             }
             PreviewAction::Close(window) => {
                 self.send_window_action(window, WindowAction::Close);
@@ -5552,6 +5575,33 @@ impl LiveShell {
     pub fn preview_key(&mut self, key: Option<KeyCode>) -> bool {
         if self.window_menu.is_some() || self.application_menu_target.is_some() {
             return self.window_menu_host_key(key);
+        }
+        if self.task_switcher_group.is_some() && self.preview_plugin_active() {
+            use nickel_core::hotkeys::HotkeyAction;
+            return match key {
+                Some(KeyCode::Escape) => self.apply_task_switch_action(HotkeyAction::CancelSwitch),
+                Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
+                    self.apply_task_switch_action(HotkeyAction::SwitchPrevious)
+                }
+                Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
+                    self.apply_task_switch_action(HotkeyAction::SwitchNext)
+                }
+                Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
+                    self.apply_task_switch_action(HotkeyAction::CommitSwitch)
+                }
+                Some(KeyCode::Delete) => {
+                    let Some(window) = self.task_switcher.selected().copied() else {
+                        return false;
+                    };
+                    if self.preview_plugin_action_allowed(PreviewAction::Close(window)) {
+                        self.apply_preview_action(PreviewAction::Close(window));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
         }
         if self.preview_plugin_active() {
             let Some(size) = self.preview_plugin_size() else {
@@ -6327,26 +6377,7 @@ impl LiveShell {
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
         self.preview_frame = None;
-        if let Some(host) = self.plugin_preview_host.as_mut() {
-            let data_changed = host
-                .application_mut()
-                .sync_window_preview_data(&serde_json::json!({"windows": []}))
-                .unwrap_or(false);
-            let images_changed = host.application_mut().sync_images(Default::default());
-            let outcome = host.step(HostBatch {
-                application_changed: data_changed || images_changed,
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-            let _ = self.plugin_registry.record_memory(
-                &crate::plugin_panel::window_preview_manifest().id,
-                nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
-                    ..Default::default()
-                },
-            );
-        }
-        self.maybe_publish_plugin_status();
+        self.clear_preview_plugin_payload();
         self.window_menu = None;
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
@@ -6374,6 +6405,29 @@ impl LiveShell {
         let _ =
             self.send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
         let _ = self.send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
+    }
+
+    fn clear_preview_plugin_payload(&mut self) {
+        if let Some(host) = self.plugin_preview_host.as_mut() {
+            let data_changed = host
+                .application_mut()
+                .sync_window_preview_data(&serde_json::json!({"windows": []}))
+                .unwrap_or(false);
+            let images_changed = host.application_mut().sync_images(Default::default());
+            let outcome = host.step(HostBatch {
+                application_changed: data_changed || images_changed,
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            let _ = self.plugin_registry.record_memory(
+                &crate::plugin_panel::window_preview_manifest().id,
+                nickel_core::plugins::PluginMemory {
+                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        self.maybe_publish_plugin_status();
     }
 
     fn dismiss_window_menu(&mut self) {
@@ -6655,6 +6709,7 @@ impl LiveShell {
                     self.task_switcher_group = None;
                     self.preview_frame = None;
                     self.preview_images.clear();
+                    self.clear_preview_plugin_payload();
                 }
                 TaskSwitchEffect::SelectPreview(_) => {
                     #[cfg(target_os = "windows")]
@@ -8262,7 +8317,11 @@ impl LiveShell {
                     false
                 });
             let images_changed = host.application_mut().sync_images(images);
-            let (width, height) = preview_dimensions(group.windows.len());
+            let (width, height) = if self.task_switcher_group.is_some() {
+                task_switcher_dimensions(group.windows.len())
+            } else {
+                preview_dimensions(group.windows.len())
+            };
             let outcome = host.step(HostBatch {
                 application_changed: data_changed || images_changed,
                 surface_size: Some((width, height)),
@@ -8300,8 +8359,17 @@ impl LiveShell {
 
     fn preview_plugin_active(&self) -> bool {
         self.plugin_preview_host.is_some()
-            && self.preview_group.is_some()
-            && self.task_switcher_group.is_none()
+            && (self.preview_group.is_some() || self.task_switcher_group.is_some())
+    }
+
+    fn preview_plugin_group(&mut self) -> Option<crate::model::WindowGroup> {
+        self.task_switcher_group.clone().or_else(|| {
+            self.preview_group.and_then(|index| {
+                self.panel_groups()
+                    .get(index)
+                    .map(|task| task.window_group())
+            })
+        })
     }
 
     fn preview_plugin_action_allowed(&mut self, action: PreviewAction) -> bool {
@@ -8313,14 +8381,20 @@ impl LiveShell {
         else {
             return action == PreviewAction::Dismiss;
         };
-        let Some(group) = self.preview_group.and_then(|index| {
-            self.panel_groups()
-                .get(index)
-                .map(|task| task.window_group())
-        }) else {
+        let Some(group) = self.preview_plugin_group() else {
             return false;
         };
-        let Some(projected) = group.windows.iter().take(12).find(|window| window.id == id) else {
+        let limit = if self.task_switcher_group.is_some() {
+            5
+        } else {
+            12
+        };
+        let Some(projected) = group
+            .windows
+            .iter()
+            .take(limit)
+            .find(|window| window.id == id)
+        else {
             return false;
         };
         let Some(current) = self.windows.iter().find(|window| window.id == id) else {
@@ -8354,12 +8428,12 @@ impl LiveShell {
     }
 
     fn preview_plugin_size(&mut self) -> Option<(u32, u32)> {
-        let group = self.preview_group.and_then(|index| {
-            self.panel_groups()
-                .get(index)
-                .map(|task| task.window_group())
-        })?;
-        Some(preview_dimensions(group.windows.len()))
+        let group = self.preview_plugin_group()?;
+        Some(if self.task_switcher_group.is_some() {
+            task_switcher_dimensions(group.windows.len())
+        } else {
+            preview_dimensions(group.windows.len())
+        })
     }
 
     fn preview_plugin_selected_window(&mut self) -> Option<crate::model::WindowId> {
@@ -8368,12 +8442,13 @@ impl LiveShell {
             .as_ref()?
             .inspect()
             .controller_target?;
-        let group = self.preview_group.and_then(|index| {
-            self.panel_groups()
-                .get(index)
-                .map(|task| task.window_group())
-        })?;
-        group.windows.iter().take(12).find_map(|window| {
+        let group = self.preview_plugin_group()?;
+        let limit = if self.task_switcher_group.is_some() {
+            5
+        } else {
+            12
+        };
+        group.windows.iter().take(limit).find_map(|window| {
             let message = self
                 .plugin_preview_host
                 .as_ref()?
@@ -8392,10 +8467,13 @@ impl LiveShell {
         &self,
         group: &crate::model::WindowGroup,
     ) -> (serde_json::Value, crate::plugin_panel::PluginImages) {
+        let switcher = self.task_switcher_group.is_some();
+        let limit = if switcher { 5 } else { 12 };
+        let selected = self.task_switcher.selected().copied();
         let windows = group
             .windows
             .iter()
-            .take(12)
+            .take(limit)
             .enumerate()
             .map(|(index, window)| {
                 let title = if window.title.is_empty() {
@@ -8408,11 +8486,29 @@ impl LiveShell {
                 } else {
                     title
                 };
+                let title = title.chars().take(120).collect::<String>();
+                let accessible_name = if switcher {
+                    format!(
+                        "{}, {} of {}{}",
+                        title,
+                        index + 1,
+                        group.windows.len(),
+                        if selected == Some(window.id) {
+                            ", selected"
+                        } else {
+                            ""
+                        }
+                    )
+                } else {
+                    title.clone()
+                };
                 serde_json::json!({
                     "id": window.id.0.to_string(),
-                    "title": title.chars().take(120).collect::<String>(),
-                    "accessibleName": title.chars().take(120).collect::<String>(),
+                    "title": title,
+                    "accessibleName": accessible_name,
                     "closable": window.state.capabilities.close,
+                    "selected": switcher && selected == Some(window.id),
+                    "imageWidth": if switcher { 188 } else { 244 },
                     "index": index,
                 })
             })
@@ -8420,7 +8516,7 @@ impl LiveShell {
         let images = group
             .windows
             .iter()
-            .take(12)
+            .take(limit)
             .enumerate()
             .filter_map(|(index, window)| {
                 self.preview_images.get(&window.id).map(|image| {
@@ -8431,7 +8527,10 @@ impl LiveShell {
                 })
             })
             .collect();
-        (serde_json::json!({"windows": windows}), images)
+        (
+            serde_json::json!({"windows": windows, "taskSwitcher": switcher}),
+            images,
+        )
     }
 
     fn preview_plugin_event(
@@ -8440,11 +8539,7 @@ impl LiveShell {
         size: (u32, u32),
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
-        let Some(group) = self.preview_group.and_then(|index| {
-            self.panel_groups()
-                .get(index)
-                .map(|task| task.window_group())
-        }) else {
+        let Some(group) = self.preview_plugin_group() else {
             return Default::default();
         };
         let (data, images) = self.preview_plugin_projection(&group);

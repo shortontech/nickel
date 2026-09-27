@@ -95,6 +95,83 @@
     }
 
     #[test]
+    fn task_switcher_cards_render_in_jsx_and_activate_through_the_host() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.windows = [WindowId(71), WindowId(72)]
+            .into_iter()
+            .map(|id| OpenWindow {
+                id,
+                application_id: None,
+                active: id == WindowId(71),
+                title: format!("Window {}", id.0),
+                state: Default::default(),
+            })
+            .collect();
+        let candidates = shell
+            .windows
+            .iter()
+            .map(|window| nickel_core::task_switcher::SwitchWindow {
+                id: window.id,
+                application_id: window.title.clone(),
+                active: window.active,
+            })
+            .collect::<Vec<_>>();
+        shell.task_switcher.apply(
+            nickel_core::hotkeys::HotkeyAction::SwitchNext,
+            &candidates,
+        );
+        shell.rebuild_task_switcher_preview();
+        assert!(!shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
+        assert!(shell.preview_plugin_active());
+        assert!(shell.preview_frame.is_none());
+        let group = shell.task_switcher_group.clone().unwrap();
+        let (projection, _) = shell.preview_plugin_projection(&group);
+        assert_eq!(projection["taskSwitcher"], true);
+        assert_eq!(
+            projection["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|window| window["selected"] == true)
+                .count(),
+            1
+        );
+
+        let action = crate::window_preview::PreviewAction::Activate(WindowId(71));
+        let bounds = shell.preview_plugin_bounds(action).unwrap();
+        host.take_commands();
+        assert!(shell.preview_click(
+            bounds.origin.x + bounds.size.width / 2.0,
+            bounds.origin.y + bounds.size.height / 2.0,
+            false,
+        ));
+        assert!(host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::WindowAction {
+                window: WindowId(71),
+                action: crate::platform::WindowAction::Activate,
+            }
+        )));
+        assert!(shell.task_switcher.session().is_none());
+        assert!(shell.task_switcher_group.is_none());
+
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::window_preview_manifest().id, false)
+            .unwrap();
+        shell.task_switcher.apply(
+            nickel_core::hotkeys::HotkeyAction::SwitchNext,
+            &candidates,
+        );
+        shell.rebuild_task_switcher_preview();
+        assert!(!shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
+        assert!(!shell.preview_plugin_active());
+        assert!(shell.preview_frame.is_some());
+    }
+
+    #[test]
     fn volume_osd_plugin_can_retire_and_restore_native_fallback() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::volume_osd_manifest().id;

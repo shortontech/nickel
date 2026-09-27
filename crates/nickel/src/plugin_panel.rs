@@ -2734,7 +2734,7 @@ mod tests {
     fn bundled_window_preview_renders_and_requests_a_typed_window_action() {
         let data = serde_json::json!({"windows": [{
             "id": "71", "title": "Document", "accessibleName": "Document",
-            "closable": true, "index": 0
+            "closable": true, "index": 0, "imageWidth": 244, "selected": false
         }]});
         let app = PluginPanelApplication::window_preview_with_data(&data).unwrap();
         let mut host = nickel_ui::UiHost::new(app, 300, 214);

@@ -5,7 +5,7 @@ function PreviewCard(props) {
     const request = action => nickel.request({ type: "preview-action", action, window: window.id });
     return h(Column, null,
         h(Row, null,
-            h(Text, null, window.title),
+            h(Text, null, window.selected ? "● " + window.title : window.title),
             window.closable ? h(Button, {
                 id: "preview-close-" + window.id,
                 accessibilityLabel: "Close " + window.title,
@@ -14,7 +14,7 @@ function PreviewCard(props) {
         h(ImageButton, {
             id: "preview-window-" + window.id,
             asset: "window:" + window.id,
-            width: 244,
+            width: window.imageWidth,
             height: 116,
             fit: "contain",
             accessibilityLabel: window.accessibleName,

@@ -1263,11 +1263,15 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
     let mut shell = LiveShell::new_with_hosts(session.clone(), files.clone()).expect("live shell");
 
     shell.apply_session_launcher_visibility(true);
-    shell.launcher_host.step(HostBatch {
-        surface_size: Some((920, 680)),
-        ..HostBatch::default()
-    });
-    assert!(shell.launcher_host.inspect().keyboard_focus.is_some());
+    assert!(
+        shell
+            .plugin_launcher_host
+            .as_ref()
+            .unwrap()
+            .inspect()
+            .keyboard_focus
+            .is_some()
+    );
 
     shell.windows = vec![
         OpenWindow {
@@ -1309,9 +1313,10 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
         .expect("task switcher preview token");
     assert!(shell.global_shortcut(crate::platform::GlobalShortcut::SwitchNext));
     assert!(
-        shell.preview_frame.is_some(),
-        "consecutive switch steps must retain the preview host so its presentation token advances"
+        shell.plugin_preview_host.is_some(),
+        "consecutive switch steps must retain the JSX preview host so its presentation token advances"
     );
+    assert!(shell.preview_frame.is_none());
     let _ = shell.scene(preview_role, 640, 240);
     assert_ne!(
         shell.scene_change_token(preview_role),
