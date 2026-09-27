@@ -1123,6 +1123,8 @@ pub struct PluginStatus {
     pub health: PluginRuntimeHealth,
     pub capabilities: Vec<String>,
     pub surfaces: Vec<String>,
+    #[serde(default)]
+    pub composition: Vec<String>,
     pub memory: PluginMemorySnapshot,
 }
 
@@ -1906,6 +1908,7 @@ mod tests {
                 health: PluginRuntimeHealth::Running,
                 capabilities: vec!["applications-read".into()],
                 surfaces: vec!["main: window".into()],
+                composition: Vec::new(),
                 memory: PluginMemorySnapshot {
                     js_heap_bytes: None,
                     native_ui_bytes: Some(4096),

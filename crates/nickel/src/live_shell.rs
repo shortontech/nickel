@@ -3020,6 +3020,32 @@ impl LiveShell {
                         .iter()
                         .map(|surface| format!("{}: {}", surface.id, surface.kind.as_str()))
                         .collect(),
+                    composition: entry
+                        .manifest
+                        .provides_slots
+                        .iter()
+                        .map(|slot| {
+                            format!(
+                                "Provides {} ({}){}",
+                                slot.id,
+                                slot.contract.as_str(),
+                                if slot.replaceable {
+                                    ", replaceable"
+                                } else {
+                                    ""
+                                }
+                            )
+                        })
+                        .chain(entry.manifest.contributes.iter().map(|contribution| {
+                            format!(
+                                "{} {}/{} ({})",
+                                contribution.mode.as_str(),
+                                contribution.target_plugin,
+                                contribution.target_slot,
+                                contribution.contract.as_str()
+                            )
+                        }))
+                        .collect(),
                     memory: PluginMemorySnapshot {
                         js_heap_bytes: entry.memory.js_heap_bytes,
                         native_ui_bytes: entry.memory.native_ui_bytes,
@@ -3058,6 +3084,11 @@ impl LiveShell {
         };
         if entry.desired_enabled == enabled {
             return Ok(false);
+        }
+        if enabled && !entry.manifest.contributes.is_empty() {
+            return Err(
+                "plugin contributions are declared but this runtime cannot compose them yet".into(),
+            );
         }
         let external_panel = if enabled {
             if let Some(descriptor) = self.external_plugin_packages.get(id) {

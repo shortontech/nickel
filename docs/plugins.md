@@ -39,3 +39,11 @@ host asset renders a placeholder without giving the plugin filesystem access.
 Nickel does not embed
 React, a browser DOM, or the TypeScript compiler. The host checks declared
 capabilities and current shell state before executing a requested effect.
+
+Manifests may declare typed composition relationships. A target declares a
+`provides_slots` entry with an ID, a `badge`, `widget`, `action`, or `section`
+contract, and whether replacement is allowed. An extension declares a
+`contributes` entry with `target_plugin`, `target_slot`, matching `contract`,
+and `mode` (`add` or `replace`). Nickel validates these declarations and shows
+them in Settings' enable review. Runtime composition is still in development;
+the shell rejects activation of a contribution until it can apply it.

@@ -236,6 +236,66 @@ pub struct PluginManifest {
     pub surfaces: Vec<PluginSurface>,
     #[serde(default)]
     pub capabilities: Vec<PluginCapability>,
+    #[serde(default)]
+    pub provides_slots: Vec<PluginProvidedSlot>,
+    #[serde(default)]
+    pub contributes: Vec<PluginContribution>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginProvidedSlot {
+    pub id: String,
+    pub contract: PluginSlotContract,
+    #[serde(default)]
+    pub replaceable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginContribution {
+    pub target_plugin: String,
+    pub target_slot: String,
+    pub contract: PluginSlotContract,
+    pub mode: PluginContributionMode,
+    #[serde(default)]
+    pub priority: i16,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginSlotContract {
+    Badge,
+    Widget,
+    Action,
+    Section,
+}
+
+impl PluginSlotContract {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Badge => "badge",
+            Self::Widget => "widget",
+            Self::Action => "action",
+            Self::Section => "section",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginContributionMode {
+    Add,
+    Replace,
+}
+
+impl PluginContributionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Replace => "replace",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -413,6 +473,29 @@ impl PluginManifest {
         for capability in &self.capabilities {
             if !capabilities.insert(capability) {
                 return Err(format!("duplicate capability {capability:?}"));
+            }
+        }
+        if self.provides_slots.len() > 32 || self.contributes.len() > 32 {
+            return Err("plugin declares too many composition slots".into());
+        }
+        let mut slot_ids = HashSet::new();
+        for slot in &self.provides_slots {
+            if !valid_identifier(&slot.id) || !slot_ids.insert(&slot.id) {
+                return Err(format!("invalid or duplicate provided slot {:?}", slot.id));
+            }
+        }
+        let mut contribution_targets = HashSet::new();
+        for contribution in &self.contributes {
+            if !valid_identifier(&contribution.target_plugin)
+                || !valid_identifier(&contribution.target_slot)
+                || contribution.target_plugin == self.id
+            {
+                return Err("contribution needs another valid plugin and slot".into());
+            }
+            if !contribution_targets
+                .insert((&contribution.target_plugin, &contribution.target_slot))
+            {
+                return Err("duplicate contribution target".into());
             }
         }
         Ok(())
@@ -738,6 +821,34 @@ mod tests {
             PluginManifest::from_json(&VALID.replace(
                 "\"capabilities\": []",
                 "\"capabilities\": [\"unrestricted-native\"]"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_typed_composition_declarations() {
+        let source = VALID.replace(
+            "\"capabilities\": []",
+            "\"capabilities\": [], \"provides_slots\": [{\"id\":\"metrics\",\"contract\":\"widget\",\"replaceable\":true}], \"contributes\": [{\"target_plugin\":\"org.nickel.taskbar\",\"target_slot\":\"task-badge\",\"contract\":\"badge\",\"mode\":\"add\"}]",
+        );
+        let manifest = PluginManifest::from_json(&source).unwrap();
+        assert!(manifest.provides_slots[0].replaceable);
+        assert_eq!(manifest.contributes[0].mode, PluginContributionMode::Add);
+        assert!(
+            PluginManifest::from_json(&source.replace("\"mode\":\"add\"", "\"mode\":\"mutate\""))
+                .is_err()
+        );
+        assert!(
+            PluginManifest::from_json(
+                &source.replace("org.nickel.taskbar", "org.nickel.hello-panel")
+            )
+            .is_err()
+        );
+        assert!(
+            PluginManifest::from_json(&source.replace(
+                "\"target_slot\":\"task-badge\"",
+                "\"target_slot\":\"../task-badge\""
             ))
             .is_err()
         );

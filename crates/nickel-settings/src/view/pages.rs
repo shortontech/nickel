@@ -84,10 +84,16 @@ impl SettingsApp {
                 } else {
                     plugin.surfaces.join(", ")
                 };
+                let composition = if plugin.composition.is_empty() {
+                    "No extension changes".to_owned()
+                } else {
+                    plugin.composition.join(", ")
+                };
                 content = content.child(
                     SettingsCard::titled(theme, &format!("Enable {}?", plugin.name), &plugin.id)
                         .child(SettingsRow::new(theme, "Access requested", grants))
                         .child(SettingsRow::new(theme, "Surfaces affected", surfaces))
+                        .child(SettingsRow::new(theme, "Composition changes", composition))
                         .child(
                             Row::new()
                                 .gap(12.0)
@@ -156,6 +162,11 @@ impl SettingsApp {
                 } else {
                     plugin.surfaces.join(", ")
                 };
+                let composition = if plugin.composition.is_empty() {
+                    "None".to_owned()
+                } else {
+                    plugin.composition.join(", ")
+                };
                 let card = SettingsCard::titled(theme, &plugin.name, &plugin.id)
                     .child(
                         SettingsRow::new(theme, "Enabled", health).trailing(
@@ -166,6 +177,7 @@ impl SettingsApp {
                     )
                     .child(SettingsRow::new(theme, "Access", grants))
                     .child(SettingsRow::new(theme, "Surfaces", surfaces))
+                    .child(SettingsRow::new(theme, "Composition", composition))
                     .child(SettingsRow::new(
                         theme,
                         "Tracked memory (lower bound)",

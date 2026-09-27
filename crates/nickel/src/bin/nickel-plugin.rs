@@ -57,6 +57,18 @@ fn main() -> Result<(), String> {
             for capability in &package.manifest.capabilities {
                 println!("access: {}", capability.as_str());
             }
+            for slot in &package.manifest.provides_slots {
+                println!("provides: {} ({})", slot.id, slot.contract.as_str());
+            }
+            for contribution in &package.manifest.contributes {
+                println!(
+                    "contributes: {} {}/{} ({})",
+                    contribution.mode.as_str(),
+                    contribution.target_plugin,
+                    contribution.target_slot,
+                    contribution.contract.as_str()
+                );
+            }
             Ok(())
         }
         Some(command) if command == "dev" => {

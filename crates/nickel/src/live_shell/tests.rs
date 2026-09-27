@@ -35,6 +35,46 @@ include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
 
 #[test]
+fn declared_extension_is_reviewable_but_cannot_run_before_composition_exists() {
+    let mut shell = LiveShell::new().unwrap();
+    let manifest = nickel_core::plugins::PluginManifest::from_json(
+        r#"{
+        "api_version": 1,
+        "id": "org.example.badge",
+        "name": "Mail badge",
+        "entry": "main.js",
+        "capabilities": [],
+        "contributes": [{
+            "target_plugin": "org.nickel.taskbar",
+            "target_slot": "task-badge",
+            "contract": "badge",
+            "mode": "add"
+        }]
+    }"#,
+    )
+    .unwrap();
+    let id = manifest.id.clone();
+    shell.plugin_registry.register(manifest).unwrap();
+    let status = shell.plugin_status_snapshot();
+    let extension = status
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .unwrap();
+    assert_eq!(
+        extension.composition,
+        ["add org.nickel.taskbar/task-badge (badge)"]
+    );
+    assert!(
+        shell
+            .set_plugin_enabled(&id, true)
+            .unwrap_err()
+            .contains("cannot compose")
+    );
+    assert!(!shell.plugin_registry.get(&id).unwrap().desired_enabled);
+}
+
+#[test]
 fn installed_panel_can_be_enabled_measured_and_disabled() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.panel");

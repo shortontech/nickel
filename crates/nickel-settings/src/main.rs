@@ -2792,6 +2792,7 @@ mod tests {
                 health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
                 capabilities: vec!["applications-read".into(), "applications-launch".into()],
                 surfaces: vec!["main: window".into()],
+                composition: Vec::new(),
                 memory: nickel_session_protocol::PluginMemorySnapshot {
                     native_ui_bytes: Some(4096),
                     tracked_peak_bytes: Some(8192),
@@ -2830,6 +2831,7 @@ mod tests {
                 health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
                 capabilities: vec!["windows-read".into()],
                 surfaces: vec!["main: panel".into()],
+                composition: vec!["add org.nickel.taskbar/task-badge (badge)".into()],
                 memory: Default::default(),
             }],
         });
@@ -2851,6 +2853,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(labels.contains(&"windows-read"));
         assert!(labels.contains(&"main: panel"));
+        assert!(labels.contains(&"add org.nickel.taskbar/task-badge (badge)"));
 
         let app = host.application_mut();
         app.plugin_status.as_mut().unwrap().activation_generation = 5;
@@ -2889,6 +2892,7 @@ mod tests {
                 health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
                 capabilities: Vec::new(),
                 surfaces: Vec::new(),
+                composition: Vec::new(),
                 memory: Default::default(),
             }],
         });
