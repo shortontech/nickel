@@ -10,11 +10,14 @@ output scope, and granted shell actions.
 
 `nickel-plugin dev assets/plugins/hello-panel` compiles `main.jsx`
 automatically into its isolated profile and reloads the nested shell on edits.
+Run `tsc -p assets/plugins/hello-panel` from the workspace root to check JSX
+props and hook types against the bundled `nickel-plugin.d.ts` declarations.
 TypeScript's CLI is used only during development. To regenerate the packaged
 `main.js` entry yourself:
 
 ```sh
-tsc --allowJs --checkJs false --jsx react --jsxFactory h --target ES2020 \
+tsc --allowJs --checkJs false --noCheck --jsx react --jsxFactory h \
+  --target ES2020 --lib ES2020 --module none \
   --outDir assets/plugins/hello-panel assets/plugins/hello-panel/main.jsx
 ```
 

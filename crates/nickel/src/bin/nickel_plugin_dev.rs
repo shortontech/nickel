@@ -63,6 +63,8 @@ fn compile_jsx(
             "h",
             "--target",
             "ES2020",
+            "--lib",
+            "ES2020",
             "--module",
             "none",
             "--rootDir",

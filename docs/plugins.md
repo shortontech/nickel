@@ -33,8 +33,17 @@ example:
 
 ```sh
 tsc --allowJs --checkJs false --noCheck --noEmitOnError --jsx react \
-  --jsxFactory h --target ES2020 --module none --outDir . main.jsx
+  --jsxFactory h --target ES2020 --lib ES2020 --module none --outDir . main.jsx
 ```
+
+Copy [Nickel's JSX declarations](../assets/plugins/nickel-plugin.d.ts) into
+your source project and reference them from your `.jsx` or `.tsx` file. The
+hello-panel example includes a `tsconfig.json` for editor checking; run
+`tsc -p assets/plugins/hello-panel` from the repository root to check its
+props and hooks. Use `lib: ["ES2020"]`: plugins have no browser DOM, and the
+DOM library's `Text` and `Image` globals conflict with Nickel's components.
+The `dev` command transpiles with `--noCheck` so an editor type error does not
+prevent testing; `tsc -p` gives the stricter check before packaging.
 
 The runtime provides `h`, `Panel`, `Row`, `Column`, `Text`, `Button`, `Dialog`,
 `Image`, `ImageButton`, `useState`, `useRef`, and other small native components.

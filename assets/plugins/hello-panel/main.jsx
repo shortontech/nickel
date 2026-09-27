@@ -1,3 +1,4 @@
+/// <reference path="../nickel-plugin.d.ts" />
 // @jsx h
 // This is the source for the bundled development panel. Run `tsc` with
 // --allowJs --jsx react --jsxFactory h to regenerate main.js.
