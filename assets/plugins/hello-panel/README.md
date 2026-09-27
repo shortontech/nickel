@@ -8,7 +8,10 @@ and `useRef`;
 React is not loaded. `plugin.json` declares the entry, surface geometry,
 output scope, and granted shell actions.
 
-Build the JSX with TypeScript's CLI (used only as a development compiler):
+`nickel-plugin dev assets/plugins/hello-panel` compiles `main.jsx`
+automatically into its isolated profile and reloads the nested shell on edits.
+TypeScript's CLI is used only during development. To regenerate the packaged
+`main.js` entry yourself:
 
 ```sh
 tsc --allowJs --checkJs false --jsx react --jsxFactory h --target ES2020 \

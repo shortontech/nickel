@@ -1,4 +1,4 @@
-//! Isolated edit loop for one external panel package.
+//! Isolated edit loop for an external panel or taskbar badge package.
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -15,16 +15,122 @@ mod linux {
     };
 
     use nickel_core::plugins::{
-        PluginActivationSettings, PluginManifest, PluginPackage, PluginSurfaceKind,
+        MAX_PLUGIN_ENTRY_BYTES, PluginActivationSettings, PluginContributionMode, PluginManifest,
+        PluginPackage, PluginSlotContract, PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::PluginPanelApplication;
 
-    fn load_panel(directory: &Path) -> Result<PluginPackage, String> {
-        let package = PluginPackage::load(directory)?;
-        if package.manifest.surfaces.len() != 1
-            || package.manifest.surfaces[0].kind != PluginSurfaceKind::Panel
+    fn jsx_source(directory: &Path, entry: &str) -> Result<Option<PathBuf>, String> {
+        let candidates = ["tsx", "jsx"]
+            .map(|extension| Path::new(entry).with_extension(extension))
+            .into_iter()
+            .filter(|source| directory.join(source).exists())
+            .collect::<Vec<_>>();
+        let [source] = candidates.as_slice() else {
+            return if candidates.is_empty() {
+                Ok(None)
+            } else {
+                Err("both .jsx and .tsx sources exist for the declared entry".into())
+            };
+        };
+        let metadata = std::fs::symlink_metadata(directory.join(source))
+            .map_err(|error| format!("could not inspect JSX source: {error}"))?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > MAX_PLUGIN_ENTRY_BYTES as u64
         {
-            return Err("dev currently needs exactly one panel surface".into());
+            return Err("JSX source must be an ordinary file of at most 2 MiB".into());
+        }
+        let resolved = std::fs::canonicalize(directory.join(source))
+            .map_err(|error| format!("could not resolve JSX source: {error}"))?;
+        if !resolved.starts_with(directory) {
+            return Err("JSX source escapes its plugin directory".into());
+        }
+        Ok(Some(source.clone()))
+    }
+
+    fn compile_jsx(
+        directory: &Path,
+        manifest: &PluginManifest,
+        source: &Path,
+    ) -> Result<String, String> {
+        let output = tempfile::tempdir()
+            .map_err(|error| format!("could not create JSX build directory: {error}"))?;
+        let compiler = directory.join("node_modules/.bin/tsc");
+        let compiler = if compiler.is_file() {
+            compiler.into_os_string()
+        } else {
+            "tsc".into()
+        };
+        let status = Command::new(compiler)
+            .current_dir(directory)
+            .args([
+                "--allowJs",
+                "--checkJs",
+                "false",
+                "--noCheck",
+                "--noEmitOnError",
+                "--jsx",
+                "react",
+                "--jsxFactory",
+                "h",
+                "--target",
+                "ES2020",
+                "--module",
+                "none",
+                "--rootDir",
+            ])
+            .arg(directory)
+            .arg("--outDir")
+            .arg(output.path())
+            .arg(source)
+            .status()
+            .map_err(|error| format!("could not run TypeScript compiler (tsc): {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "JSX compilation failed with {status}; the previous session stays running"
+            ));
+        }
+        let compiled = output.path().join(&manifest.entry);
+        let metadata = std::fs::symlink_metadata(&compiled)
+            .map_err(|error| format!("compiler did not produce {}: {error}", manifest.entry))?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > MAX_PLUGIN_ENTRY_BYTES as u64
+        {
+            return Err("compiled JavaScript must be an ordinary file of at most 2 MiB".into());
+        }
+        std::fs::read_to_string(&compiled)
+            .map_err(|error| format!("could not read compiled JavaScript: {error}"))
+    }
+
+    fn load_panel(directory: &Path) -> Result<PluginPackage, String> {
+        let manifest_bytes = std::fs::read(directory.join("plugin.json"))
+            .map_err(|error| format!("could not read plugin.json: {error}"))?;
+        let manifest_source = std::str::from_utf8(&manifest_bytes)
+            .map_err(|error| format!("plugin.json is not UTF-8: {error}"))?;
+        let manifest = PluginManifest::from_json(manifest_source)?;
+        let package = if let Some(source) = jsx_source(directory, &manifest.entry)? {
+            PluginPackage {
+                source: compile_jsx(directory, &manifest, &source)?,
+                manifest,
+            }
+        } else {
+            PluginPackage::load(directory)?
+        };
+        let panel = package.manifest.surfaces.len() == 1
+            && package.manifest.surfaces[0].kind == PluginSurfaceKind::Panel
+            && package.manifest.contributes.is_empty();
+        let badge = package.manifest.surfaces.is_empty()
+            && matches!(package.manifest.contributes.as_slice(), [contribution]
+                if contribution.target_plugin == "org.nickel.taskbar"
+                    && contribution.target_slot == "task-badge"
+                    && contribution.contract == PluginSlotContract::Badge
+                    && contribution.mode == PluginContributionMode::Add);
+        if !panel && !badge {
+            return Err(
+                "dev currently needs one panel or one surface-free badge contribution".into(),
+            );
         }
         PluginPanelApplication::from_package(&package)
             .map_err(|error| format!("plugin JavaScript failed: {error}"))?;
@@ -43,9 +149,18 @@ mod linux {
             .unwrap_or_else(|| entry.to_owned());
         current_entry.hash(&mut hasher);
         // A missing new entry is still a distinct edit. Watch for its creation.
-        std::fs::read(directory.join(current_entry))
-            .unwrap_or_default()
-            .hash(&mut hasher);
+        let mut has_jsx = false;
+        for extension in ["tsx", "jsx"] {
+            let source = Path::new(&current_entry).with_extension(extension);
+            has_jsx |= directory.join(&source).exists();
+            let bytes = std::fs::read(directory.join(source)).unwrap_or_default();
+            bytes.hash(&mut hasher);
+        }
+        if !has_jsx {
+            std::fs::read(directory.join(current_entry))
+                .unwrap_or_default()
+                .hash(&mut hasher);
+        }
         Ok(hasher.finish())
     }
 
@@ -120,7 +235,7 @@ mod linux {
         ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))
             .map_err(|error| format!("could not install interrupt handler: {error}"))?;
         println!(
-            "Testing {} in nested Nickel. Save plugin.json or {} to reload; Ctrl+C stops.",
+            "Testing {} in nested Nickel. Save plugin.json, JSX source, or {} to reload; Ctrl+C stops.",
             package.manifest.id, package.manifest.entry
         );
         let mut child = launch(&nested, config.path())?;
@@ -203,6 +318,56 @@ mod linux {
             )
             .unwrap();
             assert!(activation.desired_enabled("org.example.clock", false));
+        }
+
+        #[test]
+        fn compiles_jsx_without_overwriting_the_entry_and_rejects_invalid_edits() {
+            if Command::new("tsc").arg("--version").output().is_err() {
+                return;
+            }
+            let source = tempfile::tempdir().unwrap();
+            std::fs::write(source.path().join("plugin.json"),
+                r#"{"api_version":1,"id":"org.example.jsx","name":"JSX","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":300,"height":48}]}"#,
+            ).unwrap();
+            let jsx = source.path().join("main.jsx");
+            std::fs::write(
+                &jsx,
+                "function App() { return <Panel><Text>From JSX</Text></Panel>; }",
+            )
+            .unwrap();
+            let package = load_panel(source.path()).unwrap();
+            assert!(package.source.contains("h(Panel"));
+            assert!(!source.path().join("main.js").exists());
+            let previous = source_fingerprint(source.path(), "main.js").unwrap();
+            std::fs::write(&jsx, "function App() { return <Panel>").unwrap();
+            assert_ne!(
+                source_fingerprint(source.path(), "main.js").unwrap(),
+                previous
+            );
+            assert!(load_panel(source.path()).is_err());
+            assert!(!source.path().join("main.js").exists());
+        }
+
+        #[test]
+        fn compiles_tsx_with_type_annotations() {
+            if Command::new("tsc").arg("--version").output().is_err() {
+                return;
+            }
+            let source = tempfile::tempdir().unwrap();
+            std::fs::write(
+                source.path().join("plugin.json"),
+                r#"{"api_version":1,"id":"org.example.tsx","name":"TSX","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":300,"height":48}]}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                source.path().join("main.tsx"),
+                "function App() { const label: string = 'From TSX'; return <Panel><Text>{label}</Text></Panel>; }",
+            )
+            .unwrap();
+            let package = load_panel(source.path()).unwrap();
+            assert!(package.source.contains("From TSX"));
+            assert!(!package.source.contains(": string"));
+            assert!(!source.path().join("main.js").exists());
         }
     }
 }
