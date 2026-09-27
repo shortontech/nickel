@@ -64,3 +64,8 @@ requests carry the observed device index and ID; the host checks the current
 adapter state and device identity before using the existing Bluetooth handlers.
 The native Bluetooth view remains available if JSX fails. Build it with the
 same command and its source filename.
+
+`settings-appearance-mode.jsx` owns the Light, Dark, and Automatic mode choices.
+The Settings host renders their existing native preview cards and checks each
+typed choice before persisting the preference. The native mode card remains
+available if JSX fails. Build it with the same command and its source filename.

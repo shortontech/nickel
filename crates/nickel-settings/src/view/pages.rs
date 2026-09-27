@@ -1684,13 +1684,25 @@ impl SettingsApp {
                 {ColorSwatch::custom(theme, SettingsMessage::SetAccentHue(hue))}
             </Row>
         };
-        let mode_card = SettingsCard::titled(
+        let native_mode_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-appearance-mode"),
             self.localizer.text("settings-appearance-mode-description"),
         )
         .id("appearance-mode-card")
         .child(mode_group);
+        let mode_card = if self.settings_jsx_enabled {
+            let data = crate::appearance_mode_plugin::projection(self);
+            self.appearance_mode_page
+                .borrow_mut()
+                .get_or_insert_with(crate::appearance_mode_plugin::AppearanceModePage::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| page.render(&data, theme, appearance))
+                .unwrap_or_else(|_| AnyView::new(native_mode_card))
+        } else {
+            AnyView::new(native_mode_card)
+        };
         let accent_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-appearance-accent"),

@@ -1,0 +1,365 @@
+//! JSX-owned appearance mode choices with the existing native preview cards.
+
+use nickel_core::{
+    shell_settings::ThemePreference,
+    theme::{Appearance, ThemeMode, ThemePalette},
+};
+use nickel_plugin_runtime::JsxRuntime;
+use nickel_ui::{
+    AnyView, ChoiceCard, ChoiceCardGroup, Insets, SemanticTheme, SettingsCard, Surface,
+    SurfaceRole, ui,
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::{SettingsApp, SettingsMessage, SettingsPage};
+
+const STALE_STATUS: &str = "Appearance changed; refresh the page";
+
+#[derive(Clone)]
+struct Choice {
+    id: String,
+    label: String,
+    selected: bool,
+    action: usize,
+}
+
+#[derive(Clone)]
+struct ModeTree {
+    title: String,
+    description: String,
+    choices: Vec<Choice>,
+}
+
+impl ModeTree {
+    fn parse(value: &Value) -> Result<Self, String> {
+        if value.get("kind").and_then(Value::as_str) != Some("settings-appearance-modes") {
+            return Err("Appearance mode root is invalid".into());
+        }
+        let children = value
+            .get("children")
+            .and_then(Value::as_array)
+            .ok_or("Appearance modes have no choices")?;
+        if children.len() != 3 {
+            return Err("Appearance modes need three choices".into());
+        }
+        let expected = [
+            "appearance-mode-light",
+            "appearance-mode-dark",
+            "appearance-mode-system",
+        ];
+        let choices: Vec<Choice> = children
+            .iter()
+            .map(|child| {
+                let id = child
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or("Appearance mode choice has no ID")?;
+                if child.get("kind").and_then(Value::as_str) != Some("settings-choice")
+                    || !expected.contains(&id)
+                {
+                    return Err("Appearance mode choice is invalid".into());
+                }
+                Ok(Choice {
+                    id: id.into(),
+                    label: text(child, "label")?,
+                    selected: child
+                        .get("selected")
+                        .and_then(Value::as_bool)
+                        .ok_or("Appearance mode selection is invalid")?,
+                    action: child
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|index| usize::try_from(index).ok())
+                        .ok_or("Appearance mode action is invalid")?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if expected
+            .iter()
+            .any(|id| choices.iter().filter(|choice| choice.id == *id).count() != 1)
+        {
+            return Err("Appearance mode choices must be unique".into());
+        }
+        if choices
+            .iter()
+            .filter(|choice: &&Choice| choice.selected)
+            .count()
+            != 1
+        {
+            return Err("Appearance modes need one selection".into());
+        }
+        Ok(Self {
+            title: text(value, "label")?,
+            description: text(value, "value")?,
+            choices,
+        })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.title.capacity()
+            + self.description.capacity()
+            + self.choices.capacity() * std::mem::size_of::<Choice>()
+            + self
+                .choices
+                .iter()
+                .map(|choice| choice.id.capacity() + choice.label.capacity())
+                .sum::<usize>()
+    }
+
+    fn view(&self, theme: SemanticTheme, appearance: Appearance) -> AnyView<SettingsMessage> {
+        let light = ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Light,
+            ..appearance
+        });
+        let dark = ThemePalette::from_appearance(Appearance {
+            mode: ThemeMode::Dark,
+            ..appearance
+        });
+        let preview =
+            |palette: ThemePalette| {
+                Surface::new(theme, SurfaceRole::Raised)
+            .height(82.0).radius(theme.radii.control).padding(Insets::all(8.0))
+            .child(ui! { <Row gap={6.0}>
+                <Container width={22.0} background={palette.panel} radius={3.0} />
+                <Column grow={1.0} gap={6.0}>
+                    <Container height={12.0} background={palette.surface_hover} radius={3.0} />
+                    <Container height={28.0} background={palette.background} radius={3.0} />
+                </Column>
+            </Row> })
+            };
+        let choices =
+            self.choices
+                .iter()
+                .map(|choice| {
+                    let picture = match choice.id.as_str() {
+                "appearance-mode-light" => AnyView::new(preview(light)),
+                "appearance-mode-dark" => AnyView::new(preview(dark)),
+                _ => AnyView::new(Surface::new(theme, SurfaceRole::Raised)
+                    .height(82.0).radius(theme.radii.control).padding(Insets::all(8.0))
+                    .child(ui! { <Row height={66.0} gap={3.0}>
+                        <Container grow={1.0} background={light.background} radius={3.0} />
+                        <Container grow={1.0} background={dark.background} radius={3.0} />
+                    </Row> })),
+            };
+                    ChoiceCard::new(
+                        theme,
+                        SettingsMessage::AppearanceModeJsxAction(choice.action),
+                        &choice.label,
+                        choice.selected,
+                        picture,
+                    )
+                    .id(choice.id.as_str())
+                })
+                .collect::<Vec<_>>();
+        AnyView::new(
+            SettingsCard::titled(theme, &self.title, &self.description)
+                .id("appearance-mode-card")
+                .child(ChoiceCardGroup::new(choices)),
+        )
+    }
+
+    #[cfg(test)]
+    fn action_for_id(&self, id: &str) -> Option<usize> {
+        self.choices
+            .iter()
+            .find(|choice| choice.id == id)
+            .map(|choice| choice.action)
+    }
+}
+
+fn text(value: &Value, key: &str) -> Result<String, String> {
+    let text = value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Appearance mode {key} is missing"))?;
+    if text.chars().count() > 256 {
+        return Err(format!("Appearance mode {key} is too long"));
+    }
+    Ok(text.into())
+}
+
+pub(super) struct AppearanceModePage {
+    runtime: JsxRuntime,
+    last_data: Option<String>,
+    tree: Option<ModeTree>,
+}
+
+impl AppearanceModePage {
+    pub(super) fn new() -> Result<Self, String> {
+        Ok(Self {
+            runtime: JsxRuntime::new(
+                crate::settings_package::source(crate::settings_package::Script::AppearanceMode)?,
+                None,
+            )?,
+            last_data: None,
+            tree: None,
+        })
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.last_data.as_ref().map_or(0, String::capacity)
+            + self.tree.as_ref().map_or(0, ModeTree::retained_bytes)
+    }
+
+    pub(super) fn render(
+        &mut self,
+        data: &Value,
+        theme: SemanticTheme,
+        appearance: Appearance,
+    ) -> Result<AnyView<SettingsMessage>, String> {
+        let serialized = serde_json::to_string(data).map_err(|error| error.to_string())?;
+        if self.last_data.as_deref() != Some(&serialized) {
+            self.runtime.set_data(&serialized)?;
+            self.tree = Some(self.runtime.render("__nickelRender()", ModeTree::parse)?);
+            self.last_data = Some(serialized);
+        }
+        Ok(self
+            .tree
+            .as_ref()
+            .ok_or("Appearance modes are unavailable")?
+            .view(theme, appearance))
+    }
+
+    fn dispatch(&mut self, index: usize, current_data: &Value) -> Result<SettingsMessage, String> {
+        let serialized = serde_json::to_string(current_data).map_err(|error| error.to_string())?;
+        if self.last_data.as_deref() != Some(&serialized) {
+            return Err(STALE_STATUS.into());
+        }
+        let rendered = self
+            .runtime
+            .render(&format!("__nickelDispatch({index})"), ModeTree::parse);
+        let effects = if rendered.is_ok() {
+            self.runtime.take_effects()
+        } else {
+            Ok(Vec::new())
+        };
+        let result: Result<(ModeTree, SettingsMessage), String> = (|| {
+            let tree = rendered?;
+            let effects = effects?;
+            if effects.len() != 1 {
+                return Err("Appearance mode action needs one request".into());
+            }
+            let request: ModeRequest =
+                serde_json::from_value(effects[0].clone()).map_err(|error| error.to_string())?;
+            Ok((tree, validate_request(request, current_data)?))
+        })();
+        self.runtime.finish_event(result.is_ok())?;
+        let (tree, message) = result?;
+        self.tree = Some(tree);
+        Ok(message)
+    }
+
+    #[cfg(test)]
+    pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
+        self.tree.as_ref()?.action_for_id(id)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+enum ModeRequest {
+    Mode { value: String },
+}
+
+fn validate_request(request: ModeRequest, data: &Value) -> Result<SettingsMessage, String> {
+    if data.get("selected").and_then(Value::as_str).is_none() {
+        return Err("Appearance preference is unavailable".into());
+    }
+    match request {
+        ModeRequest::Mode { value } => match value.as_str() {
+            "light" => Ok(SettingsMessage::AppearanceLight),
+            "dark" => Ok(SettingsMessage::AppearanceDark),
+            "system" => Ok(SettingsMessage::AppearanceSystem),
+            _ => Err("Appearance mode is invalid".into()),
+        },
+    }
+}
+
+pub(super) fn projection(app: &SettingsApp) -> Value {
+    json!({
+        "title":app.localizer.text("settings-appearance-mode"),
+        "description":app.localizer.text("settings-appearance-mode-description"),
+        "light":app.localizer.text("settings-appearance-light"),
+        "dark":app.localizer.text("settings-appearance-dark"),
+        "automatic":app.localizer.text("settings-appearance-automatic"),
+        "selected":match app.shell_settings.theme {
+            ThemePreference::Light => "light", ThemePreference::Dark => "dark",
+            ThemePreference::System => "system",
+        },
+    })
+}
+
+impl SettingsApp {
+    pub(super) fn handle_appearance_mode_jsx_action(&mut self, index: usize) {
+        if self.page != SettingsPage::Appearance {
+            return;
+        }
+        let data = projection(self);
+        let result = self
+            .appearance_mode_page
+            .borrow_mut()
+            .as_mut()
+            .ok_or_else(|| "Appearance modes are not loaded".to_owned())
+            .and_then(|page| page.as_mut().map_err(|error| error.clone()))
+            .and_then(|page| page.dispatch(index, &data));
+        match result {
+            Ok(message) => self.handle_settings_message(message),
+            Err(error) => {
+                if error != STALE_STATUS {
+                    *self.appearance_mode_page.borrow_mut() = Some(Err(error));
+                }
+                self.request_redraw();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_tree_accepts_plugin_order_but_rejects_missing_choices() {
+        let choice = |id: &str, selected: bool| {
+            json!({
+                "kind":"settings-choice","id":id,"label":id,
+                "selected":selected,"action":0,
+            })
+        };
+        let root = json!({
+            "kind":"settings-appearance-modes","label":"Mode","value":"",
+            "children":[
+                choice("appearance-mode-system", true),
+                choice("appearance-mode-light", false),
+                choice("appearance-mode-dark", false),
+            ],
+        });
+        let tree = ModeTree::parse(&root).unwrap();
+        assert_eq!(tree.choices[0].id, "appearance-mode-system");
+        let mut missing = root;
+        missing["children"][2]["id"] = Value::from("appearance-mode-light");
+        assert!(ModeTree::parse(&missing).is_err());
+    }
+
+    #[test]
+    fn jsx_mode_choice_requests_typed_preference_and_checks_current_projection() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.shell_settings.theme = ThemePreference::Light;
+        let data = projection(&app);
+        let mut page = AppearanceModePage::new().unwrap();
+        page.render(&data, app.ui_theme(), nickel_platform::appearance())
+            .unwrap();
+        let action = page.action_for_id("appearance-mode-dark").unwrap();
+        assert_eq!(
+            page.dispatch(action, &data).unwrap(),
+            SettingsMessage::AppearanceDark
+        );
+        app.shell_settings.theme = ThemePreference::Dark;
+        assert_eq!(
+            page.dispatch(action, &projection(&app)).unwrap_err(),
+            STALE_STATUS
+        );
+    }
+}

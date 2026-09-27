@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod appearance_mode_plugin;
 mod bar_plugin;
 mod bluetooth_plugin;
 mod cli;
@@ -554,6 +555,7 @@ enum SettingsMessage {
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
+    AppearanceModeJsxAction(usize),
     AppearanceReset,
     SetAccentHue(u16),
     SetAppearanceHue(u16),
@@ -1107,6 +1109,7 @@ impl SettingsApp {
         self.optional_features_page.get_mut().take();
         self.network_page.get_mut().take();
         self.bluetooth_page.get_mut().take();
+        self.appearance_mode_page.get_mut().take();
         if let Some(navigation) = navigation {
             *self.navigation_plugin.get_mut() = Some(Ok(navigation));
         }
@@ -1174,6 +1177,16 @@ impl SettingsApp {
                 .as_ref()
                 .and_then(|page| page.as_ref().ok())
                 .map_or(0, bluetooth_plugin::BluetoothPage::retained_bytes);
+        let total = total
+            + self
+                .appearance_mode_page
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(
+                    0,
+                    appearance_mode_plugin::AppearanceModePage::retained_bytes,
+                );
         let total = u64::try_from(total).unwrap_or(u64::MAX);
         self.settings_jsx_peak_bytes
             .set(self.settings_jsx_peak_bytes.get().max(total));
@@ -1424,6 +1437,9 @@ impl SettingsApp {
         if !matches!(page, SettingsPage::Bluetooth | SettingsPage::BluetoothPair) {
             self.bluetooth_page.get_mut().take();
         }
+        if page != SettingsPage::Appearance {
+            self.appearance_mode_page.get_mut().take();
+        }
         if !matches!(page, SettingsPage::KeyboardShortcuts | SettingsPage::About) {
             self.ordinary_pages.get_mut().take();
         }
@@ -1635,6 +1651,9 @@ impl SettingsApp {
             SettingsMessage::AppearanceSystem => {
                 self.shell_settings.theme = ThemePreference::System;
                 self.persist_appearance();
+            }
+            SettingsMessage::AppearanceModeJsxAction(index) => {
+                self.handle_appearance_mode_jsx_action(index);
             }
             SettingsMessage::SetAccentHue(hue) => {
                 self.shell_settings.accent_hue = Some(hue.min(359));
@@ -3092,6 +3111,15 @@ mod tests {
             .and_then(|page| page.action_for_id(id))
     }
 
+    fn appearance_mode_action(app: &SettingsApp, id: &str) -> usize {
+        app.appearance_mode_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id(id))
+            .expect("appearance mode has a JSX action")
+    }
+
     #[test]
     fn plugins_page_shows_grants_memory_and_activation_control() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
@@ -3481,6 +3509,20 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn failed_appearance_mode_jsx_keeps_native_mode_choices_available() {
+        let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        *app.appearance_mode_page.borrow_mut() = Some(Err("JSX failed".into()));
+        let tree = app.build_ui(850.0, 900.0);
+        for message in [
+            SettingsMessage::AppearanceLight,
+            SettingsMessage::AppearanceDark,
+            SettingsMessage::AppearanceSystem,
+        ] {
+            assert_eq!(tree.semantic_targets_for_message(&message).len(), 1);
+        }
     }
 
     #[test]
@@ -4231,10 +4273,20 @@ mod tests {
                 .is_some_and(|extent| extent.can_scroll())
         );
         let expanded = app.build_ui(850.0, 1600.0);
+        for id in [
+            "appearance-mode-light",
+            "appearance-mode-dark",
+            "appearance-mode-system",
+        ] {
+            let action = appearance_mode_action(&app, id);
+            assert_eq!(
+                expanded
+                    .semantic_targets_for_message(&SettingsMessage::AppearanceModeJsxAction(action))
+                    .len(),
+                1
+            );
+        }
         for message in [
-            SettingsMessage::AppearanceLight,
-            SettingsMessage::AppearanceDark,
-            SettingsMessage::AppearanceSystem,
             SettingsMessage::WallpaperChoose,
             SettingsMessage::WallpaperRemove,
             SettingsMessage::SetReduceTransparency(true),
@@ -4941,9 +4993,12 @@ mod tests {
             nickel_ui_testkit::ActivationVia::Controller,
             nickel_ui_testkit::ActivationVia::Accessibility,
         ] {
+            let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+            let _ = app.build_ui(1424.0, 1800.0);
+            let dark_action = appearance_mode_action(&app, "appearance-mode-dark");
             let mut scenario = activate(
-                SettingsApp::with_initial_page(SettingsPage::Appearance),
-                SettingsMessage::AppearanceDark,
+                app,
+                SettingsMessage::AppearanceModeJsxAction(dark_action),
                 via,
             );
             assert_eq!(
