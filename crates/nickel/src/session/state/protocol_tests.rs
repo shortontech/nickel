@@ -7687,23 +7687,32 @@ fn launcher_protocol_visibility_updates_hosted_scene_and_restores_focus() {
 
 #[test]
 fn internal_shell_protocol_geometry_uses_authoritative_global_placement() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, session) = internal_shell_test_session();
-    let panel = session
-        .protocol_shell_surfaces()
-        .into_iter()
-        .find(|surface| surface.role == ShellRole::Panel)
-        .expect("internal panel snapshot");
+    // This session fixture constructs the compositor and shell together. Give
+    // its test thread enough stack for Smithay's nested initialization frames.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+            let (_event_loop, session) = internal_shell_test_session();
+            let panel = session
+                .protocol_shell_surfaces()
+                .into_iter()
+                .find(|surface| surface.role == ShellRole::Panel)
+                .expect("internal panel snapshot");
 
-    assert_eq!(
-        panel.geometry,
-        Some(nickel_session_protocol::Geometry {
-            x: 0,
-            y: 664,
-            width: 1280,
-            height: 56,
+            assert_eq!(
+                panel.geometry,
+                Some(nickel_session_protocol::Geometry {
+                    x: 0,
+                    y: 664,
+                    width: 1280,
+                    height: 56,
+                })
+            );
         })
-    );
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

@@ -67,6 +67,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib settings_activation_is_registered_without_an_in_process_window
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib multiple_plugin_surface_keys_can_target_the_same_output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib installed_panel_geometry_uses_its_manifest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --bin nickel-plugin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
