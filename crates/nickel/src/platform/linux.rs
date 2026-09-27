@@ -1316,6 +1316,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::ApplyShellBehavior { .. } => "apply-shell-behavior",
             SessionCommand::PublishPluginStatus { .. } => "publish-plugin-status",
             SessionCommand::SetPluginEnabled { .. } => "set-plugin-enabled",
+            SessionCommand::SetPluginSetting { .. } => "set-plugin-setting",
             SessionCommand::ApplyRemoteControl { .. } => "apply-remote-control",
             SessionCommand::StartRemotePairing { .. } => "start-remote-pairing",
             SessionCommand::CancelRemotePairing => "cancel-remote-pairing",
@@ -2149,6 +2150,17 @@ fn subscription_shortcut(
         }) => Some(GlobalShortcut::SetPluginEnabled {
             id,
             enabled,
+            observed_generation,
+        }),
+        ServerMessage::Event(SessionEvent::PluginSettingRequested {
+            id,
+            key,
+            value,
+            observed_generation,
+        }) => Some(GlobalShortcut::SetPluginSetting {
+            id,
+            key,
+            value,
             observed_generation,
         }),
         ServerMessage::Event(SessionEvent::LauncherVisibility { visible })

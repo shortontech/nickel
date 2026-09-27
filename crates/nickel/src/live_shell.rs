@@ -3267,6 +3267,76 @@ impl LiveShell {
         }
     }
 
+    /// Applies a declared preference and refreshes an active installed plugin.
+    pub fn set_plugin_setting(
+        &mut self,
+        id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<bool, String> {
+        let entry = self
+            .plugin_registry
+            .get(id)
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        let manifest = entry.manifest.clone();
+        let setting = manifest
+            .settings
+            .iter()
+            .find(|setting| setting.id == key)
+            .ok_or_else(|| format!("unknown setting {key:?}"))?;
+        if !setting.kind.accepts(&value) {
+            return Err(format!("invalid value for setting {key:?}"));
+        }
+        let mut values = self.plugin_settings.get(id).cloned().unwrap_or_else(|| {
+            manifest
+                .settings
+                .iter()
+                .map(|setting| (setting.id.clone(), setting.kind.default_value()))
+                .collect()
+        });
+        if values.get(key) == Some(&value) {
+            return Ok(false);
+        }
+        values.insert(key.to_owned(), value.clone());
+        let replacement = if entry.desired_enabled {
+            self.external_plugin_packages
+                .get(id)
+                .map(|descriptor| {
+                    let package = descriptor.load()?;
+                    let application =
+                        crate::plugin_panel::PluginPanelApplication::from_package_with_settings(
+                            &package, &values,
+                        )?;
+                    if !manifest.contributes.is_empty() {
+                        application.taskbar_badges()?;
+                    }
+                    Ok::<_, String>(application)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        #[cfg(not(test))]
+        nickel_core::plugins::PluginPreferences::update_default(&manifest, key, value)
+            .map_err(|error| format!("could not save plugin setting: {error}"))?;
+        self.plugin_settings.insert(id.to_owned(), values);
+        if let Some(application) = replacement {
+            if let Some((_, _, current)) = self.plugin_taskbar_badge_hosts.get_mut(id) {
+                *current = application;
+            } else if self.plugin_panel_owner == id {
+                self.plugin_panel_host = Some(nickel_ui::UiHost::new(
+                    application,
+                    self.plugin_panel_surface.width,
+                    self.plugin_panel_surface.height,
+                ));
+            }
+        }
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+        Ok(true)
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -6744,6 +6814,23 @@ impl LiveShell {
                     Ok(changed) => changed,
                     Err(error) => {
                         tracing::warn!(plugin = id, %error, "plugin activation failed");
+                        true
+                    }
+                }
+            }
+            platform::GlobalShortcut::SetPluginSetting {
+                id,
+                key,
+                value,
+                observed_generation,
+            } => {
+                if observed_generation != self.plugin_activation_generation {
+                    return false;
+                }
+                match self.set_plugin_setting(&id, &key, value) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        tracing::warn!(plugin = id, setting = key, %error, "plugin setting failed");
                         true
                     }
                 }

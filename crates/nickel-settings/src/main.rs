@@ -518,6 +518,18 @@ enum SettingsMessage {
         id: String,
         enabled: bool,
     },
+    SetPluginSetting {
+        id: String,
+        key: String,
+        value: serde_json::Value,
+    },
+    EditPluginTextSetting {
+        id: String,
+        key: String,
+    },
+    PluginTextSettingChanged(String),
+    SavePluginTextSetting,
+    CancelPluginTextSetting,
     ReviewPluginEnable(String),
     ConfirmPluginEnable,
     CancelPluginEnable,
@@ -1039,6 +1051,55 @@ impl SettingsApp {
         }
     }
 
+    fn request_plugin_setting(&mut self, id: String, key: String, value: serde_json::Value) {
+        if self.plugin_setting_rx.is_some() || self.plugin_activation_rx.is_some() {
+            return;
+        }
+        let Some(snapshot) = &self.plugin_status else {
+            self.plugin_notice = Some("Refresh plugin status before changing it.".into());
+            return;
+        };
+        let Some(setting) = snapshot
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .and_then(|plugin| plugin.settings.iter().find(|setting| setting.id == key))
+        else {
+            self.plugin_notice = Some("That setting is no longer available.".into());
+            return;
+        };
+        if !setting.kind.accepts(&value) {
+            self.plugin_notice = Some("Setting value is outside its declared bounds.".into());
+            return;
+        }
+        let generation = snapshot.activation_generation;
+        let (sender, receiver) = mpsc::channel();
+        let request_id = id.clone();
+        let request_key = key.clone();
+        let request_value = value.clone();
+        if std::thread::Builder::new()
+            .name("nickel-settings-plugin-setting".into())
+            .spawn(move || {
+                let response =
+                    session_request(SessionRequest::Command(SessionCommand::SetPluginSetting {
+                        id: request_id,
+                        key: request_key,
+                        value: request_value,
+                        observed_generation: generation,
+                    }))
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(response);
+            })
+            .is_ok()
+        {
+            self.plugin_setting_rx = Some(receiver);
+            self.plugin_setting_pending = Some((id, key, value));
+            self.plugin_notice = None;
+        } else {
+            self.plugin_notice = Some("Could not start plugin setting request.".into());
+        }
+    }
+
     fn review_plugin_enable(&mut self, id: String) {
         let Some(snapshot) = &self.plugin_status else {
             self.plugin_notice = Some("Refresh plugin status before changing it.".into());
@@ -1115,6 +1176,30 @@ impl SettingsApp {
     }
 
     fn poll_plugin_requests(&mut self, now: Instant) {
+        if let Some(receiver) = &self.plugin_setting_rx {
+            match receiver.try_recv() {
+                Ok(response) => {
+                    self.plugin_setting_rx = None;
+                    self.plugin_setting_pending = None;
+                    match response {
+                        Ok(ServerMessage::Plugins(snapshot)) => self.apply_plugin_status(snapshot),
+                        Ok(ServerMessage::Ack) => self.next_plugin_refresh = now,
+                        Ok(ServerMessage::Error { message, .. }) | Err(message) => {
+                            self.plugin_notice = Some(message);
+                        }
+                        Ok(_) => self.plugin_notice = Some("Unexpected plugin response.".into()),
+                    }
+                    self.request_redraw();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.plugin_setting_rx = None;
+                    self.plugin_setting_pending = None;
+                    self.plugin_notice = Some("Plugin setting request stopped.".into());
+                    self.request_redraw();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if let Some(receiver) = &self.plugin_activation_rx {
             match receiver.try_recv() {
                 Ok(response) => {
@@ -1291,6 +1376,33 @@ impl SettingsApp {
             SettingsMessage::SetPluginEnabled { id, enabled } => {
                 self.request_plugin_activation(id, enabled);
             }
+            SettingsMessage::SetPluginSetting { id, key, value } => {
+                self.request_plugin_setting(id, key, value);
+            }
+            SettingsMessage::EditPluginTextSetting { id, key } => {
+                let Some(value) = self.plugin_status.as_ref().and_then(|snapshot| {
+                    snapshot
+                        .plugins
+                        .iter()
+                        .find(|plugin| plugin.id == id)
+                        .and_then(|plugin| plugin.settings.iter().find(|setting| setting.id == key))
+                        .and_then(|setting| setting.value.as_str())
+                }) else {
+                    return;
+                };
+                self.plugin_setting_edit = Some((id, key, value.to_owned()));
+            }
+            SettingsMessage::PluginTextSettingChanged(value) => {
+                if let Some((_, _, draft)) = self.plugin_setting_edit.as_mut() {
+                    *draft = value;
+                }
+            }
+            SettingsMessage::SavePluginTextSetting => {
+                if let Some((id, key, value)) = self.plugin_setting_edit.take() {
+                    self.request_plugin_setting(id, key, serde_json::Value::String(value));
+                }
+            }
+            SettingsMessage::CancelPluginTextSetting => self.plugin_setting_edit = None,
             SettingsMessage::ReviewPluginEnable(id) => self.review_plugin_enable(id),
             SettingsMessage::ConfirmPluginEnable => self.confirm_plugin_enable(),
             SettingsMessage::CancelPluginEnable => self.plugin_enable_review = None,
@@ -2493,7 +2605,10 @@ impl Application for SettingsApp {
         if self.page == SettingsPage::Plugins {
             deadlines.push(self.next_plugin_refresh);
         }
-        if self.plugin_activation_rx.is_some() || self.plugin_refresh_rx.is_some() {
+        if self.plugin_activation_rx.is_some()
+            || self.plugin_setting_rx.is_some()
+            || self.plugin_refresh_rx.is_some()
+        {
             deadlines.push(now + Duration::from_millis(50));
         }
         deadlines.extend(
@@ -2825,7 +2940,15 @@ mod tests {
         assert!(labels.contains(&"8 KiB"));
         assert!(labels.contains(&"Unavailable"));
         assert!(labels.contains(&"Setting: Show count"));
-        assert!(labels.contains(&"On"));
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::SetPluginSetting {
+                id: "org.nickel.launcher".into(),
+                key: "show-count".into(),
+                value: serde_json::json!(false),
+            })
+            .len(),
+            1
+        );
     }
 
     #[test]

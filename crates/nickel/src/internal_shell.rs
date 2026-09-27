@@ -1243,6 +1243,15 @@ impl InternalShellCoordinator {
     pub(crate) fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         self.shell.set_plugin_enabled(id, enabled)
     }
+
+    pub(crate) fn set_plugin_setting(
+        &mut self,
+        id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<bool, String> {
+        self.shell.set_plugin_setting(id, key, value)
+    }
 }
 
 pub(crate) fn launcher_size(width: u32, height: u32) -> (u32, u32) {

@@ -1238,6 +1238,59 @@ impl NickelSession {
                     return protocol_error(ErrorCode::Internal, "shell subscriber is unavailable");
                 }
             }
+            SessionCommand::SetPluginSetting {
+                id,
+                key,
+                value,
+                observed_generation,
+            } => {
+                let current = self.internal_shell.as_ref().map_or_else(
+                    || {
+                        self.plugin_status
+                            .as_ref()
+                            .map(|status| status.activation_generation)
+                    },
+                    |coordinator| Some(coordinator.plugin_status_snapshot().activation_generation),
+                );
+                if current != Some(observed_generation) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin status changed; refresh Settings",
+                    );
+                }
+                if let Some(coordinator) = self.internal_shell.as_mut() {
+                    if let Err(reason) = coordinator.set_plugin_setting(&id, &key, value) {
+                        return protocol_error(ErrorCode::InvalidRequest, reason);
+                    }
+                    let snapshot = coordinator.plugin_status_snapshot();
+                    self.plugin_status = Some(snapshot.clone());
+                    self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot.clone()));
+                    return ServerMessage::Plugins(snapshot);
+                }
+                let Some(setting) = self.plugin_status.as_ref().and_then(|status| {
+                    status
+                        .plugins
+                        .iter()
+                        .find(|plugin| plugin.id == id)
+                        .and_then(|plugin| plugin.settings.iter().find(|setting| setting.id == key))
+                }) else {
+                    return protocol_error(ErrorCode::InvalidRequest, "unknown plugin setting");
+                };
+                if !setting.kind.accepts(&value) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "invalid plugin setting value",
+                    );
+                }
+                if !self.request_plugin_activation(SessionEvent::PluginSettingRequested {
+                    id,
+                    key,
+                    value,
+                    observed_generation,
+                }) {
+                    return protocol_error(ErrorCode::Internal, "shell subscriber is unavailable");
+                }
+            }
             SessionCommand::ApplyRemoteControl {
                 requested_enabled,
                 generation,

@@ -696,6 +696,12 @@ pub enum GlobalShortcut {
         enabled: bool,
         observed_generation: u64,
     },
+    SetPluginSetting {
+        id: String,
+        key: String,
+        value: serde_json::Value,
+        observed_generation: u64,
+    },
     ToggleLauncher,
     ShowLauncher,
     HideLauncher,

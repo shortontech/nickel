@@ -5240,6 +5240,45 @@ impl WindowsRemoteControl {
                                 }
                             },
                         ),
+                        Request::Command(Command::SetPluginSetting {
+                            id,
+                            key,
+                            value,
+                            observed_generation,
+                        }) => shell.as_mut().map_or_else(
+                            || error("Windows shell is unavailable"),
+                            |(shell, state)| {
+                                if state.plugin_status_snapshot().activation_generation
+                                    != observed_generation
+                                {
+                                    return error("plugin status changed; refresh Settings");
+                                }
+                                match state.set_plugin_setting(&id, &key, value) {
+                                    Ok(changed) => {
+                                        if changed
+                                            && let Err(reason) = crate::render_role(
+                                                shell,
+                                                state,
+                                                crate::winit_shell::SurfaceRole::Panel,
+                                            )
+                                        {
+                                            return error(reason);
+                                        }
+                                        if changed
+                                            && let Err(reason) = crate::render_role(
+                                                shell,
+                                                state,
+                                                crate::winit_shell::SurfaceRole::Taskbar,
+                                            )
+                                        {
+                                            return error(reason);
+                                        }
+                                        ServerMessage::Plugins(state.plugin_status_snapshot())
+                                    }
+                                    Err(reason) => error(reason),
+                                }
+                            },
+                        ),
                         request => self.handle(request),
                     };
                     let _ = request.reply.try_send(result);

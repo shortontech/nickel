@@ -341,6 +341,32 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
     assert_eq!(panel.settings.len(), 1);
     assert_eq!(panel.settings[0].value, serde_json::json!(true));
 
+    let generation = status.activation_generation;
+    assert!(
+        shell
+            .set_plugin_setting("org.example.panel", "show-label", serde_json::json!(false))
+            .unwrap()
+    );
+    assert!(
+        !shell
+            .set_plugin_setting("org.example.panel", "show-label", serde_json::json!(false))
+            .unwrap()
+    );
+    assert!(
+        shell
+            .set_plugin_setting("org.example.panel", "show-label", serde_json::json!("bad"))
+            .is_err()
+    );
+    let updated = shell.plugin_status_snapshot();
+    assert_eq!(updated.activation_generation, generation + 1);
+    let panel = updated
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "org.example.panel")
+        .unwrap();
+    assert_eq!(panel.settings[0].value, serde_json::json!(false));
+    assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+
     assert!(
         shell
             .set_plugin_enabled("org.example.panel", false)

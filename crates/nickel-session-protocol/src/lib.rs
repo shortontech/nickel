@@ -128,6 +128,12 @@ pub enum Command {
         enabled: bool,
         observed_generation: u64,
     },
+    SetPluginSetting {
+        id: String,
+        key: String,
+        value: serde_json::Value,
+        observed_generation: u64,
+    },
     ApplyRemoteControl {
         requested_enabled: bool,
         generation: u64,
@@ -1043,6 +1049,12 @@ pub enum Event {
         enabled: bool,
         observed_generation: u64,
     },
+    PluginSettingRequested {
+        id: String,
+        key: String,
+        value: serde_json::Value,
+        observed_generation: u64,
+    },
     Snapshot(Snapshot),
     LauncherVisibility {
         visible: bool,
@@ -1146,6 +1158,23 @@ pub enum PluginSettingKind {
     Integer { min: i64, max: i64 },
     Text { max_length: u16 },
     Choice { options: Vec<String> },
+}
+
+impl PluginSettingKind {
+    pub fn accepts(&self, value: &serde_json::Value) -> bool {
+        match self {
+            Self::Boolean => value.is_boolean(),
+            Self::Integer { min, max } => value
+                .as_i64()
+                .is_some_and(|number| (*min..=*max).contains(&number)),
+            Self::Text { max_length } => value
+                .as_str()
+                .is_some_and(|text| text.chars().count() <= usize::from(*max_length)),
+            Self::Choice { options } => value
+                .as_str()
+                .is_some_and(|choice| options.iter().any(|option| option == choice)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1929,7 +1958,13 @@ mod tests {
                 capabilities: vec!["applications-read".into()],
                 surfaces: vec!["main: window".into()],
                 composition: Vec::new(),
-                settings: Vec::new(),
+                settings: vec![PluginSettingStatus {
+                    id: "show-count".into(),
+                    label: "Show count".into(),
+                    description: String::new(),
+                    kind: PluginSettingKind::Boolean,
+                    value: serde_json::json!(true),
+                }],
                 memory: PluginMemorySnapshot {
                     js_heap_bytes: None,
                     native_ui_bytes: Some(4096),
@@ -1960,6 +1995,30 @@ mod tests {
         assert_eq!(
             decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
             request
+        );
+        let setting_request = ClientEnvelope {
+            token: "local".into(),
+            request_id: 12,
+            request: Request::Command(Command::SetPluginSetting {
+                id: "org.nickel.launcher".into(),
+                key: "show-count".into(),
+                value: serde_json::json!(false),
+                observed_generation: snapshot.activation_generation,
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&setting_request).unwrap()).unwrap(),
+            setting_request
+        );
+        assert!(
+            snapshot.plugins[0].settings[0]
+                .kind
+                .accepts(&serde_json::json!(false))
+        );
+        assert!(
+            !snapshot.plugins[0].settings[0]
+                .kind
+                .accepts(&serde_json::json!("false"))
         );
     }
 

@@ -221,11 +221,129 @@ impl SettingsApp {
                         serde_json::Value::String(value) => value.clone(),
                         _ => "Unavailable".to_owned(),
                     };
-                    card = card.child(SettingsRow::new(
-                        theme,
-                        &format!("Setting: {}", setting.label),
+                    let label = format!("Setting: {}", setting.label);
+                    let pending = self
+                        .plugin_setting_pending
+                        .as_ref()
+                        .is_some_and(|(id, key, _)| id == &plugin.id && key == &setting.id);
+                    let action = |value| SettingsMessage::SetPluginSetting {
+                        id: plugin.id.clone(),
+                        key: setting.id.clone(),
                         value,
-                    ));
+                    };
+                    match &setting.kind {
+                        nickel_session_protocol::PluginSettingKind::Boolean => {
+                            let enabled = setting.value.as_bool().unwrap_or(false);
+                            card = card.child(
+                                SettingsRow::new(theme, &label, &setting.description).trailing(
+                                    Switch::with_state_action(
+                                        if pending {
+                                            if enabled {
+                                                SwitchState::DisabledOn
+                                            } else {
+                                                SwitchState::DisabledOff
+                                            }
+                                        } else if enabled {
+                                            SwitchState::On
+                                        } else {
+                                            SwitchState::Off
+                                        },
+                                        (!pending)
+                                            .then(|| action(serde_json::Value::Bool(!enabled))),
+                                        theme,
+                                    )
+                                    .id(format!("plugin-setting-{}-{}", plugin.id, setting.id))
+                                    .accessibility_label(label),
+                                ),
+                            );
+                        }
+                        nickel_session_protocol::PluginSettingKind::Integer { min, max } => {
+                            let current = setting.value.as_i64().unwrap_or(*min);
+                            card = card.child(
+                                SettingsRow::new(theme, &label, value).trailing(
+                                    Row::new()
+                                        .gap(8.0)
+                                        .child(Button::semantic(
+                                            theme,
+                                            action(serde_json::Value::from(
+                                                current.saturating_sub(1).max(*min),
+                                            )),
+                                            "−",
+                                            ButtonPresentation::Quiet,
+                                        ))
+                                        .child(Button::semantic(
+                                            theme,
+                                            action(serde_json::Value::from(
+                                                current.saturating_add(1).min(*max),
+                                            )),
+                                            "+",
+                                            ButtonPresentation::Quiet,
+                                        )),
+                                ),
+                            );
+                        }
+                        nickel_session_protocol::PluginSettingKind::Choice { options } => {
+                            let next = options
+                                .iter()
+                                .position(|option| Some(option.as_str()) == setting.value.as_str())
+                                .map(|index| (index + 1) % options.len())
+                                .unwrap_or(0);
+                            if let Some(option) = options.get(next) {
+                                card = card.child(SettingsRow::new(theme, &label, value).trailing(
+                                    Button::semantic(
+                                        theme,
+                                        action(serde_json::Value::String(option.clone())),
+                                        "Change",
+                                        ButtonPresentation::Quiet,
+                                    ),
+                                ));
+                            }
+                        }
+                        nickel_session_protocol::PluginSettingKind::Text { .. } => {
+                            card = card.child(SettingsRow::new(theme, &label, value).trailing(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::EditPluginTextSetting {
+                                        id: plugin.id.clone(),
+                                        key: setting.id.clone(),
+                                    },
+                                    "Edit",
+                                    ButtonPresentation::Quiet,
+                                ),
+                            ));
+                            if let Some((id, key, draft)) = &self.plugin_setting_edit
+                                && id == &plugin.id
+                                && key == &setting.id
+                            {
+                                card = card.child(
+                                    Row::new()
+                                        .gap(8.0)
+                                        .child(
+                                            SettingsSearchField::new(
+                                                theme,
+                                                format!("plugin-setting-text-{}-{}", id, key),
+                                                draft,
+                                                "Value",
+                                                SettingsMessage::PluginTextSettingChanged,
+                                            )
+                                            .width(260.0),
+                                        )
+                                        .child(Button::semantic(
+                                            theme,
+                                            SettingsMessage::SavePluginTextSetting,
+                                            "Save",
+                                            ButtonPresentation::Primary,
+                                        ))
+                                        .child(Button::semantic(
+                                            theme,
+                                            SettingsMessage::CancelPluginTextSetting,
+                                            "Cancel",
+                                            ButtonPresentation::Quiet,
+                                        )),
+                                );
+                            }
+                        }
+                    }
                 }
                 content = content.child(card);
             }

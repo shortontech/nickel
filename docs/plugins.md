@@ -79,5 +79,6 @@ Plugins may declare up to 32 bounded settings in `plugin.json`: `boolean`,
 `options` list. Each setting has an ID, label, and default. Nickel validates
 the schema and stores values separately per plugin. An installed plugin reads
 its effective values through `nickel.data.settings`, and the Plugins page
-shows the registered values. Editing these values in Settings is still being
-implemented.
+shows the registered values. Settings provides switches, increment controls,
+choice cycling, and a text editor. Changes are validated against the manifest
+and applied to a running installed panel or badge without disabling it.
