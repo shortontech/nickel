@@ -1,4 +1,4 @@
-# Developing a Nickel panel or dock plugin
+# Developing a Nickel plugin
 
 On Linux, panel and dock plugins register their own shell surface identity.
 Their declared size and bottom offset control compositor placement, and they
@@ -30,8 +30,8 @@ the declared JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the test shell. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
 profile. The developer command supports up to 16 panel or dock surfaces in one
-package, or one surface-free
-taskbar badge contribution; `nickel-plugin validate <directory>` runs the same
+package, or one surface-free taskbar badge or desktop widget contribution;
+`nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
@@ -94,11 +94,16 @@ places the badge beside the matching task. Additive badge plugins compose in
 priority and plugin ID order, with a limit of three visible badges per task.
 A `replace` contribution replaces the slot's base badges; if several are
 enabled, the highest priority wins, with plugin ID breaking ties. Additive
-contributions then follow the winner. Other contribution contracts remain
-unavailable in this runtime.
-The taskbar's retained UI measurement currently includes contributed badge
-nodes; Nickel cannot yet split those bytes by extension. Each extension's
-JavaScript heap measurement remains unavailable in Settings.
+contributions then follow the winner. The desktop also provides a
+`desktop-widget` slot. A surface-free plugin can contribute a `widget` using
+`h(Widget, { label: "Unread mail", value: "12 messages", percent: 60 })`.
+The [example desktop widget](../assets/plugins/example-desktop-widget/) is a
+working package. Widgets appear in a bounded stack on the desktop; at most
+three are visible. Replacement selection and additive ordering follow the
+same rules as badges. The `action` and `section` contracts remain unavailable.
+The target plugin's retained UI measurement includes its contributed nodes;
+Nickel cannot yet split those bytes by extension. Each extension's JavaScript
+heap measurement remains unavailable in Settings.
 
 Settings lists each plugin with an enable switch and shows its runtime health,
 tracked memory, peak tracked memory, and the measured categories. Tracked memory
@@ -115,7 +120,7 @@ the schema and stores values separately per plugin. An installed plugin reads
 its effective values through `nickel.data.settings`, and the Plugins page
 shows the registered values. Settings provides switches, increment controls,
 choice cycling, and a text editor. Changes are validated against the manifest
-and applied to a running installed panel or badge without disabling it.
+and applied to a running installed panel, badge, or widget without disabling it.
 The manifest may also declare bounded `author` and `version` strings. Settings
 shows both in the plugin list and in the enable review; missing values are
 labeled unknown or unspecified.

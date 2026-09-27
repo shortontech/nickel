@@ -709,6 +709,14 @@ pub struct LiveShell {
             crate::plugin_panel::PluginPanelApplication,
         ),
     >,
+    plugin_desktop_widget_hosts: std::collections::BTreeMap<
+        String,
+        (
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
     plugin_notification_host:
         Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_hosts:
@@ -958,34 +966,56 @@ fn taskbar_plugin_data(
     (projection, images)
 }
 
-fn taskbar_badge_extension_priority(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutableExtensionKind {
+    TaskbarBadge,
+    DesktopWidget,
+}
+
+fn executable_extension_priority(
     manifest: &nickel_core::plugins::PluginManifest,
     registry: &nickel_core::plugins::PluginRegistry,
-) -> Result<(i16, nickel_core::plugins::PluginContributionMode), String> {
+) -> Result<
+    (
+        ExecutableExtensionKind,
+        i16,
+        nickel_core::plugins::PluginContributionMode,
+    ),
+    String,
+> {
     use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
     let [contribution] = manifest.contributes.as_slice() else {
-        return Err("badge extension needs exactly one contribution".into());
+        return Err("extension needs exactly one contribution".into());
     };
-    if !manifest.surfaces.is_empty()
-        || contribution.target_plugin != crate::plugin_panel::taskbar_manifest().id
-        || contribution.target_slot != "task-badge"
-        || contribution.contract != PluginSlotContract::Badge
-    {
-        return Err("this runtime can compose only surface-free taskbar badges".into());
+    let kind = match (
+        contribution.target_plugin.as_str(),
+        contribution.target_slot.as_str(),
+        contribution.contract,
+    ) {
+        ("org.nickel.taskbar", "task-badge", PluginSlotContract::Badge) => {
+            ExecutableExtensionKind::TaskbarBadge
+        }
+        ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget) => {
+            ExecutableExtensionKind::DesktopWidget
+        }
+        _ => return Err("this runtime cannot compose the declared extension".into()),
+    };
+    if !manifest.surfaces.is_empty() {
+        return Err("extension must not declare a surface".into());
     }
     let target = registry
         .get(&contribution.target_plugin)
-        .ok_or("badge target plugin is not registered")?;
+        .ok_or("extension target plugin is not registered")?;
     let slot = target
         .manifest
         .provides_slots
         .iter()
         .find(|slot| slot.id == contribution.target_slot && slot.contract == contribution.contract)
-        .ok_or("badge target does not provide the declared slot and contract")?;
+        .ok_or("extension target does not provide the declared slot and contract")?;
     if contribution.mode == PluginContributionMode::Replace && !slot.replaceable {
-        return Err("badge target does not allow replacement".into());
+        return Err("extension target does not allow replacement".into());
     }
-    Ok((contribution.priority, contribution.mode))
+    Ok((kind, contribution.priority, contribution.mode))
 }
 
 fn external_plugin_settings(
@@ -1053,6 +1083,39 @@ fn append_taskbar_badges(
             }
         }
     }
+}
+
+fn compose_desktop_widgets(
+    extensions: &std::collections::BTreeMap<
+        String,
+        (
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
+) -> Vec<crate::plugin_panel::DesktopPluginWidget> {
+    use nickel_core::plugins::PluginContributionMode;
+    let mut ordered = extensions.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
+    let mut widgets = Vec::new();
+    if let Some((_, (_, _, application))) = ordered
+        .iter()
+        .rev()
+        .find(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
+        && let Ok(replacement) = application.desktop_widgets()
+    {
+        widgets.extend(replacement);
+    }
+    for (_, (_, mode, application)) in ordered {
+        if *mode == PluginContributionMode::Add
+            && let Ok(addition) = application.desktop_widgets()
+        {
+            widgets.extend(addition);
+        }
+    }
+    widgets.truncate(3);
+    widgets
 }
 
 fn taskbar_plugin_control_bounds(
@@ -1689,6 +1752,7 @@ impl LiveShell {
             plugin_run_host,
             plugin_taskbar_host,
             plugin_taskbar_badge_hosts: std::collections::BTreeMap::new(),
+            plugin_desktop_widget_hosts: std::collections::BTreeMap::new(),
             plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
             plugin_taskbar_memory: HashMap::new(),
@@ -3289,6 +3353,12 @@ impl LiveShell {
             .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
             .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
             .map(|(id, _)| id.as_str());
+        let widget_replacement = self
+            .plugin_desktop_widget_hosts
+            .iter()
+            .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
+            .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
+            .map(|(id, _)| id.as_str());
 
         PluginStatusSnapshot {
             activation_generation: self.plugin_activation_generation,
@@ -3351,11 +3421,17 @@ impl LiveShell {
                                 if target_running {
                                     if entry.desired_enabled
                                         && contribution.mode == PluginContributionMode::Replace
-                                        && contribution.target_plugin
+                                        && ((contribution.target_plugin
                                             == crate::plugin_panel::taskbar_manifest().id
-                                        && contribution.target_slot == "task-badge"
-                                        && badge_replacement
-                                            .is_some_and(|winner| winner != entry.manifest.id)
+                                            && contribution.target_slot == "task-badge"
+                                            && badge_replacement
+                                                .is_some_and(|winner| winner != entry.manifest.id))
+                                            || (contribution.target_plugin
+                                                == crate::plugin_panel::desktop_manifest().id
+                                                && contribution.target_slot == "desktop-widget"
+                                                && widget_replacement.is_some_and(|winner| {
+                                                    winner != entry.manifest.id
+                                                })))
                                     {
                                         " (superseded by another replacement)"
                                     } else {
@@ -3478,7 +3554,7 @@ impl LiveShell {
                         let application = crate::plugin_panel::PluginPanelApplication::from_package_with_settings(
                             &package, &values,
                         )?;
-                        application.taskbar_badges()?;
+                        application.validate_contribution()?;
                         Ok::<_, String>(vec![(None, application)])
                     } else {
                         package
@@ -3529,6 +3605,8 @@ impl LiveShell {
                     }
                 } else if let Some((_, _, current)) = self.plugin_taskbar_badge_hosts.get_mut(id) {
                     *current = application;
+                } else if let Some((_, _, current)) = self.plugin_desktop_widget_hosts.get_mut(id) {
+                    *current = application;
                 }
             }
             self.plugin_panel_memory
@@ -3557,13 +3635,13 @@ impl LiveShell {
         if entry.desired_enabled == enabled {
             return Ok(false);
         }
-        let external_badge = if enabled && !entry.manifest.contributes.is_empty() {
-            let (priority, mode) =
-                taskbar_badge_extension_priority(&entry.manifest, &self.plugin_registry)?;
+        let external_extension = if enabled && !entry.manifest.contributes.is_empty() {
+            let (kind, priority, mode) =
+                executable_extension_priority(&entry.manifest, &self.plugin_registry)?;
             let descriptor = self
                 .external_plugin_packages
                 .get(id)
-                .ok_or("badge extension is not an installed package")?;
+                .ok_or("extension is not an installed package")?;
             let package = descriptor.load()?;
             let settings = self
                 .plugin_settings
@@ -3575,12 +3653,12 @@ impl LiveShell {
                 crate::plugin_panel::PluginPanelApplication::from_package_with_settings(
                     &package, &settings,
                 )?;
-            application.taskbar_badges()?;
-            Some((priority, mode, application))
+            application.validate_contribution()?;
+            Some((kind, priority, mode, application))
         } else {
             None
         };
-        let external_panel = if enabled && external_badge.is_none() {
+        let external_panel = if enabled && external_extension.is_none() {
             if let Some(descriptor) = self.external_plugin_packages.get(id) {
                 let surfaces = &descriptor.manifest.surfaces;
                 Some(
@@ -3641,6 +3719,7 @@ impl LiveShell {
             self.plugin_activation_generation.wrapping_add(1).max(1);
         if !enabled {
             self.plugin_taskbar_badge_hosts.remove(id);
+            self.plugin_desktop_widget_hosts.remove(id);
             self.plugin_panel_extra_hosts
                 .retain(|key, _| key.plugin_id != id);
             self.plugin_panel_memory
@@ -3677,9 +3756,17 @@ impl LiveShell {
             self.maybe_publish_plugin_status();
             return Ok(true);
         }
-        let started = if let Some(extension) = external_badge {
-            self.plugin_taskbar_badge_hosts
-                .insert(id.to_owned(), extension);
+        let started = if let Some((kind, priority, mode, application)) = external_extension {
+            match kind {
+                ExecutableExtensionKind::TaskbarBadge => {
+                    self.plugin_taskbar_badge_hosts
+                        .insert(id.to_owned(), (priority, mode, application));
+                }
+                ExecutableExtensionKind::DesktopWidget => {
+                    self.plugin_desktop_widget_hosts
+                        .insert(id.to_owned(), (priority, mode, application));
+                }
+            }
             Ok(())
         } else if let Some(external_panel) = external_panel {
             external_panel.map(|panels| {
@@ -8209,6 +8296,7 @@ impl LiveShell {
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         self.load_wallpaper_for(width, height);
+        let widgets = compose_desktop_widgets(&self.plugin_desktop_widget_hosts);
         let application = self.desktop_host.application_mut();
         let wallpaper_changed = match (&application.wallpaper, &self.wallpaper) {
             (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
@@ -8240,6 +8328,12 @@ impl LiveShell {
                 "text": self.palette.text,
                 "error": self.desktop_host.application().error,
                 "tiles": tiles,
+                "widgets": widgets.iter().map(|widget| serde_json::json!({
+                    "label": widget.label,
+                    "value": widget.value,
+                    "percent": widget.percent,
+                    "color": widget.color,
+                })).collect::<Vec<_>>(),
             });
             match host.application_mut().sync_desktop_data(&data) {
                 Ok(data_changed) => {

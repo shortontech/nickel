@@ -89,6 +89,12 @@ interface NickelBadgeProps extends NickelProps {
     count: number;
     color?: NickelColor;
 }
+interface NickelWidgetProps extends NickelProps {
+    label: string;
+    value: string;
+    percent: number;
+    color?: NickelColor;
+}
 interface NickelProgressProps extends NickelProps {
     percent: number;
     width: number;
@@ -120,6 +126,7 @@ declare function Surface(props: NickelSurfaceProps): JSX.Element;
 declare function Box(props: NickelBoxProps): JSX.Element;
 declare function FileTile(props: NickelFileTileProps): JSX.Element;
 declare function Badge(props: NickelBadgeProps): JSX.Element;
+declare function Widget(props: NickelWidgetProps): JSX.Element;
 declare function Row(props: NickelProps): JSX.Element;
 declare function Column(props: NickelProps): JSX.Element;
 declare function ScrollView(props: NickelProps & { id: string; height?: number }): JSX.Element;

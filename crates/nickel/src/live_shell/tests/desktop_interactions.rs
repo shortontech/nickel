@@ -67,6 +67,49 @@
     }
 
     #[test]
+    fn desktop_widget_extension_composes_into_plugin_scene_and_retires() {
+        use nickel_core::plugins::{PluginPackage, PluginPackageDescriptor};
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-desktop-widget"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell.external_plugin_packages.insert(
+            package.manifest.id.clone(),
+            PluginPackageDescriptor {
+                directory: directory.into(),
+                manifest: package.manifest.clone(),
+                source_digest: package.source_digest(),
+            },
+        );
+        shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
+        assert!(shell.plugin_desktop_widget_hosts.contains_key(&package.manifest.id));
+        assert_eq!(
+            shell.plugin_registry.get(&package.manifest.id).unwrap().health,
+            nickel_core::plugins::PluginHealth::Running
+        );
+        let scene = shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(scene.iter().any(|command| matches!(command,
+            nickel_ui::backend::PaintCommand::Text { text, .. } if text == "Unread mail"
+        )));
+        shell.set_plugin_enabled(&package.manifest.id, false).unwrap();
+        assert!(!shell.plugin_desktop_widget_hosts.contains_key(&package.manifest.id));
+        assert_eq!(
+            shell.plugin_registry.get(&package.manifest.id).unwrap().health,
+            nickel_core::plugins::PluginHealth::Disabled
+        );
+        let scene = shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(!scene.iter().any(|command| matches!(command,
+            nickel_ui::backend::PaintCommand::Text { text, .. } if text == "Unread mail"
+        )));
+    }
+
+    #[test]
     fn desktop_plugin_opens_only_the_current_projected_tile() {
         use std::{ffi::OsString, path::PathBuf, time::Instant};
 

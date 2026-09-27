@@ -151,6 +151,7 @@ const Surface = 'surface';
 const Box = 'box';
 const FileTile = 'file-tile';
 const Badge = 'badge';
+const Widget = 'widget';
 const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
@@ -359,6 +360,12 @@ enum PanelNode {
         count: u16,
         color: u32,
     },
+    Widget {
+        label: String,
+        value: String,
+        percent: u8,
+        color: u32,
+    },
     FileTile {
         id: String,
         action: Option<usize>,
@@ -493,6 +500,34 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
+            "widget" => {
+                if !children.is_empty() {
+                    return Err("widget cannot have children".into());
+                }
+                let bounded = |name: &str| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty() && text.len() <= 64)
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("widget {name} must be 1 to 64 bytes"))
+                };
+                Ok(Self::Widget {
+                    label: bounded("label")?,
+                    value: bounded("value")?,
+                    percent: value
+                        .get("percent")
+                        .and_then(Value::as_u64)
+                        .filter(|percent| *percent <= 100)
+                        .ok_or("widget percent must be 0 to 100")?
+                        as u8,
+                    color: value
+                        .get("color")
+                        .and_then(Value::as_u64)
+                        .filter(|color| *color <= u32::MAX as u64)
+                        .map_or(0xffd0d7e2, |color| color as u32),
+                })
+            }
             "badge" => {
                 if !children.is_empty() {
                     return Err("badge cannot have children".into());
@@ -971,6 +1006,7 @@ impl PanelNode {
                             .scale(0.72),
                     ),
             ),
+            Self::Widget { .. } => AnyView::new(Spacer::fixed(0.0)),
             Self::FileTile {
                 id,
                 action,
@@ -1371,6 +1407,40 @@ impl PanelNode {
             _ => Err("taskbar badge extension must return badges or a row/column of badges".into()),
         }
     }
+
+    fn collect_desktop_widgets(
+        &self,
+        widgets: &mut Vec<DesktopPluginWidget>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Widget {
+                label,
+                value,
+                percent,
+                color,
+            } => {
+                if widgets.len() >= 8 {
+                    return Err("extension has too many widgets".into());
+                }
+                widgets.push(DesktopPluginWidget {
+                    label: label.clone(),
+                    value: value.clone(),
+                    percent: *percent,
+                    color: *color,
+                });
+                Ok(())
+            }
+            Self::Row(children) | Self::Column(children) => {
+                for child in children {
+                    child.collect_desktop_widgets(widgets)?;
+                }
+                Ok(())
+            }
+            _ => Err(
+                "desktop widget extension must return widgets or a row/column of widgets".into(),
+            ),
+        }
+    }
 }
 
 fn child_text(children: &[Value]) -> Result<String, String> {
@@ -1419,6 +1489,14 @@ impl From<&LauncherPluginProjection> for LauncherShortcutState {
 }
 
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopPluginWidget {
+    pub label: String,
+    pub value: String,
+    pub percent: u8,
+    pub color: u32,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
@@ -2139,7 +2217,7 @@ impl PluginPanelApplication {
         if package.manifest.surfaces.is_empty() {
             let application = Self::from_package_with_settings(package, &settings)?;
             if !package.manifest.contributes.is_empty() {
-                application.taskbar_badges()?;
+                application.validate_contribution()?;
             }
         } else {
             for surface in &package.manifest.surfaces {
@@ -2157,6 +2235,27 @@ impl PluginPanelApplication {
             return Err("taskbar badge extension did not return a badge".into());
         }
         Ok(badges)
+    }
+
+    pub fn desktop_widgets(&self) -> Result<Vec<DesktopPluginWidget>, String> {
+        let mut widgets = Vec::new();
+        self.node.collect_desktop_widgets(&mut widgets)?;
+        if widgets.is_empty() {
+            return Err("desktop widget extension did not return a widget".into());
+        }
+        Ok(widgets)
+    }
+
+    pub fn validate_contribution(&self) -> Result<(), String> {
+        use nickel_core::plugins::PluginSlotContract;
+        let [contribution] = self.manifest.contributes.as_slice() else {
+            return Err("extension needs exactly one contribution".into());
+        };
+        match contribution.contract {
+            PluginSlotContract::Badge => self.taskbar_badges().map(|_| ()),
+            PluginSlotContract::Widget => self.desktop_widgets().map(|_| ()),
+            _ => Err("this runtime does not execute that contribution contract".into()),
+        }
     }
 
     pub fn launcher(launcher: &Launcher) -> Result<Self, String> {
@@ -3468,6 +3567,27 @@ mod tests {
             );
             assert!(PluginPanelApplication::new(&source).is_err());
         }
+    }
+
+    #[test]
+    fn desktop_widget_contribution_validates_and_bounds_its_values() {
+        let package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-desktop-widget"
+        ))
+        .unwrap();
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let widgets = PluginPanelApplication::from_package(&package)
+            .unwrap()
+            .desktop_widgets()
+            .unwrap();
+        assert_eq!(widgets.len(), 1);
+        assert_eq!(widgets[0].label, "Unread mail");
+        assert_eq!(widgets[0].percent, 60);
+
+        let mut invalid = package;
+        invalid.source = invalid.source.replace("percent: 60", "percent: 101");
+        assert!(PluginPanelApplication::validate_package(&invalid).is_err());
     }
 
     #[test]
