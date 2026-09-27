@@ -30,7 +30,8 @@ the declared JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the test shell. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
 profile. The developer command supports up to 16 panel or dock surfaces in one
-package, or one surface-free taskbar badge or desktop widget contribution;
+package, or one surface-free taskbar badge, taskbar action, desktop widget,
+or Control Center section contribution;
 `nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and

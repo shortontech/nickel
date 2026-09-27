@@ -1,4 +1,4 @@
-//! Isolated edit loop for an external panel or taskbar badge package.
+//! Isolated edit loop for an external panel or executable extension package.
 
 use std::{
     path::{Path, PathBuf},
@@ -138,7 +138,7 @@ mod platform {
         root.join(directory)
     }
 
-    fn load_panel(directory: &Path) -> Result<PluginPackage, String> {
+    fn load_dev_package(directory: &Path) -> Result<PluginPackage, String> {
         let package = load_package(directory)?;
         let panel = !package.manifest.surfaces.is_empty()
             && package.manifest.surfaces.iter().all(|surface| {
@@ -148,15 +148,17 @@ mod platform {
                 )
             })
             && package.manifest.contributes.is_empty();
-        let badge = package.manifest.surfaces.is_empty()
+        let extension = package.manifest.surfaces.is_empty()
             && matches!(package.manifest.contributes.as_slice(), [contribution]
-                if contribution.target_plugin == "org.nickel.taskbar"
-                    && contribution.target_slot == "task-badge"
-                    && contribution.contract == PluginSlotContract::Badge
+                if matches!((contribution.target_plugin.as_str(), contribution.target_slot.as_str(), contribution.contract),
+                    ("org.nickel.taskbar", "task-badge", PluginSlotContract::Badge)
+                    | ("org.nickel.taskbar", "task-action", PluginSlotContract::Action)
+                    | ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget)
+                    | ("org.nickel.control-center", "control-section", PluginSlotContract::Section))
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
-        if !panel && !badge {
+        if !panel && !extension {
             return Err(
-                "dev currently needs panel or dock surfaces, or one surface-free badge contribution"
+                "dev needs panel or dock surfaces, or one supported surface-free contribution"
                     .into(),
             );
         }
@@ -251,7 +253,7 @@ mod platform {
     pub(super) fn run(directory: PathBuf) -> Result<(), String> {
         let directory = std::fs::canonicalize(directory)
             .map_err(|error| format!("could not open plugin directory: {error}"))?;
-        let mut package = load_panel(&directory)?;
+        let mut package = load_dev_package(&directory)?;
         let shell = std::env::current_exe()
             .map_err(|error| format!("could not locate nickel-plugin: {error}"))?
             .with_file_name(if cfg!(target_os = "windows") {
@@ -305,7 +307,7 @@ mod platform {
                 continue;
             }
             current_fingerprint = observed;
-            let next = match load_panel(&directory) {
+            let next = match load_dev_package(&directory) {
                 Ok(next) => next,
                 Err(error) => {
                     eprintln!("plugin edit: {error}");
@@ -333,6 +335,21 @@ mod platform {
         use super::*;
 
         #[test]
+        fn accepts_each_executable_surface_free_extension() {
+            let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
+            for name in [
+                "example-task-badge",
+                "example-task-action",
+                "example-desktop-widget",
+                "example-control-section",
+            ] {
+                let package = load_dev_package(&root.join(name)).unwrap();
+                assert!(package.manifest.surfaces.is_empty());
+                assert_eq!(package.manifest.contributes.len(), 1);
+            }
+        }
+
+        #[test]
         fn stages_a_valid_panel_in_an_isolated_enabled_profile() {
             let source = tempfile::tempdir().unwrap();
             std::fs::write(
@@ -345,7 +362,7 @@ mod platform {
                 "function App() { return h(Panel, {}, h(Text, null, 'Clock')); }",
             )
             .unwrap();
-            let package = load_panel(source.path()).unwrap();
+            let package = load_dev_package(source.path()).unwrap();
             let profile = tempfile::tempdir().unwrap();
             stage(&package, source.path(), profile.path()).unwrap();
             let staged = PluginPackage::load(
@@ -374,7 +391,7 @@ mod platform {
                 "function App() { return h(Panel, {background: 0x80202020}, h(Text, {}, 'Dock')); }",
             )
             .unwrap();
-            let package = load_panel(source.path()).unwrap();
+            let package = load_dev_package(source.path()).unwrap();
             assert_eq!(package.manifest.surfaces[0].kind, PluginSurfaceKind::Dock);
             let profile = tempfile::tempdir().unwrap();
             stage(&package, source.path(), profile.path()).unwrap();
@@ -402,7 +419,7 @@ mod platform {
                 "function App() { return h(Panel, {height: nickel.data.surface.height}, h(Text, {}, nickel.data.surface.id)); }",
             )
             .unwrap();
-            let package = load_panel(source.path()).unwrap();
+            let package = load_dev_package(source.path()).unwrap();
             assert_eq!(package.manifest.surfaces.len(), 2);
             std::fs::write(
                 source.path().join("main.js"),
@@ -410,7 +427,7 @@ mod platform {
             )
             .unwrap();
             assert!(
-                load_panel(source.path())
+                load_dev_package(source.path())
                     .unwrap_err()
                     .contains("surface \"dock\"")
             );
@@ -431,7 +448,7 @@ mod platform {
                 "function App() { return <Panel><Text>From JSX</Text></Panel>; }",
             )
             .unwrap();
-            let package = load_panel(source.path()).unwrap();
+            let package = load_dev_package(source.path()).unwrap();
             assert!(package.source.contains("h(Panel"));
             assert!(!source.path().join("main.js").exists());
             let previous = source_fingerprint(source.path(), "main.js").unwrap();
@@ -440,7 +457,7 @@ mod platform {
                 source_fingerprint(source.path(), "main.js").unwrap(),
                 previous
             );
-            assert!(load_panel(source.path()).is_err());
+            assert!(load_dev_package(source.path()).is_err());
             assert!(!source.path().join("main.js").exists());
         }
 
@@ -460,7 +477,7 @@ mod platform {
                 "function App() { const label: string = 'From TSX'; return <Panel><Text>{label}</Text></Panel>; }",
             )
             .unwrap();
-            let package = load_panel(source.path()).unwrap();
+            let package = load_dev_package(source.path()).unwrap();
             assert!(package.source.contains("From TSX"));
             assert!(!package.source.contains(": string"));
             assert!(!source.path().join("main.js").exists());
