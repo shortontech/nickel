@@ -2,7 +2,7 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
-use nickel_core::plugins::{PluginCatalog, PluginPackage};
+use nickel_core::plugins::PluginCatalog;
 use nickel_shell::plugin_panel::PluginPanelApplication;
 
 fn usage() -> &'static str {
@@ -41,7 +41,7 @@ fn main() -> Result<(), String> {
             if args.next().is_some() {
                 return Err(usage().into());
             }
-            let package = PluginPackage::load(PathBuf::from(directory))?;
+            let package = dev::load_package(&PathBuf::from(directory))?;
             PluginPanelApplication::from_package(&package)
                 .map_err(|error| format!("plugin JavaScript failed: {error}"))?;
             println!("{} ({})", package.manifest.name, package.manifest.id);

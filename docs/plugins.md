@@ -19,14 +19,15 @@ the declared JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the nested session. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
 profile. The developer command supports one panel surface or one surface-free
-taskbar badge contribution; `nickel-plugin validate <directory>` works without
-launching a shell.
+taskbar badge contribution; `nickel-plugin validate <directory>` runs the same
+source compilation and checks without launching a shell.
 
 The installed entry is plain JavaScript. If `main.jsx` or `main.tsx` exists
-beside a declared `main.js` entry, `nickel-plugin dev` runs a local
-`node_modules/.bin/tsc` or `tsc` from `PATH` before validation and after each
-source edit. It compiles into the temporary profile and leaves the package's
-`main.js` untouched. TypeScript 5.6 or newer is needed for this automatic
+beside a declared `main.js` entry, both commands run a local
+`node_modules/.bin/tsc` or `tsc` from `PATH` before validation. The `dev`
+command also recompiles after each source edit. Both compile in a temporary
+directory and leave the package's `main.js` untouched. TypeScript 5.6 or newer
+is needed for this automatic
 compile path. Generate the `.js` entry when packaging for installation; for
 example:
 

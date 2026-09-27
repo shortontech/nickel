@@ -1,5 +1,112 @@
 //! Isolated edit loop for an external panel or taskbar badge package.
 
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use nickel_core::plugins::{MAX_PLUGIN_ENTRY_BYTES, PluginManifest, PluginPackage};
+
+fn jsx_source(directory: &Path, entry: &str) -> Result<Option<PathBuf>, String> {
+    let candidates = ["tsx", "jsx"]
+        .map(|extension| Path::new(entry).with_extension(extension))
+        .into_iter()
+        .filter(|source| directory.join(source).exists())
+        .collect::<Vec<_>>();
+    let [source] = candidates.as_slice() else {
+        return if candidates.is_empty() {
+            Ok(None)
+        } else {
+            Err("both .jsx and .tsx sources exist for the declared entry".into())
+        };
+    };
+    let metadata = std::fs::symlink_metadata(directory.join(source))
+        .map_err(|error| format!("could not inspect JSX source: {error}"))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_PLUGIN_ENTRY_BYTES as u64
+    {
+        return Err("JSX source must be an ordinary file of at most 2 MiB".into());
+    }
+    let resolved = std::fs::canonicalize(directory.join(source))
+        .map_err(|error| format!("could not resolve JSX source: {error}"))?;
+    if !resolved.starts_with(directory) {
+        return Err("JSX source escapes its plugin directory".into());
+    }
+    Ok(Some(source.clone()))
+}
+
+fn compile_jsx(
+    directory: &Path,
+    manifest: &PluginManifest,
+    source: &Path,
+) -> Result<String, String> {
+    let output = tempfile::tempdir()
+        .map_err(|error| format!("could not create JSX build directory: {error}"))?;
+    let compiler = directory.join("node_modules/.bin/tsc");
+    let compiler = if compiler.is_file() {
+        compiler.into_os_string()
+    } else {
+        "tsc".into()
+    };
+    let status = Command::new(compiler)
+        .current_dir(directory)
+        .args([
+            "--allowJs",
+            "--checkJs",
+            "false",
+            "--noCheck",
+            "--noEmitOnError",
+            "--jsx",
+            "react",
+            "--jsxFactory",
+            "h",
+            "--target",
+            "ES2020",
+            "--module",
+            "none",
+            "--rootDir",
+        ])
+        .arg(directory)
+        .arg("--outDir")
+        .arg(output.path())
+        .arg(source)
+        .status()
+        .map_err(|error| format!("could not run TypeScript compiler (tsc): {error}"))?;
+    if !status.success() {
+        return Err(format!("JSX compilation failed with {status}"));
+    }
+    let compiled = output.path().join(&manifest.entry);
+    let metadata = std::fs::symlink_metadata(&compiled)
+        .map_err(|error| format!("compiler did not produce {}: {error}", manifest.entry))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_PLUGIN_ENTRY_BYTES as u64
+    {
+        return Err("compiled JavaScript must be an ordinary file of at most 2 MiB".into());
+    }
+    std::fs::read_to_string(&compiled)
+        .map_err(|error| format!("could not read compiled JavaScript: {error}"))
+}
+
+pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
+    let directory = std::fs::canonicalize(directory)
+        .map_err(|error| format!("could not open plugin directory: {error}"))?;
+    let manifest_bytes = std::fs::read(directory.join("plugin.json"))
+        .map_err(|error| format!("could not read plugin.json: {error}"))?;
+    let manifest_source = std::str::from_utf8(&manifest_bytes)
+        .map_err(|error| format!("plugin.json is not UTF-8: {error}"))?;
+    let manifest = PluginManifest::from_json(manifest_source)?;
+    if let Some(source) = jsx_source(&directory, &manifest.entry)? {
+        Ok(PluginPackage {
+            source: compile_jsx(&directory, &manifest, &source)?,
+            manifest,
+        })
+    } else {
+        PluginPackage::load(&directory)
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::{
@@ -14,110 +121,15 @@ mod linux {
         time::Duration,
     };
 
+    use super::load_package;
     use nickel_core::plugins::{
-        MAX_PLUGIN_ENTRY_BYTES, PluginActivationSettings, PluginContributionMode, PluginManifest,
-        PluginPackage, PluginSlotContract, PluginSurfaceKind,
+        PluginActivationSettings, PluginContributionMode, PluginManifest, PluginPackage,
+        PluginSlotContract, PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::PluginPanelApplication;
 
-    fn jsx_source(directory: &Path, entry: &str) -> Result<Option<PathBuf>, String> {
-        let candidates = ["tsx", "jsx"]
-            .map(|extension| Path::new(entry).with_extension(extension))
-            .into_iter()
-            .filter(|source| directory.join(source).exists())
-            .collect::<Vec<_>>();
-        let [source] = candidates.as_slice() else {
-            return if candidates.is_empty() {
-                Ok(None)
-            } else {
-                Err("both .jsx and .tsx sources exist for the declared entry".into())
-            };
-        };
-        let metadata = std::fs::symlink_metadata(directory.join(source))
-            .map_err(|error| format!("could not inspect JSX source: {error}"))?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() > MAX_PLUGIN_ENTRY_BYTES as u64
-        {
-            return Err("JSX source must be an ordinary file of at most 2 MiB".into());
-        }
-        let resolved = std::fs::canonicalize(directory.join(source))
-            .map_err(|error| format!("could not resolve JSX source: {error}"))?;
-        if !resolved.starts_with(directory) {
-            return Err("JSX source escapes its plugin directory".into());
-        }
-        Ok(Some(source.clone()))
-    }
-
-    fn compile_jsx(
-        directory: &Path,
-        manifest: &PluginManifest,
-        source: &Path,
-    ) -> Result<String, String> {
-        let output = tempfile::tempdir()
-            .map_err(|error| format!("could not create JSX build directory: {error}"))?;
-        let compiler = directory.join("node_modules/.bin/tsc");
-        let compiler = if compiler.is_file() {
-            compiler.into_os_string()
-        } else {
-            "tsc".into()
-        };
-        let status = Command::new(compiler)
-            .current_dir(directory)
-            .args([
-                "--allowJs",
-                "--checkJs",
-                "false",
-                "--noCheck",
-                "--noEmitOnError",
-                "--jsx",
-                "react",
-                "--jsxFactory",
-                "h",
-                "--target",
-                "ES2020",
-                "--module",
-                "none",
-                "--rootDir",
-            ])
-            .arg(directory)
-            .arg("--outDir")
-            .arg(output.path())
-            .arg(source)
-            .status()
-            .map_err(|error| format!("could not run TypeScript compiler (tsc): {error}"))?;
-        if !status.success() {
-            return Err(format!(
-                "JSX compilation failed with {status}; the previous session stays running"
-            ));
-        }
-        let compiled = output.path().join(&manifest.entry);
-        let metadata = std::fs::symlink_metadata(&compiled)
-            .map_err(|error| format!("compiler did not produce {}: {error}", manifest.entry))?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() > MAX_PLUGIN_ENTRY_BYTES as u64
-        {
-            return Err("compiled JavaScript must be an ordinary file of at most 2 MiB".into());
-        }
-        std::fs::read_to_string(&compiled)
-            .map_err(|error| format!("could not read compiled JavaScript: {error}"))
-    }
-
     fn load_panel(directory: &Path) -> Result<PluginPackage, String> {
-        let manifest_bytes = std::fs::read(directory.join("plugin.json"))
-            .map_err(|error| format!("could not read plugin.json: {error}"))?;
-        let manifest_source = std::str::from_utf8(&manifest_bytes)
-            .map_err(|error| format!("plugin.json is not UTF-8: {error}"))?;
-        let manifest = PluginManifest::from_json(manifest_source)?;
-        let package = if let Some(source) = jsx_source(directory, &manifest.entry)? {
-            PluginPackage {
-                source: compile_jsx(directory, &manifest, &source)?,
-                manifest,
-            }
-        } else {
-            PluginPackage::load(directory)?
-        };
+        let package = load_package(directory)?;
         let panel = package.manifest.surfaces.len() == 1
             && package.manifest.surfaces[0].kind == PluginSurfaceKind::Panel
             && package.manifest.contributes.is_empty();
