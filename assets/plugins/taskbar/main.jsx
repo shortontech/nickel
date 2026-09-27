@@ -30,6 +30,10 @@ function App() {
                 onClick={() => nickel.request({type: "taskbar-toggle-launcher"})}>Nickel</Button>
             {data.items.map(item => <Task key={item.id} item={item} />)}
             <Spacer />
+            {data.keyboardEnabled ? <Button id="taskbar-keyboard" accessibilityLabel="On-screen keyboard"
+                onClick={() => nickel.request({type: "taskbar-toggle-keyboard"})}>⌨</Button> : null}
+            {data.codexAvailable ? <Button id="taskbar-codex" icon="codex" accessibilityLabel="Codex projects"
+                onClick={() => nickel.request({type: "taskbar-toggle-codex"})}>Codex</Button> : null}
             {data.tray.map(item => <TrayItem key={item.id} item={item} />)}
             <Button id="taskbar-control"
                 onClick={() => nickel.request({type: "taskbar-toggle-control"})}>{data.clock}</Button>

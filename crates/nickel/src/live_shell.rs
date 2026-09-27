@@ -884,8 +884,13 @@ fn taskbar_plugin_data(
 ) {
     let mut projection =
         crate::plugin_panel::TaskbarPluginProjection::from_groups(panel.groups.as_ref(), clock);
+    projection.keyboard_enabled = panel.keyboard_enabled;
+    projection.codex_available = panel.codex_available;
     let mut images = crate::plugin_panel::PluginImages::new();
     images.insert("logo".into(), (2, Arc::clone(&panel.panel_icon)));
+    if panel.codex_available {
+        images.insert("codex".into(), (0x5000, Arc::clone(&panel.codex_icon)));
+    }
     for item in &mut projection.items {
         if let Some((image_id, image)) = panel.task_icons.get(item.index).and_then(Option::as_ref) {
             item.icon = true;
@@ -3533,6 +3538,18 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::ToggleControlCenter => {
                     self.apply_panel_action(TaskbarAction::Control);
                     changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ToggleOnScreenKeyboard => {
+                    if self.keyboard_enabled {
+                        self.apply_panel_action(TaskbarAction::OnScreenKeyboard);
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ToggleCodexProjects => {
+                    if self.launcher.codex_available() {
+                        self.apply_panel_action(TaskbarAction::Codex);
+                        changed = true;
+                    }
                 }
                 crate::plugin_panel::PluginEffect::ActivateTaskbarItem { index, id } => {
                     if crate::plugin_panel::taskbar_item_matches(&self.panel_groups(), index, &id) {

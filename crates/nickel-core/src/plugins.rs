@@ -196,6 +196,7 @@ pub enum PluginOutputScope {
 pub enum PluginCapability {
     LauncherShow,
     ControlCenterShow,
+    OnScreenKeyboardShow,
     ApplicationsRead,
     ApplicationsLaunch,
     ApplicationsPin,
@@ -214,6 +215,7 @@ pub enum PluginCapability {
     SettingsShow,
     ProjectsRead,
     ProjectsOpen,
+    ProjectsMenuShow,
     SessionLogoutRequest,
 }
 
@@ -222,6 +224,7 @@ impl PluginCapability {
         match self {
             Self::LauncherShow => "launcher-show",
             Self::ControlCenterShow => "control-center-show",
+            Self::OnScreenKeyboardShow => "on-screen-keyboard-show",
             Self::ApplicationsRead => "applications-read",
             Self::ApplicationsLaunch => "applications-launch",
             Self::ApplicationsPin => "applications-pin",
@@ -240,6 +243,7 @@ impl PluginCapability {
             Self::SettingsShow => "settings-show",
             Self::ProjectsRead => "projects-read",
             Self::ProjectsOpen => "projects-open",
+            Self::ProjectsMenuShow => "projects-menu-show",
             Self::SessionLogoutRequest => "session-logout-request",
         }
     }

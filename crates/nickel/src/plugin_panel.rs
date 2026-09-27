@@ -674,6 +674,8 @@ pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 pub enum PluginEffect {
     ShowLauncher,
     ToggleLauncher,
+    ToggleOnScreenKeyboard,
+    ToggleCodexProjects,
     SetLauncherQuery(String),
     SetLauncherPage { dashboard: bool, page: usize },
     ActivateLauncherResult { index: usize, id: String },
@@ -755,6 +757,8 @@ pub struct TaskbarPluginProjection {
     pub items: Vec<TaskbarPluginItem>,
     pub tray: Vec<TaskbarPluginTrayItem>,
     pub clock: String,
+    pub keyboard_enabled: bool,
+    pub codex_available: bool,
 }
 
 impl TaskbarPluginProjection {
@@ -782,6 +786,8 @@ impl TaskbarPluginProjection {
                 .collect(),
             tray: Vec::new(),
             clock: clock.to_owned(),
+            keyboard_enabled: false,
+            codex_available: false,
         }
     }
 
@@ -793,7 +799,8 @@ impl TaskbarPluginProjection {
         "tray": self.tray.iter().map(|item| serde_json::json!({
             "id": item.id, "title": item.title, "icon": item.icon,
         })).collect::<Vec<_>>(),
-        "clock": self.clock})
+        "clock": self.clock, "keyboardEnabled": self.keyboard_enabled,
+        "codexAvailable": self.codex_available})
         .to_string()
     }
 }
@@ -1203,6 +1210,26 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::ControlCenterShow) =>
                         {
                             approved.push(PluginEffect::ToggleControlCenter);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-toggle-keyboard")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::OnScreenKeyboardShow) =>
+                        {
+                            approved.push(PluginEffect::ToggleOnScreenKeyboard);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-toggle-codex")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ProjectsMenuShow) =>
+                        {
+                            approved.push(PluginEffect::ToggleCodexProjects);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-activate-item")

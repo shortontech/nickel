@@ -9,6 +9,8 @@
   "capabilities": [
     "launcher-show",
     "control-center-show",
+    "on-screen-keyboard-show",
+    "projects-menu-show",
     "windows-read",
     "windows-focus",
     "windows-context",

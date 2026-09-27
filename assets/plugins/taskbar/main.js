@@ -16,6 +16,8 @@ function App() {
             h(Button, { id: "taskbar-launcher", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.request({ type: "taskbar-toggle-launcher" }) }, "Nickel"),
             data.items.map(item => h(Task, { key: item.id, item: item })),
             h(Spacer, null),
+            data.keyboardEnabled ? h(Button, { id: "taskbar-keyboard", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.request({ type: "taskbar-toggle-keyboard" }) }, "\u2328") : null,
+            data.codexAvailable ? h(Button, { id: "taskbar-codex", icon: "codex", accessibilityLabel: "Codex projects", onClick: () => nickel.request({ type: "taskbar-toggle-codex" }) }, "Codex") : null,
             data.tray.map(item => h(TrayItem, { key: item.id, item: item })),
             h(Button, { id: "taskbar-control", onClick: () => nickel.request({ type: "taskbar-toggle-control" }) }, data.clock)));
 }

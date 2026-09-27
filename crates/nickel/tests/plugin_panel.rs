@@ -899,6 +899,8 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
             icon: true,
         }],
         clock: "4:20 PM".into(),
+        keyboard_enabled: true,
+        codex_available: true,
     };
     let icon = std::sync::Arc::new(image::RgbaImage::from_pixel(
         16,
@@ -909,6 +911,7 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
     application.sync_images(
         [
             ("logo".into(), (2, std::sync::Arc::clone(&icon))),
+            ("codex".into(), (0x5000, std::sync::Arc::clone(&icon))),
             ("task:0".into(), (3, std::sync::Arc::clone(&icon))),
             ("tray:mail".into(), (4, std::sync::Arc::clone(&icon))),
         ]
@@ -974,6 +977,20 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
         host.application_mut().take_effects(),
         vec![PluginEffect::ToggleControlCenter]
     );
+    for (name, expected) in [
+        ("On-screen keyboard", PluginEffect::ToggleOnScreenKeyboard),
+        ("Codex projects", PluginEffect::ToggleCodexProjects),
+    ] {
+        let button = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .id;
+        host.perform_semantic_action(button, SemanticAction::Invoke(ActionKind::Activate));
+        assert_eq!(host.application_mut().take_effects(), vec![expected]);
+    }
     let tray = host
         .query_unique(&SemanticSelector::RoleAndName {
             role: SemanticRole::Button,
