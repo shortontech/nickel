@@ -5226,6 +5226,11 @@ mod tests {
     #[test]
     fn optional_features_exposes_a_semantic_codex_switch() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        // The developer machine can have a persisted Codex preference. Keep this
+        // view contract independent of the host's optional-feature state.
+        app.optional_features.codex_enabled = false;
+        app.codex_feature.requested_enabled = false;
+        app.codex_feature.effective = FeatureEffectiveState::Disabled;
         app.codex_feature.capability.installation = FeatureInstallation::Installed;
         app.codex_feature.capability.support = FeatureSupport::Supported;
         app.codex_feature.capability.policy = FeaturePolicy::Editable;
