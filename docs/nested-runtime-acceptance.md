@@ -15,12 +15,12 @@ shell PID is expected or authenticated and no `--role shell` child exists,
 checks the internal surface inventory and live health of eight bundled UI
 plugins, measures the launcher's rendered native UI memory, then disables and
 re-enables it while checking memory cleanup and the native fallback. It injects
-Meta and verifies that the
-internal launcher becomes visible, closes it again, creates a kernel uinput controller, and verifies
-that the production gilrs/controller route opens the launcher. It then disconnects and reconnects
-the controller, verifies the fresh device generation can close the launcher without inheriting
-stale held state, samples compositor CPU ticks across a two-second idle interval, and requests
-logout. Every phase has a deadline. On
+Meta through the nested session's test-control socket and verifies that the
+internal launcher becomes visible and closes again. It then samples compositor
+CPU ticks across a two-second idle interval and requests logout. The default
+harness does not create a uinput controller: Linux exposes that device to the
+host desktop too, where its Guide button can activate the host launcher. Every
+phase has a deadline. On
 failure, the harness terminates its compositor child and removes its temporary
 runtime data.
 
@@ -52,8 +52,11 @@ to catch an unbounded redraw loop without imposing a benchmark-grade threshold.
 On the Wayland host display, the Mesa software command above passed. The nested
 compositor ran bundled plugin UI and an installed panel, changed a live plugin
 setting, measured plugin UI memory, disabled and re-enabled the launcher with
-its native fallback, accepted native input, and shut down cleanly. The two-second
+its native fallback, accepted scoped test input, and shut down cleanly. The two-second
 idle sample used 13 compositor CPU ticks.
+
+That recorded run predates removal of the uinput controller sequence. The
+current default harness does not exercise native controller ingress.
 
 The X11 host command reached the nested test-control listener but the host X
 server returned an XIO error. Readiness then failed with `WouldBlock`, so this

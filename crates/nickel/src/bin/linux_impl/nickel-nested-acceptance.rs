@@ -139,7 +139,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-            "PASS: nested compositor ran bundled UI and an installed panel, changed a live plugin setting, measured plugin UI memory, confirmed launcher fallback and restart, accepted native input, and shut down cleanly"
+            "PASS: nested compositor ran bundled UI and an installed panel, changed a live plugin setting, measured plugin UI memory, confirmed launcher fallback and restart through scoped test input, and shut down cleanly"
     );
     Ok(())
 }
@@ -336,19 +336,6 @@ fn exercise(
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
     wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
-
-    // This is kernel-native ingress through uinput and the production gilrs reader, not direct
-    // controller reducer injection. Exercise a fresh device generation after disconnect as well.
-    checked(test_input, &environment, &["controller", "connect"])?;
-    thread::sleep(Duration::from_secs(1));
-    checked(test_input, &environment, &["controller", "tap", "guide"])?;
-    wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(5))?;
-    checked(test_input, &environment, &["controller", "disconnect"])?;
-    checked(test_input, &environment, &["controller", "connect"])?;
-    thread::sleep(Duration::from_secs(1));
-    checked(test_input, &environment, &["controller", "tap", "guide"])?;
-    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(5))?;
-    checked(test_input, &environment, &["controller", "disconnect"])?;
 
     // Launcher construction and its first GPU upload are interaction work, not
     // idle work. Let that frame settle before sampling the unchanged runtime.
