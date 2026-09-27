@@ -756,6 +756,7 @@ pub enum PluginEffect {
     ContextTaskbarItem { index: usize, id: String },
     ToggleTaskbarMenuPin { id: String },
     CloseTaskbarMenuWindows,
+    InvokeTaskbarWindowMenu { page: String, index: usize },
     ActivateTrayItem { id: String },
     ContextTrayItem { id: String },
     ToggleControlCenter,
@@ -836,6 +837,36 @@ pub struct TaskbarMenuPluginProjection {
     pub application_id: Option<String>,
     pub pinned: bool,
     pub close_all: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarWindowMenuPluginProjection {
+    pub root: Vec<(String, Option<&'static str>)>,
+    pub workspaces: Vec<(String, Option<&'static str>)>,
+    pub displays: Vec<(String, Option<&'static str>)>,
+}
+
+impl TaskbarWindowMenuPluginProjection {
+    fn to_json(&self) -> String {
+        let entries = |items: &Vec<(String, Option<&'static str>)>| {
+            items
+                .iter()
+                .take(32)
+                .map(|(label, navigate)| {
+                    serde_json::json!({
+                        "label": label.chars().take(120).collect::<String>(),
+                        "navigate": navigate,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "root": entries(&self.root),
+            "workspaces": entries(&self.workspaces),
+            "displays": entries(&self.displays),
+        })
+        .to_string()
+    }
 }
 
 impl TaskbarMenuPluginProjection {
@@ -1162,6 +1193,13 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
     }
 
+    pub fn taskbar_window_menu_with_projection(
+        projection: &TaskbarWindowMenuPluginProjection,
+    ) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/taskbar/window-menu.js");
+        Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
+    }
+
     pub fn notification_with_projection(
         projection: &NotificationPluginProjection,
     ) -> Result<Self, String> {
@@ -1275,6 +1313,25 @@ impl PluginPanelApplication {
     pub fn sync_taskbar_projection(
         &mut self,
         projection: &TaskbarPluginProjection,
+    ) -> Result<bool, String> {
+        if self.manifest.id != taskbar_manifest().id {
+            return Err("this plugin is not the taskbar".into());
+        }
+        let data = projection.to_json();
+        if self.projection_data.as_deref() == Some(data.as_str()) {
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.projection_data = Some(data);
+        Ok(true)
+    }
+
+    pub fn sync_taskbar_window_menu_projection(
+        &mut self,
+        projection: &TaskbarWindowMenuPluginProjection,
     ) -> Result<bool, String> {
         if self.manifest.id != taskbar_manifest().id {
             return Err("this plugin is not the taskbar".into());
@@ -1651,6 +1708,35 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::WindowsContext) =>
                         {
                             approved.push(PluginEffect::CloseTaskbarMenuWindows);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-window-menu-action")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::WindowsContext) =>
+                        {
+                            let Some(page) = effect.get("page").and_then(Value::as_str) else {
+                                self.last_error = Some("window menu page is missing".into());
+                                return;
+                            };
+                            let Some(index) = effect
+                                .get("index")
+                                .and_then(Value::as_u64)
+                                .and_then(|index| usize::try_from(index).ok())
+                            else {
+                                self.last_error = Some("window menu row is missing".into());
+                                return;
+                            };
+                            if !matches!(page, "root" | "workspaces" | "displays") || index >= 32 {
+                                self.last_error = Some("window menu target is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::InvokeTaskbarWindowMenu {
+                                page: page.to_owned(),
+                                index,
+                            });
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];

@@ -132,9 +132,11 @@ use crate::{
     window_preview::{
         ApplicationMenuAction, ApplicationMenuApp, ApplicationMenuTarget, MENU_WIDTH, MenuAction,
         PreviewAction, TaskbarPreviewAnchor, WindowMenuApp, WindowPreviewFrame,
-        application_menu_entries, build_preview_frame, menu_height, menu_height_for_rows,
-        preview_dimensions, semantic_theme_from_palette, task_switcher_dimensions,
-        validated_application_close_targets, window_menu_action_is_current, window_menu_max_rows,
+        application_menu_entries, build_preview_frame, display_menu_entries, menu_height,
+        menu_height_for_rows, preview_dimensions, semantic_theme_from_palette,
+        task_switcher_dimensions, validated_application_close_targets,
+        window_menu_action_is_current, window_menu_entries, window_menu_max_rows,
+        workspace_menu_entries,
     },
     winit_shell::SurfaceRole,
 };
@@ -717,6 +719,7 @@ pub struct LiveShell {
     window_menu_anchor_x: Option<i32>,
     window_menu_anchor_y: Option<i32>,
     window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
+    window_menu_plugin_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     application_menu_target: Option<ApplicationMenuTarget>,
     application_menu_host: Option<nickel_ui::UiHost<ApplicationMenuApp>>,
     application_menu_plugin_host:
@@ -1548,6 +1551,7 @@ impl LiveShell {
             window_menu_anchor_x: None,
             window_menu_anchor_y: None,
             window_menu_host: None,
+            window_menu_plugin_host: None,
             application_menu_target: None,
             application_menu_host: None,
             application_menu_plugin_host: None,
@@ -2247,7 +2251,9 @@ impl LiveShell {
                 .as_ref()
                 .is_none_or(WindowPreviewFrame::remote_access_protected),
             SurfaceRole::WindowContextMenu => {
-                if let Some(host) = self.window_menu_host.as_ref() {
+                if let Some(host) = self.window_menu_plugin_host.as_ref() {
+                    host.remote_access_protected()
+                } else if let Some(host) = self.window_menu_host.as_ref() {
                     host.remote_access_protected()
                 } else if let Some(host) = self.application_menu_plugin_host.as_ref() {
                     host.remote_access_protected()
@@ -3002,6 +3008,7 @@ impl LiveShell {
                 self.plugin_taskbar_memory.clear();
                 self.plugin_taskbar_menu_memory = 0;
                 self.application_menu_plugin_host = None;
+                self.window_menu_plugin_host = None;
             } else if id == crate::plugin_panel::notification_manifest().id {
                 self.plugin_notification_host = None;
             }
@@ -3183,9 +3190,14 @@ impl LiveShell {
                 self.preview_frame.as_ref().map(|host| host.change_token())
             }
             SurfaceRole::WindowContextMenu => self
-                .window_menu_host
+                .window_menu_plugin_host
                 .as_ref()
                 .map(|host| host_token(host.inspect()))
+                .or_else(|| {
+                    self.window_menu_host
+                        .as_ref()
+                        .map(|host| host_token(host.inspect()))
+                })
                 .or_else(|| {
                     self.application_menu_plugin_host
                         .as_ref()
@@ -3927,6 +3939,32 @@ impl LiveShell {
                     self.apply_application_menu_action(ApplicationMenuAction::CloseAll);
                     changed = true;
                 }
+                crate::plugin_panel::PluginEffect::InvokeTaskbarWindowMenu { page, index } => {
+                    if self.plugin_taskbar_host.is_none() {
+                        continue;
+                    }
+                    let Some(snapshot) = self.window_menu_snapshot.as_ref() else {
+                        continue;
+                    };
+                    let outputs = self.window_feed.outputs();
+                    let entries = match page.as_str() {
+                        "root" => window_menu_entries(snapshot, &self.workspaces, &outputs),
+                        "workspaces" => workspace_menu_entries(snapshot, &self.workspaces),
+                        "displays" => display_menu_entries(snapshot, &outputs),
+                        _ => continue,
+                    };
+                    if let Some((_, action)) = entries.get(index)
+                        && !matches!(
+                            action,
+                            MenuAction::ShowWorkspaces
+                                | MenuAction::ShowDisplays
+                                | MenuAction::Back
+                        )
+                    {
+                        self.apply_window_menu_action(action.clone());
+                        changed = true;
+                    }
+                }
                 crate::plugin_panel::PluginEffect::ActivateTrayItem { id } => {
                     if self.tray.iter().rev().take(4).any(|item| item.id == id) {
                         self.apply_panel_action(TaskbarAction::Tray(id));
@@ -4299,6 +4337,14 @@ impl LiveShell {
                 }
                 if self.window_menu_host.is_none() {
                     let _ = self.window_menu_scene();
+                }
+                if self.plugin_taskbar_host.is_some() && self.window_menu_plugin_host.is_some() {
+                    return self.window_menu_plugin_event(
+                        HostEvent::Ui(event),
+                        width,
+                        height,
+                        None,
+                    );
                 }
                 let Some(host) = self.window_menu_host.as_mut() else {
                     return false;
@@ -4767,13 +4813,31 @@ impl LiveShell {
                     WindowMenuTargetAction::MaximizeRestore => MenuAction::MaximizeRestore(window),
                     WindowMenuTargetAction::Minimize => MenuAction::Minimize(window),
                 };
-                let bounds = self
-                    .window_menu_host
-                    .as_ref()?
-                    .semantic_targets_for_message(&menu_action)
-                    .into_iter()
-                    .next()?
-                    .bounds;
+                let bounds = if let Some(host) = self.window_menu_plugin_host.as_ref() {
+                    let snapshot = self.window_menu_snapshot.as_ref()?;
+                    if snapshot.id != window {
+                        return None;
+                    }
+                    let outputs = self.window_feed.outputs();
+                    let entries = window_menu_entries(snapshot, &self.workspaces, &outputs);
+                    let index = entries
+                        .iter()
+                        .position(|(_, entry)| entry == &menu_action)?;
+                    let id = format!("window-menu-action-{index}");
+                    host.semantic_nodes()
+                        .into_iter()
+                        .find(|node| {
+                            node.id.as_str() == id || node.id.as_str().ends_with(&format!("/{id}"))
+                        })?
+                        .bounds
+                } else {
+                    self.window_menu_host
+                        .as_ref()?
+                        .semantic_targets_for_message(&menu_action)
+                        .into_iter()
+                        .next()?
+                        .bounds
+                };
                 let point = Point {
                     x: bounds.origin.x + bounds.size.width / 2.0,
                     y: bounds.origin.y + bounds.size.height / 2.0,
@@ -5195,6 +5259,7 @@ impl LiveShell {
                     .find(|candidate| candidate.id == window)
                     .cloned();
                 self.window_menu_host = None;
+                self.window_menu_plugin_host = None;
                 self.window_menu_anchor_x = Some(x);
                 self.window_menu_anchor_y = Some(self.panel_origin_y);
                 let _ = self.send_session_command(
@@ -5414,6 +5479,29 @@ impl LiveShell {
         changed
     }
 
+    fn window_menu_plugin_event(
+        &mut self,
+        event: HostEvent,
+        width: u32,
+        height: u32,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> bool {
+        if self.window_menu_plugin_host.is_none() {
+            let _ = self.window_menu_scene();
+        }
+        let Some(host) = self.window_menu_plugin_host.as_mut() else {
+            return false;
+        };
+        let outcome = host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![event],
+            normalized_authorities: authority.into_iter().collect(),
+            ..HostBatch::default()
+        });
+        let effects = host.application_mut().take_effects();
+        outcome.changed | self.apply_plugin_effects(effects)
+    }
+
     pub fn window_menu_host_input(
         &mut self,
         input: nickel_input::InputEvent,
@@ -5424,6 +5512,11 @@ impl LiveShell {
             .application_menu_plugin_host
             .as_ref()
             .map(|host| host.inspect())
+            .or_else(|| {
+                self.window_menu_plugin_host
+                    .as_ref()
+                    .map(|host| host.inspect())
+            })
             .or_else(|| {
                 self.application_menu_host
                     .as_ref()
@@ -5477,6 +5570,9 @@ impl LiveShell {
         }
         if self.window_menu_host.is_none() {
             let _ = self.window_menu_scene();
+        }
+        if self.plugin_taskbar_host.is_some() && self.window_menu_plugin_host.is_some() {
+            return self.window_menu_plugin_event(event, width, height, authority);
         }
         let Some(host) = self.window_menu_host.as_mut() else {
             return false;
@@ -5561,6 +5657,34 @@ impl LiveShell {
             }
             return outcome.changed;
         }
+        if self.plugin_taskbar_host.is_some() && self.window_menu_plugin_host.is_none() {
+            let _ = self.window_menu_scene();
+        }
+        if self.window_menu_plugin_host.is_some() {
+            let event = match key {
+                Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
+                Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
+                    HostEvent::Controller(ControllerAction::Up)
+                }
+                Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
+                    HostEvent::Controller(ControllerAction::Down)
+                }
+                Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
+                    HostEvent::Controller(ControllerAction::Confirm)
+                }
+                _ => return false,
+            };
+            let changed = self.window_menu_plugin_event(
+                event,
+                MENU_WIDTH.ceil() as u32,
+                self.window_context_menu_height().max(1) as u32,
+                None,
+            );
+            if key == Some(KeyCode::Escape) {
+                self.dismiss_window_menu();
+            }
+            return changed;
+        }
         if self.window_menu_host.is_none() {
             let _ = self.window_menu_scene();
         }
@@ -5634,6 +5758,21 @@ impl LiveShell {
                 self.dismiss_window_menu();
             }
             return outcome.changed;
+        }
+        if self.plugin_taskbar_host.is_some() && self.window_menu_plugin_host.is_none() {
+            let _ = self.window_menu_scene();
+        }
+        if self.window_menu_plugin_host.is_some() {
+            let changed = self.window_menu_plugin_event(
+                HostEvent::Controller(action),
+                MENU_WIDTH.ceil() as u32,
+                self.window_context_menu_height().max(1) as u32,
+                None,
+            );
+            if action == ControllerAction::Cancel {
+                self.dismiss_window_menu();
+            }
+            return changed;
         }
         if self.window_menu_host.is_none() {
             let _ = self.window_menu_scene();
@@ -5752,7 +5891,12 @@ impl LiveShell {
             return menu_height(&self.workspaces) as i32;
         };
         let outputs = self.window_feed.outputs();
-        menu_height_for_rows(window_menu_max_rows(window, &self.workspaces, &outputs)) as i32
+        let rows = window_menu_max_rows(window, &self.workspaces, &outputs);
+        if self.plugin_taskbar_host.is_some() {
+            16 + 48 * rows.min(32) as i32
+        } else {
+            menu_height_for_rows(rows) as i32
+        }
     }
 
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
@@ -5788,6 +5932,7 @@ impl LiveShell {
         self.window_menu_anchor_x = None;
         self.window_menu_anchor_y = None;
         self.window_menu_host = None;
+        self.window_menu_plugin_host = None;
         self.application_menu_target = None;
         self.application_menu_host = None;
         self.application_menu_plugin_host = None;
@@ -5863,6 +6008,7 @@ impl LiveShell {
         self.window_menu_anchor_x = None;
         self.window_menu_anchor_y = None;
         self.window_menu_host = None;
+        self.window_menu_plugin_host = None;
         self.application_menu_target = None;
         self.application_menu_host = None;
         self.application_menu_plugin_host = None;
@@ -6231,6 +6377,10 @@ impl LiveShell {
                 .any(|host| host.pointer_interaction_active())
             || self
                 .window_menu_host
+                .as_ref()
+                .is_some_and(|host| host.pointer_interaction_active())
+            || self
+                .window_menu_plugin_host
                 .as_ref()
                 .is_some_and(|host| host.pointer_interaction_active())
             || self
@@ -6830,6 +6980,7 @@ impl LiveShell {
         self.window_menu = Some(snapshot.id);
         self.window_menu_snapshot = Some(snapshot);
         self.window_menu_host = None;
+        self.window_menu_plugin_host = None;
         self.window_menu_anchor_x = Some(x);
         self.window_menu_anchor_y = Some(y);
         let sent = self.send_session_command(
@@ -7706,12 +7857,55 @@ impl LiveShell {
         })
     }
 
+    fn taskbar_window_menu_projection(
+        snapshot: &OpenWindow,
+        workspaces: &[platform::WorkspaceSummary],
+        outputs: &[String],
+    ) -> crate::plugin_panel::TaskbarWindowMenuPluginProjection {
+        let entries = |items: Vec<(String, MenuAction)>| {
+            items
+                .into_iter()
+                .take(32)
+                .map(|(label, action)| {
+                    let navigate = match action {
+                        MenuAction::ShowWorkspaces => Some("workspaces"),
+                        MenuAction::ShowDisplays => Some("displays"),
+                        MenuAction::Back => Some("root"),
+                        _ => None,
+                    };
+                    (label, navigate)
+                })
+                .collect()
+        };
+        crate::plugin_panel::TaskbarWindowMenuPluginProjection {
+            root: entries(window_menu_entries(snapshot, workspaces, outputs)),
+            workspaces: entries(workspace_menu_entries(snapshot, workspaces)),
+            displays: entries(display_menu_entries(snapshot, outputs)),
+        }
+    }
+
+    fn record_taskbar_menu_memory(&mut self) {
+        let retained_ui = self
+            .plugin_taskbar_memory
+            .values()
+            .copied()
+            .fold(self.plugin_taskbar_menu_memory, u64::saturating_add);
+        let _ = self.plugin_registry.record_memory(
+            &crate::plugin_panel::taskbar_manifest().id,
+            nickel_core::plugins::PluginMemory {
+                native_ui_bytes: Some(retained_ui),
+                ..nickel_core::plugins::PluginMemory::default()
+            },
+        );
+    }
+
     fn window_menu_scene(&mut self) -> Vec<PaintCommand> {
         if self.application_menu_target.is_some() {
             return self.application_menu_scene();
         }
         if self.window_menu.is_none() && self.window_menu_snapshot.is_none() {
             self.window_menu_host = None;
+            self.window_menu_plugin_host = None;
             return Vec::new();
         }
         let Some(snapshot) = self.window_menu_snapshot.clone().or_else(|| {
@@ -7732,6 +7926,44 @@ impl LiveShell {
             menu_height_for_rows(window_menu_max_rows(&snapshot, &self.workspaces, &outputs))
                 .ceil()
                 .max(1.0) as u32;
+        if self.plugin_taskbar_host.is_some() {
+            let projection =
+                Self::taskbar_window_menu_projection(&snapshot, &self.workspaces, &outputs);
+            let height = (16
+                + 48 * window_menu_max_rows(&snapshot, &self.workspaces, &outputs).min(32))
+                as u32;
+            if self.window_menu_plugin_host.is_none() {
+                match crate::plugin_panel::PluginPanelApplication::taskbar_window_menu_with_projection(&projection) {
+                    Ok(application) => {
+                        self.window_menu_plugin_host = Some(nickel_ui::UiHost::new(
+                            application,
+                            MENU_WIDTH.ceil() as u32,
+                            height,
+                        ));
+                    }
+                    Err(error) => tracing::error!(%error, "taskbar JSX window menu failed to start"),
+                }
+            }
+            if let Some(host) = self.window_menu_plugin_host.as_mut() {
+                let changed = host
+                    .application_mut()
+                    .sync_taskbar_window_menu_projection(&projection)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%error, "taskbar JSX window menu projection failed");
+                        false
+                    });
+                let outcome = host.step(HostBatch {
+                    application_changed: changed,
+                    surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                });
+                let commands = host.commands().to_vec();
+                self.plugin_taskbar_menu_memory = outcome.telemetry.retained_frame_bytes as u64;
+                self.record_taskbar_menu_memory();
+                return commands;
+            }
+        }
         let host = self.window_menu_host.get_or_insert_with(|| {
             nickel_ui::UiHost::new(
                 WindowMenuApp::new(
@@ -7799,18 +8031,7 @@ impl LiveShell {
                 });
                 let commands = host.commands().to_vec();
                 self.plugin_taskbar_menu_memory = outcome.telemetry.retained_frame_bytes as u64;
-                let retained_ui = self
-                    .plugin_taskbar_memory
-                    .values()
-                    .copied()
-                    .fold(self.plugin_taskbar_menu_memory, u64::saturating_add);
-                let _ = self.plugin_registry.record_memory(
-                    &crate::plugin_panel::taskbar_manifest().id,
-                    nickel_core::plugins::PluginMemory {
-                        native_ui_bytes: Some(retained_ui),
-                        ..nickel_core::plugins::PluginMemory::default()
-                    },
-                );
+                self.record_taskbar_menu_memory();
                 return commands;
             }
         }

@@ -514,7 +514,7 @@ pub(crate) fn window_menu_entries(
     entries
 }
 
-fn workspace_menu_entries(
+pub(crate) fn workspace_menu_entries(
     window: &OpenWindow,
     workspaces: &[WorkspaceSummary],
 ) -> Vec<(String, MenuAction)> {
@@ -531,7 +531,10 @@ fn workspace_menu_entries(
     entries
 }
 
-fn display_menu_entries(window: &OpenWindow, outputs: &[String]) -> Vec<(String, MenuAction)> {
+pub(crate) fn display_menu_entries(
+    window: &OpenWindow,
+    outputs: &[String],
+) -> Vec<(String, MenuAction)> {
     let mut entries = vec![("‹ Window Actions".into(), MenuAction::Back)];
     entries.extend(outputs.iter().map(|output| {
         let checked = window.state.output.as_ref() == Some(output);

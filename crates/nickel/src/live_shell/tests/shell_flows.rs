@@ -915,6 +915,9 @@
     fn semantic_shell_targets_come_from_live_group_preview_and_menu_records() {
         let mut shell = LiveShell::new().unwrap();
         shell
+            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+            .unwrap();
+        shell
             .launcher
             .set_preferences(LauncherPreferences::default());
         let application_id = ApplicationId::new("org.nickel.Terminal");
@@ -1165,6 +1168,149 @@
             crate::platform::ShellCommand::WindowAction {
                 window: WindowId(41),
                 action: crate::platform::WindowAction::Close,
+            }
+        )));
+    }
+
+    #[test]
+    fn plugin_taskbar_window_menu_dispatches_validated_close() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        let window = OpenWindow {
+            id: WindowId(71),
+            application_id: Some(ApplicationId::new("org.nickel.window-menu")),
+            active: true,
+            title: "Window menu test".into(),
+            state: crate::model::WindowState::default(),
+        };
+        shell.windows = vec![window.clone()];
+        shell.window_menu = Some(window.id);
+        shell.window_menu_snapshot = Some(window);
+        let height = shell.window_context_menu_height() as u32;
+        assert!(!shell.window_menu_scene().is_empty());
+        assert!(shell.window_menu_host.is_none());
+        let menu = shell.window_menu_plugin_host.as_ref().unwrap();
+        let target = shell
+            .resolve_semantic_target(&ShellSemanticTarget::WindowMenu {
+                window: nickel_session_protocol::WindowId(71),
+                action: WindowMenuTargetAction::Close,
+            })
+            .expect("JSX window menu close target");
+        assert_eq!(target.role, ShellRole::ContextMenu);
+        let close = menu
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Close Window".into(),
+            })
+            .unwrap();
+        assert!(shell.window_menu_host_event(
+            HostEvent::Ui(UiEvent::AccessibilityActivate(close.id)),
+            super::MENU_WIDTH as u32,
+            height,
+        ));
+        assert!(host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::WindowAction {
+                window: WindowId(71),
+                action: crate::platform::WindowAction::Close,
+            }
+        )));
+        assert!(shell.window_menu_plugin_host.is_none());
+    }
+
+    #[test]
+    fn plugin_taskbar_window_menu_rejects_reused_window_identity() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        let captured = OpenWindow {
+            id: WindowId(71),
+            application_id: Some(ApplicationId::new("org.nickel.original")),
+            active: true,
+            title: "Original".into(),
+            state: crate::model::WindowState::default(),
+        };
+        shell.window_menu = Some(captured.id);
+        shell.window_menu_snapshot = Some(captured.clone());
+        shell.windows = vec![OpenWindow {
+            application_id: Some(ApplicationId::new("org.nickel.replacement")),
+            ..captured
+        }];
+        let close_index = crate::window_preview::window_menu_entries(
+            shell.window_menu_snapshot.as_ref().unwrap(),
+            &shell.workspaces,
+            &shell.window_feed.outputs(),
+        )
+        .iter()
+        .position(|(_, action)| matches!(action, MenuAction::Close(_)))
+        .unwrap();
+        shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::InvokeTaskbarWindowMenu {
+                page: "root".into(),
+                index: close_index,
+            },
+        ]);
+        assert!(!host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::WindowAction { .. }
+        )));
+    }
+
+    #[test]
+    fn plugin_taskbar_window_menu_navigates_to_workspace_action() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        let mut window = OpenWindow {
+            id: WindowId(72),
+            application_id: Some(ApplicationId::new("org.nickel.workspace-menu")),
+            active: true,
+            title: "Workspace menu test".into(),
+            state: crate::model::WindowState::default(),
+        };
+        window.state.capabilities.move_workspace = true;
+        shell.workspaces = vec![
+            crate::platform::WorkspaceSummary { id: 10, active: true },
+            crate::platform::WorkspaceSummary { id: 20, active: false },
+        ];
+        shell.windows = vec![window.clone()];
+        shell.window_menu = Some(window.id);
+        shell.window_menu_snapshot = Some(window);
+        let height = shell.window_context_menu_height() as u32;
+        shell.window_menu_scene();
+        let menu = shell.window_menu_plugin_host.as_ref().unwrap();
+        let navigate = menu
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Move to Workspace ›".into(),
+            })
+            .unwrap();
+        assert!(shell.window_menu_host_event(
+            HostEvent::Ui(UiEvent::AccessibilityActivate(navigate.id)),
+            super::MENU_WIDTH as u32,
+            height,
+        ));
+        let menu = shell.window_menu_plugin_host.as_ref().unwrap();
+        let destination = menu
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Workspace 2".into(),
+            })
+            .unwrap();
+        assert!(shell.window_menu_host_event(
+            HostEvent::Ui(UiEvent::AccessibilityActivate(destination.id)),
+            super::MENU_WIDTH as u32,
+            height,
+        ));
+        assert!(host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::MoveWindowToWorkspace {
+                window: WindowId(72),
+                workspace: 20,
             }
         )));
     }
@@ -1559,6 +1705,9 @@
     #[test]
     fn transient_keyboard_navigation_uses_production_frame_order() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+            .unwrap();
         let palette = nickel_core::theme::ThemePalette::from_appearance(Appearance::default());
         let group = WindowGroup {
             application_id: None,

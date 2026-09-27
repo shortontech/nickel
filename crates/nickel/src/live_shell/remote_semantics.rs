@@ -253,7 +253,9 @@ impl LiveShell {
                     )))
                 }),
             SurfaceRole::WindowContextMenu => {
-                if let Some(host) = self.window_menu_host.as_ref() {
+                if let Some(host) = self.window_menu_plugin_host.as_ref() {
+                    Ok(observe_only(plugin_projection(host, |_, _| false)?))
+                } else if let Some(host) = self.window_menu_host.as_ref() {
                     Ok(observe_only(project(host, |_| {
                         RemoteActionDisposition::Unavailable
                     })?))
