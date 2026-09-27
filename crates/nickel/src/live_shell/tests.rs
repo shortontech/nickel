@@ -759,6 +759,9 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
         decisions: Mutex::new(Vec::new()),
     });
     let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+    shell
+        .set_plugin_enabled(&crate::plugin_panel::notification_manifest().id, false)
+        .unwrap();
 
     shell.sync_remote_lease_notifications_from(host.pending.lock().unwrap().clone());
 
@@ -1011,6 +1014,9 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
 #[test]
 fn native_audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes() {
     let mut shell = LiveShell::new().unwrap();
+    shell
+        .set_plugin_enabled(&crate::plugin_panel::volume_osd_manifest().id, false)
+        .unwrap();
     let mut status = AudioStatus {
         available: true,
         volume_percent: 31,

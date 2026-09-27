@@ -1355,6 +1355,7 @@
             })
             .unwrap();
         assert!(close.bounds.origin.y + close.bounds.size.height <= menu_height as f32);
+        host.take_commands();
         shell.window_menu_host_event(
             HostEvent::Ui(UiEvent::AccessibilityActivate(close.id)),
             super::MENU_WIDTH as u32,
@@ -1897,6 +1898,7 @@
     #[test]
     fn transient_keyboard_navigation_uses_production_frame_order() {
         let mut shell = LiveShell::new().unwrap();
+        shell.plugin_preview_host = None;
         shell
             .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
             .unwrap();
