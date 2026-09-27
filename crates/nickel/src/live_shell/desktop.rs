@@ -25,6 +25,7 @@ use crate::file_window_host::FileWindowHost;
 
 pub struct DesktopApplication {
     pub(super) wallpaper: Option<Arc<image::RgbaImage>>,
+    pub(super) plugin_background: bool,
     pub(super) wallpaper_generation: u64,
     pub(super) palette: ThemePalette,
     pub(super) browser: Option<DirectoryBrowser>,
@@ -202,6 +203,7 @@ impl DesktopApplication {
         }
         Self {
             wallpaper,
+            plugin_background: false,
             wallpaper_generation: 0,
             palette,
             browser,
@@ -1548,13 +1550,18 @@ impl nickel_ui::Application for DesktopApplication {
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
-        let mut layer = Layer::new().width(width).height(height).child(
-            Container::new()
-                .width(width)
-                .height(height)
-                .background(self.palette.background),
-        );
-        if let Some(wallpaper) = &self.wallpaper {
+        let mut layer = Layer::new().width(width).height(height);
+        if !self.plugin_background {
+            layer = layer.child(
+                Container::new()
+                    .width(width)
+                    .height(height)
+                    .background(self.palette.background),
+            );
+        }
+        if !self.plugin_background
+            && let Some(wallpaper) = &self.wallpaper
+        {
             layer = layer.child(
                 // Wallpaper changes have an owned generation; dragging an icon
                 // must not fingerprint every wallpaper byte during view rebuild.
@@ -1691,7 +1698,11 @@ impl nickel_ui::Application for DesktopApplication {
             .semantic_role(SemanticRole::ApplicationPresentation)
             .accessibility_label("Desktop")
             .context_message(DesktopMessage::BackgroundContext)
-            .background(self.palette.background)
+            .background(if self.plugin_background {
+                0x00000000
+            } else {
+                self.palette.background
+            })
             .width(width)
             .height(height)
             .child(layer)
@@ -1747,6 +1758,7 @@ impl DesktopApplication {
         let (operation_tx, operation_rx) = std::sync::mpsc::channel();
         Self {
             wallpaper,
+            plugin_background: false,
             wallpaper_generation: 0,
             palette,
             file_window_host: crate::file_window_host::default_file_window_host(),

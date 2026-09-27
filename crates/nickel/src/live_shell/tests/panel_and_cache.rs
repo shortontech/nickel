@@ -745,13 +745,14 @@
         shell.wallpaper_size = (1920, 1080);
         let initial = shell.desktop_host.inspect();
 
-        shell.desktop_scene(1920, 1080);
+        let scene = shell.desktop_scene(1920, 1080);
         let rebuilt = shell.desktop_host.inspect();
 
         assert_eq!(rebuilt.frame_generation, initial.frame_generation + 1);
         assert!(
-            rebuilt.resources.paint_primitive_count > initial.resources.paint_primitive_count,
-            "the declarative wallpaper image enters the rebuilt desktop frame"
+            scene.iter().any(|command| matches!(command,
+                nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. })),
+            "the desktop plugin must paint the arriving wallpaper"
         );
     }
 

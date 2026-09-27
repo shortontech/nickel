@@ -110,6 +110,54 @@
     }
 
     #[test]
+    fn desktop_background_plugin_reports_memory_and_restores_native_wallpaper_when_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plugin-wallpaper.png");
+        RgbaImage::from_pixel(8, 8, Rgba([44, 55, 66, 255]))
+            .save(&path)
+            .unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        assert!(shell.refresh_configured_wallpaper(Some(path)));
+        let plugin_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        let wallpaper_index = plugin_scene
+            .iter()
+            .position(|command| matches!(
+                command,
+                nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. }
+            ))
+            .expect("JSX desktop wallpaper image");
+        if let nickel_ui::backend::PaintCommand::Image { image, .. } = &plugin_scene[wallpaper_index]
+        {
+            assert!(Arc::ptr_eq(image, shell.wallpaper.as_ref().unwrap()));
+        }
+        assert!(!plugin_scene[wallpaper_index + 1..].iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Fill { rect, color }
+                if rect.size.width >= 320.0 && rect.size.height >= 200.0 && *color >> 24 != 0
+        )));
+        assert!(shell.desktop_host.application().plugin_background);
+        let id = &crate::plugin_panel::desktop_manifest().id;
+        let status = shell.plugin_registry().get(id).unwrap();
+        assert!(status.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0));
+
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        let native_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        assert!(native_scene.iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Image { id: 1, .. }
+        )));
+        assert!(!native_scene.iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. }
+        )));
+        assert!(!shell.desktop_host.application().plugin_background);
+        assert_eq!(
+            shell.plugin_registry().get(id).unwrap().memory,
+            nickel_core::plugins::PluginMemory::default()
+        );
+    }
+
+    #[test]
     fn failed_wallpaper_decode_preserves_the_last_presentable_image() {
         let directory = tempfile::tempdir().expect("wallpaper fixture directory");
         let valid_path = directory.path().join("valid.png");

@@ -11,7 +11,7 @@ use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, ImageFit, Insets,
+    AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, ImageFit, Insets, Layer,
     OverlayAnchor, OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Row, SemanticRole,
     Shortcut, Size, Spacer, Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll,
     ViewContext,
@@ -102,6 +102,14 @@ pub fn window_preview_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn desktop_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!("../../../assets/plugins/desktop/plugin.json"))
+            .expect("bundled desktop plugin manifest must be valid")
+    })
+}
+
 pub fn run_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -139,6 +147,7 @@ pub fn enabled() -> bool {
 
 const BOOTSTRAP: &str = r#"
 const Panel = 'panel';
+const Surface = 'surface';
 const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
@@ -296,6 +305,12 @@ function __nickelDispatch(action, value) {
 
 #[derive(Clone, Debug, PartialEq)]
 enum PanelNode {
+    Surface {
+        children: Vec<Self>,
+        background: u32,
+        width: u32,
+        height: u32,
+    },
     Panel {
         children: Vec<Self>,
         background: u32,
@@ -372,6 +387,29 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
+            "surface" => {
+                let dimension = |name| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_u64)
+                        .filter(|size| (1..=8192).contains(size))
+                        .map(|size| size as u32)
+                        .ok_or_else(|| format!("surface {name} must be 1 to 8192"))
+                };
+                Ok(Self::Surface {
+                    children: children
+                        .iter()
+                        .filter(|value| !value.is_null())
+                        .map(Self::parse)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    background: value
+                        .get("background")
+                        .and_then(Value::as_u64)
+                        .map_or(0xff202124, |color| color as u32),
+                    width: dimension("width")?,
+                    height: dimension("height")?,
+                })
+            }
             "panel" | "row" | "column" | "scroll-view" => {
                 let children = children
                     .iter()
@@ -655,6 +693,26 @@ impl PanelNode {
 
     fn view(&self, images: &PluginImages) -> AnyView<PluginMessage> {
         match self {
+            Self::Surface {
+                children,
+                background,
+                width,
+                height,
+            } => {
+                let mut layer = Layer::new().width(*width as f32).height(*height as f32);
+                for child in children {
+                    if !matches!(child, Self::Dialog { .. }) {
+                        layer = layer.child(child.view(images));
+                    }
+                }
+                AnyView::new(
+                    Container::new()
+                        .width(*width as f32)
+                        .height(*height as f32)
+                        .background(*background)
+                        .child(layer),
+                )
+            }
             Self::Panel {
                 children,
                 background,
@@ -856,7 +914,8 @@ impl PanelNode {
     fn dialog(&self, requested_id: &str) -> Option<&Self> {
         match self {
             Self::Dialog { id, .. } if id == requested_id => Some(self),
-            Self::Panel { children, .. }
+            Self::Surface { children, .. }
+            | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
             | Self::ScrollView { children, .. } => {
@@ -869,7 +928,8 @@ impl PanelNode {
     fn menu(&self, requested_id: &str) -> Option<&Self> {
         match self {
             Self::Menu { id, .. } if id == requested_id => Some(self),
-            Self::Panel { children, .. }
+            Self::Surface { children, .. }
+            | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
             | Self::ScrollView { children, .. } => {
@@ -882,7 +942,8 @@ impl PanelNode {
     fn transients<'a>(&'a self, output: &mut Vec<&'a Self>) {
         match self {
             Self::Dialog { .. } | Self::Menu { .. } => output.push(self),
-            Self::Panel { children, .. }
+            Self::Surface { children, .. }
+            | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
             | Self::ScrollView { children, .. } => {
@@ -902,7 +963,8 @@ impl PanelNode {
                 action: Some(action),
                 ..
             } if id == requested_id => Some(*action),
-            Self::Panel { children, .. }
+            Self::Surface { children, .. }
+            | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
             | Self::ScrollView { children, .. } => children
@@ -1644,6 +1706,11 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, window_preview_manifest(), Some(data.to_string()))
     }
 
+    pub fn desktop_with_data(data: &Value) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/desktop/main.js");
+        Self::new_with_manifest(source, desktop_manifest(), Some(data.to_string()))
+    }
+
     pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
         let source = include_str!("../../../assets/plugins/run/main.js");
         let data = serde_json::json!({ "status": status }).to_string();
@@ -1846,6 +1913,24 @@ impl PluginPanelApplication {
     pub fn sync_window_preview_data(&mut self, data: &Value) -> Result<bool, String> {
         if self.manifest.id != window_preview_manifest().id {
             return Err("this plugin is not the window preview".into());
+        }
+        let serialized = data.to_string();
+        if self.projection_data.as_deref() == Some(serialized.as_str()) {
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!(
+                "__nickelSetData({serialized})"
+            )))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.projection_data = Some(serialized);
+        Ok(true)
+    }
+
+    pub fn sync_desktop_data(&mut self, data: &Value) -> Result<bool, String> {
+        if self.manifest.id != desktop_manifest().id {
+            return Err("this plugin is not the desktop".into());
         }
         let serialized = data.to_string();
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
@@ -2584,6 +2669,7 @@ impl nickel_ui::Application for PluginPanelApplication {
             || self.manifest.id == notification_manifest().id
             || self.manifest.id == run_manifest().id
             || self.manifest.id == window_preview_manifest().id
+            || self.manifest.id == desktop_manifest().id
         {
             AnyView::new(self.node.view(&self.images))
         } else {

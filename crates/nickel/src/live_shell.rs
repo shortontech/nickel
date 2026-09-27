@@ -644,6 +644,7 @@ pub struct LiveShell {
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
     desktop_host: nickel_ui::UiHost<DesktopApplication>,
+    plugin_desktop_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     desktop_viewports: HashMap<String, DesktopSurfaceViewport>,
     desktop_active_viewport: String,
     desktop_change_token: HostChangeToken,
@@ -1285,6 +1286,7 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::volume_osd_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::control_center_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::window_preview_manifest().clone())?;
+        plugin_registry.register(crate::plugin_panel::desktop_manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
         #[cfg(not(test))]
@@ -1514,6 +1516,7 @@ impl LiveShell {
             wallpaper,
             wallpaper_size,
             desktop_host,
+            plugin_desktop_host: None,
             desktop_viewports: HashMap::new(),
             desktop_active_viewport: "primary".into(),
             desktop_change_token: HostChangeToken::default(),
@@ -1669,6 +1672,22 @@ impl LiveShell {
             match crate::plugin_panel::PluginPanelApplication::window_preview_with_data(&data) {
                 Ok(application) => {
                     shell.plugin_preview_host = Some(nickel_ui::UiHost::new(application, 300, 214));
+                    shell.plugin_registry.mark_running(id)?;
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    shell.plugin_registry.mark_failed(id, error)?;
+                }
+            }
+        }
+        if plugin_activation.desired_enabled(&crate::plugin_panel::desktop_manifest().id, true) {
+            let id = &crate::plugin_panel::desktop_manifest().id;
+            shell.plugin_registry.set_enabled(id, true)?;
+            let data = serde_json::json!({"width": 1, "height": 1,
+                "background": palette.background, "wallpaper": false});
+            match crate::plugin_panel::PluginPanelApplication::desktop_with_data(&data) {
+                Ok(application) => {
+                    shell.plugin_desktop_host = Some(nickel_ui::UiHost::new(application, 1, 1));
                     shell.plugin_registry.mark_running(id)?;
                 }
                 Err(error) => {
@@ -2283,6 +2302,10 @@ impl LiveShell {
         match role {
             SurfaceRole::Desktop => {
                 self.desktop_host.remote_access_protected()
+                    || self
+                        .plugin_desktop_host
+                        .as_ref()
+                        .is_some_and(|host| host.remote_access_protected())
                     || self
                         .desktop_viewports
                         .values()
@@ -3107,6 +3130,9 @@ impl LiveShell {
                 self.plugin_control_host = None;
             } else if id == crate::plugin_panel::window_preview_manifest().id {
                 self.plugin_preview_host = None;
+            } else if id == crate::plugin_panel::desktop_manifest().id {
+                self.plugin_desktop_host = None;
+                self.desktop_application_dirty = true;
             }
             self.maybe_publish_plugin_status();
             return Ok(true);
@@ -3186,6 +3212,15 @@ impl LiveShell {
             crate::plugin_panel::PluginPanelApplication::window_preview_with_data(&data).map(
                 |application| {
                     self.plugin_preview_host = Some(nickel_ui::UiHost::new(application, 300, 214));
+                },
+            )
+        } else if id == crate::plugin_panel::desktop_manifest().id {
+            let data = serde_json::json!({"width": 1, "height": 1,
+                "background": self.palette.background, "wallpaper": false});
+            crate::plugin_panel::PluginPanelApplication::desktop_with_data(&data).map(
+                |application| {
+                    self.plugin_desktop_host = Some(nickel_ui::UiHost::new(application, 1, 1));
+                    self.desktop_application_dirty = true;
                 },
             )
         } else {
@@ -7517,7 +7552,51 @@ impl LiveShell {
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         self.load_wallpaper_for(width, height);
+        let plugin_commands = if let Some(host) = self.plugin_desktop_host.as_mut() {
+            let data = serde_json::json!({
+                "width": width.clamp(1, 8192),
+                "height": height.clamp(1, 8192),
+                "background": self.palette.background,
+                "wallpaper": self.wallpaper.is_some(),
+            });
+            match host.application_mut().sync_desktop_data(&data) {
+                Ok(data_changed) => {
+                    let mut images = crate::plugin_panel::PluginImages::new();
+                    if let Some(wallpaper) = &self.wallpaper {
+                        images.insert("wallpaper".into(), (0x6000, Arc::clone(wallpaper)));
+                    }
+                    let images_changed = host.application_mut().sync_images(images);
+                    let outcome = host.step(HostBatch {
+                        application_changed: data_changed || images_changed,
+                        surface_size: Some((width, height)),
+                        events: vec![HostEvent::Poll],
+                        ..HostBatch::default()
+                    });
+                    let commands = host.commands().to_vec();
+                    let _ = self.plugin_registry.record_memory(
+                        &crate::plugin_panel::desktop_manifest().id,
+                        nickel_core::plugins::PluginMemory {
+                            native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                            ..Default::default()
+                        },
+                    );
+                    Some(commands)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "desktop plugin projection failed");
+                    let _ = self
+                        .plugin_registry
+                        .mark_failed(&crate::plugin_panel::desktop_manifest().id, error);
+                    self.plugin_desktop_host = None;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let application = self.desktop_host.application_mut();
+        let background_changed = application.plugin_background != plugin_commands.is_some();
+        application.plugin_background = plugin_commands.is_some();
         let wallpaper_changed = match (&application.wallpaper, &self.wallpaper) {
             (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
             (None, None) => false,
@@ -7533,8 +7612,11 @@ impl LiveShell {
         }
         application.palette = self.palette;
         let icons_changed = application.prepare_icons();
-        let application_changed =
-            self.desktop_application_dirty || wallpaper_changed || palette_changed || icons_changed;
+        let application_changed = self.desktop_application_dirty
+            || background_changed
+            || wallpaper_changed
+            || palette_changed
+            || icons_changed;
         let outcome = self.desktop_host.step(HostBatch {
             application_changed,
             surface_size: Some((width, height)),
@@ -7543,10 +7625,11 @@ impl LiveShell {
         self.desktop_application_dirty = false;
         self.desktop_change_token = outcome.change_token;
         self.desktop_deadline = outcome.next_deadline;
-        let commands = self.desktop_host.commands().to_vec();
+        let mut commands = plugin_commands.unwrap_or_default();
+        commands.extend_from_slice(self.desktop_host.commands());
+        self.maybe_publish_plugin_status();
         #[cfg(target_os = "windows")]
         let commands = {
-            let mut commands = commands;
             if let Some((output, _, index)) = &self.output_identification
                 && output == &self.desktop_active_viewport
             {
