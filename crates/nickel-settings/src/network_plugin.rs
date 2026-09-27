@@ -1,29 +1,29 @@
 //! Network page JSX adapter. The platform operations remain in Settings.
 
-use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{AnyView, Column, Insets, SemanticTheme, VerticalScroll};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{SettingsApp, SettingsMessage, SettingsPage, plugin_list::Node};
+use crate::{
+    SettingsApp, SettingsMessage, SettingsPage,
+    settings_components::{Node, SettingsJsxContext},
+};
 
 const STALE_STATUS: &str = "Network status changed; refresh the page";
 
 pub(super) struct NetworkPage {
-    runtime: JsxRuntime,
-    node: Option<Node>,
-    last_data: Option<String>,
+    context: SettingsJsxContext,
 }
 
 impl NetworkPage {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            runtime: JsxRuntime::new(
+            context: SettingsJsxContext::new(
                 include_str!("../../../assets/plugin-runtime/settings-network.js"),
-                None,
+                parse_tree,
+                STALE_STATUS,
+                "Network action must request one operation",
             )?,
-            node: None,
-            last_data: None,
         })
     }
 
@@ -32,13 +32,7 @@ impl NetworkPage {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        let data = serde_json::to_string(data).map_err(|error| error.to_string())?;
-        if self.last_data.as_deref() != Some(&data) {
-            self.runtime.set_data(&data)?;
-            self.node = Some(self.runtime.render("__nickelRender()", parse_tree)?);
-            self.last_data = Some(data);
-        }
-        let node = self.node.as_ref().ok_or("Network page is unavailable")?;
+        let node = self.context.render(data)?;
         Ok(AnyView::new(
             Column::new()
                 .grow(1.0)
@@ -58,37 +52,16 @@ impl NetworkPage {
     }
 
     fn dispatch(&mut self, index: usize, data: &Value) -> Result<SettingsMessage, String> {
-        let serialized = serde_json::to_string(data).map_err(|error| error.to_string())?;
-        if self.last_data.as_deref() != Some(&serialized) {
-            return Err(STALE_STATUS.into());
-        }
-        let rendered = self
-            .runtime
-            .render(&format!("__nickelDispatch({index},null)"), parse_tree);
-        let effects = if rendered.is_ok() {
-            self.runtime.take_effects()
-        } else {
-            Ok(Vec::new())
-        };
-        let result: Result<(Node, SettingsMessage), String> = (|| {
-            let node = rendered?;
-            let mut effects = effects?;
-            if effects.len() != 1 {
-                return Err("Network action must request one operation".into());
-            }
+        self.context.dispatch(index, &Value::Null, data, |effect| {
             let request: NetworkRequest =
-                serde_json::from_value(effects.remove(0)).map_err(|error| error.to_string())?;
-            Ok((node, validate_request(request, data)?))
-        })();
-        self.runtime.finish_event(result.is_ok())?;
-        let (node, message) = result?;
-        self.node = Some(node);
-        Ok(message)
+                serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
+            validate_request(request, data)
+        })
     }
 
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.node.as_ref()?.action_for_id(id)
+        self.context.action_for_id(id)
     }
 }
 

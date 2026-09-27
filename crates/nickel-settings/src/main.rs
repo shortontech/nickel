@@ -10,6 +10,7 @@ mod optional_features_plugin;
 mod persistence;
 mod platform;
 mod plugin_list;
+mod settings_components;
 mod settings_plugin;
 mod view;
 
