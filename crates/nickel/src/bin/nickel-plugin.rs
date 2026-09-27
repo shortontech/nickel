@@ -42,7 +42,7 @@ fn main() -> Result<(), String> {
                 return Err(usage().into());
             }
             let package = dev::load_package(&PathBuf::from(directory))?;
-            PluginPanelApplication::from_package(&package)
+            PluginPanelApplication::validate_package(&package)
                 .map_err(|error| format!("plugin JavaScript failed: {error}"))?;
             println!("{} ({})", package.manifest.name, package.manifest.id);
             for surface in &package.manifest.surfaces {

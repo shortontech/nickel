@@ -3061,20 +3061,27 @@ mod tests {
     }
 
     #[test]
-    fn two_plugin_panels_can_target_the_same_output() {
+    fn multiple_plugin_surface_keys_can_target_the_same_output() {
         let mut panels = BTreeMap::new();
-        for (id, scope) in [
+        for (id, surface_id, scope) in [
             (
                 "org.example.clock",
+                "main",
                 nickel_core::plugins::PluginOutputScope::Primary,
             ),
             (
                 "org.example.mail",
+                "main",
                 nickel_core::plugins::PluginOutputScope::All,
+            ),
+            (
+                "org.example.mail",
+                "dock",
+                nickel_core::plugins::PluginOutputScope::Primary,
             ),
         ] {
             let mut surface = crate::plugin_panel::surface().clone();
-            surface.id = "main".into();
+            surface.id = surface_id.into();
             surface.output = scope;
             panels.insert(
                 nickel_core::plugins::PluginSurfaceKey {
@@ -3085,13 +3092,13 @@ mod tests {
             );
         }
         let desired = desired_plugin_surfaces(&["DP-1".into(), "DP-2".into()], &panels);
-        assert_eq!(desired.len(), 3);
+        assert_eq!(desired.len(), 4);
         assert_eq!(
             desired
                 .iter()
                 .filter(|(output, _)| output == "DP-1")
                 .count(),
-            2
+            3
         );
         assert_eq!(
             desired

@@ -29,14 +29,18 @@ temporary Nickel profile, and launches the test shell. Saving `plugin.json`,
 the declared JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the test shell. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
-profile. The developer command supports one panel or dock surface, or one surface-free
+profile. The developer command supports up to 16 panel or dock surfaces in one
+package, or one surface-free
 taskbar badge contribution; `nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `Panel` component's ARGB `background` can be translucent. Several installed
-panel and dock plugins can be enabled together. Each installed package currently
-declares one surface; a package cannot create additional surfaces at runtime.
+panel and dock plugins can be enabled together. A package can declare several
+surfaces, each with a unique ID. Nickel starts a separate component instance for
+each and exposes `nickel.data.surface` with its `id`, `kind`, `width`, and
+`height`; the same entry can return different layouts for each ID. Surface
+declarations are static until the package is updated.
 
 The installed entry is plain JavaScript. If `main.jsx` or `main.tsx` exists
 beside a declared `main.js` entry, both commands run a local

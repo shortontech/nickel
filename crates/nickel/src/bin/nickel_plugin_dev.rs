@@ -140,11 +140,13 @@ mod platform {
 
     fn load_panel(directory: &Path) -> Result<PluginPackage, String> {
         let package = load_package(directory)?;
-        let panel = package.manifest.surfaces.len() == 1
-            && matches!(
-                package.manifest.surfaces[0].kind,
-                PluginSurfaceKind::Panel | PluginSurfaceKind::Dock
-            )
+        let panel = !package.manifest.surfaces.is_empty()
+            && package.manifest.surfaces.iter().all(|surface| {
+                matches!(
+                    surface.kind,
+                    PluginSurfaceKind::Panel | PluginSurfaceKind::Dock
+                )
+            })
             && package.manifest.contributes.is_empty();
         let badge = package.manifest.surfaces.is_empty()
             && matches!(package.manifest.contributes.as_slice(), [contribution]
@@ -154,11 +156,11 @@ mod platform {
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
         if !panel && !badge {
             return Err(
-                "dev currently needs one panel or dock, or one surface-free badge contribution"
+                "dev currently needs panel or dock surfaces, or one surface-free badge contribution"
                     .into(),
             );
         }
-        PluginPanelApplication::from_package(&package)
+        PluginPanelApplication::validate_package(&package)
             .map_err(|error| format!("plugin JavaScript failed: {error}"))?;
         Ok(package)
     }
@@ -385,6 +387,33 @@ mod platform {
             )
             .unwrap();
             assert!(activation.approval_current(&staged.manifest, &staged.source_digest()));
+        }
+
+        #[test]
+        fn validates_each_surface_of_one_package() {
+            let source = tempfile::tempdir().unwrap();
+            std::fs::write(
+                source.path().join("plugin.json"),
+                r#"{"api_version":1,"id":"org.example.two","name":"Two","entry":"main.js","surfaces":[{"id":"clock","kind":"panel","width":300,"height":48},{"id":"dock","kind":"dock","width":400,"height":72}]}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                source.path().join("main.js"),
+                "function App() { return h(Panel, {height: nickel.data.surface.height}, h(Text, {}, nickel.data.surface.id)); }",
+            )
+            .unwrap();
+            let package = load_panel(source.path()).unwrap();
+            assert_eq!(package.manifest.surfaces.len(), 2);
+            std::fs::write(
+                source.path().join("main.js"),
+                "function App() { return nickel.data.surface.id === 'dock' ? h('unknown-component', {}) : h(Panel, {}, h(Text, {}, 'Clock')); }",
+            )
+            .unwrap();
+            assert!(
+                load_panel(source.path())
+                    .unwrap_err()
+                    .contains("surface \"dock\"")
+            );
         }
 
         #[test]

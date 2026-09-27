@@ -137,6 +137,12 @@ declare function useRef<T>(initial: T): { current: T };
 declare const nickel: Readonly<{
     readonly data: Readonly<Record<string, unknown> & {
         settings?: Readonly<Record<string, boolean | number | string>>;
+        surface?: Readonly<{
+            id: string;
+            kind: "panel" | "dock" | "desktop" | "window" | "dialog" | "overlay";
+            width: number;
+            height: number;
+        }>;
     }>;
     request(effect: string): void;
     openDialog(id: string): void;

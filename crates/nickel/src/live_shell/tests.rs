@@ -503,9 +503,96 @@ fn two_installed_panels_render_and_retire_independently() {
     assert!(shell.plugin_panel_scene(&panels[1].0, 360, 64).is_some());
 }
 
+#[test]
+fn one_installed_package_runs_two_surfaces_and_updates_both_settings_views() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "org.example.two-surfaces";
+    let directory = root.path().join(id);
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.two-surfaces","name":"Two surfaces","entry":"main.js","surfaces":[{"id":"clock","kind":"panel","width":360,"height":64},{"id":"dock","kind":"dock","width":420,"height":72,"bottom_offset":20}],"settings":[{"id":"show-label","label":"Show label","kind":"boolean","default":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(Panel, {height: nickel.data.surface.height}, h(Text, {}, nickel.data.surface.id + ':' + (nickel.data.settings['show-label'] ? 'on' : 'off'))); }",
+    )
+    .unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    let descriptor = catalog.packages.remove(id).unwrap();
+    let mut shell = LiveShell::new().unwrap();
+    shell
+        .plugin_registry
+        .register(descriptor.manifest.clone())
+        .unwrap();
+    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell.plugin_settings.insert(
+        id.into(),
+        std::collections::BTreeMap::from([("show-label".into(), serde_json::json!(true))]),
+    );
+    assert!(shell.set_plugin_enabled(id, true).unwrap());
+    let panels = shell.plugin_panels();
+    assert_eq!(panels.len(), 2);
+    let mut first_bytes = 0;
+    for (index, (key, surface)) in panels.iter().enumerate() {
+        let commands = shell
+            .plugin_panel_scene(key, surface.width, surface.height)
+            .unwrap();
+        assert!(commands.iter().any(|command| matches!(command,
+            nickel_ui::backend::PaintCommand::Text { text, .. } if text == &format!("{}:on", key.surface_id)
+        )));
+        if index == 0 {
+            first_bytes = shell
+                .plugin_registry
+                .get(id)
+                .unwrap()
+                .memory
+                .native_ui_bytes
+                .unwrap();
+        }
+    }
+    let both_bytes = shell
+        .plugin_registry
+        .get(id)
+        .unwrap()
+        .memory
+        .native_ui_bytes
+        .unwrap();
+    assert!(first_bytes > 0 && both_bytes > first_bytes);
+    assert!(
+        shell
+            .set_plugin_setting(id, "show-label", serde_json::json!(false))
+            .unwrap()
+    );
+    assert_eq!(
+        shell
+            .plugin_registry
+            .get(id)
+            .unwrap()
+            .memory
+            .native_ui_bytes,
+        Some(0)
+    );
+    for (key, surface) in &panels {
+        let commands = shell
+            .plugin_panel_scene(key, surface.width, surface.height)
+            .unwrap();
+        assert!(commands.iter().any(|command| matches!(command,
+            nickel_ui::backend::PaintCommand::Text { text, .. } if text == &format!("{}:off", key.surface_id)
+        )));
+    }
+    assert!(shell.set_plugin_enabled(id, false).unwrap());
+    assert!(shell.plugin_panels().is_empty());
+    assert_eq!(
+        shell.plugin_registry.get(id).unwrap().memory,
+        nickel_core::plugins::PluginMemory::default()
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
-fn internal_shell_presents_two_installed_panels_on_one_output() {
+fn internal_shell_presents_two_surfaces_from_one_package_on_one_output() {
     struct Host;
     impl crate::session_host::SessionHost for Host {
         fn dispatch(
@@ -523,20 +610,18 @@ fn internal_shell_presents_two_installed_panels_on_one_output() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    for (id, label) in [("org.example.clock", "Clock"), ("org.example.mail", "Mail")] {
-        let directory = root.path().join(id);
-        std::fs::create_dir(&directory).unwrap();
-        std::fs::write(
-            directory.join("plugin.json"),
-            format!(r#"{{"api_version":1,"id":"{id}","name":"{label}","entry":"main.js","surfaces":[{{"id":"main","kind":"panel","width":300,"height":64}}]}}"#),
-        )
-        .unwrap();
-        std::fs::write(
-            directory.join("main.js"),
-            format!("function App() {{ return h(Panel, {{}}, h(Text, {{}}, '{label}')); }}"),
-        )
-        .unwrap();
-    }
+    let directory = root.path().join("org.example.multi");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.multi","name":"Multi","entry":"main.js","surfaces":[{"id":"clock","kind":"panel","width":300,"height":64},{"id":"mail","kind":"panel","width":340,"height":68}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.surface.id)); }",
+    )
+    .unwrap();
     let mut coordinator = crate::internal_shell::InternalShellCoordinator::new(
         Arc::new(Host),
         crate::winit_shell::PanelEdge::Bottom,
@@ -569,25 +654,20 @@ fn internal_shell_presents_two_installed_panels_on_one_output() {
         .map(|surface| {
             (
                 surface.id,
-                surface.plugin.as_ref().unwrap().plugin_id.clone(),
+                surface.plugin.as_ref().unwrap().surface_id.clone(),
             )
         })
         .collect::<Vec<_>>();
     assert_eq!(panels.len(), 2);
-    for (id, owner) in panels {
+    for (id, label) in panels {
         assert!(coordinator.visible(id));
-        let label = if owner.ends_with("clock") {
-            "Clock"
-        } else {
-            "Mail"
-        };
         assert!(
             coordinator
                 .scene(id)
                 .unwrap()
                 .iter()
                 .any(|command| matches!(command,
-                    nickel_ui::backend::PaintCommand::Text { text, .. } if text == label
+                    nickel_ui::backend::PaintCommand::Text { text, .. } if text == &label
                 ))
         );
     }

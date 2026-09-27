@@ -2067,6 +2067,45 @@ impl PluginPanelApplication {
         Self::new_with_manifest(&package.source, &package.manifest, Some(data))
     }
 
+    pub fn from_package_surface(
+        package: &PluginPackage,
+        settings: &std::collections::BTreeMap<String, serde_json::Value>,
+        surface: &PluginSurface,
+    ) -> Result<Self, String> {
+        let data = serde_json::json!({
+            "settings": settings,
+            "surface": {
+                "id": surface.id,
+                "kind": surface.kind.as_str(),
+                "width": surface.width,
+                "height": surface.height,
+            },
+        })
+        .to_string();
+        Self::new_with_manifest(&package.source, &package.manifest, Some(data))
+    }
+
+    pub fn validate_package(package: &PluginPackage) -> Result<(), String> {
+        let settings: std::collections::BTreeMap<_, _> = package
+            .manifest
+            .settings
+            .iter()
+            .map(|setting| (setting.id.clone(), setting.kind.default_value()))
+            .collect();
+        if package.manifest.surfaces.is_empty() {
+            let application = Self::from_package_with_settings(package, &settings)?;
+            if !package.manifest.contributes.is_empty() {
+                application.taskbar_badges()?;
+            }
+        } else {
+            for surface in &package.manifest.surfaces {
+                Self::from_package_surface(package, &settings, surface)
+                    .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn taskbar_badges(&self) -> Result<Vec<(String, String, u16, u32)>, String> {
         let mut badges = Vec::new();
         self.node.collect_taskbar_badges(&mut badges)?;

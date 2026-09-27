@@ -759,6 +759,9 @@ impl PluginManifest {
                 "plugin entry must be a relative .js path inside the plugin directory".into(),
             );
         }
+        if self.surfaces.len() > 16 {
+            return Err("plugin declares more than 16 surfaces".into());
+        }
         let mut ids = HashSet::new();
         for surface in &self.surfaces {
             if !valid_identifier(&surface.id) || !ids.insert(&surface.id) {
@@ -1229,6 +1232,19 @@ mod tests {
             "\"output\":\"all\"},{\"id\":\"main\",\"kind\":\"dock\",\"width\":100,\"height\":50}",
         );
         assert!(PluginManifest::from_json(&duplicate).is_err());
+    }
+
+    #[test]
+    fn bounds_surfaces_in_one_package() {
+        let mut manifest = PluginManifest::from_json(VALID).unwrap();
+        let template = manifest.surfaces[0].clone();
+        manifest.surfaces = (0..17)
+            .map(|index| PluginSurface {
+                id: format!("surface-{index}"),
+                ..template.clone()
+            })
+            .collect();
+        assert!(manifest.validate().unwrap_err().contains("16 surfaces"));
     }
 
     #[test]
