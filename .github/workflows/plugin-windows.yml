@@ -53,7 +53,7 @@ jobs:
         run: |
           cargo test --locked -p nickel-plugin-runtime
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p nickel-settings --bin nickel-settings plugin
+          cargo test --locked -p nickel-settings --bin nickel-settings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --test plugin_panel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

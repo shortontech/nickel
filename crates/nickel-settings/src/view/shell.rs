@@ -25,53 +25,10 @@ impl SettingsApp {
             return self.bluetooth_pairing_view();
         }
         let theme = self.ui_theme();
-        let destination_header = |page| {
-            let (title, subtitle) = match page {
-                SettingsPage::Display => (
-                    self.localizer.text("settings-display-title"),
-                    self.localizer.text("settings-display-subtitle"),
-                ),
-                SettingsPage::Bar => (
-                    self.localizer.text("settings-bar-title"),
-                    self.localizer.text("settings-bar-subtitle"),
-                ),
-                SettingsPage::Appearance => (
-                    self.localizer.text("settings-appearance-title"),
-                    self.localizer.text("settings-appearance-subtitle"),
-                ),
-                SettingsPage::Network => (
-                    self.localizer.text("settings-network-title"),
-                    self.localizer.text("settings-network-subtitle"),
-                ),
-                SettingsPage::Bluetooth => (
-                    self.localizer.text("settings-bluetooth-title"),
-                    self.localizer.text("settings-bluetooth-subtitle"),
-                ),
-                SettingsPage::BluetoothPair => (
-                    self.localizer.text("settings-bluetooth-pair-title"),
-                    self.localizer.text("settings-bluetooth-pair-subtitle"),
-                ),
-                SettingsPage::DefaultApps => (
-                    self.localizer.text("settings-default-apps-title"),
-                    self.localizer.text("settings-default-apps-subtitle"),
-                ),
-                SettingsPage::OptionalFeatures => (
-                    "Optional Features".into(),
-                    "Enable integrations and inspect their availability".into(),
-                ),
-                SettingsPage::Plugins => (
-                    "Plugins".into(),
-                    "Review access, memory, and installed shell components".into(),
-                ),
-                SettingsPage::KeyboardShortcuts => (
-                    self.localizer.text("settings-keyboard-title"),
-                    self.localizer.text("settings-keyboard-subtitle"),
-                ),
-                SettingsPage::About => (
-                    self.localizer.text("settings-about-title"),
-                    self.localizer.text("settings-about-subtitle"),
-                ),
-            };
+        let declared_destinations = self.navigation_destinations();
+        let destination_header = |destination: &crate::navigation_plugin::Destination| {
+            let title = destination.title.clone();
+            let subtitle = destination.subtitle.clone();
             if width < 720.0 {
                 AnyView::new(
                     nickel_ui::Row::new()
@@ -94,69 +51,11 @@ impl SettingsApp {
                 AnyView::new(PageHeader::new(theme, title, subtitle))
             }
         };
-        let display_label = self.localizer.text("settings-nav-display");
-        let bar_label = self.localizer.text("settings-nav-bar");
         let appearance_label = self.localizer.text("settings-nav-appearance");
-        let network_label = self.localizer.text("settings-nav-network");
-        let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
-        let default_apps_label = self.localizer.text("settings-nav-default-apps");
         let optional_features_label = "Optional Features".to_owned();
         let plugins_label = "Plugins".to_owned();
-        let keyboard_label = self.localizer.text("settings-nav-keyboard");
-        let about_label = self.localizer.text("settings-nav-about");
         let palette = self.palette();
         let query = self.sidebar_query.trim().to_lowercase();
-        let (
-            show_display,
-            show_bar,
-            show_appearance,
-            show_network,
-            show_bluetooth,
-            show_keyboard,
-            show_about,
-        ) = (false, false, false, false, false, false, false);
-        let display_button = NavigationItem::new(
-            theme,
-            SettingsMessage::Navigate(SettingsPage::Display),
-            &display_label,
-            false,
-        );
-        let bar_button = NavigationItem::new(
-            theme,
-            SettingsMessage::Navigate(SettingsPage::Bar),
-            &bar_label,
-            false,
-        );
-        let appearance_button = NavigationItem::new(
-            theme,
-            SettingsMessage::Navigate(SettingsPage::Appearance),
-            &appearance_label,
-            false,
-        );
-        let network_button = NavigationItem::new(
-            theme,
-            SettingsMessage::Navigate(SettingsPage::Network),
-            &network_label,
-            false,
-        );
-        let bluetooth_button = NavigationItem::new(
-            theme,
-            SettingsMessage::Navigate(SettingsPage::Bluetooth),
-            &bluetooth_label,
-            false,
-        );
-        let keyboard_button = NavigationItem::new(
-            theme,
-            SettingsMessage::Navigate(SettingsPage::KeyboardShortcuts),
-            &keyboard_label,
-            false,
-        );
-        let about_button = NavigationItem::new(
-            theme,
-            SettingsMessage::Navigate(SettingsPage::About),
-            &about_label,
-            false,
-        );
         let mut navigation = SettingsNavigation::embedded_header(theme, SIDEBAR_WIDTH as f32)
             .child(SettingsSearchField::with_leading(
                 theme,
@@ -273,176 +172,75 @@ impl SettingsApp {
                         );
                     }
                 }
+            } else {
+                navigation = navigation.child(ui! {
+                    <Container padding={Insets::all(10.0)}>
+                        <Text color={palette.muted} wrap={true}>
+                            {self.localizer.text("settings-search-no-results")}
+                        </Text>
+                    </Container>
+                });
             }
-        }
-        if show_display {
-            navigation = navigation
-                .section(theme, self.localizer.text("settings-nav-section-system"))
-                .item(display_button);
-        }
-        if show_bar || show_appearance {
-            navigation = navigation.section(
-                theme,
-                self.localizer.text("settings-nav-section-personalization"),
-            );
-            if show_bar {
-                navigation = navigation.item(bar_button);
-            }
-            if show_appearance {
-                navigation = navigation.item(appearance_button);
-            }
-        }
-        if show_network || show_bluetooth {
-            navigation = navigation.section(
-                theme,
-                self.localizer.text("settings-nav-section-connectivity"),
-            );
-            if show_network {
-                navigation = navigation.item(network_button);
-            }
-            if show_bluetooth {
-                navigation = navigation.item(bluetooth_button);
-            }
-        }
-        if show_keyboard || show_about {
-            navigation =
-                navigation.section(theme, self.localizer.text("settings-nav-section-support"));
-            if show_keyboard {
-                navigation = navigation.item(keyboard_button);
-            }
-            if show_about {
-                navigation = navigation.item(about_button);
-            }
-        }
-        if !query.is_empty()
-            && !(show_display
-                || show_bar
-                || show_appearance
-                || show_network
-                || show_bluetooth
-                || show_keyboard
-                || show_about)
-        {
-            navigation = navigation.child(ui! {
-                <Container padding={Insets::all(10.0)}>
-                    <Text color={palette.muted} wrap={true}>
-                        {self.localizer.text("settings-search-no-results")}
-                    </Text>
-                </Container>
-            });
         }
         // ResponsiveNavigation owns the presentation and controller-pane policy. The
         // existing sidebar is retained above while search remains app-specific; destination
         // identity and all navigation activation now flow through the shared primitive.
-        let destinations = vec![
-            ResponsiveNavigationDestination::new(
-                SettingsPage::Display,
-                display_label,
-                SettingsMessage::Navigate(SettingsPage::Display),
-                self.display_components(if width < 720.0 {
-                    width
-                } else {
-                    (width - SIDEBAR_WIDTH as f32).max(0.0)
-                }),
-            )
-            .header(destination_header(SettingsPage::Display))
-            .leading(sidebar_icon(SidebarIconKind::Display))
-            .section(self.localizer.text("settings-nav-section-system"))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::Bar,
-                bar_label,
-                SettingsMessage::Navigate(SettingsPage::Bar),
-                self.bar_components(),
-            )
-            .header(destination_header(SettingsPage::Bar))
-            .leading(sidebar_icon(SidebarIconKind::Bar))
-            .section(self.localizer.text("settings-nav-section-personalization"))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::Appearance,
-                appearance_label,
-                SettingsMessage::Navigate(SettingsPage::Appearance),
-                self.appearance_components(),
-            )
-            .header(destination_header(SettingsPage::Appearance))
-            .leading(sidebar_icon(SidebarIconKind::Appearance))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::Network,
-                network_label,
-                SettingsMessage::Navigate(SettingsPage::Network),
-                self.network_components(),
-            )
-            .header(destination_header(SettingsPage::Network))
-            .leading(sidebar_icon(SidebarIconKind::Network))
-            .section(self.localizer.text("settings-nav-section-connectivity"))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::Bluetooth,
-                bluetooth_label,
-                SettingsMessage::Navigate(SettingsPage::Bluetooth),
-                self.bluetooth_components(),
-            )
-            .header(destination_header(SettingsPage::Bluetooth))
-            .leading(sidebar_icon(SidebarIconKind::Bluetooth))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::BluetoothPair,
-                self.localizer.text("settings-bluetooth-pair-title"),
-                SettingsMessage::Navigate(SettingsPage::BluetoothPair),
-                self.bluetooth_components(),
-            )
-            .header(destination_header(SettingsPage::BluetoothPair))
-            .leading(sidebar_icon(SidebarIconKind::Bluetooth))
-            .visible(false),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::DefaultApps,
-                default_apps_label,
-                SettingsMessage::Navigate(SettingsPage::DefaultApps),
-                self.default_apps_components(),
-            )
-            .header(destination_header(SettingsPage::DefaultApps))
-            .leading(sidebar_icon(SidebarIconKind::DefaultApps))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::OptionalFeatures,
-                optional_features_label,
-                SettingsMessage::Navigate(SettingsPage::OptionalFeatures),
-                self.optional_features_components(),
-            )
-            .header(destination_header(SettingsPage::OptionalFeatures))
-            .leading(sidebar_icon(SidebarIconKind::OptionalFeatures))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::Plugins,
-                plugins_label,
-                SettingsMessage::Navigate(SettingsPage::Plugins),
-                self.plugins_components(),
-            )
-            .header(destination_header(SettingsPage::Plugins))
-            .leading(sidebar_icon(SidebarIconKind::OptionalFeatures))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::KeyboardShortcuts,
-                keyboard_label,
-                SettingsMessage::Navigate(SettingsPage::KeyboardShortcuts),
-                self.keyboard_shortcuts_components(),
-            )
-            .header(destination_header(SettingsPage::KeyboardShortcuts))
-            .leading(sidebar_icon(SidebarIconKind::Keyboard))
-            .section(self.localizer.text("settings-nav-section-support"))
-            .visible(query.is_empty()),
-            ResponsiveNavigationDestination::new(
-                SettingsPage::About,
-                about_label,
-                SettingsMessage::Navigate(SettingsPage::About),
-                self.about_components(),
-            )
-            .header(destination_header(SettingsPage::About))
-            .leading(sidebar_icon(SidebarIconKind::About))
-            .visible(query.is_empty()),
-        ];
+        let destinations = declared_destinations
+            .iter()
+            .map(|destination| {
+                let page = destination.page;
+                let detail = match page {
+                    SettingsPage::Display => {
+                        AnyView::new(self.display_components(if width < 720.0 {
+                            width
+                        } else {
+                            (width - SIDEBAR_WIDTH as f32).max(0.0)
+                        }))
+                    }
+                    SettingsPage::Bar => AnyView::new(self.bar_components()),
+                    SettingsPage::Appearance => AnyView::new(self.appearance_components()),
+                    SettingsPage::Network => AnyView::new(self.network_components()),
+                    SettingsPage::Bluetooth | SettingsPage::BluetoothPair => {
+                        AnyView::new(self.bluetooth_components())
+                    }
+                    SettingsPage::DefaultApps => AnyView::new(self.default_apps_components()),
+                    SettingsPage::OptionalFeatures => {
+                        AnyView::new(self.optional_features_components())
+                    }
+                    SettingsPage::Plugins => AnyView::new(self.plugins_components()),
+                    SettingsPage::KeyboardShortcuts => self.keyboard_shortcuts_components(),
+                    SettingsPage::About => self.about_components(),
+                };
+                let icon = match page {
+                    SettingsPage::Display => SidebarIconKind::Display,
+                    SettingsPage::Bar => SidebarIconKind::Bar,
+                    SettingsPage::Appearance => SidebarIconKind::Appearance,
+                    SettingsPage::Network => SidebarIconKind::Network,
+                    SettingsPage::Bluetooth | SettingsPage::BluetoothPair => {
+                        SidebarIconKind::Bluetooth
+                    }
+                    SettingsPage::DefaultApps => SidebarIconKind::DefaultApps,
+                    SettingsPage::OptionalFeatures | SettingsPage::Plugins => {
+                        SidebarIconKind::OptionalFeatures
+                    }
+                    SettingsPage::KeyboardShortcuts => SidebarIconKind::Keyboard,
+                    SettingsPage::About => SidebarIconKind::About,
+                };
+                let mut entry = ResponsiveNavigationDestination::new(
+                    page,
+                    destination.label.clone(),
+                    SettingsMessage::Navigate(page),
+                    detail,
+                )
+                .header(destination_header(destination))
+                .leading(sidebar_icon(icon))
+                .visible(query.is_empty() && page != SettingsPage::BluetoothPair);
+                if !destination.section.is_empty() {
+                    entry = entry.section(destination.section.clone());
+                }
+                entry
+            })
+            .collect::<Vec<_>>();
         let root = ResponsiveNavigation::try_new(
             theme,
             width,

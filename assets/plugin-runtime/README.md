@@ -26,3 +26,8 @@ its shipped JS with the same command, replacing `settings-pages.jsx` with
 
 Settings starts each Boa context when its page is first opened. Building the
 navigation destinations for other pages does not allocate those contexts.
+
+`settings-navigation.jsx` declares destination order, grouping, labels, and
+headers. The native `ResponsiveNavigation` adapter owns focus, responsive
+layout, and the trusted page slots while the remaining page views migrate.
+Rebuild it with the same `tsc` command and its source filename.

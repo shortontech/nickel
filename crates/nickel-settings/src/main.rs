@@ -3,6 +3,7 @@
 mod cli;
 mod effects;
 mod model;
+mod navigation_plugin;
 mod persistence;
 mod platform;
 mod plugin_list;
@@ -3118,9 +3119,11 @@ mod tests {
     #[test]
     fn settings_jsx_contexts_start_only_when_their_page_is_opened() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+        assert!(app.navigation_plugin.borrow().is_none());
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
         let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.navigation_plugin.borrow().is_some());
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
 
