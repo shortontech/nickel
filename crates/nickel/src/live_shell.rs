@@ -3763,6 +3763,7 @@ impl LiveShell {
             .map_err(|error| format!("could not save plugin setting: {error}"))?;
         self.plugin_settings.insert(id.to_owned(), values);
         if let Some(replacements) = replacement {
+            let mut extension_bytes = None;
             let replaced_panels = replacements
                 .iter()
                 .any(|(surface_id, _)| surface_id.is_some());
@@ -3788,13 +3789,25 @@ impl LiveShell {
                         }
                     }
                 } else if let Some((_, _, current)) = self.plugin_taskbar_badge_hosts.get_mut(id) {
+                    extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
                 } else if let Some((_, _, current)) = self.plugin_taskbar_action_hosts.get_mut(id) {
+                    extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
                     self.application_menu_plugin_host = None;
                 } else if let Some((_, _, current)) = self.plugin_desktop_widget_hosts.get_mut(id) {
+                    extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
                 }
+            }
+            if let Some(bytes) = extension_bytes {
+                let _ = self.plugin_registry.record_memory(
+                    id,
+                    nickel_core::plugins::PluginMemory {
+                        native_ui_bytes: Some(bytes),
+                        ..Default::default()
+                    },
+                );
             }
             self.plugin_panel_memory
                 .retain(|key, _| key.plugin_id != id);
@@ -3946,6 +3959,9 @@ impl LiveShell {
             self.maybe_publish_plugin_status();
             return Ok(true);
         }
+        let extension_bytes = external_extension
+            .as_ref()
+            .map(|(_, _, _, application)| application.retained_contribution_bytes());
         let started = if let Some((kind, priority, mode, application)) = external_extension {
             match kind {
                 ExecutableExtensionKind::TaskbarBadge => {
@@ -4069,7 +4085,18 @@ impl LiveShell {
             Err(format!("plugin {id:?} has no runtime host"))
         };
         let result = match started {
-            Ok(()) => self.plugin_registry.mark_running(id).map(|()| true),
+            Ok(()) => self.plugin_registry.mark_running(id).map(|()| {
+                if let Some(bytes) = extension_bytes {
+                    let _ = self.plugin_registry.record_memory(
+                        id,
+                        nickel_core::plugins::PluginMemory {
+                            native_ui_bytes: Some(bytes),
+                            ..Default::default()
+                        },
+                    );
+                }
+                true
+            }),
             Err(error) => {
                 self.plugin_registry.mark_failed(id, error.clone())?;
                 Err(error)
@@ -5106,7 +5133,15 @@ impl LiveShell {
                     };
                     let handled = extension.activate_taskbar_action(&id, target_id.unwrap_or(""));
                     let extension_effects = extension.take_effects();
+                    let retained_bytes = extension.retained_contribution_bytes();
                     if handled {
+                        let _ = self.plugin_registry.record_memory(
+                            &plugin_id,
+                            nickel_core::plugins::PluginMemory {
+                                native_ui_bytes: Some(retained_bytes),
+                                ..Default::default()
+                            },
+                        );
                         changed = true;
                         changed |= self.apply_plugin_effects(extension_effects);
                     }

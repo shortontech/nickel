@@ -1343,6 +1343,13 @@
             },
         );
         shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
+        let active = shell
+            .plugin_status_snapshot()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.id == package.manifest.id)
+            .unwrap();
+        assert!(active.memory.native_ui_bytes.unwrap() > 0);
         shell.windows = vec![OpenWindow {
             id: WindowId(81),
             application_id: Some(ApplicationId::new("org.nickel.mail")),
@@ -1375,6 +1382,13 @@
         assert!(shell.launcher_visible);
         assert!(shell.application_menu_target.is_none());
         shell.set_plugin_enabled(&package.manifest.id, false).unwrap();
+        let disabled = shell
+            .plugin_status_snapshot()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.id == package.manifest.id)
+            .unwrap();
+        assert!(disabled.memory.native_ui_bytes.is_none());
         assert!(!shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::InvokeTaskbarExtensionAction {
                 plugin_id: package.manifest.id.clone(),

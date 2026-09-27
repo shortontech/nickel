@@ -111,9 +111,10 @@ plugin's own JS host; its requested effects still require that plugin's
 declared capabilities and current host validation. The
 [example task action](../assets/plugins/example-task-action/) demonstrates this.
 The `section` contract remains unavailable.
-The target plugin's retained UI measurement includes its contributed nodes;
-Nickel cannot yet split those bytes by extension. Each extension's JavaScript
-heap measurement remains unavailable in Settings.
+Settings measures the retained native component tree in each extension's own
+account. The target plugin's rendered UI measurement also includes contributed
+nodes, so these category totals overlap; they should not be added to estimate
+process memory. Each extension's JavaScript heap measurement remains unavailable.
 
 Settings lists each plugin with an enable switch and shows its runtime health,
 tracked memory, peak tracked memory, and the measured categories. Tracked memory

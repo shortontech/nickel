@@ -484,6 +484,23 @@ enum PanelNode {
 }
 
 impl PanelNode {
+    fn contribution_bytes(&self) -> u64 {
+        let own = std::mem::size_of::<Self>() as u64;
+        let capacity = |value: &String| value.capacity() as u64;
+        own + match self {
+            Self::Badge { item, label, .. } => item.as_ref().map_or(0, capacity) + capacity(label),
+            Self::Widget { label, value, .. } => capacity(label) + capacity(value),
+            Self::Action {
+                id, item, label, ..
+            } => capacity(id) + item.as_ref().map_or(0, capacity) + capacity(label),
+            Self::Row(children) | Self::Column(children) => {
+                let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
+                spare as u64 + children.iter().map(Self::contribution_bytes).sum::<u64>()
+            }
+            _ => 0,
+        }
+    }
+
     fn file_tile_action(&self, id: &str) -> Option<usize> {
         match self {
             Self::FileTile {
@@ -2418,6 +2435,10 @@ impl PluginPanelApplication {
             return Err("taskbar action extension did not return an action".into());
         }
         Ok(actions)
+    }
+
+    pub fn retained_contribution_bytes(&self) -> u64 {
+        self.node.contribution_bytes()
     }
 
     pub fn activate_taskbar_action(&mut self, id: &str, application_id: &str) -> bool {
