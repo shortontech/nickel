@@ -17,10 +17,17 @@ cargo build -p nickel --bin nickel-plugin --bin nickel-nested --features backend
 target/debug/nickel-plugin dev assets/plugins/hello-panel
 ```
 
+On Windows, build `nickel-plugin.exe` and `nickel.exe` beside each other, then
+run `nickel-plugin.exe dev assets/plugins/hello-panel`. The command starts a
+separate Nickel shell without desktop windows and gives it a temporary
+`LOCALAPPDATA`/`APPDATA` profile. It stops that shell and removes the profile
+when you press Ctrl+C. This is a native Windows test shell, so its taskbar and
+plugin surfaces appear on the current desktop.
+
 The command validates the manifest and JavaScript, stages the package in a
-temporary Nickel profile, and launches `nickel-nested`. Saving `plugin.json`,
+temporary Nickel profile, and launches the test shell. Saving `plugin.json`,
 the declared JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
-and restarts the nested session. An invalid edit prints its error and leaves
+and restarts the test shell. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
 profile. The developer command supports one panel or dock surface, or one surface-free
 taskbar badge contribution; `nickel-plugin validate <directory>` runs the same

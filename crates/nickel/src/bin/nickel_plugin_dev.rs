@@ -109,8 +109,8 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod platform {
     use std::{
         collections::hash_map::DefaultHasher,
         hash::{Hash, Hasher},
@@ -129,6 +129,14 @@ mod linux {
         PluginSlotContract, PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::PluginPanelApplication;
+
+    fn staged_config_directory(root: &Path) -> PathBuf {
+        #[cfg(target_os = "linux")]
+        let directory = "nickel";
+        #[cfg(target_os = "windows")]
+        let directory = "Nickel";
+        root.join(directory)
+    }
 
     fn load_panel(directory: &Path) -> Result<PluginPackage, String> {
         let package = load_package(directory)?;
@@ -190,8 +198,7 @@ mod linux {
         if PluginManifest::from_json(manifest_source)? != package.manifest {
             return Err("plugin manifest changed during staging".into());
         }
-        let target = root
-            .join("nickel")
+        let target = staged_config_directory(root)
             .join("plugins")
             .join(&package.manifest.id);
         if target.exists() {
@@ -210,7 +217,7 @@ mod linux {
         std::fs::write(entry, &package.source)
             .map_err(|error| format!("could not stage JavaScript: {error}"))?;
         PluginActivationSettings::update_manifest(
-            root.join("nickel").join("plugin-activation.json"),
+            staged_config_directory(root).join("plugin-activation.json"),
             &package.manifest,
             &package.source_digest(),
             true,
@@ -226,23 +233,34 @@ mod linux {
     }
 
     fn launch(binary: &Path, config_root: &Path) -> Result<Child, String> {
-        Command::new(binary)
-            .env("XDG_CONFIG_HOME", config_root)
+        let mut command = Command::new(binary);
+        #[cfg(target_os = "linux")]
+        command.env("XDG_CONFIG_HOME", config_root);
+        #[cfg(target_os = "windows")]
+        command
+            .env("LOCALAPPDATA", config_root)
+            .env("APPDATA", config_root)
+            .arg("--no-desktop-windows");
+        command
             .spawn()
-            .map_err(|error| format!("could not start nested Nickel: {error}"))
+            .map_err(|error| format!("could not start Nickel test shell: {error}"))
     }
 
     pub(super) fn run(directory: PathBuf) -> Result<(), String> {
         let directory = std::fs::canonicalize(directory)
             .map_err(|error| format!("could not open plugin directory: {error}"))?;
         let mut package = load_panel(&directory)?;
-        let nested = std::env::current_exe()
+        let shell = std::env::current_exe()
             .map_err(|error| format!("could not locate nickel-plugin: {error}"))?
-            .with_file_name("nickel-nested");
-        if !nested.is_file() {
+            .with_file_name(if cfg!(target_os = "windows") {
+                "nickel.exe"
+            } else {
+                "nickel-nested"
+            });
+        if !shell.is_file() {
             return Err(format!(
-                "{} is missing; build it with cargo build -p nickel --bin nickel-nested --features backend-winit",
-                nested.display()
+                "{} is missing; build the Nickel shell binary beside nickel-plugin",
+                shell.display()
             ));
         }
         let config = tempfile::tempdir()
@@ -254,22 +272,22 @@ mod linux {
         ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))
             .map_err(|error| format!("could not install interrupt handler: {error}"))?;
         println!(
-            "Testing {} in nested Nickel. Save plugin.json, JSX source, or {} to reload; Ctrl+C stops.",
+            "Testing {} in isolated Nickel. Save plugin.json, JSX source, or {} to reload; Ctrl+C stops.",
             package.manifest.id, package.manifest.entry
         );
-        let mut child = launch(&nested, config.path())?;
+        let mut child = launch(&shell, config.path())?;
         let mut child_exited = false;
         while running.load(Ordering::SeqCst) {
             if !child_exited {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        eprintln!("nested Nickel exited: {status}; waiting for a plugin edit");
+                        eprintln!("Nickel test shell exited: {status}; waiting for a plugin edit");
                         child_exited = true;
                     }
                     Ok(None) => {}
                     Err(error) => {
                         stop(&mut child);
-                        return Err(format!("could not inspect nested Nickel: {error}"));
+                        return Err(format!("could not inspect Nickel test shell: {error}"));
                     }
                 }
             }
@@ -300,7 +318,7 @@ mod linux {
             stage(&next, &directory, config.path())?;
             package = next;
             current_fingerprint = source_fingerprint(&directory, &package.manifest.entry)?;
-            child = launch(&nested, config.path())?;
+            child = launch(&shell, config.path())?;
             child_exited = false;
             println!("Reloaded {}", package.manifest.id);
         }
@@ -328,12 +346,13 @@ mod linux {
             let package = load_panel(source.path()).unwrap();
             let profile = tempfile::tempdir().unwrap();
             stage(&package, source.path(), profile.path()).unwrap();
-            let staged =
-                PluginPackage::load(profile.path().join("nickel/plugins/org.example.clock"))
-                    .unwrap();
+            let staged = PluginPackage::load(
+                staged_config_directory(profile.path()).join("plugins/org.example.clock"),
+            )
+            .unwrap();
             assert_eq!(staged.source, package.source);
             let activation = PluginActivationSettings::load(
-                profile.path().join("nickel/plugin-activation.json"),
+                staged_config_directory(profile.path()).join("plugin-activation.json"),
             )
             .unwrap();
             assert!(activation.desired_enabled("org.example.clock", false));
@@ -357,11 +376,12 @@ mod linux {
             assert_eq!(package.manifest.surfaces[0].kind, PluginSurfaceKind::Dock);
             let profile = tempfile::tempdir().unwrap();
             stage(&package, source.path(), profile.path()).unwrap();
-            let staged =
-                PluginPackage::load(profile.path().join("nickel/plugins/org.example.dock"))
-                    .unwrap();
+            let staged = PluginPackage::load(
+                staged_config_directory(profile.path()).join("plugins/org.example.dock"),
+            )
+            .unwrap();
             let activation = PluginActivationSettings::load(
-                profile.path().join("nickel/plugin-activation.json"),
+                staged_config_directory(profile.path()).join("plugin-activation.json"),
             )
             .unwrap();
             assert!(activation.approval_current(&staged.manifest, &staged.source_digest()));
@@ -419,12 +439,12 @@ mod linux {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(super) fn run(directory: std::path::PathBuf) -> Result<(), String> {
-    linux::run(directory)
+    platform::run(directory)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(super) fn run(_directory: std::path::PathBuf) -> Result<(), String> {
-    Err("nickel-plugin dev currently requires Linux nested Nickel".into())
+    Err("nickel-plugin dev currently requires Linux or Windows".into())
 }
