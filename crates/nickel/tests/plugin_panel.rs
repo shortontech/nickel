@@ -353,6 +353,10 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
         query: String::new(),
         dashboard_visible: true,
         view: LauncherView::Favorites,
+        result_page: 0,
+        result_page_count: 1,
+        dashboard_page: 0,
+        dashboard_page_count: 1,
         results: vec![LauncherPluginResult {
             index: 0,
             id: "calculator".into(),
@@ -522,6 +526,10 @@ fn launcher_dashboard_scrolls_without_dispatching_a_plugin_handler() {
         query: String::new(),
         dashboard_visible: true,
         view: LauncherView::Favorites,
+        result_page: 0,
+        result_page_count: 1,
+        dashboard_page: 0,
+        dashboard_page_count: 1,
         results: vec![],
         dashboard,
         places: vec![],
@@ -550,6 +558,10 @@ fn launcher_dashboard_requests_projects_settings_account_and_logout() {
         query: String::new(),
         dashboard_visible: true,
         view: LauncherView::Favorites,
+        result_page: 0,
+        result_page_count: 1,
+        dashboard_page: 0,
+        dashboard_page_count: 1,
         results: vec![],
         dashboard: vec![],
         places: vec![],
@@ -629,6 +641,10 @@ fn launcher_plugin_switches_dashboard_views_from_host_projection() {
         query: String::new(),
         dashboard_visible: true,
         view: LauncherView::Favorites,
+        result_page: 0,
+        result_page_count: 1,
+        dashboard_page: 0,
+        dashboard_page_count: 1,
         results: vec![],
         dashboard: vec![LauncherPluginResult {
             index: 0,
@@ -687,6 +703,127 @@ fn launcher_plugin_switches_dashboard_views_from_host_projection() {
             name: "Favorite app".into(),
         })
         .is_err()
+    );
+}
+
+#[test]
+fn launcher_plugin_pages_search_results_through_typed_requests() {
+    let mut projection = LauncherPluginProjection {
+        query: "app".into(),
+        dashboard_visible: false,
+        view: LauncherView::Applications,
+        result_page: 0,
+        result_page_count: 2,
+        dashboard_page: 0,
+        dashboard_page_count: 1,
+        results: vec![LauncherPluginResult {
+            index: 0,
+            id: "app-0".into(),
+            name: "First app".into(),
+            pinned: false,
+        }],
+        dashboard: vec![],
+        places: vec![],
+        projects: vec![],
+        codex_available: false,
+        account_name: "Local session".into(),
+        logout_available: false,
+    };
+    let mut host = UiHost::new(
+        PluginPanelApplication::launcher_with_projection(&projection).unwrap(),
+        920,
+        680,
+    );
+    let next = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Next".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(next, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::SetLauncherPage {
+            dashboard: false,
+            page: 1,
+        }]
+    );
+    projection.result_page = 1;
+    projection.results[0] = LauncherPluginResult {
+        index: 12,
+        id: "app-12".into(),
+        name: "Later app".into(),
+        pinned: false,
+    };
+    assert!(
+        host.application_mut()
+            .sync_launcher_projection(&projection)
+            .unwrap()
+    );
+    host.step(HostBatch {
+        application_changed: true,
+        ..HostBatch::default()
+    });
+    let later = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Later app".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(later, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ActivateLauncherResult {
+            index: 12,
+            id: "app-12".into(),
+        }]
+    );
+}
+
+#[test]
+fn launcher_plugin_pages_dashboard_applications() {
+    let projection = LauncherPluginProjection {
+        query: String::new(),
+        dashboard_visible: true,
+        view: LauncherView::Applications,
+        result_page: 0,
+        result_page_count: 1,
+        dashboard_page: 0,
+        dashboard_page_count: 2,
+        results: vec![],
+        dashboard: vec![LauncherPluginResult {
+            index: 0,
+            id: "app-0".into(),
+            name: "First app".into(),
+            pinned: false,
+        }],
+        places: vec![],
+        projects: vec![],
+        codex_available: false,
+        account_name: "Local session".into(),
+        logout_available: false,
+    };
+    let mut host = UiHost::new(
+        PluginPanelApplication::launcher_with_projection(&projection).unwrap(),
+        920,
+        680,
+    );
+    let next = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Next".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(next, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::SetLauncherPage {
+            dashboard: true,
+            page: 1,
+        }]
     );
 }
 

@@ -675,6 +675,7 @@ pub enum PluginEffect {
     ShowLauncher,
     ToggleLauncher,
     SetLauncherQuery(String),
+    SetLauncherPage { dashboard: bool, page: usize },
     ActivateLauncherResult { index: usize, id: String },
     LaunchDashboardApplication { id: String },
     SetLauncherView(LauncherView),
@@ -719,6 +720,10 @@ pub struct LauncherPluginProjection {
     pub query: String,
     pub dashboard_visible: bool,
     pub view: LauncherView,
+    pub result_page: usize,
+    pub result_page_count: usize,
+    pub dashboard_page: usize,
+    pub dashboard_page_count: usize,
     pub results: Vec<LauncherPluginResult>,
     pub dashboard: Vec<LauncherPluginResult>,
     pub places: Vec<LauncherPluginResult>,
@@ -813,7 +818,24 @@ pub fn taskbar_item_matches(groups: &[TaskbarApplication], index: usize, id: &st
 
 impl LauncherPluginProjection {
     pub(crate) fn from_launcher(launcher: &Launcher) -> Self {
-        let results = (0..launcher.result_count().min(12))
+        Self::from_launcher_pages(launcher, 0, 0)
+    }
+
+    pub(crate) fn from_launcher_pages(
+        launcher: &Launcher,
+        result_page: usize,
+        dashboard_page: usize,
+    ) -> Self {
+        const SEARCH_PAGE_SIZE: usize = 12;
+        const DASHBOARD_PAGE_SIZE: usize = 48;
+        let count = launcher.result_count();
+        let result_page_count = count.div_ceil(SEARCH_PAGE_SIZE).max(1);
+        let dashboard_page_count = count.div_ceil(DASHBOARD_PAGE_SIZE).max(1);
+        let result_page = result_page.min(result_page_count - 1);
+        let dashboard_page = dashboard_page.min(dashboard_page_count - 1);
+        let result_start = result_page * SEARCH_PAGE_SIZE;
+        let dashboard_start = dashboard_page * DASHBOARD_PAGE_SIZE;
+        let results = (result_start..count.min(result_start + SEARCH_PAGE_SIZE))
             .filter_map(|index| {
                 launcher
                     .result_at(index)
@@ -824,8 +846,12 @@ impl LauncherPluginProjection {
             query: launcher.query().to_owned(),
             dashboard_visible: launcher.mode() == LauncherMode::Dashboard,
             view: launcher.view(),
+            result_page,
+            result_page_count,
+            dashboard_page,
+            dashboard_page_count,
             results,
-            dashboard: (0..launcher.result_count().min(48))
+            dashboard: (dashboard_start..count.min(dashboard_start + DASHBOARD_PAGE_SIZE))
                 .filter_map(|index| {
                     launcher.result_at(index).and_then(|application| {
                         launcher_plugin_result(launcher, index, application)
@@ -887,7 +913,10 @@ impl LauncherPluginProjection {
             LauncherView::Applications => "applications",
             LauncherView::Places => "places",
         };
-        serde_json::json!({"query": self.query, "dashboardVisible": self.dashboard_visible, "view": view, "results": results,
+        serde_json::json!({"query": self.query, "dashboardVisible": self.dashboard_visible, "view": view,
+            "resultPage": self.result_page, "resultPageCount": self.result_page_count,
+            "dashboardPage": self.dashboard_page, "dashboardPageCount": self.dashboard_page_count,
+            "results": results,
             "dashboard": items(&self.dashboard), "places": items(&self.places),
             "projects": self.projects.iter().map(|project| serde_json::json!({"id": project.id, "name": project.name})).collect::<Vec<_>>(),
             "codexAvailable": self.codex_available, "accountName": self.account_name,
@@ -1334,6 +1363,36 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::SetLauncherQuery(query.to_owned()));
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-set-page")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsRead) =>
+                        {
+                            let Some(page) = effect
+                                .get("page")
+                                .and_then(Value::as_u64)
+                                .and_then(|page| usize::try_from(page).ok())
+                            else {
+                                self.last_error = Some("launcher page is invalid".into());
+                                return;
+                            };
+                            if page > 10_000 {
+                                self.last_error = Some("launcher page exceeds limit".into());
+                                return;
+                            }
+                            let dashboard = match effect.get("view").and_then(Value::as_str) {
+                                Some("dashboard") => true,
+                                Some("search") => false,
+                                _ => {
+                                    self.last_error = Some("launcher page view is invalid".into());
+                                    return;
+                                }
+                            };
+                            approved.push(PluginEffect::SetLauncherPage { dashboard, page });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-activate-result")

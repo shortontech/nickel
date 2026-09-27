@@ -722,6 +722,8 @@ pub struct LiveShell {
     launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
     launcher_icon_revision: u64,
+    launcher_plugin_result_page: usize,
+    launcher_plugin_dashboard_page: usize,
     launcher_host: nickel_ui::UiHost<LauncherApplication>,
     launcher_status: Option<String>,
     #[cfg(target_os = "windows")]
@@ -1452,6 +1454,8 @@ impl LiveShell {
             launcher_view,
             launcher_icons,
             launcher_icon_revision,
+            launcher_plugin_result_page: 0,
+            launcher_plugin_dashboard_page: 0,
             launcher_host,
             launcher_status: application_status,
             #[cfg(target_os = "windows")]
@@ -2790,6 +2794,8 @@ impl LiveShell {
                 self.plugin_panel_host = None;
             } else if id == crate::plugin_panel::launcher_manifest().id {
                 self.plugin_launcher_host = None;
+                self.launcher_plugin_result_page = 0;
+                self.launcher_plugin_dashboard_page = 0;
             } else if id == crate::plugin_panel::taskbar_manifest().id {
                 self.plugin_taskbar_host = None;
                 self.plugin_taskbar_hosts.clear();
@@ -2807,6 +2813,8 @@ impl LiveShell {
                 ));
             })
         } else if id == crate::plugin_panel::launcher_manifest().id {
+            self.launcher_plugin_result_page = 0;
+            self.launcher_plugin_dashboard_page = 0;
             let projection =
                 crate::plugin_panel::LauncherPluginProjection::from_launcher(&self.launcher);
             let images =
@@ -3554,6 +3562,28 @@ impl LiveShell {
                     self.apply_launcher_action(LauncherAction::SetQuery(query));
                     changed = true;
                 }
+                crate::plugin_panel::PluginEffect::SetLauncherPage { dashboard, page } => {
+                    let matching_view = (self.launcher.mode()
+                        == crate::launcher::LauncherMode::Dashboard)
+                        == dashboard;
+                    if matching_view {
+                        let projection = self.current_plugin_launcher_projection();
+                        let count = if dashboard {
+                            projection.dashboard_page_count
+                        } else {
+                            projection.result_page_count
+                        };
+                        if page < count {
+                            let current = if dashboard {
+                                &mut self.launcher_plugin_dashboard_page
+                            } else {
+                                &mut self.launcher_plugin_result_page
+                            };
+                            changed |= *current != page;
+                            *current = page;
+                        }
+                    }
+                }
                 crate::plugin_panel::PluginEffect::DismissLauncher => {
                     if self.launcher_visible {
                         self.apply_launcher_action(LauncherAction::Dismiss);
@@ -3562,18 +3592,17 @@ impl LiveShell {
                 }
                 crate::plugin_panel::PluginEffect::ActivateLauncherResult { index, id } => {
                     if self
-                        .launcher
-                        .result_at(index)
-                        .is_some_and(|result| result.id() == id)
+                        .current_plugin_launcher_projection()
+                        .results
+                        .iter()
+                        .any(|result| result.index == index && result.id == id)
                     {
                         self.apply_launcher_action(LauncherAction::ActivateResult(index));
                         changed = true;
                     }
                 }
                 crate::plugin_panel::PluginEffect::LaunchDashboardApplication { id } => {
-                    let projection = crate::plugin_panel::LauncherPluginProjection::from_launcher(
-                        &self.launcher,
-                    );
+                    let projection = self.current_plugin_launcher_projection();
                     if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard
                         && projection
                             .dashboard
@@ -3592,9 +3621,7 @@ impl LiveShell {
                     }
                 }
                 crate::plugin_panel::PluginEffect::ToggleLauncherPin { id } => {
-                    let projection = crate::plugin_panel::LauncherPluginProjection::from_launcher(
-                        &self.launcher,
-                    );
+                    let projection = self.current_plugin_launcher_projection();
                     let visible = if projection.dashboard_visible {
                         projection
                             .dashboard
@@ -3624,9 +3651,7 @@ impl LiveShell {
                     }
                 }
                 crate::plugin_panel::PluginEffect::LauncherOpenProject { id } => {
-                    let projection = crate::plugin_panel::LauncherPluginProjection::from_launcher(
-                        &self.launcher,
-                    );
+                    let projection = self.current_plugin_launcher_projection();
                     if projection.dashboard_visible
                         && projection.projects.iter().any(|project| project.id == id)
                     {
@@ -3659,8 +3684,9 @@ impl LiveShell {
         if self.plugin_launcher_host.is_none() {
             return false;
         }
-        let projection =
-            crate::plugin_panel::LauncherPluginProjection::from_launcher(&self.launcher);
+        let projection = self.current_plugin_launcher_projection();
+        self.launcher_plugin_result_page = projection.result_page;
+        self.launcher_plugin_dashboard_page = projection.dashboard_page;
         let images = launcher_plugin_images(&self.launcher, &mut self.launcher_icons, &projection);
         let host = self
             .plugin_launcher_host
@@ -3676,6 +3702,14 @@ impl LiveShell {
             }
         };
         image_changed || projection_changed
+    }
+
+    fn current_plugin_launcher_projection(&self) -> crate::plugin_panel::LauncherPluginProjection {
+        crate::plugin_panel::LauncherPluginProjection::from_launcher_pages(
+            &self.launcher,
+            self.launcher_plugin_result_page,
+            self.launcher_plugin_dashboard_page,
+        )
     }
 
     pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
@@ -7596,6 +7630,11 @@ impl LiveShell {
     }
 
     fn apply_launcher_action(&mut self, action: LauncherAction) {
+        match &action {
+            LauncherAction::SetQuery(_) => self.launcher_plugin_result_page = 0,
+            LauncherAction::SetView(_) => self.launcher_plugin_dashboard_page = 0,
+            _ => {}
+        }
         let Some(effect) =
             reduce_launcher_action(&mut self.launcher, &mut self.launcher_view, action)
         else {

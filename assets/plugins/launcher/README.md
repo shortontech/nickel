@@ -31,7 +31,10 @@ Pin actions. Its requests still pass through the host's current-ID checks.
 Application buttons use icon slots from Nickel's existing asynchronous icon
 cache. The host owns the image buffers; JSX keeps the app name visible and
 uses the same name for accessibility.
+Search and dashboard application lists request bounded pages from the host.
+Actions include the current catalog index and ID, which the host checks again
+against the visible page before launching or pinning.
 
 This is a comparison path while the full launcher, including keyboard and
-controller behavior, complete catalog paging, and menus, is migrated and
+controller behavior and complete menu parity, is migrated and
 tested.

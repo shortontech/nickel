@@ -63,6 +63,15 @@ function App() {
                     {app.pinned ? "Unpin" : "Pin"}
                 </Button>
             </Row>)}
+            {data.dashboardPageCount > 1 ? <Row>
+                {data.dashboardPage > 0 ? <Button id="launcher-dashboard-previous" onClick={() => nickel.request({type: "launcher-set-page", view: "dashboard", page: data.dashboardPage - 1})}>
+                    Previous
+                </Button> : null}
+                <Text>{"Page " + (data.dashboardPage + 1) + " of " + data.dashboardPageCount}</Text>
+                {data.dashboardPage + 1 < data.dashboardPageCount ? <Button id="launcher-dashboard-next" onClick={() => nickel.request({type: "launcher-set-page", view: "dashboard", page: data.dashboardPage + 1})}>
+                    Next
+                </Button> : null}
+            </Row> : null}
             <Button id="launcher-account" onClick={() => nickel.request({type: "launcher-open-account"})}>
                 {data.accountName}
             </Button>
@@ -90,6 +99,15 @@ function App() {
                     {result.pinned ? "Unpin" : "Pin"}
                 </Button>
             </Row>)}
+            {data.resultPageCount > 1 ? <Row>
+                {data.resultPage > 0 ? <Button id="launcher-search-previous" onClick={() => nickel.request({type: "launcher-set-page", view: "search", page: data.resultPage - 1})}>
+                    Previous
+                </Button> : null}
+                <Text>{"Page " + (data.resultPage + 1) + " of " + data.resultPageCount}</Text>
+                {data.resultPage + 1 < data.resultPageCount ? <Button id="launcher-search-next" onClick={() => nickel.request({type: "launcher-set-page", view: "search", page: data.resultPage + 1})}>
+                    Next
+                </Button> : null}
+            </Row> : null}
         </ScrollView> : null}
         <Dialog id="launcher-logout-dialog" anchor="launcher-logout" open={logoutOpen} width={320} height={160}>
             <Column>
