@@ -1358,6 +1358,80 @@
     }
 
     #[test]
+    fn jsx_taskbar_semantic_targets_use_live_groups_and_controls() {
+        let mut shell = LiveShell::new().unwrap();
+        assert!(shell.plugin_taskbar_host.is_some());
+        shell.windows = vec![OpenWindow {
+            id: WindowId(41),
+            application_id: Some(ApplicationId::new("org.kde.dolphin")),
+            active: true,
+            title: "Files".into(),
+            state: crate::model::WindowState::default(),
+        }];
+        shell.keyboard_enabled = true;
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        shell.panel_host.application_mut().groups = Arc::new(Vec::new());
+
+        let application = shell
+            .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
+                application_id: "org.kde.dolphin".into(),
+                output: None,
+                interaction: PointerInteraction::Hover,
+            })
+            .expect("JSX task target resolves without native groups");
+        assert_eq!(application.role, ShellRole::Panel);
+        assert_eq!(application.interaction, PointerInteraction::Hover);
+
+        let keyboard = shell
+            .resolve_semantic_target(&ShellSemanticTarget::OnScreenKeyboardToggle)
+            .expect("JSX keyboard control resolves");
+        assert_eq!(keyboard.role, ShellRole::Panel);
+        assert_eq!(keyboard.interaction, PointerInteraction::LeftClick);
+
+        shell.windows[0].application_id = Some(ApplicationId::new("org.example.Changed"));
+        assert!(
+            shell
+                .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
+                    application_id: "org.example.Changed".into(),
+                    output: None,
+                    interaction: PointerInteraction::LeftClick,
+                })
+                .is_none(),
+            "a changed group cannot reuse a stale JSX button"
+        );
+    }
+
+    #[test]
+    fn jsx_taskbar_anchors_previews_and_codex_menu_to_its_controls() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher.set_codex_available(true);
+        shell.windows = vec![OpenWindow {
+            id: WindowId(42),
+            application_id: Some(ApplicationId::new("org.kde.dolphin")),
+            active: true,
+            title: "Files".into(),
+            state: crate::model::WindowState::default(),
+        }];
+        shell.set_panel_output("left");
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        let host = shell.plugin_taskbar_host.as_ref().unwrap();
+        let item = super::taskbar_plugin_control_bounds(host, "taskbar-item-0").unwrap();
+        let codex = super::taskbar_plugin_control_bounds(host, "taskbar-codex").unwrap();
+        let preview_width = 320;
+        assert_eq!(
+            shell.preview_origin_x(0, preview_width),
+            super::TaskbarPreviewAnchor::new(shell.panel_origin_x, item)
+                .preview_origin_x(preview_width)
+        );
+
+        shell.apply_panel_action(super::TaskbarAction::Codex);
+        let anchor = shell.pending_popover_anchor.as_ref().unwrap();
+        assert_eq!(anchor.control, "taskbar-codex");
+        assert_eq!(anchor.output, "left");
+        assert_eq!(anchor.bounds, codex);
+    }
+
+    #[test]
     fn plugin_taskbar_context_menu_uses_the_jsx_item_anchor() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::taskbar_manifest().id;

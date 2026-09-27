@@ -2546,6 +2546,26 @@ impl PluginPanelApplication {
         Ok(true)
     }
 
+    pub fn rendered_taskbar_item_matches(&self, index: usize, id: &str) -> bool {
+        if self.manifest.id != taskbar_manifest().id {
+            return false;
+        }
+        self.projection_data
+            .as_deref()
+            .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .is_some_and(|data| {
+                data.get("items")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("index").and_then(serde_json::Value::as_u64)
+                                == u64::try_from(index).ok()
+                                && item.get("id").and_then(serde_json::Value::as_str) == Some(id)
+                        })
+                    })
+            })
+    }
+
     pub fn sync_taskbar_window_menu_projection(
         &mut self,
         projection: &TaskbarWindowMenuPluginProjection,

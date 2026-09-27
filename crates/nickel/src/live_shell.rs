@@ -5858,30 +5858,26 @@ impl LiveShell {
         if anchored_role.is_some() {
             self.pending_popover_anchor = None;
         }
-        let anchor_bounds =
-            if self.plugin_taskbar_host.is_some() && matches!(action, TaskbarAction::Control) {
-                self.plugin_taskbar_host
-                    .as_ref()
-                    .and_then(|host| taskbar_plugin_control_bounds(host, "taskbar-control"))
-            } else {
-                self.panel_host
-                    .semantic_targets_for_message(&action)
-                    .into_iter()
-                    .next()
-                    .map(|target| target.bounds)
-            };
+        let plugin_control = match action {
+            TaskbarAction::Control => Some("taskbar-control"),
+            TaskbarAction::Codex => Some("taskbar-codex"),
+            _ => None,
+        };
+        let anchor_bounds = if let Some(host) = self.plugin_taskbar_host.as_ref() {
+            plugin_control.and_then(|id| taskbar_plugin_control_bounds(host, id))
+        } else {
+            self.panel_host
+                .semantic_targets_for_message(&action)
+                .into_iter()
+                .next()
+                .map(|target| target.bounds)
+        };
         if let Some((role, control)) = anchored_role
             && let (Some(output), Some(bounds)) = (self.panel_output.clone(), anchor_bounds)
         {
             self.pending_popover_anchor = Some(PendingPopoverAnchor {
                 role,
-                control: if self.plugin_taskbar_host.is_some()
-                    && matches!(action, TaskbarAction::Control)
-                {
-                    "taskbar-control".to_owned()
-                } else {
-                    control.to_owned()
-                },
+                control: plugin_control.unwrap_or(control).to_owned(),
                 output,
                 bounds,
             });
@@ -6055,6 +6051,16 @@ impl LiveShell {
                 })
             }
             ShellSemanticTarget::OnScreenKeyboardToggle => {
+                if let Some(host) = self.plugin_taskbar_host.as_ref() {
+                    let bounds = taskbar_plugin_control_bounds(host, "taskbar-keyboard")?;
+                    return Some(ResolvedShellTarget {
+                        role: ShellRole::Panel,
+                        output: self.panel_output.clone(),
+                        x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                        y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
+                        interaction: PointerInteraction::LeftClick,
+                    });
+                }
                 let target = self
                     .panel_host
                     .semantic_targets_for_message(&TaskbarAction::OnScreenKeyboard)
@@ -6073,32 +6079,61 @@ impl LiveShell {
                 output,
                 interaction,
             } => {
-                let host = if output.is_none() || output == &self.panel_output {
-                    &self.panel_host
-                } else if let Some(host) = self.panel_hosts.get(output) {
-                    host
-                } else if self.panel_output.is_none() && self.panel_hosts.is_empty() {
-                    // The legacy single-panel presenter has no named output
-                    // host. Its requested output is a native routing hint.
-                    &self.panel_host
-                } else {
-                    return None;
-                };
-                let groups = &host.application().groups;
-                let index = groups.iter().take(12).position(|group| {
-                    group
-                        .application_id
-                        .as_ref()
-                        .is_some_and(|id| id.as_str() == application_id)
-                })?;
                 let plugin_host = if output.is_none() || output == &self.panel_output {
                     self.plugin_taskbar_host.as_ref()
                 } else {
                     self.plugin_taskbar_hosts.get(output)
                 };
                 let bounds = if let Some(plugin_host) = plugin_host {
+                    let windows = self
+                        .windows
+                        .iter()
+                        .filter(|window| {
+                            window_belongs_to_panel(
+                                self.all_windows_on_every_bar,
+                                output.as_deref().or(self.panel_output.as_deref()),
+                                window.state.output.as_deref(),
+                            )
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let groups = self.launcher.taskbar_applications(&windows);
+                    let index = groups.iter().take(12).position(|group| {
+                        group
+                            .application_id
+                            .as_ref()
+                            .is_some_and(|id| id.as_str() == application_id)
+                    })?;
+                    if !plugin_host
+                        .application()
+                        .rendered_taskbar_item_matches(index, application_id)
+                    {
+                        return None;
+                    }
                     taskbar_plugin_control_bounds(plugin_host, &format!("taskbar-item-{index}"))?
                 } else {
+                    let host = if output.is_none() || output == &self.panel_output {
+                        &self.panel_host
+                    } else if let Some(host) = self.panel_hosts.get(output) {
+                        host
+                    } else if self.panel_output.is_none() && self.panel_hosts.is_empty() {
+                        // The legacy single-panel presenter has no named output
+                        // host. Its requested output is a native routing hint.
+                        &self.panel_host
+                    } else {
+                        return None;
+                    };
+                    let index = host
+                        .application()
+                        .groups
+                        .iter()
+                        .take(12)
+                        .position(|group| {
+                            group
+                                .application_id
+                                .as_ref()
+                                .is_some_and(|id| id.as_str() == application_id)
+                        })?;
                     host.semantic_targets_for_message(&TaskbarAction::Task(index))
                         .into_iter()
                         .next()?
@@ -7450,20 +7485,23 @@ impl LiveShell {
     }
 
     fn preview_origin_x(&self, index: usize, width: u32) -> i32 {
-        let control_bounds = self
-            .panel_host
-            .semantic_targets_for_message(&TaskbarAction::Task(index))
-            .into_iter()
-            .next()
-            .map(|target| target.bounds)
-            .unwrap_or_else(|| {
-                Rect::new(
-                    PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
-                    0.0,
-                    PANEL_ITEM_WIDTH,
-                    PANEL_ITEM_WIDTH,
-                )
-            });
+        let control_bounds = if let Some(host) = self.plugin_taskbar_host.as_ref() {
+            taskbar_plugin_control_bounds(host, &format!("taskbar-item-{index}"))
+        } else {
+            self.panel_host
+                .semantic_targets_for_message(&TaskbarAction::Task(index))
+                .into_iter()
+                .next()
+                .map(|target| target.bounds)
+        }
+        .unwrap_or_else(|| {
+            Rect::new(
+                PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
+                0.0,
+                PANEL_ITEM_WIDTH,
+                PANEL_ITEM_WIDTH,
+            )
+        });
         TaskbarPreviewAnchor::new(self.panel_origin_x, control_bounds).preview_origin_x(width)
     }
 
