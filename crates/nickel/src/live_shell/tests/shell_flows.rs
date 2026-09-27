@@ -1456,11 +1456,16 @@
             &format!("taskbar-item-{index}"),
         )
         .unwrap();
-        let expected_x = shell.panel_origin_x + item.origin.x.round() as i32;
         let center = item.origin.x + item.size.width / 2.0;
         assert!(shell.panel_pointer_moved(center, 1_280));
         assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Task(index)));
         assert!(shell.panel_click(center, 1_280, true));
+        let current_item = super::taskbar_plugin_control_bounds(
+            shell.plugin_taskbar_host.as_ref().unwrap(),
+            &format!("taskbar-item-{index}"),
+        )
+        .unwrap();
+        let expected_x = shell.panel_origin_x + current_item.origin.x.round() as i32;
         assert_eq!(shell.window_menu_anchor_x, Some(expected_x));
         assert_eq!(
             shell.application_menu_target.as_ref().map(|target| target.windows.clone()),

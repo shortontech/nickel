@@ -743,6 +743,8 @@ pub struct LiveShell {
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
+    panel_pet_frame: u8,
+    panel_pet_deadline: Option<Instant>,
     panel_output: Option<String>,
     pending_popover_anchor: Option<PendingPopoverAnchor>,
     all_windows_on_every_bar: bool,
@@ -1946,6 +1948,8 @@ impl LiveShell {
             panel_projections: HashMap::new(),
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
+            panel_pet_frame: 0,
+            panel_pet_deadline: None,
             panel_output: None,
             pending_popover_anchor: None,
             all_windows_on_every_bar: shell_settings.all_windows_on_every_bar,
@@ -4064,6 +4068,7 @@ impl LiveShell {
                 self.plugin_taskbar_hosts.clear();
                 self.plugin_taskbar_memory.clear();
                 self.plugin_taskbar_menu_memory = 0;
+                self.panel_pet_deadline = None;
                 self.application_menu_plugin_host = None;
                 self.window_menu_plugin_host = None;
             } else if id == crate::plugin_panel::notification_manifest().id {
@@ -4159,6 +4164,8 @@ impl LiveShell {
         } else if id == crate::plugin_panel::taskbar_manifest().id {
             self.plugin_taskbar_hosts.clear();
             self.plugin_taskbar_memory.clear();
+            self.panel_pet_frame = 0;
+            self.panel_pet_deadline = None;
             let (clock, _) = panel_clock_text();
             let (projection, images) = self.taskbar_plugin_projection(&clock);
             crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection).map(
@@ -4265,9 +4272,15 @@ impl LiveShell {
         push(
             "panel",
             self.panel_hosts
-                .values()
-                .filter_map(|host| host.next_deadline())
-                .chain(self.panel_host.next_deadline())
+                .iter()
+                .filter(|(output, _)| !self.plugin_taskbar_hosts.contains_key(*output))
+                .filter_map(|(_, host)| host.next_deadline())
+                .chain(
+                    self.plugin_taskbar_host
+                        .is_none()
+                        .then(|| self.panel_host.next_deadline())
+                        .flatten(),
+                )
                 .chain(
                     self.plugin_taskbar_hosts
                         .values()
@@ -4279,6 +4292,7 @@ impl LiveShell {
                         .and_then(|host| host.next_deadline()),
                 )
                 .chain(self.panel_deadline)
+                .chain(self.panel_pet_deadline)
                 .min(),
         );
         push("lock", self.lock_deadline);
@@ -4653,17 +4667,23 @@ impl LiveShell {
             changed.push(SurfaceRole::Desktop);
         }
         let input_output = self.panel_output.clone();
+        let plugin_clock_due = self.plugin_taskbar_host.is_some()
+            && self.panel_deadline.is_some_and(|deadline| now >= deadline);
         let mut due_panels = self
             .panel_hosts
             .iter()
-            .filter(|(_, host)| host.next_deadline().is_some_and(|deadline| now >= deadline))
+            .filter(|(output, host)| {
+                !self.plugin_taskbar_hosts.contains_key(*output)
+                    && host.next_deadline().is_some_and(|deadline| now >= deadline)
+            })
             .map(|(output, _)| output.clone())
             .collect::<Vec<_>>();
-        if self
-            .panel_deadline
-            .into_iter()
-            .chain(self.panel_host.next_deadline())
-            .any(|deadline| now >= deadline)
+        if self.plugin_taskbar_host.is_none()
+            && self
+                .panel_deadline
+                .into_iter()
+                .chain(self.panel_host.next_deadline())
+                .any(|deadline| now >= deadline)
         {
             due_panels.push(input_output.clone());
         }
@@ -4681,6 +4701,19 @@ impl LiveShell {
             }
         }
         self.switch_panel_output(input_output);
+        if plugin_clock_due {
+            self.panel_deadline = Some(now + taskbar::duration_until_next_minute());
+            changed.push(SurfaceRole::Taskbar);
+        }
+        if self.plugin_taskbar_host.is_some()
+            && self
+                .panel_pet_deadline
+                .is_some_and(|deadline| now >= deadline)
+        {
+            self.panel_pet_frame = (self.panel_pet_frame + 1) % 4;
+            self.panel_pet_deadline = Some(now + Duration::from_millis(360));
+            changed.push(SurfaceRole::Taskbar);
+        }
         if self.lock_deadline.is_some_and(|deadline| now >= deadline) {
             let outcome = self.lock_host.step(HostBatch {
                 now: Some(now),
@@ -6448,6 +6481,7 @@ impl LiveShell {
             } else {
                 self.plugin_taskbar_hosts.clear();
                 self.plugin_taskbar_memory.clear();
+                self.panel_pet_deadline = None;
             }
         }
         self.panel_deadline = if self.plugin_taskbar_host.is_some() {
@@ -10327,6 +10361,23 @@ impl LiveShell {
         self.panel_deadline = outcome
             .next_deadline
             .or_else(|| Some(Instant::now() + taskbar::duration_until_next_minute()));
+        let pets_visible = self.windows.iter().any(|window| {
+            window
+                .application_id
+                .as_ref()
+                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
+        }) || self
+            .launcher
+            .preferences()
+            .favorites()
+            .iter()
+            .any(|id| id.starts_with("io.nickel.codex.project."));
+        if pets_visible {
+            self.panel_pet_deadline
+                .get_or_insert_with(|| Instant::now() + Duration::from_millis(360));
+        } else {
+            self.panel_pet_deadline = None;
+        }
         outcome.changed |= self.apply_plugin_effects(effects);
         self.maybe_publish_plugin_status();
         Some(outcome)
@@ -10455,7 +10506,7 @@ impl LiveShell {
         crate::plugin_panel::PluginImages,
     ) {
         let groups = self.panel_groups();
-        let pet_frame = self.panel_host.application().pet_frame;
+        let pet_frame = self.panel_pet_frame;
         let task_icons = self.resolve_task_icons(groups.as_ref(), pet_frame);
         taskbar_plugin_data(
             TaskbarProjectionInput {

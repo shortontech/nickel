@@ -393,6 +393,33 @@
     }
 
     #[test]
+    fn jsx_taskbar_animates_project_faces_without_polling_the_native_host() {
+        let mut shell = LiveShell::new().unwrap();
+        assert!(shell.plugin_taskbar_host.is_some());
+        shell.launcher = crate::launcher::Launcher::new(Vec::new());
+        shell.windows = vec![OpenWindow {
+            id: WindowId(1),
+            application_id: Some(ApplicationId::new("io.nickel.codex.project.alpha")),
+            active: true,
+            title: "Codex".into(),
+            state: Default::default(),
+        }];
+
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        let (clock, _) = super::panel_clock_text();
+        let initial = shell.taskbar_plugin_projection(&clock).1["task:0"].0;
+        let native_frame = shell.panel_host.application().pet_frame;
+        let due = shell.panel_pet_deadline.expect("JSX pet animation deadline");
+        assert!(due <= Instant::now() + Duration::from_millis(400));
+
+        assert!(shell.poll_host_deadlines(due).contains(&SurfaceRole::Taskbar));
+        let animated = shell.taskbar_plugin_projection(&clock).1["task:0"].0;
+        assert_ne!(initial, animated);
+        assert_eq!(shell.panel_host.application().pet_frame, native_frame);
+        assert!(shell.panel_pet_deadline.is_some_and(|deadline| deadline > due));
+    }
+
+    #[test]
     fn jsx_taskbar_pin_drag_reorders_only_the_current_pinned_item() {
         let directory = tempfile::tempdir().unwrap();
         let mut shell = LiveShell::new().unwrap();
@@ -595,6 +622,9 @@
     #[test]
     fn due_panel_clock_deadline_rebuilds_only_when_the_minute_changes() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+            .unwrap();
         let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         shell.panel_host.application_mut().clock = "stale".into();
         shell.panel_host.application_mut().date = "stale".into();
