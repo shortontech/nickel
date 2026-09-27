@@ -226,3 +226,58 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
         }]
     );
 }
+
+#[test]
+fn keyed_function_components_keep_state_across_conditional_siblings() {
+    let script = r#"
+        function Counter(props) {
+            const [count, setCount] = useState(0);
+            return h(Button, {id: props.id, onClick: () => setCount(count + 1)}, props.id + ':' + count);
+        }
+        function App() {
+            const [showFirst, setShowFirst] = useState(true);
+            return h(Panel, null,
+                h(Button, {id: 'toggle', onClick: () => setShowFirst(!showFirst)}, 'Toggle'),
+                showFirst ? h(Counter, {key: 'first', id: 'first'}) : null,
+                h(Counter, {key: 'second', id: 'second'}));
+        }
+    "#;
+    let mut host = UiHost::new(
+        PluginPanelApplication::new(script).expect("script loads"),
+        surface().width,
+        surface().height,
+    );
+    let invoke = |host: &mut UiHost<PluginPanelApplication>, name: &str| {
+        let id = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .id;
+        assert!(
+            host.perform_semantic_action(id, SemanticAction::Invoke(ActionKind::Activate))
+                .changed
+        );
+    };
+    invoke(&mut host, "second:0");
+    invoke(&mut host, "Toggle");
+    assert!(
+        host.query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "first:0".into(),
+        })
+        .is_err()
+    );
+    invoke(&mut host, "Toggle");
+    host.query_unique(&SemanticSelector::RoleAndName {
+        role: SemanticRole::Button,
+        name: "first:0".into(),
+    })
+    .expect("remounted component starts with fresh state");
+    host.query_unique(&SemanticSelector::RoleAndName {
+        role: SemanticRole::Button,
+        name: "second:1".into(),
+    })
+    .expect("stable keyed sibling retains its state");
+}

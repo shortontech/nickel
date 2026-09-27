@@ -64,7 +64,12 @@ const Text = 'text';
 const TextField = 'text-field';
 const Button = 'button';
 const Dialog = 'dialog';
-let __hooks = [];
+const __componentIds = new WeakMap();
+let __nextComponentId = 0;
+const __componentHooks = new Map();
+let __visitedComponents = new Set();
+let __componentChildren = new Map();
+let __currentComponent = null;
 let __hookIndex = 0;
 let __handlers = [];
 let __effects = [];
@@ -83,21 +88,57 @@ function __nickelTakeEffects() {
 }
 
 function useState(initial) {
+    if (__currentComponent === null) throw Error('useState requires a component');
     const slot = __hookIndex++;
-    if (!(slot in __hooks)) __hooks[slot] = initial;
-    return [__hooks[slot], next => {
-        __hooks[slot] = typeof next === 'function' ? next(__hooks[slot]) : next;
+    const hooks = __componentHooks.get(__currentComponent);
+    if (!hooks[slot]) hooks[slot] = {kind: 'state', value: typeof initial === 'function' ? initial() : initial};
+    if (hooks[slot].kind !== 'state') throw Error('hook order changed');
+    const entry = hooks[slot];
+    const owner = __currentComponent;
+    return [entry.value, next => {
+        if (__componentHooks.get(owner)?.[slot] !== entry) return;
+        entry.value = typeof next === 'function' ? next(entry.value) : next;
     }];
 }
 
 function useRef(initial) {
+    if (__currentComponent === null) throw Error('useRef requires a component');
     const slot = __hookIndex++;
-    if (!(slot in __hooks)) __hooks[slot] = {current: initial};
-    return __hooks[slot];
+    const hooks = __componentHooks.get(__currentComponent);
+    if (!hooks[slot]) hooks[slot] = {kind: 'ref', value: {current: initial}};
+    if (hooks[slot].kind !== 'ref') throw Error('hook order changed');
+    return hooks[slot].value;
 }
 
 function h(kind, props, ...children) {
-    if (typeof kind === 'function') return kind({...props, children});
+    if (typeof kind === 'function') {
+        let type = __componentIds.get(kind);
+        if (type === undefined) {
+            type = ++__nextComponentId;
+            __componentIds.set(kind, type);
+        }
+        const parent = __currentComponent ?? 'root';
+        const ordinalKey = `${parent}/${type}`;
+        const ordinal = __componentChildren.get(ordinalKey) ?? 0;
+        __componentChildren.set(ordinalKey, ordinal + 1);
+        const identity = props?.key === undefined ? `#${ordinal}` : `@${encodeURIComponent(String(props.key))}`;
+        const path = `${ordinalKey}/${identity}`;
+        if (__visitedComponents.has(path)) throw Error(`duplicate component key ${identity}`);
+        __visitedComponents.add(path);
+        if (!__componentHooks.has(path)) __componentHooks.set(path, []);
+        const previous = __currentComponent;
+        const previousIndex = __hookIndex;
+        __currentComponent = path;
+        __hookIndex = 0;
+        try {
+            const node = kind({...props, children});
+            if (__hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
+            return node;
+        } finally {
+            __currentComponent = previous;
+            __hookIndex = previousIndex;
+        }
+    }
     const handler = typeof props?.onClick === 'function' ? props.onClick : props?.onChange;
     const action = typeof handler === 'function' ? __handlers.push(handler) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
@@ -108,8 +149,15 @@ function h(kind, props, ...children) {
 
 function __nickelRender() {
     __handlers = [];
+    __visitedComponents = new Set();
+    __componentChildren = new Map();
+    __currentComponent = null;
     __hookIndex = 0;
-    return JSON.stringify(App());
+    const node = h(App, {});
+    for (const path of __componentHooks.keys()) {
+        if (!__visitedComponents.has(path)) __componentHooks.delete(path);
+    }
+    return JSON.stringify(node);
 }
 
 function __nickelDispatch(action, value) {
@@ -710,5 +758,48 @@ mod tests {
         panel.update(PluginMessage::Click(0));
         assert!(format!("{:?}", panel.node).contains("Count: 1"));
         assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn keyed_components_keep_state_when_a_sibling_unmounts() {
+        let source = r#"
+            function Counter(props) {
+                const [count, setCount] = useState(0);
+                return h(Button, {id: props.id, onClick: () => setCount(count + 1)}, props.id + ':' + count);
+            }
+            function App() {
+                const [showFirst, setShowFirst] = useState(true);
+                return h(Panel, null,
+                    h(Button, {id: 'toggle', onClick: () => setShowFirst(!showFirst)}, 'Toggle'),
+                    showFirst ? h(Counter, {key: 'first', id: 'first'}) : null,
+                    h(Counter, {key: 'second', id: 'second'}));
+            }
+        "#;
+        let mut panel = PluginPanelApplication::new(source).unwrap();
+        panel.update(PluginMessage::Click(2));
+        assert!(format!("{:?}", panel.node).contains("second:1"));
+        panel.update(PluginMessage::Click(0));
+        let without_first = format!("{:?}", panel.node);
+        assert!(!without_first.contains("first:0"));
+        assert!(without_first.contains("second:1"));
+        panel.update(PluginMessage::Click(0));
+        let restored = format!("{:?}", panel.node);
+        assert!(restored.contains("first:0"));
+        assert!(restored.contains("second:1"));
+    }
+
+    #[test]
+    fn duplicate_component_keys_are_rejected() {
+        let source = r#"
+            function Child() { return h(Text, null, 'child'); }
+            function App() {
+                return h(Panel, null, h(Child, {key: 'same'}), h(Child, {key: 'same'}));
+            }
+        "#;
+        assert!(
+            PluginPanelApplication::new(source)
+                .err()
+                .is_some_and(|error| error.contains("duplicate component key"))
+        );
     }
 }
