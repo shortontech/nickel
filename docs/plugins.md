@@ -34,8 +34,9 @@ taskbar badge contribution; `nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
-`Panel` component's ARGB `background` can be translucent. The current runtime
-allows one active external panel or dock at a time.
+`Panel` component's ARGB `background` can be translucent. Several installed
+panel and dock plugins can be enabled together. Each installed package currently
+declares one surface; a package cannot create additional surfaces at runtime.
 
 The installed entry is plain JavaScript. If `main.jsx` or `main.tsx` exists
 beside a declared `main.js` entry, both commands run a local
@@ -88,6 +89,14 @@ unavailable in this runtime.
 The taskbar's retained UI measurement currently includes contributed badge
 nodes; Nickel cannot yet split those bytes by extension. Each extension's
 JavaScript heap measurement remains unavailable in Settings.
+
+Settings lists each plugin with an enable switch and shows its runtime health,
+tracked memory, peak tracked memory, and the measured categories. Tracked memory
+is a lower bound: native UI bytes are measured for rendered plugin trees, while
+the embedded JavaScript heap and some shared allocations cannot yet be assigned
+to an individual plugin. An unavailable category is shown as unavailable rather
+than counted as zero. Disabling a plugin retires its host and clears its
+reported memory.
 
 Plugins may declare up to 32 bounded settings in `plugin.json`: `boolean`,
 `integer` with `min`/`max`, `text` with `max_length`, or `choice` with an

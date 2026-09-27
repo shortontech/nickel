@@ -1230,6 +1230,19 @@ fn scene_for_native_surface(
     }
 }
 
+fn scene_change_token_for_native_surface(
+    shell: &WinitShell,
+    state: &LiveShell,
+    id: SurfaceId,
+    role: SurfaceRole,
+) -> Option<HostChangeToken> {
+    if role == SurfaceRole::Panel {
+        state.plugin_panel_change_token(shell.surface(id)?.plugin_key()?)
+    } else {
+        state.scene_change_token(role)
+    }
+}
+
 fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), String> {
     sync_desktop_outputs(shell, state);
     let surfaces = shell
@@ -1264,7 +1277,7 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         else {
             continue;
         };
-        if let Some(token) = state.scene_change_token(role) {
+        if let Some(token) = scene_change_token_for_native_surface(shell, state, id, role) {
             shell.present_host_frame(id, token, &commands)?;
         } else {
             shell.present(id, &commands)?;
@@ -1311,7 +1324,7 @@ fn render_role(
         else {
             continue;
         };
-        if let Some(token) = state.scene_change_token(role) {
+        if let Some(token) = scene_change_token_for_native_surface(shell, state, id, role) {
             shell.present_host_frame(id, token, &commands)?;
         } else {
             shell.present(id, &commands)?;
@@ -1457,7 +1470,7 @@ fn prewarm_role(
         else {
             continue;
         };
-        if let Some(token) = state.scene_change_token(wanted) {
+        if let Some(token) = scene_change_token_for_native_surface(shell, state, id, wanted) {
             shell.present_host_frame(id, token, &commands)?;
         } else {
             shell.present(id, &commands)?;
@@ -1861,7 +1874,8 @@ fn handle_shell_input(
             return Ok(());
         }
         let (width, height) = entry.window().size();
-        if state.plugin_panel_host_input(event, width, height) {
+        let key = entry.plugin_key().unwrap().clone();
+        if state.plugin_panel_host_input_for(&key, event, width, height) {
             sync_visibility(shell, state);
             render_role(shell, state, role)?;
             render_role(shell, state, SurfaceRole::Launcher)?;
@@ -2445,8 +2459,7 @@ pub fn run() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
     let mut state = LiveShell::new()?;
-    shell.set_plugin_panel_surface(state.plugin_panel_owner(), state.plugin_panel_surface())?;
-    shell.set_plugin_panel_enabled(state.surface_visible(SurfaceRole::Panel))?;
+    shell.set_plugin_panels(state.plugin_panels())?;
     let mut feature_settings = OptionalFeatureSettings::load_default();
     feature_settings.codex_enabled = feature_settings.effective_codex_enabled();
     let mut codex = CodexSurfaces::new(&shell, &feature_settings, state.semantic_theme())?;
@@ -2845,11 +2858,7 @@ pub fn run() -> Result<(), String> {
                 let opening_notification_history =
                     shortcut == platform::GlobalShortcut::ShowNotifications;
                 if state.global_shortcut(shortcut) {
-                    shell.set_plugin_panel_surface(
-                        state.plugin_panel_owner(),
-                        state.plugin_panel_surface(),
-                    )?;
-                    shell.set_plugin_panel_enabled(state.surface_visible(SurfaceRole::Panel))?;
+                    shell.set_plugin_panels(state.plugin_panels())?;
                     sync_visibility(&mut shell, &state);
                     #[cfg(target_os = "windows")]
                     if opening_notification_history

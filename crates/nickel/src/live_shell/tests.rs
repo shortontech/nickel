@@ -427,7 +427,6 @@ fn installed_dock_uses_declared_offset_and_translucent_panel() {
     assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
 }
 
-#[cfg(not(target_os = "windows"))]
 #[test]
 fn two_installed_panels_render_and_retire_independently() {
     let root = tempfile::tempdir().unwrap();

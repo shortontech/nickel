@@ -206,6 +206,27 @@ fn desired_output_surfaces(
         .collect()
 }
 
+fn desired_plugin_surfaces(
+    output_names: &[String],
+    panels: &std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    >,
+) -> HashSet<(String, nickel_core::plugins::PluginSurfaceKey)> {
+    panels
+        .iter()
+        .flat_map(|(key, surface)| {
+            output_names
+                .iter()
+                .enumerate()
+                .filter(move |(index, _)| {
+                    surface.output == nickel_core::plugins::PluginOutputScope::All || *index == 0
+                })
+                .map(|(_, output)| (output.clone(), key.clone()))
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SurfaceId(WindowId);
 
@@ -540,6 +561,10 @@ pub struct WinitShell {
     plugin_panel_enabled: bool,
     plugin_panel_surface: nickel_core::plugins::PluginSurface,
     plugin_panel_owner: String,
+    extra_plugin_panels: std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    >,
     #[cfg(target_os = "windows")]
     launcher_surface_size: Option<(u32, u32)>,
     next_surface_diagnostic_generation: u64,
@@ -603,6 +628,7 @@ impl WinitShell {
             plugin_panel_enabled: crate::plugin_panel::enabled(),
             plugin_panel_surface: crate::plugin_panel::surface().clone(),
             plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
+            extra_plugin_panels: std::collections::BTreeMap::new(),
             #[cfg(target_os = "windows")]
             launcher_surface_size: None,
             next_surface_diagnostic_generation: 0,
@@ -789,12 +815,30 @@ impl WinitShell {
             self.plugin_panel_enabled,
             self.plugin_panel_surface.output,
         );
+        let primary_plugin_key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: self.plugin_panel_owner.clone(),
+            surface_id: self.plugin_panel_surface.id.clone(),
+        };
+        let mut active_panels = self.extra_plugin_panels.clone();
+        if self.plugin_panel_enabled {
+            active_panels.insert(
+                primary_plugin_key.clone(),
+                self.plugin_panel_surface.clone(),
+            );
+        }
+        let desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
+        let panel_expected = |surface: &ShellSurface| {
+            surface.plugin.as_ref().is_some_and(|key| {
+                desired_plugin_panels.contains(&(surface.output_name.clone(), key.clone()))
+            })
+        };
         // A settings policy change is authoritative immediately. Missing outputs remain
         // dormant for the retirement grace period so a transient topology snapshot or a
         // quick reconnect can preserve their stable surface identities.
-        self.surfaces.retain(|surface| {
-            !matches!(surface.role, SurfaceRole::Taskbar | SurfaceRole::Panel)
-                || desired.contains(&(surface.output_name.clone(), surface.role))
+        self.surfaces.retain(|surface| match surface.role {
+            SurfaceRole::Panel => panel_expected(surface),
+            SurfaceRole::Taskbar => desired.contains(&(surface.output_name.clone(), surface.role)),
+            _ => true,
         });
         for surface in &mut self.surfaces {
             #[cfg(target_os = "windows")]
@@ -803,7 +847,11 @@ impl WinitShell {
                 continue;
             }
             if output_role(surface.role)
-                && !desired.contains(&(surface.output_name.clone(), surface.role))
+                && if surface.role == SurfaceRole::Panel {
+                    !panel_expected(surface)
+                } else {
+                    !desired.contains(&(surface.output_name.clone(), surface.role))
+                }
             {
                 surface.display_connected = false;
                 surface.presenter = None;
@@ -829,6 +877,8 @@ impl WinitShell {
                     surface.display_connected
                         && surface.role == role
                         && surface.output_name == *output_name
+                        && (role != SurfaceRole::Panel
+                            || surface.plugin.as_ref() == Some(&primary_plugin_key))
                 }) {
                     continue;
                 }
@@ -836,6 +886,8 @@ impl WinitShell {
                     !surface.display_connected
                         && surface.role == role
                         && surface.output_name == *output_name
+                        && (role != SurfaceRole::Panel
+                            || surface.plugin.as_ref() == Some(&primary_plugin_key))
                 }) {
                     surface.display_index = display_index;
                     surface.display_connected = true;
@@ -863,6 +915,48 @@ impl WinitShell {
                             %error,
                             "failed to create output-owned shell surface; retry scheduled"
                         );
+                    }
+                }
+            }
+        }
+        if cfg!(target_os = "windows") {
+            let extra = self
+                .extra_plugin_panels
+                .iter()
+                .map(|(key, surface)| (key.clone(), surface.clone()))
+                .collect::<Vec<_>>();
+            for (key, panel) in extra {
+                for (display_index, geometry) in displays.iter().copied().enumerate() {
+                    let output_name = &output_names[display_index];
+                    if !desired_plugin_panels.contains(&(output_name.clone(), key.clone())) {
+                        continue;
+                    }
+                    if self.surfaces.iter().any(|surface| {
+                        surface.display_connected
+                            && surface.role == SurfaceRole::Panel
+                            && surface.output_name == *output_name
+                            && surface.plugin.as_ref() == Some(&key)
+                    }) {
+                        continue;
+                    }
+                    if let Some(existing) = self.surfaces.iter_mut().find(|surface| {
+                        !surface.display_connected
+                            && surface.role == SurfaceRole::Panel
+                            && surface.output_name == *output_name
+                            && surface.plugin.as_ref() == Some(&key)
+                    }) {
+                        existing.display_index = display_index;
+                        existing.display_connected = true;
+                        existing.window.set_visible(true);
+                    } else if let Err(error) = self.create_surface_with_plugin(
+                        SurfaceRole::Panel,
+                        display_index,
+                        geometry,
+                        output_name,
+                        Some((&key, &panel)),
+                    ) {
+                        creation_failed = true;
+                        tracing::warn!(plugin = %key.plugin_id, %error, "failed to create plugin panel surface");
                     }
                 }
             }
@@ -946,7 +1040,11 @@ impl WinitShell {
                 surface.role,
                 display,
                 self.options.panel_edge,
-                &self.plugin_panel_surface,
+                surface
+                    .plugin
+                    .as_ref()
+                    .and_then(|key| active_panels.get(key))
+                    .unwrap_or(&self.plugin_panel_surface),
             );
             surface
                 .window
@@ -967,47 +1065,85 @@ impl WinitShell {
         Ok(true)
     }
 
-    pub fn set_plugin_panel_enabled(&mut self, enabled: bool) -> Result<bool, String> {
-        if self.plugin_panel_enabled == enabled {
-            return Ok(false);
-        }
-        self.plugin_panel_enabled = enabled;
-        self.sync_display_geometry()?;
-        Ok(true)
-    }
-
-    pub fn set_plugin_panel_surface(
+    pub fn set_plugin_panels(
         &mut self,
-        owner: &str,
-        surface: &nickel_core::plugins::PluginSurface,
+        panels: Vec<(
+            nickel_core::plugins::PluginSurfaceKey,
+            nickel_core::plugins::PluginSurface,
+        )>,
     ) -> Result<bool, String> {
-        if self.plugin_panel_owner == owner && self.plugin_panel_surface == *surface {
+        let mut panels = panels.into_iter();
+        let primary = panels.next();
+        if primary
+            .as_ref()
+            .is_some_and(|(key, surface)| key.surface_id != surface.id)
+        {
+            return Err("mismatched primary plugin panel surface".into());
+        }
+        let mut extra = std::collections::BTreeMap::new();
+        for (key, surface) in panels {
+            if key.surface_id != surface.id || extra.insert(key, surface).is_some() {
+                return Err("duplicate or mismatched plugin panel surface".into());
+            }
+        }
+        let enabled = primary.is_some();
+        let (owner, surface) = primary.map_or_else(
+            || {
+                (
+                    crate::plugin_panel::manifest().id.clone(),
+                    crate::plugin_panel::surface().clone(),
+                )
+            },
+            |(key, surface)| (key.plugin_id, surface),
+        );
+        if enabled
+            && extra.contains_key(&nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: owner.clone(),
+                surface_id: surface.id.clone(),
+            })
+        {
+            return Err("duplicate plugin panel surface".into());
+        }
+        if self.plugin_panel_enabled == enabled
+            && self.plugin_panel_owner == owner
+            && self.plugin_panel_surface == surface
+            && self.extra_plugin_panels == extra
+        {
             return Ok(false);
         }
-        let next_key = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: owner.to_owned(),
-            surface_id: surface.id.clone(),
-        };
-        if self.surfaces.iter().any(|existing| {
-            existing.role == SurfaceRole::Panel && existing.plugin.as_ref() != Some(&next_key)
-        }) {
-            self.surfaces
-                .retain(|existing| existing.role != SurfaceRole::Panel);
-            self.rebuild_surface_indices();
+        let mut active = extra.clone();
+        if enabled {
+            active.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: owner.clone(),
+                    surface_id: surface.id.clone(),
+                },
+                surface.clone(),
+            );
         }
+        self.surfaces.retain(|existing| {
+            existing.role != SurfaceRole::Panel
+                || existing
+                    .plugin
+                    .as_ref()
+                    .is_some_and(|key| active.contains_key(key))
+        });
+        self.rebuild_surface_indices();
         #[cfg(target_os = "linux")]
         for existing in self
             .surfaces
             .iter()
             .filter(|existing| existing.role == SurfaceRole::Panel && existing.display_connected)
         {
+            let key = existing.plugin.as_ref().expect("plugin surface has owner");
+            let surface = active.get(key).expect("retained plugin surface is active");
             crate::platform::register_shell_surface(
                 nickel_session_protocol::ShellSurfaceIdentity {
                     application_id: existing.application_id.clone(),
                     role: SessionShellRole::PluginSurface,
                     output: Some(existing.output_name.clone()),
                     plugin_surface: Some(nickel_session_protocol::PluginSurfacePlacement {
-                        plugin_id: owner.to_owned(),
+                        plugin_id: key.plugin_id.clone(),
                         surface_id: surface.id.clone(),
                         width: surface.width,
                         height: surface.height,
@@ -1017,8 +1153,10 @@ impl WinitShell {
             )
             .map_err(|error| format!("failed to register plugin surface: {error}"))?;
         }
-        self.plugin_panel_owner = owner.to_owned();
-        self.plugin_panel_surface = surface.clone();
+        self.plugin_panel_enabled = enabled;
+        self.plugin_panel_owner = owner;
+        self.plugin_panel_surface = surface;
+        self.extra_plugin_panels = extra;
         self.sync_display_geometry()?;
         Ok(true)
     }
@@ -2143,12 +2281,34 @@ impl WinitShell {
         geometry: DisplayGeometry,
         output_name: &str,
     ) -> Result<(), String> {
-        let (base_title, x, y, width, height, hidden) = surface_geometry_for_panel(
-            role,
-            geometry,
-            self.options.panel_edge,
-            &self.plugin_panel_surface,
-        );
+        self.create_surface_with_plugin(role, display_index, geometry, output_name, None)
+    }
+
+    fn create_surface_with_plugin(
+        &mut self,
+        role: SurfaceRole,
+        display_index: usize,
+        geometry: DisplayGeometry,
+        output_name: &str,
+        plugin: Option<(
+            &nickel_core::plugins::PluginSurfaceKey,
+            &nickel_core::plugins::PluginSurface,
+        )>,
+    ) -> Result<(), String> {
+        let panel = plugin
+            .map(|(_, surface)| surface.clone())
+            .unwrap_or_else(|| self.plugin_panel_surface.clone());
+        let plugin_key = (role == SurfaceRole::Panel).then(|| {
+            plugin.map_or_else(
+                || nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: self.plugin_panel_owner.clone(),
+                    surface_id: panel.id.clone(),
+                },
+                |(key, _)| key.clone(),
+            )
+        });
+        let (base_title, x, y, width, height, hidden) =
+            surface_geometry_for_panel(role, geometry, self.options.panel_edge, &panel);
         let title = base_title;
         let session_role = match role {
             SurfaceRole::Desktop => SessionShellRole::Desktop,
@@ -2193,11 +2353,11 @@ impl WinitShell {
                     output,
                     plugin_surface: (role == SurfaceRole::Panel).then(|| {
                         nickel_session_protocol::PluginSurfacePlacement {
-                            plugin_id: self.plugin_panel_owner.clone(),
-                            surface_id: self.plugin_panel_surface.id.clone(),
-                            width: self.plugin_panel_surface.width,
-                            height: self.plugin_panel_surface.height,
-                            bottom_offset: self.plugin_panel_surface.bottom_offset,
+                            plugin_id: plugin_key.as_ref().unwrap().plugin_id.clone(),
+                            surface_id: panel.id.clone(),
+                            width: panel.width,
+                            height: panel.height,
+                            bottom_offset: panel.bottom_offset,
                         }
                     }),
                 },
@@ -2303,10 +2463,7 @@ impl WinitShell {
         self.surfaces.push(ShellSurface {
             id,
             role,
-            plugin: (role == SurfaceRole::Panel).then(|| nickel_core::plugins::PluginSurfaceKey {
-                plugin_id: self.plugin_panel_owner.clone(),
-                surface_id: self.plugin_panel_surface.id.clone(),
-            }),
+            plugin: plugin_key,
             application_id,
             display_index,
             output_name: output_name.to_owned(),
@@ -2663,17 +2820,17 @@ mod tests {
     use super::{
         DisplayGeometry, OUTPUT_CREATION_RETRY_MAX, OUTPUT_CREATION_RETRY_MIN,
         OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry, OutputRetirementTracker, PanelEdge,
-        ShellEvent, SurfaceRole, desired_output_surfaces, durable_presenter_peak, output_name_at,
-        output_role_is_retired, panel_outputs, parse_proc_status_rss, preferred_output_index,
-        queue_shell_input, record_pump_status, require_displays, surface_geometry,
-        surface_is_borderless,
+        ShellEvent, SurfaceRole, desired_output_surfaces, desired_plugin_surfaces,
+        durable_presenter_peak, output_name_at, output_role_is_retired, panel_outputs,
+        parse_proc_status_rss, preferred_output_index, queue_shell_input, record_pump_status,
+        require_displays, surface_geometry, surface_is_borderless,
     };
 
     use nickel_input::{
         DeviceId, EventOrder, InputEvent, KeyEdge, Point, PointerButton, PointerEvent, Vector,
     };
     use nickel_ui::AggregatePresenterCacheDiagnostics;
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::time::{Duration, Instant};
     use winit::platform::pump_events::PumpStatus;
 
@@ -2901,6 +3058,53 @@ mod tests {
         );
         assert_eq!(panel_outputs(&outputs, true, Some("HDMI-A-1")), outputs);
         assert_eq!(panel_outputs(&[], false, None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn two_plugin_panels_can_target_the_same_output() {
+        let mut panels = BTreeMap::new();
+        for (id, scope) in [
+            (
+                "org.example.clock",
+                nickel_core::plugins::PluginOutputScope::Primary,
+            ),
+            (
+                "org.example.mail",
+                nickel_core::plugins::PluginOutputScope::All,
+            ),
+        ] {
+            let mut surface = crate::plugin_panel::surface().clone();
+            surface.id = "main".into();
+            surface.output = scope;
+            panels.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: id.into(),
+                    surface_id: surface.id.clone(),
+                },
+                surface,
+            );
+        }
+        let desired = desired_plugin_surfaces(&["DP-1".into(), "DP-2".into()], &panels);
+        assert_eq!(desired.len(), 3);
+        assert_eq!(
+            desired
+                .iter()
+                .filter(|(output, _)| output == "DP-1")
+                .count(),
+            2
+        );
+        assert_eq!(
+            desired
+                .iter()
+                .filter(|(output, _)| output == "DP-2")
+                .count(),
+            1
+        );
+        assert!(
+            desired
+                .iter()
+                .any(|(output, key)| { output == "DP-2" && key.plugin_id == "org.example.mail" })
+        );
     }
 
     #[test]

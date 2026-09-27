@@ -596,7 +596,7 @@ pub struct PluginSurface {
 
 /// Stable manifest identity for a plugin-owned surface. The host pairs this
 /// with an output instance when it creates a native presentation slot.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PluginSurfaceKey {
     pub plugin_id: String,
     pub surface_id: String,
