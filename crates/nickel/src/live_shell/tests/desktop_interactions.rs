@@ -227,6 +227,28 @@
         );
         assert!(requests.try_recv().is_err());
 
+        shell.desktop_host.application_mut().update(super::desktop::DesktopMessage::Rename(
+            nickel_file::desktop::DesktopEntryId(nickel_file::FileIdentity(7, 9)),
+        ));
+        assert!(requests.try_recv().is_err());
+        assert!(shell.dispatch_desktop_plugin_file_action());
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            nickel_file::FileWindowRequest::Open(nickel_file::FileLaunch::Rename(path.clone()))
+        );
+        #[cfg(target_os = "windows")]
+        {
+            shell.finish_desktop_native_context_menu(Some(
+                super::desktop::DesktopMessage::Rename(nickel_file::desktop::DesktopEntryId(
+                    nickel_file::FileIdentity(7, 9),
+                )),
+            ));
+            assert_eq!(
+                requests.try_recv().unwrap(),
+                nickel_file::FileWindowRequest::Open(nickel_file::FileLaunch::Rename(path.clone()))
+            );
+        }
+
         shell.desktop_host.application_mut().layout.reconcile(Vec::new());
         assert!(!shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::DesktopOpen { id: "7:9".into() },
@@ -237,6 +259,12 @@
         assert!(!shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::DesktopMove {
                 id: "7:9".into(), dx: 96.0, dy: 0.0,
+            },
+        ]));
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::DesktopFileAction {
+                id: "7:9".into(),
+                action: nickel_file::desktop::DesktopContextAction::Rename,
             },
         ]));
         assert!(requests.try_recv().is_err());
@@ -257,6 +285,22 @@
                 id: "7:9".into(), dx: 96.0, dy: 0.0,
             },
         ]));
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::DesktopFileAction {
+                id: "7:9".into(),
+                action: nickel_file::desktop::DesktopContextAction::Rename,
+            },
+        ]));
+        shell
+            .desktop_host
+            .application_mut()
+            .update(super::desktop::DesktopMessage::Rename(
+                nickel_file::desktop::DesktopEntryId(nickel_file::FileIdentity(7, 9)),
+            ));
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            nickel_file::FileWindowRequest::Open(nickel_file::FileLaunch::Rename(path.clone()))
+        );
         for click in 0..2 {
             assert!(shell.desktop_host.application_mut().pointer_press(point, false, Default::default()));
             assert!(shell.desktop_host.application_mut().pointer_release(

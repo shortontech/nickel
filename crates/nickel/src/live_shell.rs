@@ -2989,6 +2989,7 @@ impl LiveShell {
         if let Some(action) = action {
             self.desktop_host.application_mut().update(action);
             self.dispatch_desktop_plugin_open();
+            self.dispatch_desktop_plugin_file_action();
         } else {
             self.desktop_host
                 .application_mut()
@@ -3180,6 +3181,7 @@ impl LiveShell {
             self.desktop_change_token = outcome.change_token;
             self.desktop_deadline = outcome.next_deadline;
             let plugin_changed = self.dispatch_desktop_plugin_open();
+            let plugin_changed = plugin_changed | self.dispatch_desktop_plugin_file_action();
             if captured_release {
                 self.desktop_overlay_pointer_capture = None;
             }
@@ -3258,6 +3260,7 @@ impl LiveShell {
         let changed =
             changed | (reveal_selection && self.desktop_host.application_mut().reveal_active());
         let changed = changed | self.dispatch_desktop_plugin_open();
+        let changed = changed | self.dispatch_desktop_plugin_file_action();
         if changed && coalesce_motion {
             self.desktop_application_dirty = true;
         } else if changed {
@@ -3299,6 +3302,49 @@ impl LiveShell {
             self.apply_plugin_effects(effects)
         } else {
             self.desktop_host.application_mut().activate(entry);
+            true
+        }
+    }
+
+    fn dispatch_desktop_plugin_file_action(&mut self) -> bool {
+        let Some((entry, action)) = self
+            .desktop_host
+            .application_mut()
+            .pending_plugin_file_action
+            .take()
+        else {
+            return false;
+        };
+        let desktop = self.desktop_host.application();
+        let visible = desktop
+            .layout
+            .items()
+            .iter()
+            .any(|item| item.id == entry && item.output == desktop.active_output);
+        if !visible {
+            return false;
+        }
+        let id = format!("{}:{}", entry.0.0, entry.0.1);
+        let (handled, effects) =
+            self.plugin_desktop_host
+                .as_mut()
+                .map_or((false, Vec::new()), |host| {
+                    let handled = host.application_mut().file_action_desktop_tile(&id, action);
+                    let effects = host.application_mut().take_effects();
+                    if handled {
+                        host.step(HostBatch {
+                            application_changed: true,
+                            ..HostBatch::default()
+                        });
+                    }
+                    (handled, effects)
+                });
+        if handled {
+            self.apply_plugin_effects(effects)
+        } else {
+            self.desktop_host
+                .application_mut()
+                .execute_context_action(entry, action);
             true
         }
     }
@@ -3418,6 +3464,7 @@ impl LiveShell {
         };
         let changed = changed | application.reveal_active();
         let changed = changed | self.dispatch_desktop_plugin_open();
+        let changed = changed | self.dispatch_desktop_plugin_file_action();
         if !changed {
             return false;
         }
@@ -5169,6 +5216,26 @@ impl LiveShell {
                             });
                         if visible {
                             self.desktop_host.application_mut().activate(entry);
+                            changed = true;
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::DesktopFileAction { id, action } => {
+                    let entry = id.split_once(':').and_then(|(first, second)| {
+                        Some(nickel_file::desktop::DesktopEntryId(
+                            nickel_file::FileIdentity(first.parse().ok()?, second.parse().ok()?),
+                        ))
+                    });
+                    if let Some(entry) = entry.filter(|_| self.plugin_desktop_host.is_some()) {
+                        let desktop = self.desktop_host.application();
+                        let visible =
+                            desktop.layout.items().iter().any(|item| {
+                                item.id == entry && item.output == desktop.active_output
+                            });
+                        if visible {
+                            self.desktop_host
+                                .application_mut()
+                                .execute_context_action(entry, action);
                             changed = true;
                         }
                     }

@@ -108,6 +108,8 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onSelect) - 1 : null;
     const moveAction = typeof props?.onMove === 'function'
         ? __handlers.push(props.onMove) - 1 : null;
+    const fileAction = typeof props?.onFileAction === 'function'
+        ? __handlers.push(props.onFileAction) - 1 : null;
     const closeAction = typeof props?.onClose === 'function'
         ? __handlers.push(props.onClose) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
@@ -121,7 +123,7 @@ function h(kind, props, ...children) {
         item: props?.item, count: props?.count, hue: props?.hue, custom: props?.custom,
         asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, state: props?.state, icon: props?.icon,
-        showLabel: props?.showLabel, contextAction, dragAction, selectAction, moveAction, closeAction,
+        showLabel: props?.showLabel, contextAction, dragAction, selectAction, moveAction, fileAction, closeAction,
         value: props?.value, placeholder: props?.placeholder, maxLines: props?.maxLines,
         percent: props?.percent,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};

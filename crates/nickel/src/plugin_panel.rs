@@ -176,6 +176,7 @@ enum PanelNode {
         action: Option<usize>,
         select_action: Option<usize>,
         move_action: Option<usize>,
+        file_action: Option<usize>,
         asset: String,
         label: String,
         x: f32,
@@ -355,6 +356,25 @@ impl PanelNode {
         }
     }
 
+    fn file_tile_file_action(&self, id: &str) -> Option<usize> {
+        match self {
+            Self::FileTile {
+                id: tile_id,
+                file_action,
+                ..
+            } if tile_id == id => *file_action,
+            Self::Box { children, .. }
+            | Self::Surface { children, .. }
+            | Self::Panel { children, .. }
+            | Self::Row(children)
+            | Self::Column(children)
+            | Self::ScrollView { children, .. } => children
+                .iter()
+                .find_map(|child| child.file_tile_file_action(id)),
+            _ => None,
+        }
+    }
+
     fn parse(value: &Value) -> Result<Self, String> {
         let kind = value
             .get("kind")
@@ -513,6 +533,10 @@ impl PanelNode {
                         .and_then(|action| usize::try_from(action).ok()),
                     move_action: value
                         .get("moveAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
+                    file_action: value
+                        .get("fileAction")
                         .and_then(Value::as_u64)
                         .and_then(|action| usize::try_from(action).ok()),
                     asset: value
@@ -938,6 +962,7 @@ impl PanelNode {
                 action,
                 select_action: _,
                 move_action: _,
+                file_action: _,
                 asset,
                 label,
                 x,
@@ -1526,6 +1551,10 @@ pub enum PluginEffect {
     DesktopOpen {
         id: String,
     },
+    DesktopFileAction {
+        id: String,
+        action: nickel_file::desktop::DesktopContextAction,
+    },
     RunSubmit(String),
     RunDismiss,
     ToggleLauncher,
@@ -1773,6 +1802,7 @@ pub enum PluginMessage {
     Click(usize),
     Button { click: usize, drag: usize },
     TileMove(usize, f32, f32),
+    FileAction(usize, String),
     Context(usize),
     Drag(usize, DragGesture),
     Text(usize, String),
@@ -2700,6 +2730,24 @@ impl PluginPanelApplication {
         self.last_error.is_none()
     }
 
+    pub fn file_action_desktop_tile(
+        &mut self,
+        id: &str,
+        action: nickel_file::desktop::DesktopContextAction,
+    ) -> bool {
+        if self.manifest.id != desktop_manifest().id {
+            return false;
+        }
+        let Some(handler) = self.node.file_tile_file_action(id) else {
+            return false;
+        };
+        nickel_ui::Application::update(
+            self,
+            PluginMessage::FileAction(handler, action.as_str().to_owned()),
+        );
+        self.last_error.is_none()
+    }
+
     pub fn take_effects(&mut self) -> Vec<PluginEffect> {
         std::mem::take(&mut self.effects)
     }
@@ -2789,6 +2837,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                 let encoded = serde_json::json!({ "dx": dx, "dy": dy });
                 format!("__nickelDispatch({action}, {encoded})")
             }
+            PluginMessage::FileAction(action, kind) => {
+                let encoded = serde_json::json!({ "action": kind });
+                format!("__nickelDispatch({action}, {encoded})")
+            }
             PluginMessage::Text(action, value) => {
                 let encoded = serde_json::to_string(&value).expect("string serialization");
                 format!("__nickelDispatch({action}, {encoded})")
@@ -2850,6 +2902,38 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::DesktopOpen { id: id.to_owned() });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("desktop-file-action")
+                            && self.manifest.id == desktop_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DesktopFilesManage) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("desktop file ID is missing".into());
+                                return;
+                            };
+                            let Some(action) = effect
+                                .get("action")
+                                .and_then(Value::as_str)
+                                .and_then(nickel_file::desktop::DesktopContextAction::parse)
+                            else {
+                                self.last_error = Some("desktop file action is invalid".into());
+                                return;
+                            };
+                            let valid_id = id.split_once(':').is_some_and(|(first, second)| {
+                                first.parse::<u64>().is_ok() && second.parse::<u64>().is_ok()
+                            });
+                            if !valid_id || self.node.file_tile_file_action(id).is_none() {
+                                self.last_error = Some("desktop file ID is stale".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::DesktopFileAction {
+                                id: id.to_owned(),
+                                action,
+                            });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("desktop-select")
@@ -3893,6 +3977,37 @@ mod tests {
             }]
         );
         assert!(!application.move_desktop_tile("7:9", 9000.0, 0.0));
+        assert!(application.take_effects().is_empty());
+        assert!(
+            application.file_action_desktop_tile(
+                "7:9",
+                nickel_file::desktop::DesktopContextAction::Rename,
+            )
+        );
+        assert_eq!(
+            application.take_effects(),
+            vec![PluginEffect::DesktopFileAction {
+                id: "7:9".into(),
+                action: nickel_file::desktop::DesktopContextAction::Rename,
+            }]
+        );
+        assert!(
+            !application.file_action_desktop_tile(
+                "7:10",
+                nickel_file::desktop::DesktopContextAction::Rename,
+            )
+        );
+        assert!(application.take_effects().is_empty());
+        application
+            .manifest
+            .capabilities
+            .retain(|capability| *capability != PluginCapability::DesktopFilesManage);
+        assert!(
+            !application.file_action_desktop_tile(
+                "7:9",
+                nickel_file::desktop::DesktopContextAction::Rename,
+            )
+        );
         assert!(application.take_effects().is_empty());
     }
 

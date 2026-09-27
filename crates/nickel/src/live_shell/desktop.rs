@@ -8,8 +8,8 @@ use nickel_core::{shell_settings::ShellSettings, theme::ThemePalette};
 use nickel_file::{
     DirectoryBrowser, DirectoryWatch,
     desktop::{
-        Arrangement as DesktopArrangement, DesktopEntryId, DesktopFileAction, DesktopLayout,
-        DesktopOutput, FolderGrouping, Point as DesktopPoint, Rect as DesktopRect,
+        Arrangement as DesktopArrangement, DesktopContextAction, DesktopEntryId, DesktopFileAction,
+        DesktopLayout, DesktopOutput, FolderGrouping, Point as DesktopPoint, Rect as DesktopRect,
         SelectionModifiers, SortDirection as DesktopSortDirection, SortKey as DesktopSortKey,
     },
 };
@@ -47,6 +47,7 @@ pub struct DesktopApplication {
     pub(super) pending_plugin_open: Option<DesktopEntryId>,
     pub(super) pending_plugin_select: Option<(DesktopEntryId, SelectionModifiers)>,
     pub(super) pending_plugin_move: Option<(DesktopEntryId, DesktopPoint)>,
+    pub(super) pending_plugin_file_action: Option<(DesktopEntryId, DesktopContextAction)>,
     pub(super) modifiers: SelectionModifiers,
     pub(super) context_menu: Option<DesktopMenuContext>,
     #[cfg(target_os = "windows")]
@@ -226,6 +227,7 @@ impl DesktopApplication {
             pending_plugin_open: None,
             pending_plugin_select: None,
             pending_plugin_move: None,
+            pending_plugin_file_action: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             #[cfg(target_os = "windows")]
@@ -527,6 +529,7 @@ impl DesktopApplication {
         self.pointer_seen = true;
         self.pending_plugin_select = None;
         self.pending_plugin_move = None;
+        self.pending_plugin_file_action = None;
         let hit = self.hit(local);
         if secondary {
             self.replacing_context_menu();
@@ -677,6 +680,7 @@ impl DesktopApplication {
         self.pointer_dragged = false;
         self.pending_plugin_select = None;
         self.pending_plugin_move = None;
+        self.pending_plugin_file_action = None;
         changed
     }
 
@@ -1195,6 +1199,77 @@ fn desktop_layout_path() -> std::path::PathBuf {
     root.join("nickel").join("desktop-layout")
 }
 
+impl DesktopApplication {
+    pub(super) fn execute_context_action(
+        &mut self,
+        id: DesktopEntryId,
+        action: DesktopContextAction,
+    ) {
+        match action {
+            DesktopContextAction::Cut | DesktopContextAction::Copy => {
+                if !self.layout.selected().contains(&id) {
+                    self.layout.select(id, SelectionModifiers::default());
+                }
+                let paths = self
+                    .layout
+                    .items()
+                    .iter()
+                    .filter(|item| self.layout.selected().contains(&item.id))
+                    .map(|item| item.entry.path.clone())
+                    .collect::<Vec<_>>();
+                if let Err(error) =
+                    nickel_file::publish_file_clipboard(&paths, action == DesktopContextAction::Cut)
+                {
+                    self.error = Some(format!("Could not update file clipboard: {error}"));
+                }
+            }
+            DesktopContextAction::Rename | DesktopContextAction::Properties => {
+                if let Some(path) = self
+                    .layout
+                    .items()
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.entry.path.clone())
+                {
+                    let result = if action == DesktopContextAction::Rename {
+                        self.file_window_host
+                            .dispatch(nickel_file::FileWindowRequest::Open(
+                                nickel_file::FileLaunch::Rename(path),
+                            ))
+                    } else {
+                        self.file_window_host
+                            .dispatch(nickel_file::FileWindowRequest::OpenOrFocus(
+                                nickel_file::FileLaunch::Properties(path),
+                            ))
+                    };
+                    if let Err(error) = result {
+                        self.error = Some(error);
+                    }
+                }
+            }
+            DesktopContextAction::OpenTerminal => {
+                if let Some(path) = self
+                    .layout
+                    .items()
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.entry.path.as_path())
+                {
+                    let directory = if path.is_dir() {
+                        path
+                    } else {
+                        path.parent().unwrap_or(path)
+                    };
+                    if let Err(error) = nickel_platform::open_terminal(directory) {
+                        self.error = Some(error);
+                    }
+                }
+            }
+        }
+        self.dismiss_context_menu(DesktopMenuDismissReason::Action);
+    }
+}
+
 impl nickel_ui::Application for DesktopApplication {
     type Message = DesktopMessage;
 
@@ -1227,67 +1302,25 @@ impl nickel_ui::Application for DesktopApplication {
                     });
                 }
             }
-            DesktopMessage::Cut(id) | DesktopMessage::Copy(id) => {
-                let cut = matches!(message, DesktopMessage::Cut(_));
-                if !self.layout.selected().contains(&id) {
-                    self.layout.select(id, SelectionModifiers::default());
+            DesktopMessage::Cut(id)
+            | DesktopMessage::Copy(id)
+            | DesktopMessage::Rename(id)
+            | DesktopMessage::Properties(id)
+            | DesktopMessage::OpenTerminal(id) => {
+                let action = match message {
+                    DesktopMessage::Cut(_) => DesktopContextAction::Cut,
+                    DesktopMessage::Copy(_) => DesktopContextAction::Copy,
+                    DesktopMessage::Rename(_) => DesktopContextAction::Rename,
+                    DesktopMessage::Properties(_) => DesktopContextAction::Properties,
+                    DesktopMessage::OpenTerminal(_) => DesktopContextAction::OpenTerminal,
+                    _ => unreachable!(),
+                };
+                if self.plugin_background {
+                    self.pending_plugin_file_action = Some((id, action));
+                    self.dismiss_context_menu(DesktopMenuDismissReason::Action);
+                } else {
+                    self.execute_context_action(id, action);
                 }
-                let paths = self
-                    .layout
-                    .items()
-                    .iter()
-                    .filter(|item| self.layout.selected().contains(&item.id))
-                    .map(|item| item.entry.path.clone())
-                    .collect::<Vec<_>>();
-                if let Err(error) = nickel_file::publish_file_clipboard(&paths, cut) {
-                    self.error = Some(format!("Could not update file clipboard: {error}"));
-                }
-                self.dismiss_context_menu(DesktopMenuDismissReason::Action);
-            }
-            DesktopMessage::Rename(id) | DesktopMessage::Properties(id) => {
-                let rename = matches!(message, DesktopMessage::Rename(_));
-                if let Some(path) = self
-                    .layout
-                    .items()
-                    .iter()
-                    .find(|item| item.id == id)
-                    .map(|item| item.entry.path.clone())
-                {
-                    let result = if rename {
-                        self.file_window_host
-                            .dispatch(nickel_file::FileWindowRequest::Open(
-                                nickel_file::FileLaunch::Rename(path),
-                            ))
-                    } else {
-                        self.file_window_host
-                            .dispatch(nickel_file::FileWindowRequest::OpenOrFocus(
-                                nickel_file::FileLaunch::Properties(path),
-                            ))
-                    };
-                    if let Err(error) = result {
-                        self.error = Some(error);
-                    }
-                }
-                self.dismiss_context_menu(DesktopMenuDismissReason::Action);
-            }
-            DesktopMessage::OpenTerminal(id) => {
-                if let Some(path) = self
-                    .layout
-                    .items()
-                    .iter()
-                    .find(|item| item.id == id)
-                    .map(|item| item.entry.path.as_path())
-                {
-                    let directory = if path.is_dir() {
-                        path
-                    } else {
-                        path.parent().unwrap_or(path)
-                    };
-                    if let Err(error) = nickel_platform::open_terminal(directory) {
-                        self.error = Some(error);
-                    }
-                }
-                self.dismiss_context_menu(DesktopMenuDismissReason::Action);
             }
             DesktopMessage::BackgroundContext => {
                 // The UI host emits this from the same secondary press that updated
@@ -1962,6 +1995,7 @@ impl DesktopApplication {
             pending_plugin_open: None,
             pending_plugin_select: None,
             pending_plugin_move: None,
+            pending_plugin_file_action: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             #[cfg(target_os = "windows")]

@@ -81,6 +81,12 @@ controls `open`; dialog buttons may still update state and request typed effects
 Nickel does not embed
 React, a browser DOM, or the TypeScript compiler. The host checks declared
 capabilities and current shell state before executing a requested effect.
+The bundled desktop's `FileTile` registers `onFileAction({ action })` for Cut,
+Copy, Rename, Properties, and Open in Terminal. It requests
+`{ type: "desktop-file-action", id, action }` with the tile's projected ID and
+declares `desktop-files-manage`. Nickel checks the grant, rendered tile, current
+file identity, and output before carrying out the request. Native file menus
+and file windows still present these actions.
 
 Manifests may declare typed composition relationships. A target declares a
 `provides_slots` entry with an ID, a `badge`, `widget`, `action`, or `section`

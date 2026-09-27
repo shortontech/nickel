@@ -1,6 +1,6 @@
 // @jsx h
 // Nickel supplies bounded desktop data and image assets. JSX owns presentation
-// and requests selection, movement, or activation; Rust validates the file identity.
+// and requests file actions; Rust validates the file identity and grants.
 /** @typedef {{ label: string, value: string, percent: number, color: number }} DesktopWidget */
 /** @typedef {{ width: number, height: number, background: number,
  * wallpaper: boolean, tiles: NickelFileTileProps[], widgets: DesktopWidget[], error: string | null,
@@ -12,6 +12,7 @@ function App() {
         {(data.tiles || []).map(tile => <FileTile key={tile.id} {...tile}
             onSelect={() => nickel.request({type: "desktop-select", id: tile.id})}
             onMove={({dx, dy}) => nickel.request({type: "desktop-move", id: tile.id, dx, dy})}
+            onFileAction={({action}) => nickel.request({type: "desktop-file-action", id: tile.id, action})}
             onClick={() => nickel.request({type: "desktop-open", id: tile.id})} />)}
         {(data.widgets || []).slice(0, 3).map((widget, index) =>
             <Box key={index} x={Math.max(0, data.width - 224)} y={20 + index * 92}

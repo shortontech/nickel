@@ -132,6 +132,7 @@ interface NickelFileTileProps extends NickelProps {
     onClick?: NickelClick;
     onSelect?: NickelClick;
     onMove?: (delta: { dx: number; dy: number }) => void;
+    onFileAction?: (request: { action: "cut" | "copy" | "rename" | "properties" | "open-terminal" }) => void;
 }
 
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
