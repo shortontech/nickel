@@ -35,7 +35,7 @@ include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
 
 #[test]
-fn unsupported_extension_is_reviewable_and_rejected() {
+fn declared_extension_is_reviewable_but_needs_an_installed_package() {
     let mut shell = LiveShell::new().unwrap();
     let manifest = nickel_core::plugins::PluginManifest::from_json(
         r#"{
@@ -69,7 +69,7 @@ fn unsupported_extension_is_reviewable_and_rejected() {
         shell
             .set_plugin_enabled(&id, true)
             .unwrap_err()
-            .contains("only additive taskbar badges")
+            .contains("not an installed package")
     );
     assert!(!shell.plugin_registry.get(&id).unwrap().desired_enabled);
 }
@@ -109,6 +109,28 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
     std::fs::write(earlier.join("main.js"),
         "function App() { return h(Badge, {item: 'org.example.mail', label: 'Urgent mail', count: 2}); }"
     ).unwrap();
+    for (id, priority, count) in [
+        ("org.example.replace-low", 1, 11),
+        ("org.example.replace-high", 9, 19),
+        ("org.example.replace-tie", 9, 23),
+    ] {
+        let replacement = root.path().join(id);
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(
+            replacement.join("plugin.json"),
+            format!(
+                r#"{{"api_version":1,"id":"{id}","name":"Replacement badge","entry":"main.js","contributes":[{{"target_plugin":"org.nickel.taskbar","target_slot":"task-badge","contract":"badge","mode":"replace","priority":{priority}}}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            replacement.join("main.js"),
+            format!(
+                "function App() {{ return h(Badge, {{item: 'org.example.mail', label: 'Replacement', count: {count}}}); }}"
+            ),
+        )
+        .unwrap();
+    }
     let mut shell = LiveShell::new().unwrap();
     let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
     for (_, descriptor) in std::mem::take(&mut catalog.packages) {
@@ -168,6 +190,74 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .iter()
             .any(|node| node.label.as_deref() == Some("Urgent mail: 2"))
     );
+
+    shell
+        .set_plugin_enabled("org.example.replace-low", true)
+        .unwrap();
+    shell
+        .set_plugin_enabled("org.example.replace-high", true)
+        .unwrap();
+    shell
+        .set_plugin_enabled("org.example.replace-tie", true)
+        .unwrap();
+    let status = shell.plugin_status_snapshot();
+    assert!(
+        status
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == "org.example.replace-high")
+            .unwrap()
+            .composition[0]
+            .contains("superseded")
+    );
+    assert!(
+        !status
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == "org.example.replace-tie")
+            .unwrap()
+            .composition[0]
+            .contains("superseded")
+    );
+    let mut replaced = projection.clone();
+    super::compose_taskbar_badges(&mut replaced, &shell.plugin_taskbar_badge_hosts);
+    assert_eq!(
+        replaced.items[0]
+            .badges
+            .iter()
+            .map(|badge| badge.count)
+            .collect::<Vec<_>>(),
+        [23, 2, 7]
+    );
+    shell
+        .set_plugin_enabled("org.example.replace-tie", false)
+        .unwrap();
+    let mut high_priority = projection.clone();
+    super::compose_taskbar_badges(&mut high_priority, &shell.plugin_taskbar_badge_hosts);
+    assert_eq!(
+        high_priority.items[0]
+            .badges
+            .iter()
+            .map(|badge| badge.count)
+            .collect::<Vec<_>>(),
+        [19, 2, 7]
+    );
+    shell
+        .set_plugin_enabled("org.example.replace-high", false)
+        .unwrap();
+    let mut lower_priority = projection.clone();
+    super::compose_taskbar_badges(&mut lower_priority, &shell.plugin_taskbar_badge_hosts);
+    assert_eq!(
+        lower_priority.items[0]
+            .badges
+            .iter()
+            .map(|badge| badge.count)
+            .collect::<Vec<_>>(),
+        [11, 2, 7]
+    );
+    shell
+        .set_plugin_enabled("org.example.replace-low", false)
+        .unwrap();
 
     shell
         .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)

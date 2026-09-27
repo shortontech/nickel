@@ -138,7 +138,7 @@ mod linux {
                 if contribution.target_plugin == "org.nickel.taskbar"
                     && contribution.target_slot == "task-badge"
                     && contribution.contract == PluginSlotContract::Badge
-                    && contribution.mode == PluginContributionMode::Add);
+                    && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
         if !panel && !badge {
             return Err(
                 "dev currently needs one panel or one surface-free badge contribution".into(),

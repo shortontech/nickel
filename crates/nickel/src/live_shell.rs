@@ -691,8 +691,14 @@ pub struct LiveShell {
     plugin_launcher_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_run_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
-    plugin_taskbar_badge_hosts:
-        std::collections::BTreeMap<String, (i16, crate::plugin_panel::PluginPanelApplication)>,
+    plugin_taskbar_badge_hosts: std::collections::BTreeMap<
+        String,
+        (
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
     plugin_notification_host:
         Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_hosts:
@@ -945,7 +951,7 @@ fn taskbar_plugin_data(
 fn taskbar_badge_extension_priority(
     manifest: &nickel_core::plugins::PluginManifest,
     registry: &nickel_core::plugins::PluginRegistry,
-) -> Result<i16, String> {
+) -> Result<(i16, nickel_core::plugins::PluginContributionMode), String> {
     use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
     let [contribution] = manifest.contributes.as_slice() else {
         return Err("badge extension needs exactly one contribution".into());
@@ -954,50 +960,72 @@ fn taskbar_badge_extension_priority(
         || contribution.target_plugin != crate::plugin_panel::taskbar_manifest().id
         || contribution.target_slot != "task-badge"
         || contribution.contract != PluginSlotContract::Badge
-        || contribution.mode != PluginContributionMode::Add
     {
-        return Err(
-            "this runtime can compose only additive taskbar badges without a surface".into(),
-        );
+        return Err("this runtime can compose only surface-free taskbar badges".into());
     }
     let target = registry
         .get(&contribution.target_plugin)
         .ok_or("badge target plugin is not registered")?;
-    if !target
+    let slot = target
         .manifest
         .provides_slots
         .iter()
-        .any(|slot| slot.id == contribution.target_slot && slot.contract == contribution.contract)
-    {
-        return Err("badge target does not provide the declared slot and contract".into());
+        .find(|slot| slot.id == contribution.target_slot && slot.contract == contribution.contract)
+        .ok_or("badge target does not provide the declared slot and contract")?;
+    if contribution.mode == PluginContributionMode::Replace && !slot.replaceable {
+        return Err("badge target does not allow replacement".into());
     }
-    Ok(contribution.priority)
+    Ok((contribution.priority, contribution.mode))
 }
 
 fn compose_taskbar_badges(
     projection: &mut crate::plugin_panel::TaskbarPluginProjection,
     extensions: &std::collections::BTreeMap<
         String,
-        (i16, crate::plugin_panel::PluginPanelApplication),
+        (
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
     >,
 ) {
+    use nickel_core::plugins::PluginContributionMode;
     let mut ordered = extensions.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|(id, (priority, _))| (*priority, id.as_str()));
-    for (_, (_, application)) in ordered {
-        if let Ok(badges) = application.taskbar_badges() {
-            for (item_id, label, count, color) in badges {
-                if count == 0 {
-                    continue;
-                }
-                if let Some(item) = projection.items.iter_mut().find(|item| item.id == item_id)
-                    && item.badges.len() < 3
-                {
-                    item.badges.push(crate::plugin_panel::TaskbarPluginBadge {
-                        label,
-                        count,
-                        color,
-                    });
-                }
+    ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
+    let replacement = ordered
+        .iter()
+        .rev()
+        .find(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace);
+    if let Some((_, (_, _, application))) = replacement {
+        for item in &mut projection.items {
+            item.badges.clear();
+        }
+        append_taskbar_badges(projection, application);
+    }
+    for (_, (_, mode, application)) in ordered {
+        if *mode == PluginContributionMode::Add {
+            append_taskbar_badges(projection, application);
+        }
+    }
+}
+
+fn append_taskbar_badges(
+    projection: &mut crate::plugin_panel::TaskbarPluginProjection,
+    application: &crate::plugin_panel::PluginPanelApplication,
+) {
+    if let Ok(badges) = application.taskbar_badges() {
+        for (item_id, label, count, color) in badges {
+            if count == 0 {
+                continue;
+            }
+            if let Some(item) = projection.items.iter_mut().find(|item| item.id == item_id)
+                && item.badges.len() < 3
+            {
+                item.badges.push(crate::plugin_panel::TaskbarPluginBadge {
+                    label,
+                    count,
+                    color,
+                });
             }
         }
     }
@@ -3050,10 +3078,18 @@ impl LiveShell {
     }
 
     pub fn plugin_status_snapshot(&self) -> nickel_session_protocol::PluginStatusSnapshot {
+        use nickel_core::plugins::PluginContributionMode;
         use nickel_core::plugins::PluginHealth;
         use nickel_session_protocol::{
             PluginMemorySnapshot, PluginRuntimeHealth, PluginStatus, PluginStatusSnapshot,
         };
+
+        let badge_replacement = self
+            .plugin_taskbar_badge_hosts
+            .iter()
+            .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
+            .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
+            .map(|(id, _)| id.as_str());
 
         PluginStatusSnapshot {
             activation_generation: self.plugin_activation_generation,
@@ -3112,7 +3148,18 @@ impl LiveShell {
                                 contribution.target_slot,
                                 contribution.contract.as_str(),
                                 if target_running {
-                                    ""
+                                    if entry.desired_enabled
+                                        && contribution.mode == PluginContributionMode::Replace
+                                        && contribution.target_plugin
+                                            == crate::plugin_panel::taskbar_manifest().id
+                                        && contribution.target_slot == "task-badge"
+                                        && badge_replacement
+                                            .is_some_and(|winner| winner != entry.manifest.id)
+                                    {
+                                        " (superseded by another replacement)"
+                                    } else {
+                                        ""
+                                    }
                                 } else {
                                     " (target inactive)"
                                 }
@@ -3159,7 +3206,7 @@ impl LiveShell {
             return Ok(false);
         }
         let external_badge = if enabled && !entry.manifest.contributes.is_empty() {
-            let priority =
+            let (priority, mode) =
                 taskbar_badge_extension_priority(&entry.manifest, &self.plugin_registry)?;
             let descriptor = self
                 .external_plugin_packages
@@ -3168,7 +3215,7 @@ impl LiveShell {
             let package = descriptor.load()?;
             let application = crate::plugin_panel::PluginPanelApplication::from_package(&package)?;
             application.taskbar_badges()?;
-            Some((priority, application))
+            Some((priority, mode, application))
         } else {
             None
         };

@@ -52,12 +52,15 @@ contract, and whether replacement is allowed. An extension declares a
 `contributes` entry with `target_plugin`, `target_slot`, matching `contract`,
 and `mode` (`add` or `replace`). Nickel validates these declarations and shows
 them in Settings' enable review. The first executable slot is the taskbar's
-`task-badge` slot: a package with no surface can declare one additive `badge`
+`task-badge` slot: a package with no surface can declare one `badge`
 contribution targeting `org.nickel.taskbar/task-badge`. Its `App` returns
 `h(Badge, { item: "application-id", label: "Unread mail", count: 3 })`; Nickel
-places the badge beside the matching task. Multiple badge plugins compose in
+places the badge beside the matching task. Additive badge plugins compose in
 priority and plugin ID order, with a limit of three visible badges per task.
-Other contribution kinds and replacement remain unavailable in this runtime.
+A `replace` contribution replaces the slot's base badges; if several are
+enabled, the highest priority wins, with plugin ID breaking ties. Additive
+contributions then follow the winner. Other contribution contracts remain
+unavailable in this runtime.
 The taskbar's retained UI measurement currently includes contributed badge
 nodes; Nickel cannot yet split those bytes by extension. Each extension's
 JavaScript heap measurement remains unavailable in Settings.
