@@ -309,6 +309,7 @@ pub enum PluginCapability {
     ProjectsOpen,
     ProjectsMenuShow,
     SessionLogoutRequest,
+    RunCommand,
 }
 
 impl PluginCapability {
@@ -337,6 +338,7 @@ impl PluginCapability {
             Self::ProjectsOpen => "projects-open",
             Self::ProjectsMenuShow => "projects-menu-show",
             Self::SessionLogoutRequest => "session-logout-request",
+            Self::RunCommand => "run-command",
         }
     }
 }

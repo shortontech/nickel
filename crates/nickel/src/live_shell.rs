@@ -681,6 +681,7 @@ pub struct LiveShell {
     last_published_plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
     plugin_panel_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_launcher_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
+    plugin_run_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_notification_host:
         Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
@@ -1253,6 +1254,7 @@ impl LiveShell {
         let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
         plugin_registry.register(crate::plugin_panel::manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::launcher_manifest().clone())?;
+        plugin_registry.register(crate::plugin_panel::run_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::taskbar_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::notification_manifest().clone())?;
         let plugin_activation = nickel_core::plugins::PluginActivationSettings::load_default()
@@ -1301,6 +1303,26 @@ impl LiveShell {
                     application.sync_images(images);
                     plugin_registry.mark_running(id)?;
                     Some(nickel_ui::UiHost::new(application, 920, 680))
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    plugin_registry.mark_failed(id, error)?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let plugin_run_host = if plugin_activation.desired_enabled(
+            &crate::plugin_panel::run_manifest().id,
+            crate::plugin_panel::run_enabled(),
+        ) {
+            let id = &crate::plugin_panel::run_manifest().id;
+            plugin_registry.set_enabled(id, true)?;
+            match crate::plugin_panel::PluginPanelApplication::run_with_status(None) {
+                Ok(application) => {
+                    plugin_registry.mark_running(id)?;
+                    Some(nickel_ui::UiHost::new(application, 620, 180))
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1442,6 +1464,7 @@ impl LiveShell {
             last_published_plugin_status: None,
             plugin_panel_host,
             plugin_launcher_host,
+            plugin_run_host,
             plugin_taskbar_host,
             plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
@@ -2131,7 +2154,10 @@ impl LiveShell {
                         .values()
                         .any(|host| host.remote_access_protected())
             }
-            SurfaceRole::Launcher if self.run_visible => self.run_host.remote_access_protected(),
+            SurfaceRole::Launcher if self.run_visible => self.plugin_run_host.as_ref().map_or_else(
+                || self.run_host.remote_access_protected(),
+                |host| host.remote_access_protected(),
+            ),
             SurfaceRole::Launcher => self.plugin_launcher_host.as_ref().map_or_else(
                 || self.launcher_host.remote_access_protected(),
                 |host| host.remote_access_protected(),
@@ -2856,6 +2882,8 @@ impl LiveShell {
                 self.plugin_launcher_host = None;
                 self.launcher_plugin_result_page = 0;
                 self.launcher_plugin_dashboard_page = 0;
+            } else if id == crate::plugin_panel::run_manifest().id {
+                self.plugin_run_host = None;
             } else if id == crate::plugin_panel::taskbar_manifest().id {
                 self.plugin_taskbar_host = None;
                 self.plugin_taskbar_hosts.clear();
@@ -2887,6 +2915,10 @@ impl LiveShell {
                     self.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
                 },
             )
+        } else if id == crate::plugin_panel::run_manifest().id {
+            crate::plugin_panel::PluginPanelApplication::run_with_status(None).map(|application| {
+                self.plugin_run_host = Some(nickel_ui::UiHost::new(application, 620, 180));
+            })
         } else if id == crate::plugin_panel::taskbar_manifest().id {
             self.sync_panel_host();
             self.plugin_taskbar_hosts.clear();
@@ -3006,7 +3038,11 @@ impl LiveShell {
                 .as_ref()
                 .map(|host| host_token(host.inspect())),
             SurfaceRole::Lock => Some(self.lock_change_token),
-            SurfaceRole::Launcher if self.run_visible => Some(host_token(self.run_host.inspect())),
+            SurfaceRole::Launcher if self.run_visible => Some(host_token(
+                self.plugin_run_host
+                    .as_ref()
+                    .map_or_else(|| self.run_host.inspect(), |host| host.inspect()),
+            )),
             SurfaceRole::Launcher => Some(host_token(
                 self.plugin_launcher_host
                     .as_ref()
@@ -3047,7 +3083,9 @@ impl LiveShell {
         height: u32,
     ) -> nickel_ui::HostEventOutcome {
         let recipient = if self.run_visible {
-            self.run_host.inspect()
+            self.plugin_run_host
+                .as_ref()
+                .map_or_else(|| self.run_host.inspect(), |host| host.inspect())
         } else if let Some(host) = &self.plugin_launcher_host {
             host.inspect()
         } else {
@@ -3077,6 +3115,19 @@ impl LiveShell {
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
         if self.run_visible {
+            if let Some(host) = self.plugin_run_host.as_mut() {
+                let outcome = host.step(HostBatch {
+                    clipboard_text_limit: limit,
+                    surface_size: Some((width, height)),
+                    events: vec![event],
+                    normalized_authorities: authority.into_iter().collect(),
+                    ..HostBatch::default()
+                });
+                let effects = host.application_mut().take_effects();
+                self.apply_plugin_effects(effects);
+                self.host_runtime_samples.record(outcome.telemetry);
+                return outcome;
+            }
             let outcome = self.run_host.step(HostBatch {
                 clipboard_text_limit: limit,
                 surface_size: Some((width, height)),
@@ -3140,6 +3191,24 @@ impl LiveShell {
         family: nickel_ui::ControllerFamily,
     ) -> bool {
         if self.run_visible {
+            if let Some(host) = self.plugin_run_host.as_mut() {
+                let event =
+                    launcher_controller_host_event(action, host.inspect().open_overlay.is_some());
+                let outcome = host.step(HostBatch {
+                    events: vec![event],
+                    ..HostBatch::default()
+                });
+                let show_keyboard = action == ControllerAction::Confirm
+                    && outcome.text_input_active
+                    && host.controller_targets_text_input();
+                let effects = host.application_mut().take_effects();
+                if show_keyboard {
+                    self.set_keyboard_visible(true);
+                }
+                self.apply_plugin_effects(effects);
+                self.host_runtime_samples.record(outcome.telemetry);
+                return outcome.changed;
+            }
             let event = launcher_controller_host_event(
                 action,
                 self.run_host.inspect().open_overlay.is_some(),
@@ -3647,6 +3716,28 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::ShowLauncher => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
                 }
+                crate::plugin_panel::PluginEffect::RunSubmit(command) => {
+                    match platform::execute_run_command(&command) {
+                        Ok(()) => {
+                            self.set_launcher_visible(false);
+                            changed = true;
+                        }
+                        Err(error) => {
+                            let status =
+                                format!("Could not run command: {}", launch_error_summary(&error));
+                            if let Some(host) = self.plugin_run_host.as_mut() {
+                                changed |= host
+                                    .application_mut()
+                                    .sync_run_status(Some(&status))
+                                    .unwrap_or(false);
+                            }
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::RunDismiss => {
+                    self.set_launcher_visible(false);
+                    changed = true;
+                }
                 crate::plugin_panel::PluginEffect::ToggleLauncher => {
                     self.apply_panel_action(TaskbarAction::Launcher);
                     changed = true;
@@ -3921,7 +4012,10 @@ impl LiveShell {
     #[cfg(target_os = "linux")]
     pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(nickel_ui::UiId, u64)> {
         let inspection = match role {
-            SurfaceRole::Launcher if self.run_visible => self.run_host.inspect(),
+            SurfaceRole::Launcher if self.run_visible => self
+                .plugin_run_host
+                .as_ref()
+                .map_or_else(|| self.run_host.inspect(), |host| host.inspect()),
             SurfaceRole::Launcher => self
                 .plugin_launcher_host
                 .as_ref()
@@ -5865,7 +5959,10 @@ impl LiveShell {
             })
             || self.desktop_overlay_pointer_capture.is_some()
             || self.volume_osd_host.pointer_interaction_active()
-            || self.run_host.pointer_interaction_active()
+            || self.plugin_run_host.as_ref().map_or_else(
+                || self.run_host.pointer_interaction_active(),
+                |host| host.pointer_interaction_active(),
+            )
             || self.lock_host.pointer_interaction_active()
             || self.panel_host.pointer_interaction_active()
             || self
@@ -6099,6 +6196,19 @@ impl LiveShell {
         }
         self.run_visible = visible;
         if visible {
+            if let Some(host) = self.plugin_run_host.as_mut() {
+                let _ = host.application_mut().sync_run_status(None);
+                host.step(HostBatch {
+                    application_changed: true,
+                    ..HostBatch::default()
+                });
+                if let Ok(field) =
+                    host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+                {
+                    let _ = host.request_focus(field.id);
+                }
+                return true;
+            }
             self.run_host.application_mut().status = None;
             self.run_host.step(HostBatch {
                 application_changed: true,
@@ -6163,6 +6273,14 @@ impl LiveShell {
 
     pub fn focus_launcher(&mut self) -> bool {
         if self.run_visible {
+            if let Some(host) = self.plugin_run_host.as_mut() {
+                return host
+                    .step(HostBatch {
+                        window_focused: Some(true),
+                        ..HostBatch::default()
+                    })
+                    .changed;
+            }
             return self
                 .run_host
                 .step(HostBatch {
@@ -7441,6 +7559,22 @@ impl LiveShell {
     }
 
     fn run_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        if let Some(host) = self.plugin_run_host.as_mut() {
+            let outcome = host.step(HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            let commands = host.commands().to_vec();
+            let _ = self.plugin_registry.record_memory(
+                &crate::plugin_panel::run_manifest().id,
+                nickel_core::plugins::PluginMemory {
+                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    ..nickel_core::plugins::PluginMemory::default()
+                },
+            );
+            return commands;
+        }
         self.run_host.application_mut().palette = self.palette;
         self.run_host.step(HostBatch {
             surface_size: Some((width, height)),

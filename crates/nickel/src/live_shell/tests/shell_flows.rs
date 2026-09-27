@@ -56,6 +56,24 @@
     }
 
     #[test]
+    fn run_plugin_can_start_render_and_retire() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::run_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.plugin_run_host.is_some());
+        shell.run_visible = true;
+        shell.scene(super::SurfaceRole::Launcher, 620, 180);
+        assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.plugin_run_host.is_none());
+        assert_eq!(
+            shell.plugin_registry().get(id).unwrap().memory,
+            nickel_core::plugins::PluginMemory::default()
+        );
+    }
+
+    #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
         use nickel_input::global::{ShortcutCapability, UnavailableReason};
 

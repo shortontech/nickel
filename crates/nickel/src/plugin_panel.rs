@@ -66,6 +66,18 @@ pub fn notification_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn run_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!("../../../assets/plugins/run/plugin.json"))
+            .expect("bundled run plugin manifest must be valid")
+    })
+}
+
+pub fn run_enabled() -> bool {
+    std::env::var_os("NICKEL_DEV_PLUGIN_RUN").is_some()
+}
+
 pub fn notification_enabled() -> bool {
     std::env::var_os("NICKEL_DEV_PLUGIN_NOTIFICATION").is_some()
 }
@@ -656,6 +668,19 @@ impl PanelNode {
             _ => {}
         }
     }
+
+    fn button_action(&self, requested_id: &str) -> Option<usize> {
+        match self {
+            Self::Button { id, action, .. } if id == requested_id => Some(*action),
+            Self::Panel { children, .. }
+            | Self::Row(children)
+            | Self::Column(children)
+            | Self::ScrollView { children, .. } => children
+                .iter()
+                .find_map(|child| child.button_action(requested_id)),
+            _ => None,
+        }
+    }
 }
 
 fn child_text(children: &[Value]) -> Result<String, String> {
@@ -708,6 +733,8 @@ pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
+    RunSubmit(String),
+    RunDismiss,
     ToggleLauncher,
     ToggleOnScreenKeyboard,
     ToggleCodexProjects,
@@ -1112,6 +1139,28 @@ impl PluginPanelApplication {
         Ok(application)
     }
 
+    pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/run/main.js");
+        let data = serde_json::json!({ "status": status }).to_string();
+        Self::new_with_manifest(source, run_manifest(), Some(data))
+    }
+
+    pub fn sync_run_status(&mut self, status: Option<&str>) -> Result<bool, String> {
+        if self.manifest.id != run_manifest().id {
+            return Err("this plugin is not the Run dialog".into());
+        }
+        let data = serde_json::json!({ "status": status }).to_string();
+        if self.projection_data.as_deref() == Some(data.as_str()) {
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.projection_data = Some(data);
+        Ok(true)
+    }
+
     fn new_with_manifest(
         source: &str,
         manifest: &PluginManifest,
@@ -1269,6 +1318,23 @@ impl nickel_ui::Application for PluginPanelApplication {
     type Message = PluginMessage;
 
     fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
+        if self.manifest.id == run_manifest().id {
+            return match shortcut {
+                Shortcut::Escape => {
+                    self.effects.push(PluginEffect::RunDismiss);
+                    nickel_ui::ShortcutOutcome::handled(true)
+                }
+                Shortcut::Submit => {
+                    if let Some(action) = self.node.button_action("run-submit") {
+                        self.update(PluginMessage::Click(action));
+                        nickel_ui::ShortcutOutcome::handled(true)
+                    } else {
+                        nickel_ui::ShortcutOutcome::from_changed(false)
+                    }
+                }
+                _ => nickel_ui::ShortcutOutcome::from_changed(false),
+            };
+        }
         if shortcut == Shortcut::Escape
             && let Some((id, history_visible)) = self.notification_shortcuts
         {
@@ -1352,6 +1418,30 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
                             approved.push(PluginEffect::ShowLauncher);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str) == Some("run-submit")
+                            && self.manifest.id == run_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::RunCommand) =>
+                        {
+                            let Some(command) = effect.get("command").and_then(Value::as_str)
+                            else {
+                                self.last_error = Some("Run command is missing".into());
+                                return;
+                            };
+                            let command = command.trim();
+                            if command.is_empty() || command.chars().count() > 4096 {
+                                self.last_error = Some("Run command is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::RunSubmit(command.to_owned()));
+                        }
+                        _ if effect.get("type").and_then(Value::as_str) == Some("run-dismiss")
+                            && self.manifest.id == run_manifest().id =>
+                        {
+                            approved.push(PluginEffect::RunDismiss);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-toggle-launcher")
@@ -1811,6 +1901,7 @@ impl nickel_ui::Application for PluginPanelApplication {
             )
         } else if self.manifest.id == taskbar_manifest().id
             || self.manifest.id == notification_manifest().id
+            || self.manifest.id == run_manifest().id
         {
             AnyView::new(self.node.view(&self.images))
         } else {
@@ -1898,6 +1989,8 @@ impl nickel_ui::Application for PluginPanelApplication {
     fn title(&self) -> &str {
         if self.manifest.id == launcher_manifest().id {
             "Plugin Launcher"
+        } else if self.manifest.id == run_manifest().id {
+            "Plugin Run Dialog"
         } else if self.manifest.id == taskbar_manifest().id {
             "Plugin Taskbar"
         } else {
@@ -1957,6 +2050,43 @@ mod tests {
             Some((OverlayId::new("plugin-second"), UiId::from("second-button")))
         );
         assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn run_plugin_submits_bounded_command_and_shows_host_error() {
+        let mut panel = PluginPanelApplication::run_with_status(None).unwrap();
+        panel.update(PluginMessage::Text(0, "  nickel-test  ".into()));
+        let submit = panel.node.button_action("run-submit").unwrap();
+        panel.update(PluginMessage::Click(submit));
+        assert_eq!(
+            panel.take_effects(),
+            vec![PluginEffect::RunSubmit("nickel-test".into())]
+        );
+        assert!(
+            panel
+                .sync_run_status(Some("Could not run command: missing"))
+                .unwrap()
+        );
+        assert!(format!("{:?}", panel.node).contains("Could not run command: missing"));
+        panel.update(PluginMessage::Text(0, "x".repeat(5000)));
+        let submit = panel.node.button_action("run-submit").unwrap();
+        panel.update(PluginMessage::Click(submit));
+        assert_eq!(
+            panel.take_effects(),
+            vec![PluginEffect::RunSubmit("x".repeat(4096))]
+        );
+        assert_eq!(panel.manifest.id, run_manifest().id);
+        assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn run_plugin_escape_requests_dismissal() {
+        let mut panel = PluginPanelApplication::run_with_status(None).unwrap();
+        assert_eq!(
+            panel.shortcut_outcome(Shortcut::Escape).disposition,
+            nickel_ui::EventDisposition::Handled
+        );
+        assert_eq!(panel.take_effects(), vec![PluginEffect::RunDismiss]);
     }
 
     #[test]
