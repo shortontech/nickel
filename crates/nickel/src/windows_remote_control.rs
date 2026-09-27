@@ -10950,6 +10950,7 @@ mod tests {
         let display_state = Arc::new(std::sync::Mutex::new(WindowsDisplayState::default()));
         WindowsRemoteControl {
             _transport: None,
+            settings_plugin_report: None,
             receiver,
             remote_control: RemoteControlRuntime::default(),
             local_cues: Default::default(),
