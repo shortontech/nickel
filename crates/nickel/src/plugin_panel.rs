@@ -360,6 +360,8 @@ enum PanelNode {
         color: u32,
     },
     FileTile {
+        id: String,
+        action: Option<usize>,
         asset: String,
         label: String,
         x: f32,
@@ -462,6 +464,25 @@ enum PanelNode {
 }
 
 impl PanelNode {
+    fn file_tile_action(&self, id: &str) -> Option<usize> {
+        match self {
+            Self::FileTile {
+                id: tile_id,
+                action,
+                ..
+            } if tile_id == id => *action,
+            Self::Box { children, .. }
+            | Self::Surface { children, .. }
+            | Self::Panel { children, .. }
+            | Self::Row(children)
+            | Self::Column(children)
+            | Self::ScrollView { children, .. } => {
+                children.iter().find_map(|child| child.file_tile_action(id))
+            }
+            _ => None,
+        }
+    }
+
     fn parse(value: &Value) -> Result<Self, String> {
         let kind = value
             .get("kind")
@@ -524,6 +545,16 @@ impl PanelNode {
                         .ok_or_else(|| format!("file tile {name} needs a color"))
                 };
                 Ok(Self::FileTile {
+                    id: value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 64)
+                        .ok_or("file tile needs an ID")?
+                        .to_owned(),
+                    action: value
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
                     asset: value
                         .get("asset")
                         .and_then(Value::as_str)
@@ -941,6 +972,8 @@ impl PanelNode {
                     ),
             ),
             Self::FileTile {
+                id,
+                action,
                 asset,
                 label,
                 x,
@@ -963,11 +996,12 @@ impl PanelNode {
                 );
                 let icon_id = images.get(asset).map_or(0, |(id, _)| *id);
                 let mut tile = FilePlaneItem::new(
-                    PluginMessage::Click(usize::MAX),
+                    PluginMessage::Click(action.unwrap_or(usize::MAX)),
                     label.clone(),
                     icon_id,
                     icon,
                 )
+                .id(id.clone())
                 .position(Point { x: *x, y: *y })
                 .width(*width)
                 .height(*height)
@@ -1389,6 +1423,9 @@ pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
+    DesktopOpen {
+        id: String,
+    },
     RunSubmit(String),
     RunDismiss,
     ToggleLauncher,
@@ -2423,6 +2460,17 @@ impl PluginPanelApplication {
         Ok(true)
     }
 
+    pub fn activate_desktop_tile(&mut self, id: &str) -> bool {
+        if self.manifest.id != desktop_manifest().id {
+            return false;
+        }
+        let Some(action) = self.node.file_tile_action(id) else {
+            return false;
+        };
+        nickel_ui::Application::update(self, PluginMessage::Click(action));
+        self.last_error.is_none()
+    }
+
     pub fn take_effects(&mut self) -> Vec<PluginEffect> {
         std::mem::take(&mut self.effects)
     }
@@ -2582,6 +2630,26 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
                             approved.push(PluginEffect::ShowLauncher);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str) == Some("desktop-open")
+                            && self.manifest.id == desktop_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DesktopFilesOpen) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("desktop file ID is missing".into());
+                                return;
+                            };
+                            let valid_id = id.split_once(':').is_some_and(|(first, second)| {
+                                first.parse::<u64>().is_ok() && second.parse::<u64>().is_ok()
+                            });
+                            if !valid_id || self.node.file_tile_action(id).is_none() {
+                                self.last_error = Some("desktop file ID is stale".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::DesktopOpen { id: id.to_owned() });
                         }
                         _ if effect.get("type").and_then(Value::as_str) == Some("run-submit")
                             && self.manifest.id == run_manifest().id

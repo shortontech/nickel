@@ -2986,6 +2986,7 @@ impl LiveShell {
             _ => false,
         };
         let changed = changed | (reveal_selection && application.reveal_active());
+        let changed = changed | self.dispatch_desktop_plugin_open();
         if changed && coalesce_motion {
             self.desktop_application_dirty = true;
         } else if changed {
@@ -2997,6 +2998,38 @@ impl LiveShell {
             self.desktop_deadline = outcome.next_deadline;
         }
         changed
+    }
+
+    fn dispatch_desktop_plugin_open(&mut self) -> bool {
+        let Some(entry) = self
+            .desktop_host
+            .application_mut()
+            .pending_plugin_open
+            .take()
+        else {
+            return false;
+        };
+        let id = format!("{}:{}", entry.0.0, entry.0.1);
+        let (handled, effects) =
+            self.plugin_desktop_host
+                .as_mut()
+                .map_or((false, Vec::new()), |host| {
+                    let handled = host.application_mut().activate_desktop_tile(&id);
+                    let effects = host.application_mut().take_effects();
+                    if handled {
+                        host.step(HostBatch {
+                            application_changed: true,
+                            ..HostBatch::default()
+                        });
+                    }
+                    (handled, effects)
+                });
+        if handled {
+            self.apply_plugin_effects(effects)
+        } else {
+            self.desktop_host.application_mut().activate(entry);
+            true
+        }
     }
 
     pub fn set_file_clipboard_available(&mut self, available: bool) {
@@ -4609,6 +4642,24 @@ impl LiveShell {
             match effect {
                 crate::plugin_panel::PluginEffect::ShowLauncher => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
+                }
+                crate::plugin_panel::PluginEffect::DesktopOpen { id } => {
+                    let entry = id.split_once(':').and_then(|(first, second)| {
+                        Some(nickel_file::desktop::DesktopEntryId(
+                            nickel_file::FileIdentity(first.parse().ok()?, second.parse().ok()?),
+                        ))
+                    });
+                    if let Some(entry) = entry.filter(|_| self.plugin_desktop_host.is_some()) {
+                        let desktop = self.desktop_host.application();
+                        let visible =
+                            desktop.layout.items().iter().any(|item| {
+                                item.id == entry && item.output == desktop.active_output
+                            });
+                        if visible {
+                            self.desktop_host.application_mut().activate(entry);
+                            changed = true;
+                        }
+                    }
                 }
                 crate::plugin_panel::PluginEffect::RunSubmit(command) => {
                     match platform::execute_run_command(&command) {
@@ -8182,7 +8233,7 @@ impl LiveShell {
                 "height": height.clamp(1, 8192),
                 "background": self.palette.background,
                 "wallpaper": self.wallpaper.is_some(),
-                "surface": self.palette.surface,
+                "surfaceColor": self.palette.surface,
                 "text": self.palette.text,
                 "error": self.desktop_host.application().error,
                 "tiles": tiles,

@@ -44,6 +44,7 @@ pub struct DesktopApplication {
     pub(super) pointer_seen: bool,
     pub(super) pointer_dragged: bool,
     pub(super) last_click: Option<(DesktopEntryId, Instant)>,
+    pub(super) pending_plugin_open: Option<DesktopEntryId>,
     pub(super) modifiers: SelectionModifiers,
     pub(super) context_menu: Option<DesktopMenuContext>,
     #[cfg(target_os = "windows")]
@@ -220,6 +221,7 @@ impl DesktopApplication {
             pointer_seen: false,
             pointer_dragged: false,
             last_click: None,
+            pending_plugin_open: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             #[cfg(target_os = "windows")]
@@ -616,7 +618,11 @@ impl DesktopApplication {
             last == id && now.duration_since(at) <= Duration::from_millis(500)
         }) {
             self.last_click = None;
-            self.activate(id);
+            if self.plugin_background {
+                self.pending_plugin_open = Some(id);
+            } else {
+                self.activate(id);
+            }
         } else {
             self.last_click = Some((id, now));
         }
@@ -1071,6 +1077,7 @@ impl DesktopApplication {
                 );
             }
             tiles.push(serde_json::json!({
+                "id": format!("{}:{}", item.id.0.0, item.id.0.1),
                 "asset": asset,
                 "label": item.entry.display_name(),
                 "x": x.clamp(-8192.0, 8192.0),
@@ -1899,6 +1906,7 @@ impl DesktopApplication {
             pointer_seen: false,
             pointer_dragged: false,
             last_click: None,
+            pending_plugin_open: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             #[cfg(target_os = "windows")]

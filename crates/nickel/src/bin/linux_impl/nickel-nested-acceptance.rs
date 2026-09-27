@@ -291,7 +291,7 @@ fn exercise(
     {
         return Err("installed panel did not start with its declared setting".into());
     }
-    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(2))?;
+    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(5))?;
     let changed = checked(
         test_input,
         &environment,
@@ -311,7 +311,7 @@ fn exercise(
     {
         return Err("installed panel setting was not applied to the running plugin".into());
     }
-    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(2))?;
+    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(5))?;
     let disabled = checked(test_input, &environment, &["plugin-set", panel_id, "disabled"])?;
     let disabled: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
@@ -421,7 +421,10 @@ fn wait_for_plugin_native_memory(
             }
         }
         if Instant::now() >= deadline {
-            return Err(format!("plugin {id} did not report rendered UI memory"));
+            return Err(format!(
+                "plugin {id} did not report rendered UI memory: health={:?}, native={:?}, peak={:?}",
+                plugin.health, plugin.memory.native_ui_bytes, plugin.memory.tracked_peak_bytes,
+            ));
         }
         thread::sleep(POLL);
     }

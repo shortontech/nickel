@@ -95,6 +95,7 @@ interface NickelProgressProps extends NickelProps {
     height: number;
 }
 interface NickelFileTileProps extends NickelProps {
+    id: string;
     asset: string;
     label: string;
     x: number;
@@ -110,6 +111,7 @@ interface NickelFileTileProps extends NickelProps {
     selectedBackground: NickelColor;
     accent: NickelColor;
     complement: NickelColor;
+    onClick?: NickelClick;
 }
 
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
@@ -145,7 +147,7 @@ declare const nickel: Readonly<{
             height: number;
         }>;
     }>;
-    request(effect: string): void;
+    request(effect: string | Readonly<{ type: string; [key: string]: unknown }>): void;
     openDialog(id: string): void;
     openMenu(id: string): void;
 }>;

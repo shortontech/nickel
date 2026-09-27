@@ -67,6 +67,93 @@
     }
 
     #[test]
+    fn desktop_plugin_opens_only_the_current_projected_tile() {
+        use std::{ffi::OsString, path::PathBuf, time::Instant};
+
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        let (file_host, requests) = crate::file_window_host::internal_file_window_channel();
+        desktop.file_window_host = file_host;
+        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            primary: true,
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0, y: 0.0, width: 400.0, height: 300.0,
+            },
+            scale: 1.0,
+        }]);
+        let path = PathBuf::from("/desktop/projected-folder");
+        let entry = nickel_file::FileEntry {
+            display_name_override: None,
+            name: OsString::from("projected-folder"),
+            path: path.clone(),
+            is_directory: true,
+            size: None,
+            modified: None,
+        };
+        desktop.layout.reconcile(vec![(
+            nickel_file::FileIdentity(7, 9),
+            entry.clone(),
+        )]);
+        let item = &desktop.layout.items()[0];
+        let point = nickel_file::desktop::Point {
+            x: item.position.x + 4.0,
+            y: item.position.y + 4.0,
+        };
+        let mut shell = LiveShell::new().unwrap();
+        shell.desktop_host = UiHost::new(desktop, 400, 300);
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(shell.desktop_host.application().plugin_background);
+
+        let now = Instant::now();
+        for click in 0..2 {
+            assert!(shell.desktop_host.application_mut().pointer_press(point, false, Default::default()));
+            assert!(shell.desktop_host.application_mut().pointer_release(
+                point,
+                now + std::time::Duration::from_millis(click * 100),
+            ));
+        }
+        assert!(requests.try_recv().is_err());
+        assert!(shell.dispatch_desktop_plugin_open());
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            nickel_file::FileWindowRequest::OpenOrFocus(
+                nickel_file::FileLaunch::Browse(path.clone()),
+            )
+        );
+        assert!(requests.try_recv().is_err());
+
+        shell.desktop_host.application_mut().layout.reconcile(Vec::new());
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::DesktopOpen { id: "7:9".into() },
+        ]));
+        assert!(requests.try_recv().is_err());
+
+        shell.desktop_host.application_mut().layout.reconcile(vec![(
+            nickel_file::FileIdentity(7, 9), entry,
+        )]);
+        shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::DesktopOpen { id: "7:9".into() },
+        ]));
+        for click in 0..2 {
+            assert!(shell.desktop_host.application_mut().pointer_press(point, false, Default::default()));
+            assert!(shell.desktop_host.application_mut().pointer_release(
+                point,
+                now + std::time::Duration::from_secs(1) + std::time::Duration::from_millis(click * 100),
+            ));
+        }
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            nickel_file::FileWindowRequest::OpenOrFocus(
+                nickel_file::FileLaunch::Browse(path),
+            )
+        );
+        assert!(shell.desktop_host.application().pending_plugin_open.is_none());
+    }
+
+    #[test]
     fn desktop_overflow_plane_is_scrollable_hittable_and_focus_revealable() {
         use std::{ffi::OsString, path::PathBuf};
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
