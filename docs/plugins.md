@@ -31,6 +31,11 @@ esbuild main.jsx --target=es2022 --jsx-factory=h --outfile=main.js --watch
 ```
 
 The runtime provides `h`, `Panel`, `Row`, `Column`, `Text`, `Button`, `Dialog`,
-`useState`, `useRef`, and other small native components. It does not embed
+`Image`, `ImageButton`, `useState`, `useRef`, and other small native components.
+Images use a host-provided asset key and explicit `width` and `height` (1 to
+8192 logical pixels); `fit` is `contain`, `cover`, or `stretch`. `ImageButton`
+also needs an ID, an accessibility label, and an `onClick` handler. A missing
+host asset renders a placeholder without giving the plugin filesystem access.
+Nickel does not embed
 React, a browser DOM, or the TypeScript compiler. The host checks declared
 capabilities and current shell state before executing a requested effect.

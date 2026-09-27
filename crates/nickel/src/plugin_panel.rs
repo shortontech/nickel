@@ -11,9 +11,10 @@ use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, Insets, OverlayAnchor,
-    OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Row, SemanticRole, Shortcut, Size,
-    Spacer, Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
+    AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, ImageFit, Insets,
+    OverlayAnchor, OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Row, SemanticRole,
+    Shortcut, Size, Spacer, Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll,
+    ViewContext,
 };
 use serde_json::Value;
 
@@ -131,6 +132,8 @@ const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
 const Text = 'text';
+const Image = 'image';
+const ImageButton = 'image-button';
 const Progress = 'progress';
 const TextField = 'text-field';
 const Button = 'button';
@@ -221,6 +224,7 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onContextMenu) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         width: props?.width, height: props?.height, background: props?.background,
+        asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
         showLabel: props?.showLabel, contextAction,
         value: props?.value, placeholder: props?.placeholder,
@@ -294,6 +298,16 @@ enum PanelNode {
         children: Vec<Self>,
     },
     Text(String),
+    Image {
+        id: Option<String>,
+        asset: String,
+        accessibility_label: Option<String>,
+        width: u32,
+        height: u32,
+        fit: ImageFit,
+        action: Option<usize>,
+        context_action: Option<usize>,
+    },
     Progress {
         percent: u8,
         width: u32,
@@ -392,6 +406,72 @@ impl PanelNode {
                 }
             }
             "text" => Ok(Self::Text(child_text(children)?)),
+            "image" | "image-button" => {
+                if !children.is_empty() {
+                    return Err("image cannot have children".into());
+                }
+                let asset = value
+                    .get("asset")
+                    .and_then(Value::as_str)
+                    .filter(|asset| !asset.is_empty() && asset.len() <= 128)
+                    .ok_or("image asset must contain 1 to 128 characters")?
+                    .to_owned();
+                let dimension = |name| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_u64)
+                        .filter(|size| (1..=8192).contains(size))
+                        .map(|size| size as u32)
+                        .ok_or_else(|| format!("image {name} must be 1 to 8192"))
+                };
+                let fit = match value
+                    .get("fit")
+                    .and_then(Value::as_str)
+                    .unwrap_or("contain")
+                {
+                    "contain" => ImageFit::Contain,
+                    "cover" => ImageFit::Cover,
+                    "stretch" => ImageFit::Stretch,
+                    _ => return Err("image fit must be contain, cover, or stretch".into()),
+                };
+                let accessibility_label = value
+                    .get("accessibilityLabel")
+                    .and_then(Value::as_str)
+                    .filter(|label| !label.is_empty() && label.len() <= 256)
+                    .map(str::to_owned);
+                let (id, action, context_action) = if kind == "image-button" {
+                    let id = value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 128)
+                        .ok_or("image button ID must contain 1 to 128 characters")?;
+                    if accessibility_label.is_none() {
+                        return Err("image button needs an accessibility label".into());
+                    }
+                    let action = value
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok())
+                        .ok_or("image button needs an onClick handler")?;
+                    let context = value
+                        .get("contextAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok());
+                    (Some(id.to_owned()), Some(action), context)
+                } else {
+                    (None, None, None)
+                };
+                Ok(Self::Image {
+                    id,
+                    asset,
+                    accessibility_label,
+                    width: dimension("width")?,
+                    height: dimension("height")?,
+                    fit,
+                    action,
+                    context_action,
+                })
+            }
             "progress" => {
                 if !children.is_empty() {
                     return Err("progress cannot have children".into());
@@ -624,6 +704,61 @@ impl PanelNode {
                     .padding(Insets::all(10.0))
                     .child(Text::new(text).color(0xf4f6fa).scale(1.0)),
             ),
+            Self::Image {
+                id,
+                asset,
+                accessibility_label,
+                width,
+                height,
+                fit,
+                action,
+                context_action,
+            } => {
+                let visual = images.get(asset).map_or_else(
+                    || {
+                        AnyView::new(
+                            Container::new()
+                                .width(*width as f32)
+                                .height(*height as f32)
+                                .background(0xff30343d),
+                        )
+                    },
+                    |(image_id, image)| {
+                        AnyView::new(
+                            Image::new(*image_id, Arc::clone(image))
+                                .width(*width as f32)
+                                .height(*height as f32)
+                                .fit(*fit)
+                                .decorative(),
+                        )
+                    },
+                );
+                let mut container = Container::new()
+                    .width(*width as f32)
+                    .height(*height as f32)
+                    .child(visual);
+                if let Some(action) = action {
+                    container = container
+                        .id(id.as_ref().expect("image button has an ID").clone())
+                        .semantic_role(SemanticRole::Button)
+                        .accessibility_label(
+                            accessibility_label
+                                .as_ref()
+                                .expect("image button has a label")
+                                .clone(),
+                        )
+                        .message(PluginMessage::Click(*action));
+                    if let Some(context_action) = context_action {
+                        container =
+                            container.context_message(PluginMessage::Context(*context_action));
+                    }
+                } else if let Some(label) = accessibility_label {
+                    container = container
+                        .semantic_role(SemanticRole::Image)
+                        .accessibility_label(label.clone());
+                }
+                AnyView::new(container)
+            }
             Self::Progress {
                 percent,
                 width,
@@ -751,6 +886,11 @@ impl PanelNode {
     fn button_action(&self, requested_id: &str) -> Option<usize> {
         match self {
             Self::Button { id, action, .. } if id == requested_id => Some(*action),
+            Self::Image {
+                id: Some(id),
+                action: Some(action),
+                ..
+            } if id == requested_id => Some(*action),
             Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -2468,6 +2608,49 @@ mod tests {
             let source = format!(
                 "function App() {{ return h(Panel, {{}}, h(Progress, {{{properties}}})); }}"
             );
+            assert!(PluginPanelApplication::new(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn image_button_renders_host_image_and_dispatches_its_handler() {
+        let source = "function App() { return h(Panel, {height: 180}, h(ImageButton, {id: 'preview', asset: 'window:1', width: 180, height: 110, accessibilityLabel: 'Open window', onClick: () => nickel.request('show-launcher')})); }";
+        let mut app = PluginPanelApplication::new(source).unwrap();
+        let mut images = PluginImages::new();
+        images.insert(
+            "window:1".into(),
+            (42, Arc::new(image::RgbaImage::new(8, 8))),
+        );
+        assert!(app.sync_images(images));
+        let mut host = nickel_ui::UiHost::new(app, 300, 180);
+        let target = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open window".into(),
+            })
+            .unwrap();
+        assert!(!host.commands().is_empty());
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(target.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ShowLauncher]
+        );
+    }
+
+    #[test]
+    fn image_components_reject_unbounded_or_unlabeled_interactive_views() {
+        for node in [
+            "h(Image, {asset: 'photo', width: 0, height: 20})",
+            "h(Image, {asset: 'photo', width: 20, height: 9000})",
+            "h(Image, {asset: 'photo', width: 20, height: 20, fit: 'unknown'})",
+            "h(ImageButton, {id: 'x', asset: 'photo', width: 20, height: 20, onClick: () => {}})",
+        ] {
+            let source = format!("function App() {{ return h(Panel, {{}}, {node}); }}");
             assert!(PluginPanelApplication::new(&source).is_err());
         }
     }
