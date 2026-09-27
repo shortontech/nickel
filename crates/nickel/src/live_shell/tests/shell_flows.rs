@@ -1325,6 +1325,66 @@
     }
 
     #[test]
+    fn taskbar_action_extension_renders_and_invokes_its_plugin_callback() {
+        use nickel_core::plugins::{PluginPackage, PluginPackageDescriptor};
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-task-action"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell.plugin_registry.register(package.manifest.clone()).unwrap();
+        shell.external_plugin_packages.insert(
+            package.manifest.id.clone(),
+            PluginPackageDescriptor {
+                directory: directory.into(),
+                manifest: package.manifest.clone(),
+                source_digest: package.source_digest(),
+            },
+        );
+        shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
+        shell.windows = vec![OpenWindow {
+            id: WindowId(81),
+            application_id: Some(ApplicationId::new("org.nickel.mail")),
+            active: true,
+            title: "Mail".into(),
+            state: crate::model::WindowState::default(),
+        }];
+        shell.scene(SurfaceRole::Taskbar, 1_280, 56);
+        let index = shell.panel_groups().iter().position(|group|
+            group.windows.iter().any(|window| window.id == WindowId(81))
+        ).unwrap();
+        let bounds = super::taskbar_plugin_control_bounds(
+            shell.plugin_taskbar_host.as_ref().unwrap(),
+            &format!("taskbar-item-{index}"),
+        ).unwrap();
+        assert!(shell.panel_click(bounds.origin.x + bounds.size.width / 2.0, 1_280, true));
+        let height = shell.window_context_menu_height() as u32;
+        shell.scene(SurfaceRole::WindowContextMenu, super::MENU_WIDTH as u32, height);
+        let action = shell.application_menu_plugin_host.as_ref().unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Find apps".into(),
+            }).unwrap();
+        assert!(action.bounds.origin.y + action.bounds.size.height <= height as f32);
+        assert!(shell.window_menu_host_event(
+            HostEvent::Ui(UiEvent::AccessibilityActivate(action.id)),
+            super::MENU_WIDTH as u32,
+            height,
+        ));
+        assert!(shell.launcher_visible);
+        assert!(shell.application_menu_target.is_none());
+        shell.set_plugin_enabled(&package.manifest.id, false).unwrap();
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::InvokeTaskbarExtensionAction {
+                plugin_id: package.manifest.id.clone(),
+                id: "find-apps".into(),
+                application_id: Some("org.nickel.mail".into()),
+            },
+        ]));
+    }
+
+    #[test]
     fn plugin_taskbar_menu_pins_the_captured_application_and_retires() {
         let directory = tempfile::tempdir().unwrap();
         let mut shell = LiveShell::new().unwrap();

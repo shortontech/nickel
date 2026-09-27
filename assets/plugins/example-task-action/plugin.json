@@ -1,0 +1,16 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.example-task-action",
+  "name": "Example task action",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "surfaces": [],
+  "capabilities": ["launcher-show"],
+  "contributes": [{
+    "target_plugin": "org.nickel.taskbar",
+    "target_slot": "task-action",
+    "contract": "action",
+    "mode": "add"
+  }]
+}

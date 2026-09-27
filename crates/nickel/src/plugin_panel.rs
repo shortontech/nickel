@@ -152,6 +152,7 @@ const Box = 'box';
 const FileTile = 'file-tile';
 const Badge = 'badge';
 const Widget = 'widget';
+const Action = 'action';
 const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
@@ -370,6 +371,12 @@ enum PanelNode {
         percent: u8,
         color: u32,
     },
+    Action {
+        id: String,
+        item: Option<String>,
+        label: String,
+        action: usize,
+    },
     FileTile {
         id: String,
         action: Option<usize>,
@@ -544,6 +551,35 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
+            "action" => {
+                if !children.is_empty() {
+                    return Err("action cannot have children".into());
+                }
+                let bounded = |name: &str, max: usize| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty() && text.len() <= max)
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("action {name} must be 1 to {max} bytes"))
+                };
+                Ok(Self::Action {
+                    id: bounded("id", 64)?,
+                    item: match value.get("item") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(item)) if !item.is_empty() && item.len() <= 256 => {
+                            Some(item.clone())
+                        }
+                        _ => return Err("action item must be 1 to 256 bytes".into()),
+                    },
+                    label: bounded("label", 120)?,
+                    action: value
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok())
+                        .ok_or("action needs an onClick handler")?,
+                })
+            }
             "widget" => {
                 if !children.is_empty() {
                     return Err("widget cannot have children".into());
@@ -1059,6 +1095,7 @@ impl PanelNode {
                     ),
             ),
             Self::Widget { .. } => AnyView::new(Spacer::fixed(0.0)),
+            Self::Action { .. } => AnyView::new(Spacer::fixed(0.0)),
             Self::FileTile {
                 id,
                 action,
@@ -1495,6 +1532,39 @@ impl PanelNode {
             ),
         }
     }
+
+    fn collect_taskbar_actions(
+        &self,
+        actions: &mut Vec<TaskbarPluginAction>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Action {
+                id, item, label, ..
+            } => {
+                if actions.len() >= 8 {
+                    return Err("extension has too many actions".into());
+                }
+                if actions.iter().any(|action| action.id == *id) {
+                    return Err("extension action IDs must be unique".into());
+                }
+                actions.push(TaskbarPluginAction {
+                    id: id.clone(),
+                    item: item.clone(),
+                    label: label.clone(),
+                });
+                Ok(())
+            }
+            Self::Row(children) | Self::Column(children) => {
+                for child in children {
+                    child.collect_taskbar_actions(actions)?;
+                }
+                Ok(())
+            }
+            _ => Err(
+                "taskbar action extension must return actions or a row/column of actions".into(),
+            ),
+        }
+    }
 }
 
 fn child_text(children: &[Value]) -> Result<String, String> {
@@ -1550,6 +1620,13 @@ pub struct DesktopPluginWidget {
     pub value: String,
     pub percent: u8,
     pub color: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarPluginAction {
+    pub id: String,
+    pub item: Option<String>,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1612,6 +1689,11 @@ pub enum PluginEffect {
         id: String,
     },
     CloseTaskbarMenuWindows,
+    InvokeTaskbarExtensionAction {
+        plugin_id: String,
+        id: String,
+        application_id: Option<String>,
+    },
     InvokeTaskbarWindowMenu {
         page: String,
         index: usize,
@@ -1888,6 +1970,14 @@ pub struct TaskbarMenuPluginProjection {
     pub application_id: Option<String>,
     pub pinned: bool,
     pub close_all: bool,
+    pub actions: Vec<TaskbarMenuPluginAction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarMenuPluginAction {
+    pub plugin_id: String,
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1942,6 +2032,11 @@ impl TaskbarMenuPluginProjection {
             "applicationId": self.application_id,
             "pinned": self.pinned,
             "closeAll": self.close_all,
+            "actions": self.actions.iter().map(|action| serde_json::json!({
+                "plugin": action.plugin_id,
+                "id": action.id,
+                "label": action.label,
+            })).collect::<Vec<_>>(),
         })
         .to_string()
     }
@@ -2309,6 +2404,48 @@ impl PluginPanelApplication {
         Ok(widgets)
     }
 
+    pub fn taskbar_actions(&self) -> Result<Vec<TaskbarPluginAction>, String> {
+        let mut actions = Vec::new();
+        self.node.collect_taskbar_actions(&mut actions)?;
+        if actions.is_empty() {
+            return Err("taskbar action extension did not return an action".into());
+        }
+        Ok(actions)
+    }
+
+    pub fn activate_taskbar_action(&mut self, id: &str, application_id: &str) -> bool {
+        let Some(action) = self.find_taskbar_action(id, application_id) else {
+            return false;
+        };
+        nickel_ui::Application::update(
+            self,
+            PluginMessage::Text(action, application_id.to_owned()),
+        );
+        self.last_error.is_none()
+    }
+
+    fn find_taskbar_action(&self, id: &str, application_id: &str) -> Option<usize> {
+        fn find(node: &PanelNode, id: &str, application_id: &str) -> Option<usize> {
+            match node {
+                PanelNode::Action {
+                    id: action_id,
+                    item,
+                    action,
+                    ..
+                } if action_id == id
+                    && item.as_deref().is_none_or(|item| item == application_id) =>
+                {
+                    Some(*action)
+                }
+                PanelNode::Row(children) | PanelNode::Column(children) => children
+                    .iter()
+                    .find_map(|child| find(child, id, application_id)),
+                _ => None,
+            }
+        }
+        find(&self.node, id, application_id)
+    }
+
     pub fn validate_contribution(&self) -> Result<(), String> {
         use nickel_core::plugins::PluginSlotContract;
         let [contribution] = self.manifest.contributes.as_slice() else {
@@ -2317,6 +2454,7 @@ impl PluginPanelApplication {
         match contribution.contract {
             PluginSlotContract::Badge => self.taskbar_badges().map(|_| ()),
             PluginSlotContract::Widget => self.desktop_widgets().map(|_| ()),
+            PluginSlotContract::Action => self.taskbar_actions().map(|_| ()),
             _ => Err("this runtime does not execute that contribution contract".into()),
         }
     }
@@ -3129,6 +3267,55 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::CloseTaskbarMenuWindows);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-extension-action")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::WindowsContext) =>
+                        {
+                            let plugin_id = effect.get("plugin").and_then(Value::as_str);
+                            let id = effect.get("id").and_then(Value::as_str);
+                            let application_id =
+                                effect.get("applicationId").and_then(Value::as_str);
+                            let valid = plugin_id
+                                .is_some_and(|value| !value.is_empty() && value.len() <= 128)
+                                && id.is_some_and(|value| !value.is_empty() && value.len() <= 64)
+                                && application_id
+                                    .is_none_or(|value| !value.is_empty() && value.len() <= 256);
+                            if !valid {
+                                self.last_error =
+                                    Some("taskbar extension action is invalid".into());
+                                return;
+                            }
+                            let projection = self
+                                .projection_data
+                                .as_deref()
+                                .and_then(|data| serde_json::from_str::<Value>(data).ok());
+                            let projected = projection.as_ref().is_some_and(|data| {
+                                data.get("applicationId").and_then(Value::as_str) == application_id
+                                    && data.get("actions").and_then(Value::as_array).is_some_and(
+                                        |actions| {
+                                            actions.iter().any(|action| {
+                                                action.get("plugin").and_then(Value::as_str)
+                                                    == plugin_id
+                                                    && action.get("id").and_then(Value::as_str)
+                                                        == id
+                                            })
+                                        },
+                                    )
+                            });
+                            if !projected {
+                                self.last_error = Some("taskbar extension action is stale".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::InvokeTaskbarExtensionAction {
+                                plugin_id: plugin_id.unwrap().to_owned(),
+                                id: id.unwrap().to_owned(),
+                                application_id: application_id.map(str::to_owned),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-window-menu-action")
                             && self.manifest.id == taskbar_manifest().id
                             && self
@@ -3733,6 +3920,22 @@ mod tests {
         invalid.source = invalid.source.replace("Math.min(100, unread * 5)", "101");
         assert_ne!(invalid.source, package.source);
         assert!(PluginPanelApplication::validate_package(&invalid).is_err());
+    }
+
+    #[test]
+    fn taskbar_action_contribution_dispatches_its_own_granted_callback() {
+        let package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-task-action"
+        ))
+        .unwrap();
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let mut application = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(application.taskbar_actions().unwrap()[0].id, "find-apps");
+        assert!(application.activate_taskbar_action("find-apps", "org.nickel.mail"));
+        assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
+        assert!(!application.activate_taskbar_action("missing", "org.nickel.mail"));
+        assert!(application.take_effects().is_empty());
     }
 
     #[test]

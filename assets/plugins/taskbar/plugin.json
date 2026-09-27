@@ -23,6 +23,7 @@
     "tray-context"
   ],
   "provides_slots": [
-    {"id":"task-badge","contract":"badge","replaceable":true}
+    {"id":"task-badge","contract":"badge","replaceable":true},
+    {"id":"task-action","contract":"action","replaceable":true}
   ]
 }

@@ -100,7 +100,17 @@ contributions then follow the winner. The desktop also provides a
 The [example desktop widget](../assets/plugins/example-desktop-widget/) is a
 working package. Widgets appear in a bounded stack on the desktop; at most
 three are visible. Replacement selection and additive ordering follow the
-same rules as badges. The `action` and `section` contracts remain unavailable.
+same rules as badges.
+The taskbar also provides a `task-action` slot with the `action` contract. A
+surface-free extension can return
+`h(Action, { id: "find-apps", item: "org.example.app", label: "Find apps", onClick: applicationId => nickel.request("show-launcher") })`.
+Omit `item` to show the action in every application menu. Nickel renders at
+most four contributed actions in that JSX menu, ordered by replacement winner
+then additive priority and plugin ID. The callback runs in the contributing
+plugin's own JS host; its requested effects still require that plugin's
+declared capabilities and current host validation. The
+[example task action](../assets/plugins/example-task-action/) demonstrates this.
+The `section` contract remains unavailable.
 The target plugin's retained UI measurement includes its contributed nodes;
 Nickel cannot yet split those bytes by extension. Each extension's JavaScript
 heap measurement remains unavailable in Settings.

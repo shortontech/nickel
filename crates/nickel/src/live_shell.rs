@@ -709,6 +709,14 @@ pub struct LiveShell {
             crate::plugin_panel::PluginPanelApplication,
         ),
     >,
+    plugin_taskbar_action_hosts: std::collections::BTreeMap<
+        String,
+        (
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
     plugin_desktop_widget_hosts: std::collections::BTreeMap<
         String,
         (
@@ -969,6 +977,7 @@ fn taskbar_plugin_data(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutableExtensionKind {
     TaskbarBadge,
+    TaskbarAction,
     DesktopWidget,
 }
 
@@ -998,6 +1007,9 @@ fn executable_extension_priority(
     ) {
         ("org.nickel.taskbar", "task-badge", PluginSlotContract::Badge) => {
             ExecutableExtensionKind::TaskbarBadge
+        }
+        ("org.nickel.taskbar", "task-action", PluginSlotContract::Action) => {
+            ExecutableExtensionKind::TaskbarAction
         }
         ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget) => {
             ExecutableExtensionKind::DesktopWidget
@@ -1083,6 +1095,60 @@ fn append_taskbar_badges(
                     label,
                     count,
                     color,
+                });
+            }
+        }
+    }
+}
+
+fn compose_taskbar_actions(
+    extensions: &std::collections::BTreeMap<
+        String,
+        (
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
+    application_id: Option<&str>,
+) -> Vec<crate::plugin_panel::TaskbarMenuPluginAction> {
+    use nickel_core::plugins::PluginContributionMode;
+    let mut ordered = extensions.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
+    let mut actions = Vec::new();
+    if let Some((id, (_, _, application))) = ordered
+        .iter()
+        .rev()
+        .find(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
+    {
+        append_taskbar_actions(&mut actions, id, application, application_id);
+    }
+    for (id, (_, mode, application)) in ordered {
+        if *mode == PluginContributionMode::Add {
+            append_taskbar_actions(&mut actions, id, application, application_id);
+        }
+    }
+    actions.truncate(4);
+    actions
+}
+
+fn append_taskbar_actions(
+    actions: &mut Vec<crate::plugin_panel::TaskbarMenuPluginAction>,
+    plugin_id: &str,
+    application: &crate::plugin_panel::PluginPanelApplication,
+    application_id: Option<&str>,
+) {
+    if let Ok(contributions) = application.taskbar_actions() {
+        for contribution in contributions {
+            if contribution
+                .item
+                .as_deref()
+                .is_none_or(|item| Some(item) == application_id)
+            {
+                actions.push(crate::plugin_panel::TaskbarMenuPluginAction {
+                    plugin_id: plugin_id.to_owned(),
+                    id: contribution.id,
+                    label: contribution.label,
                 });
             }
         }
@@ -1770,6 +1836,7 @@ impl LiveShell {
             plugin_run_host,
             plugin_taskbar_host,
             plugin_taskbar_badge_hosts: std::collections::BTreeMap::new(),
+            plugin_taskbar_action_hosts: std::collections::BTreeMap::new(),
             plugin_desktop_widget_hosts: std::collections::BTreeMap::new(),
             plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
@@ -3458,6 +3525,12 @@ impl LiveShell {
             .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
             .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
             .map(|(id, _)| id.as_str());
+        let action_replacement = self
+            .plugin_taskbar_action_hosts
+            .iter()
+            .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
+            .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
+            .map(|(id, _)| id.as_str());
         let widget_replacement = self
             .plugin_desktop_widget_hosts
             .iter()
@@ -3531,6 +3604,12 @@ impl LiveShell {
                                             && contribution.target_slot == "task-badge"
                                             && badge_replacement
                                                 .is_some_and(|winner| winner != entry.manifest.id))
+                                            || (contribution.target_plugin
+                                                == crate::plugin_panel::taskbar_manifest().id
+                                                && contribution.target_slot == "task-action"
+                                                && action_replacement.is_some_and(|winner| {
+                                                    winner != entry.manifest.id
+                                                }))
                                             || (contribution.target_plugin
                                                 == crate::plugin_panel::desktop_manifest().id
                                                 && contribution.target_slot == "desktop-widget"
@@ -3710,6 +3789,9 @@ impl LiveShell {
                     }
                 } else if let Some((_, _, current)) = self.plugin_taskbar_badge_hosts.get_mut(id) {
                     *current = application;
+                } else if let Some((_, _, current)) = self.plugin_taskbar_action_hosts.get_mut(id) {
+                    *current = application;
+                    self.application_menu_plugin_host = None;
                 } else if let Some((_, _, current)) = self.plugin_desktop_widget_hosts.get_mut(id) {
                     *current = application;
                 }
@@ -3824,6 +3906,9 @@ impl LiveShell {
             self.plugin_activation_generation.wrapping_add(1).max(1);
         if !enabled {
             self.plugin_taskbar_badge_hosts.remove(id);
+            if self.plugin_taskbar_action_hosts.remove(id).is_some() {
+                self.application_menu_plugin_host = None;
+            }
             self.plugin_desktop_widget_hosts.remove(id);
             self.plugin_panel_extra_hosts
                 .retain(|key, _| key.plugin_id != id);
@@ -3866,6 +3951,11 @@ impl LiveShell {
                 ExecutableExtensionKind::TaskbarBadge => {
                     self.plugin_taskbar_badge_hosts
                         .insert(id.to_owned(), (priority, mode, application));
+                }
+                ExecutableExtensionKind::TaskbarAction => {
+                    self.plugin_taskbar_action_hosts
+                        .insert(id.to_owned(), (priority, mode, application));
+                    self.application_menu_plugin_host = None;
                 }
                 ExecutableExtensionKind::DesktopWidget => {
                     self.plugin_desktop_widget_hosts
@@ -4986,6 +5076,40 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::CloseTaskbarMenuWindows => {
                     self.apply_application_menu_action(ApplicationMenuAction::CloseAll);
                     changed = true;
+                }
+                crate::plugin_panel::PluginEffect::InvokeTaskbarExtensionAction {
+                    plugin_id,
+                    id,
+                    application_id,
+                } => {
+                    if self.plugin_taskbar_host.is_none() {
+                        continue;
+                    }
+                    let Some(target) = self.application_menu_target.as_ref() else {
+                        continue;
+                    };
+                    let target_id = target.application_id.as_ref().map(|id| id.as_str());
+                    if target_id != application_id.as_deref() {
+                        continue;
+                    }
+                    let visible =
+                        compose_taskbar_actions(&self.plugin_taskbar_action_hosts, target_id)
+                            .iter()
+                            .any(|action| action.plugin_id == plugin_id && action.id == id);
+                    if !visible {
+                        continue;
+                    }
+                    let Some((_, _, extension)) =
+                        self.plugin_taskbar_action_hosts.get_mut(&plugin_id)
+                    else {
+                        continue;
+                    };
+                    let handled = extension.activate_taskbar_action(&id, target_id.unwrap_or(""));
+                    let extension_effects = extension.take_effects();
+                    if handled {
+                        changed = true;
+                        changed |= self.apply_plugin_effects(extension_effects);
+                    }
                 }
                 crate::plugin_panel::PluginEffect::InvokeTaskbarWindowMenu { page, index } => {
                     if self.plugin_taskbar_host.is_none() {
@@ -7164,7 +7288,11 @@ impl LiveShell {
                 .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
             let rows = application_menu_entries(target, pinned).len();
             return if self.plugin_taskbar_host.is_some() {
-                16 + 48 * rows as i32
+                let actions = compose_taskbar_actions(
+                    &self.plugin_taskbar_action_hosts,
+                    target.application_id.as_ref().map(|id| id.as_str()),
+                );
+                16 + 48 * (rows + actions.len()) as i32
             } else {
                 menu_height_for_rows(rows) as i32
             };
@@ -9702,6 +9830,13 @@ impl LiveShell {
             .as_ref()
             .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
         if self.plugin_taskbar_host.is_some() {
+            let actions = compose_taskbar_actions(
+                &self.plugin_taskbar_action_hosts,
+                target.application_id.as_ref().map(|id| id.as_str()),
+            );
+            let height = (16
+                + 48 * (application_menu_entries(&target, pinned).len() + actions.len()))
+                as u32;
             let projection = crate::plugin_panel::TaskbarMenuPluginProjection {
                 application_id: target
                     .application_id
@@ -9709,8 +9844,8 @@ impl LiveShell {
                     .map(|id| id.as_str().to_owned()),
                 pinned,
                 close_all: target.all_closeable,
+                actions,
             };
-            let height = (16 + 48 * application_menu_entries(&target, pinned).len()) as u32;
             if self.application_menu_plugin_host.is_none() {
                 match crate::plugin_panel::PluginPanelApplication::taskbar_menu_with_projection(
                     &projection,

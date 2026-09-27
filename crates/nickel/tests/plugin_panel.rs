@@ -1032,6 +1032,7 @@ fn bundled_taskbar_menu_requests_validated_pin_and_close_actions() {
             application_id: Some("org.example.editor".into()),
             pinned: false,
             close_all: true,
+            actions: Vec::new(),
         })
         .unwrap();
     let mut host = UiHost::new(application, 248, 112);
