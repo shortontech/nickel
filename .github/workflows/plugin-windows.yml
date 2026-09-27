@@ -12,6 +12,7 @@ on:
       - "crates/nickel-plugin-runtime/**"
       - "crates/nickel-ui/**"
       - "assets/plugins/**"
+      - "assets/plugin-runtime/**"
   pull_request:
     paths:
       - ".github/workflows/plugin-windows.yml"
@@ -22,6 +23,7 @@ on:
       - "crates/nickel-plugin-runtime/**"
       - "crates/nickel-ui/**"
       - "assets/plugins/**"
+      - "assets/plugin-runtime/**"
   workflow_dispatch:
 
 permissions:
