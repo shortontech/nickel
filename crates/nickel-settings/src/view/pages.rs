@@ -131,6 +131,7 @@ impl SettingsApp {
             );
         }
         let projection = crate::plugin_list::projection(
+            &self.localizer,
             self.plugin_status.as_ref(),
             self.plugin_notice.as_deref(),
             self.plugin_pending.as_ref(),

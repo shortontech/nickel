@@ -11,7 +11,8 @@ function Detail(props) {
 function Setting(props) {
     const plugin = props.plugin;
     const setting = props.setting;
-    const label = `Setting: ${setting.label}`;
+    const labels = props.labels;
+    const label = setting.displayLabel;
     const base = {id: plugin.id, key: setting.id};
     let control = null;
     const kind = setting.kind.kind;
@@ -29,10 +30,10 @@ function Setting(props) {
     } else if (kind === 'choice' && setting.kind.options.length) {
         const index = setting.kind.options.indexOf(setting.value);
         const next = setting.kind.options[(index + 1) % setting.kind.options.length];
-        control = <settings-button label="Change" value="quiet"
+        control = <settings-button label={labels.change} value="quiet"
             onClick={setting.pending ? undefined : () => action('set-setting', {...base, value: next})} />;
     } else if (kind === 'text') {
-        control = <settings-button label="Edit" value="quiet"
+        control = <settings-button label={labels.edit} value="quiet"
             onClick={setting.pending ? undefined : () => action('edit-text', base)} />;
     }
     return <settings-fragment>
@@ -42,47 +43,49 @@ function Setting(props) {
         {props.editing ? <settings-inline>
             <settings-input id={`plugin-setting-text-${plugin.id}-${setting.id}`}
                 value={props.draft} onChange={value => action('text-changed', {value})} />
-            <settings-button label="Save" value="primary" onClick={() => action('save-text')} />
-            <settings-button label="Cancel" value="quiet" onClick={() => action('cancel-text')} />
+            <settings-button label={labels.save} value="primary" onClick={() => action('save-text')} />
+            <settings-button label={labels.cancel} value="quiet" onClick={() => action('cancel-text')} />
         </settings-inline> : null}
     </settings-fragment>;
 }
 
 function Plugin(props) {
     const plugin = props.plugin;
+    const labels = props.labels;
     return <settings-card label={plugin.name} value={plugin.id}>
-        <Detail label="Publisher" value={plugin.author} />
-        <Detail label="Version" value={plugin.version} />
-        <settings-row label="Enabled" value={plugin.health}>
+        <Detail label={labels.publisher} value={plugin.author} />
+        <Detail label={labels.version} value={plugin.version} />
+        <settings-row label={labels.enabled} value={plugin.health}>
             <settings-switch id={`plugin-enable-${plugin.id}`}
-                label={`${plugin.desiredEnabled ? 'Disable' : 'Enable'} ${plugin.name}`}
+                label={plugin.toggleLabel}
                 value={plugin.switchState}
                 onClick={plugin.pending ? undefined : () => action(plugin.desiredEnabled ? 'disable' : 'review-enable', {id: plugin.id})} />
         </settings-row>
-        <Detail label="Access" value={plugin.access} />
-        <Detail label="Surfaces" value={plugin.surfaces} />
-        <Detail label="Composition" value={plugin.composition} />
-        <Detail label="Tracked memory (lower bound)" value={plugin.memory.tracked} />
-        <Detail label="Peak tracked memory (lower bound)" value={plugin.memory.peak} />
-        <Detail label="JavaScript heap" value={plugin.memory.js} />
-        <Detail label="Native UI (lower bound)" value={plugin.memory.native} />
-        <Detail label="Textures" value={plugin.memory.textures} />
-        <Detail label="Timers and subscriptions" value={plugin.memory.timers} />
-        {plugin.memory.overlap ? <Detail label="Memory attribution"
-            value="Extension UI also appears in the target plugin's native UI count" /> : null}
-        {plugin.settings.map(setting => <Setting key={setting.id} plugin={plugin}
+        <Detail label={labels.access} value={plugin.access} />
+        <Detail label={labels.surfaces} value={plugin.surfaces} />
+        <Detail label={labels.composition} value={plugin.composition} />
+        <Detail label={labels.trackedMemory} value={plugin.memory.tracked} />
+        <Detail label={labels.peakMemory} value={plugin.memory.peak} />
+        <Detail label={labels.jsHeap} value={plugin.memory.js} />
+        <Detail label={labels.nativeUi} value={plugin.memory.native} />
+        <Detail label={labels.textures} value={plugin.memory.textures} />
+        <Detail label={labels.timers} value={plugin.memory.timers} />
+        {plugin.memory.overlap ? <Detail label={labels.memoryAttribution}
+            value={labels.extensionOverlap} /> : null}
+        {plugin.settings.map(setting => <Setting key={setting.id} plugin={plugin} labels={labels}
             setting={setting} editing={setting.editing} draft={setting.draft} />)}
     </settings-card>;
 }
 
 function App() {
     const data = nickel.data;
+    const labels = data.labels;
     return <settings-stack>
-        {data.notice ? <settings-card label="Plugin status" value={data.notice} /> : null}
+        {data.notice ? <settings-card label={labels.pluginStatus} value={data.notice} /> : null}
         {data.available
-            ? data.plugins.map(plugin => <Plugin key={plugin.id} plugin={plugin} />)
-            : <settings-card label="Waiting for Nickel" value="Live plugin status is unavailable.">
-                <settings-button label="Refresh" value="secondary" onClick={() => action('refresh')} />
+            ? data.plugins.map(plugin => <Plugin key={plugin.id} plugin={plugin} labels={labels} />)
+            : <settings-card label={labels.waiting} value={labels.statusUnavailable}>
+                <settings-button label={labels.refresh} value="secondary" onClick={() => action('refresh')} />
             </settings-card>}
     </settings-stack>;
 }

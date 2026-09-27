@@ -1,5 +1,6 @@
 //! JSX-owned ordinary plugin list. Permission approval remains a native overlay.
 
+use nickel_i18n::Localizer;
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_session_protocol::{
     PluginMemorySnapshot, PluginRuntimeHealth, PluginSettingKind, PluginStatusSnapshot,
@@ -404,6 +405,7 @@ fn memory_projection(memory: &PluginMemorySnapshot, overlap: bool) -> Value {
 }
 
 pub(super) fn projection(
+    localizer: &Localizer,
     snapshot: Option<&PluginStatusSnapshot>,
     notice: Option<&str>,
     pending: Option<&(String, bool)>,
@@ -432,7 +434,9 @@ pub(super) fn projection(
             };
             let editing = edit.is_some_and(|(id,key,_)| id == &plugin.id && key == &setting.id);
             json!({
-                "id":setting.id,"label":setting.label,"description":setting.description,
+                "id":setting.id,"label":setting.label,
+                "displayLabel":localizer.value("settings-plugin-setting-name", "name", &setting.label),
+                "description":setting.description,
                 "kind":setting.kind,"value":setting.value,"displayValue":display_value,
                 "pending":setting_pending.is_some_and(|(id,key,_)| id == &plugin.id && key == &setting.id),
                 "editing":editing,"draft":edit.filter(|_| editing).map(|(_,_,draft)| draft),
@@ -442,6 +446,10 @@ pub(super) fn projection(
         json!({
             "id":plugin.id,"name":plugin.name,"author":plugin.author.as_deref().unwrap_or("Unknown"),
             "version":plugin.version.as_deref().unwrap_or("Unspecified"),
+            "toggleLabel":localizer.value(
+                if plugin.desired_enabled { "settings-plugin-disable-name" } else { "settings-plugin-enable-name" },
+                "name", &plugin.name,
+            ),
             "desiredEnabled":plugin.desired_enabled,"health":health,"switchState":switch_state,
             "pending":pending,
             "access":if plugin.capabilities.is_empty() { "None".into() } else { plugin.capabilities.join(", ") },
@@ -450,7 +458,36 @@ pub(super) fn projection(
             "memory":memory_projection(&plugin.memory,overlap), "settings":settings,
         })
     }).collect::<Vec<_>>()).unwrap_or_default();
-    json!({"available":snapshot.is_some(),"generation":snapshot.map(|snapshot| snapshot.activation_generation),"notice":notice,"plugins":plugins})
+    json!({
+        "available":snapshot.is_some(),
+        "generation":snapshot.map(|snapshot| snapshot.activation_generation),
+        "notice":notice,
+        "plugins":plugins,
+        "labels":{
+            "change":localizer.text("settings-plugin-change"),
+            "edit":localizer.text("settings-plugin-edit"),
+            "save":localizer.text("settings-plugin-save"),
+            "cancel":localizer.text("settings-plugin-cancel"),
+            "publisher":localizer.text("settings-plugin-publisher"),
+            "version":localizer.text("settings-plugin-version"),
+            "enabled":localizer.text("settings-plugin-enabled"),
+            "access":localizer.text("settings-plugin-access"),
+            "surfaces":localizer.text("settings-plugin-surfaces"),
+            "composition":localizer.text("settings-plugin-composition"),
+            "trackedMemory":localizer.text("settings-plugin-tracked-memory"),
+            "peakMemory":localizer.text("settings-plugin-peak-memory"),
+            "jsHeap":localizer.text("settings-plugin-js-heap"),
+            "nativeUi":localizer.text("settings-plugin-native-ui"),
+            "textures":localizer.text("settings-plugin-textures"),
+            "timers":localizer.text("settings-plugin-timers"),
+            "memoryAttribution":localizer.text("settings-plugin-memory-attribution"),
+            "extensionOverlap":localizer.text("settings-plugin-extension-overlap"),
+            "pluginStatus":localizer.text("settings-plugin-status"),
+            "waiting":localizer.text("settings-plugin-waiting"),
+            "statusUnavailable":localizer.text("settings-plugin-status-unavailable"),
+            "refresh":localizer.text("settings-plugin-refresh"),
+        }
+    })
 }
 
 pub(super) fn validate_request(
@@ -605,6 +642,7 @@ fn valid_next_setting_value(kind: &PluginSettingKind, current: &Value, next: &Va
 impl SettingsApp {
     pub(super) fn handle_plugin_jsx_action(&mut self, index: usize, value: Value) {
         let data = projection(
+            &self.localizer,
             self.plugin_status.as_ref(),
             self.plugin_notice.as_deref(),
             self.plugin_pending.as_ref(),
@@ -669,7 +707,8 @@ mod tests {
     #[test]
     fn jsx_enable_action_routes_through_trusted_review() {
         let snapshot = snapshot();
-        let data = projection(Some(&snapshot), None, None, None, None);
+        let localizer = Localizer::system();
+        let data = projection(&localizer, Some(&snapshot), None, None, None, None);
         let mut list = PluginList::new().unwrap();
         let theme = crate::semantic_theme(nickel_core::theme::ThemePalette::from_appearance(
             nickel_core::theme::Appearance::default(),
@@ -687,7 +726,7 @@ mod tests {
         );
         let mut stale = snapshot.clone();
         stale.activation_generation += 1;
-        let stale_data = projection(Some(&stale), None, None, None, None);
+        let stale_data = projection(&localizer, Some(&stale), None, None, None, None);
         assert!(
             list.dispatch(action, Value::Null, &stale_data, |_| {
                 Ok(SettingsMessage::RefreshPlugins)
