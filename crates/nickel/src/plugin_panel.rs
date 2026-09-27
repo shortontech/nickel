@@ -88,13 +88,14 @@ const Menu = 'menu';
 const MenuItem = 'menu-item';
 const __componentIds = new WeakMap();
 let __nextComponentId = 0;
-const __componentHooks = new Map();
+let __componentHooks = new Map();
 let __visitedComponents = new Set();
 let __componentChildren = new Map();
 let __currentComponent = null;
 let __hookIndex = 0;
 let __handlers = [];
 let __effects = [];
+let __pendingRender = null;
 let __nickelData = Object.freeze({query: '', results: []});
 
 const nickel = Object.freeze({
@@ -174,17 +175,48 @@ function h(kind, props, ...children) {
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
 }
 
+function __nickelRollbackRender() {
+    if (__pendingRender === null) return;
+    const {handlers, hooks, values, effectsLength} = __pendingRender;
+    __handlers = handlers;
+    let componentIndex = 0;
+    for (const slots of hooks.values()) {
+        const oldValues = values[componentIndex++];
+        slots.forEach((entry, index) => {
+            if (entry.kind === 'ref') entry.value.current = oldValues[index];
+            else entry.value = oldValues[index];
+        });
+    }
+    __componentHooks = hooks;
+    __effects.length = effectsLength;
+    __pendingRender = null;
+}
+
+function __nickelCommitRender() { __pendingRender = null; }
+
 function __nickelRender() {
+    if (__pendingRender !== null) throw Error('previous render was not finalized');
+    const previousHandlers = __handlers;
+    const previousHooks = new Map(Array.from(__componentHooks, ([path, hooks]) => [path, hooks.slice()]));
+    const previousValues = Array.from(__componentHooks.values(), hooks => hooks.map(entry =>
+        entry.kind === 'ref' ? entry.value.current : entry.value));
+    __pendingRender = {handlers: previousHandlers, hooks: previousHooks,
+        values: previousValues, effectsLength: __effects.length};
     __handlers = [];
     __visitedComponents = new Set();
     __componentChildren = new Map();
     __currentComponent = null;
     __hookIndex = 0;
-    const node = h(App, {});
-    for (const path of __componentHooks.keys()) {
-        if (!__visitedComponents.has(path)) __componentHooks.delete(path);
+    try {
+        const node = h(App, {});
+        for (const path of __componentHooks.keys()) {
+            if (!__visitedComponents.has(path)) __componentHooks.delete(path);
+        }
+        return JSON.stringify(node);
+    } catch (error) {
+        __nickelRollbackRender();
+        throw error;
     }
-    return JSON.stringify(node);
 }
 
 function __nickelDispatch(action, value) {
@@ -1025,15 +1057,26 @@ impl PluginPanelApplication {
 }
 
 fn evaluate_tree(context: &mut Context, expression: &str) -> Result<PanelNode, String> {
-    let value = context
-        .eval(Source::from_bytes(expression))
-        .map_err(|error| error.to_string())?;
-    let text = value
-        .to_string(context)
-        .map_err(|error| error.to_string())?
-        .to_std_string_escaped();
-    let value: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
-    PanelNode::parse(&value)
+    let parsed = (|| {
+        let value = context
+            .eval(Source::from_bytes(expression))
+            .map_err(|error| error.to_string())?;
+        let text = value
+            .to_string(context)
+            .map_err(|error| error.to_string())?
+            .to_std_string_escaped();
+        let value: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+        PanelNode::parse(&value)
+    })();
+    let finalizer = if parsed.is_ok() {
+        "__nickelCommitRender()"
+    } else {
+        "__nickelRollbackRender()"
+    };
+    context
+        .eval(Source::from_bytes(finalizer))
+        .map_err(|error| format!("could not finalize plugin render: {error}"))?;
+    parsed
 }
 
 impl nickel_ui::Application for PluginPanelApplication {

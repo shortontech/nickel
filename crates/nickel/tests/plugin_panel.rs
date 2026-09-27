@@ -55,6 +55,89 @@ fn directory_package_runs_in_the_same_jsx_host() {
         vec![PluginEffect::ShowLauncher]
     );
 }
+
+#[test]
+fn failed_jsx_render_keeps_previous_handlers_and_recovers() {
+    let script = r#"
+        function App() {
+            const [broken, setBroken] = useState(false);
+            const [count, setCount] = useState(0);
+            if (!broken) useRef(null);
+            return h(Panel, {},
+                h(Button, {id: 'break', onClick: () => setBroken(true)}, 'Break'),
+                h(Button, {id: 'reset', onClick: () => setBroken(false)}, 'Reset'),
+                h(Button, {id: 'count', onClick: () => setCount(count + 1)}, 'Count: ' + count));
+        }
+    "#;
+    let mut host = UiHost::new(PluginPanelApplication::new(script).unwrap(), 320, 140);
+    let break_button = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Break".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(break_button, SemanticAction::Invoke(ActionKind::Activate));
+    assert!(
+        host.application()
+            .last_error()
+            .is_some_and(|error| error.contains("hook order changed"))
+    );
+    let reset = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Reset".into(),
+        })
+        .expect("previous valid tree remains visible")
+        .id;
+    host.perform_semantic_action(reset, SemanticAction::Invoke(ActionKind::Activate));
+    assert!(host.application().last_error().is_none());
+    let count = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Count: 0".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(count, SemanticAction::Invoke(ActionKind::Activate));
+    host.query_unique(&SemanticSelector::RoleAndName {
+        role: SemanticRole::Button,
+        name: "Count: 1".into(),
+    })
+    .expect("handlers still match the recovered tree");
+}
+
+#[test]
+fn rejected_native_tree_keeps_previous_jsx_handlers() {
+    let script = r#"
+        function App() {
+            const [invalid, setInvalid] = useState(false);
+            return h(Panel, {},
+                h(Button, {id: 'break', onClick: () => setInvalid(true)}, 'Break'),
+                h(Button, {id: 'reset', onClick: () => setInvalid(false)}, 'Reset'),
+                invalid ? h('unsupported-component', {}, 'Bad') : h(Text, {}, 'Valid'));
+        }
+    "#;
+    let mut host = UiHost::new(PluginPanelApplication::new(script).unwrap(), 320, 140);
+    let button = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Break".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(button, SemanticAction::Invoke(ActionKind::Activate));
+    assert!(host.application().last_error().is_some());
+    let reset = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Reset".into(),
+        })
+        .expect("previous tree is still visible")
+        .id;
+    host.perform_semantic_action(reset, SemanticAction::Invoke(ActionKind::Activate));
+    assert!(host.application().last_error().is_none());
+}
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     ActionKind, HostBatch, HostEvent, Point, SemanticAction, SemanticRole, SemanticSelector,
