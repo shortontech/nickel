@@ -1,8 +1,10 @@
 # Development panel
 
 This small JSX panel is the first plugin-host prototype. Nickel renders its
-`Panel`, `Row`, `Text`, and `Button` tags as native `nickel-ui` components. The
-JavaScript runtime provides `h`, `useState`, and `useRef`; React is not loaded.
+`Panel`, `Row`, `Text`, `Button`, and `Dialog` tags as native `nickel-ui`
+components. The JavaScript runtime provides `h`, `useState`, and `useRef`;
+React is not loaded. `plugin.json` declares the entry, surface geometry,
+output scope, and granted shell actions.
 
 Build the JSX with TypeScript's CLI (used only as a development compiler):
 
@@ -24,6 +26,12 @@ the bottom of each output (default 24). The example's ARGB `background` prop
 controls panel transparency. Restart the nested session after changing the
 script or offset.
 
+The example opens a component dialog. Its **Show** button requests the
+`launcher-show` capability, which Nickel checks against `plugin.json` before
+opening the launcher. The dialog uses space inside this prototype's 220-pixel
+surface; a separate managed dialog surface is part of the next runtime step.
+
 This prototype hosts one panel shape per output and one shared JavaScript app
-instance. It does not yet have plugin discovery, settings authorization,
-multiple panel definitions, hot reload, or a production crash boundary.
+instance. It does not yet have plugin discovery, Settings enable/disable or
+memory reporting, multiple panel definitions, hot reload, or a production
+crash boundary.

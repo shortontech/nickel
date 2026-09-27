@@ -675,6 +675,7 @@ pub struct LiveShell {
     panel_hover: Option<TaskbarHover>,
     panel_hover_output: Option<String>,
     panel_host: nickel_ui::UiHost<TaskbarUi>,
+    plugin_registry: nickel_core::plugins::PluginRegistry,
     plugin_panel_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     panel_hosts: HashMap<Option<String>, nickel_ui::UiHost<TaskbarUi>>,
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
@@ -1161,12 +1162,26 @@ impl LiveShell {
             1920,
             56,
         );
+        let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
+        plugin_registry.register(crate::plugin_panel::manifest().clone())?;
         let plugin_panel_host = if crate::plugin_panel::enabled() {
-            Some(nickel_ui::UiHost::new(
-                crate::plugin_panel::PluginPanelApplication::bundled()?,
-                crate::plugin_panel::WIDTH,
-                crate::plugin_panel::HEIGHT,
-            ))
+            let id = &crate::plugin_panel::manifest().id;
+            plugin_registry.set_enabled(id, true)?;
+            match crate::plugin_panel::PluginPanelApplication::bundled() {
+                Ok(application) => {
+                    plugin_registry.mark_running(id)?;
+                    Some(nickel_ui::UiHost::new(
+                        application,
+                        crate::plugin_panel::surface().width,
+                        crate::plugin_panel::surface().height,
+                    ))
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    plugin_registry.mark_failed(id, error)?;
+                    None
+                }
+            }
         } else {
             None
         };
@@ -1246,6 +1261,7 @@ impl LiveShell {
             panel_hover: None,
             panel_hover_output: None,
             panel_host,
+            plugin_registry,
             plugin_panel_host,
             panel_hosts: HashMap::new(),
             panel_projections: HashMap::new(),
@@ -1950,16 +1966,24 @@ impl LiveShell {
         match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Taskbar => self.panel_scene(width, height),
-            SurfaceRole::Panel => self
-                .plugin_panel_host
-                .as_mut()
-                .map_or_else(Vec::new, |host| {
-                    host.step(HostBatch {
-                        surface_size: Some((width, height)),
-                        ..HostBatch::default()
-                    });
-                    host.commands().to_vec()
-                }),
+            SurfaceRole::Panel => {
+                let Some(host) = self.plugin_panel_host.as_mut() else {
+                    return Vec::new();
+                };
+                let outcome = host.step(HostBatch {
+                    surface_size: Some((width, height)),
+                    ..HostBatch::default()
+                });
+                let commands = host.commands().to_vec();
+                let _ = self.plugin_registry.record_memory(
+                    &crate::plugin_panel::manifest().id,
+                    nickel_core::plugins::PluginMemory {
+                        native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                        ..nickel_core::plugins::PluginMemory::default()
+                    },
+                );
+                commands
+            }
             SurfaceRole::Launcher if self.run_visible => self.run_scene(width, height),
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => {
@@ -2514,6 +2538,10 @@ impl LiveShell {
             #[cfg(target_os = "windows")]
             SurfaceRole::TrustedControl => false,
         }
+    }
+
+    pub fn plugin_registry(&self) -> &nickel_core::plugins::PluginRegistry {
+        &self.plugin_registry
     }
 
     pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
@@ -3080,18 +3108,35 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
-        let Some(host) = self.plugin_panel_host.as_mut() else {
-            return false;
+        let (changed, effects) = {
+            let Some(host) = self.plugin_panel_host.as_mut() else {
+                return false;
+            };
+            let (event, authority) =
+                internal_normalized_ingress(input, None, "plugin-panel", host.inspect(), None);
+            let changed = host
+                .step(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![event],
+                    normalized_authorities: vec![authority],
+                    ..HostBatch::default()
+                })
+                .changed;
+            (changed, host.application_mut().take_effects())
         };
-        let (event, authority) =
-            internal_normalized_ingress(input, None, "plugin-panel", host.inspect(), None);
-        host.step(HostBatch {
-            surface_size: Some((width, height)),
-            events: vec![event],
-            normalized_authorities: vec![authority],
-            ..HostBatch::default()
-        })
-        .changed
+        changed | self.apply_plugin_effects(effects)
+    }
+
+    fn apply_plugin_effects(&mut self, effects: Vec<crate::plugin_panel::PluginEffect>) -> bool {
+        let mut changed = false;
+        for effect in effects {
+            match effect {
+                crate::plugin_panel::PluginEffect::ShowLauncher => {
+                    changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
+                }
+            }
+        }
+        changed
     }
 
     pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
@@ -3160,14 +3205,20 @@ impl LiveShell {
     ) -> bool {
         match role {
             SurfaceRole::Taskbar => self.panel_host_ui(event, width),
-            SurfaceRole::Panel => self.plugin_panel_host.as_mut().is_some_and(|host| {
-                host.step(HostBatch {
-                    surface_size: Some((width, height)),
-                    events: vec![HostEvent::Ui(event)],
-                    ..HostBatch::default()
-                })
-                .changed
-            }),
+            SurfaceRole::Panel => {
+                let Some(host) = self.plugin_panel_host.as_mut() else {
+                    return false;
+                };
+                let changed = host
+                    .step(HostBatch {
+                        surface_size: Some((width, height)),
+                        events: vec![HostEvent::Ui(event)],
+                        ..HostBatch::default()
+                    })
+                    .changed;
+                let effects = host.application_mut().take_effects();
+                changed | self.apply_plugin_effects(effects)
+            }
             SurfaceRole::Launcher => self.launcher_host_ui(event, width, height),
             SurfaceRole::ControlCenter => {
                 if !self.control_visible {

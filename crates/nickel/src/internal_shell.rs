@@ -275,7 +275,11 @@ impl InternalShellCoordinator {
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, Some(output.name.clone()), size));
             }
-            if crate::plugin_panel::enabled() {
+            if crate::plugin_panel::enabled()
+                && (crate::plugin_panel::surface().output
+                    == nickel_core::plugins::PluginOutputScope::All
+                    || index == 0)
+            {
                 let role = SurfaceRole::Panel;
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, Some(output.name.clone()), size));
@@ -1236,8 +1240,8 @@ fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) 
         SurfaceRole::Desktop | SurfaceRole::Lock => (width, height),
         SurfaceRole::Taskbar => (width, PANEL_HEIGHT),
         SurfaceRole::Panel => (
-            crate::plugin_panel::WIDTH.min(width),
-            crate::plugin_panel::HEIGHT.min(height),
+            crate::plugin_panel::surface().width.min(width),
+            crate::plugin_panel::surface().height.min(height),
         ),
         SurfaceRole::Launcher => launcher_size(width, height),
         SurfaceRole::ControlCenter => control_center_size(width, height),

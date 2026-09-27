@@ -12,6 +12,7 @@ pub mod launcher_preferences;
 pub mod on_screen_keyboard;
 pub mod optional_features;
 pub mod output_layout;
+pub mod plugins;
 pub mod quick_settings;
 pub mod resource_owner;
 pub mod run;

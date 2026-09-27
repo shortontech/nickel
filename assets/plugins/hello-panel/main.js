@@ -8,5 +8,11 @@ function App() {
             h(Text, null, "Nickel plugin panel"),
             h(Button, { onClick: () => setCount(count + 1) },
                 "Count: ",
-                count)));
+                count),
+            h(Button, { id: "open-dialog", onClick: () => nickel.openDialog("launcher-dialog") }, "Open dialog")),
+        h(Dialog, { id: "launcher-dialog", anchor: "open-dialog", open: true, width: 320, height: 120 },
+            h(Row, null,
+                h(Text, null, "Show the launcher?"),
+                h(Button, { onClick: () => nickel.request("show-launcher") }, "Show"),
+                h(Button, { onClick: () => { } }, "Cancel"))));
 }

@@ -1,0 +1,17 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.hello-panel",
+  "name": "Hello Panel",
+  "entry": "main.js",
+  "surfaces": [
+    {
+      "id": "main",
+      "kind": "panel",
+      "width": 440,
+      "height": 220,
+      "bottom_offset": 24,
+      "output": "all"
+    }
+  ],
+  "capabilities": ["launcher-show"]
+}

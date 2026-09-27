@@ -193,7 +193,11 @@ fn desired_output_surfaces(
                 (*role != SurfaceRole::Desktop || create_desktops)
                     && (*role != SurfaceRole::Taskbar || panel_outputs.contains(output))
                     && (*role != SurfaceRole::Panel
-                        || (cfg!(target_os = "windows") && crate::plugin_panel::enabled()))
+                        || (cfg!(target_os = "windows")
+                            && crate::plugin_panel::enabled()
+                            && (crate::plugin_panel::surface().output
+                                == nickel_core::plugins::PluginOutputScope::All
+                                || output_names.first() == Some(output))))
             })
             .map(|role| (output.clone(), role))
         })
@@ -2345,14 +2349,19 @@ fn surface_geometry(
         ),
         SurfaceRole::Panel => (
             "Nickel Plugin Panel",
-            geometry.x + geometry.width.saturating_sub(crate::plugin_panel::WIDTH) as i32 / 2,
+            geometry.x
+                + geometry
+                    .width
+                    .saturating_sub(crate::plugin_panel::surface().width) as i32
+                    / 2,
             geometry.y
                 + geometry.height.saturating_sub(
-                    crate::plugin_panel::HEIGHT
+                    crate::plugin_panel::surface()
+                        .height
                         .saturating_add(crate::plugin_panel::bottom_offset()),
                 ) as i32,
-            crate::plugin_panel::WIDTH.min(geometry.width),
-            crate::plugin_panel::HEIGHT.min(geometry.height),
+            crate::plugin_panel::surface().width.min(geometry.width),
+            crate::plugin_panel::surface().height.min(geometry.height),
             true,
         ),
         SurfaceRole::Launcher => (

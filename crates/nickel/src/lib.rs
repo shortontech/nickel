@@ -1821,7 +1821,9 @@ fn handle_shell_input(
             .map(|entry| entry.window().size())
             .unwrap_or_default();
         if state.plugin_panel_host_input(event, width, height) {
+            sync_visibility(shell, state);
             render_role(shell, state, role)?;
+            render_role(shell, state, SurfaceRole::Launcher)?;
         }
         return Ok(());
     }

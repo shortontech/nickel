@@ -3552,6 +3552,8 @@ dependencies = [
  "libc",
  "nickel-input",
  "nickel-storage",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
