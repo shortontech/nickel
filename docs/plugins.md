@@ -1,5 +1,9 @@
 # Developing a Nickel panel or dock plugin
 
+On Linux, panel and dock plugins register their own shell surface identity.
+Their declared size and bottom offset control compositor placement, and they
+do not replace the built-in taskbar readiness surface.
+
 Nickel loads a compiled JavaScript entry from a directory containing
 `plugin.json`. The [bundled hello panel](../assets/plugins/hello-panel/) is a
 minimal working example. The [taskbar](../assets/plugins/taskbar/) shows how a

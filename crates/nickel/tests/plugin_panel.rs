@@ -899,6 +899,7 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
             active: true,
             pinned: true,
             icon: true,
+            badges: Vec::new(),
         }],
         tray: vec![TaskbarPluginTrayItem {
             id: "mail".into(),

@@ -534,6 +534,7 @@ pub struct WinitShell {
     active_output_name: Option<String>,
     plugin_panel_enabled: bool,
     plugin_panel_surface: nickel_core::plugins::PluginSurface,
+    plugin_panel_owner: String,
     #[cfg(target_os = "windows")]
     launcher_surface_size: Option<(u32, u32)>,
     next_surface_diagnostic_generation: u64,
@@ -596,6 +597,7 @@ impl WinitShell {
             active_output_name: None,
             plugin_panel_enabled: crate::plugin_panel::enabled(),
             plugin_panel_surface: crate::plugin_panel::surface().clone(),
+            plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
             #[cfg(target_os = "windows")]
             launcher_surface_size: None,
             next_surface_diagnostic_generation: 0,
@@ -971,11 +973,35 @@ impl WinitShell {
 
     pub fn set_plugin_panel_surface(
         &mut self,
+        owner: &str,
         surface: &nickel_core::plugins::PluginSurface,
     ) -> Result<bool, String> {
-        if self.plugin_panel_surface == *surface {
+        if self.plugin_panel_owner == owner && self.plugin_panel_surface == *surface {
             return Ok(false);
         }
+        #[cfg(target_os = "linux")]
+        for existing in self
+            .surfaces
+            .iter()
+            .filter(|existing| existing.role == SurfaceRole::Panel && existing.display_connected)
+        {
+            crate::platform::register_shell_surface(
+                nickel_session_protocol::ShellSurfaceIdentity {
+                    application_id: existing.application_id.clone(),
+                    role: SessionShellRole::PluginSurface,
+                    output: Some(existing.output_name.clone()),
+                    plugin_surface: Some(nickel_session_protocol::PluginSurfacePlacement {
+                        plugin_id: owner.to_owned(),
+                        surface_id: surface.id.clone(),
+                        width: surface.width,
+                        height: surface.height,
+                        bottom_offset: surface.bottom_offset,
+                    }),
+                },
+            )
+            .map_err(|error| format!("failed to register plugin surface: {error}"))?;
+        }
+        self.plugin_panel_owner = owner.to_owned();
         self.plugin_panel_surface = surface.clone();
         self.sync_display_geometry()?;
         Ok(true)
@@ -2109,7 +2135,7 @@ impl WinitShell {
         let session_role = match role {
             SurfaceRole::Desktop => SessionShellRole::Desktop,
             SurfaceRole::Taskbar => SessionShellRole::Panel,
-            SurfaceRole::Panel => SessionShellRole::Panel,
+            SurfaceRole::Panel => SessionShellRole::PluginSurface,
             SurfaceRole::Launcher => SessionShellRole::Launcher,
             SurfaceRole::ControlCenter => SessionShellRole::ControlCenter,
             SurfaceRole::Notification => SessionShellRole::Notification,
@@ -2147,6 +2173,15 @@ impl WinitShell {
                     application_id: application_id.clone(),
                     role: session_role,
                     output,
+                    plugin_surface: (role == SurfaceRole::Panel).then(|| {
+                        nickel_session_protocol::PluginSurfacePlacement {
+                            plugin_id: self.plugin_panel_owner.clone(),
+                            surface_id: self.plugin_panel_surface.id.clone(),
+                            width: self.plugin_panel_surface.width,
+                            height: self.plugin_panel_surface.height,
+                            bottom_offset: self.plugin_panel_surface.bottom_offset,
+                        }
+                    }),
                 },
             )
             .map_err(|error| format!("failed to register shell surface: {error}"))?;

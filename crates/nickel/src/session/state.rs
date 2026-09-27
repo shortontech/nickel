@@ -7864,6 +7864,8 @@ struct RegisteredShellRole {
     role: ShellRole,
     output: Option<String>,
     surface: ObjectId,
+    application_id: Option<String>,
+    plugin_surface: Option<nickel_session_protocol::PluginSurfacePlacement>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7934,7 +7936,7 @@ fn shell_registration_is_active(
     expected_panel_outputs: &HashSet<String>,
 ) -> bool {
     match registration.role {
-        ShellRole::Desktop | ShellRole::Lock => registration
+        ShellRole::Desktop | ShellRole::PluginSurface | ShellRole::Lock => registration
             .output
             .as_ref()
             .is_some_and(|output| output_names.contains(output)),
@@ -11194,10 +11196,12 @@ impl NickelSession {
         window: &Window,
         role: ShellRole,
         output: Option<String>,
+        application_id: Option<String>,
+        plugin_surface: Option<nickel_session_protocol::PluginSurfacePlacement>,
     ) {
         if matches!(
             role,
-            ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
+            ShellRole::Desktop | ShellRole::Panel | ShellRole::PluginSurface | ShellRole::Lock
         ) && output.is_none()
         {
             return;
@@ -11209,6 +11213,8 @@ impl NickelSession {
             role,
             output,
             surface: surface.id(),
+            application_id,
+            plugin_surface,
         };
         // A title/app-id update on the same live surface may change its output
         // slot. Replace that registration rather than treating the original
@@ -11218,7 +11224,8 @@ impl NickelSession {
             .registered_shell_role_slots
             .iter()
             .filter(|existing| {
-                existing.role == registration.role
+                existing.role != ShellRole::PluginSurface
+                    && existing.role == registration.role
                     && existing.output == registration.output
                     && existing.surface != registration.surface
             })
@@ -12358,6 +12365,10 @@ impl NickelSession {
             // Keep it below the lock surface (100), but above the keyboard (60).
             window.override_z_index(90);
             self.place_screenshot_surface(&window);
+        }
+        if role == ShellRole::PluginSurface {
+            window.override_z_index(40);
+            self.relayout_shell_surfaces();
         }
         if role == ShellRole::OnScreenKeyboard {
             window.override_z_index(60);
@@ -13774,6 +13785,47 @@ impl NickelSession {
             let location = Self::shell_surface_location(&panel, geometry);
             self.map_buffered_window(panel.clone(), location, false);
             self.space.raise_element(&panel, false);
+        }
+        for plugin in self.utility_windows.clone() {
+            let Some(surface) = plugin.wl_surface() else {
+                continue;
+            };
+            let Some(registration) = self
+                .registered_shell_role_slots
+                .iter()
+                .find(|registration| {
+                    registration.surface == surface.id()
+                        && registration.role == ShellRole::PluginSurface
+                })
+            else {
+                continue;
+            };
+            let (Some(output_name), Some(placement)) = (
+                registration.output.as_deref(),
+                registration.plugin_surface.as_ref(),
+            ) else {
+                continue;
+            };
+            let Some(output_index) = output_index_for_shell_surface(output_name, &output_names)
+            else {
+                self.space.unmap_elem(&plugin);
+                continue;
+            };
+            let Some(output) = self.space.output_geometry(&outputs[output_index]) else {
+                continue;
+            };
+            let width = placement.width.min(output.size.w as u32) as i32;
+            let height = placement.height.min(output.size.h as u32) as i32;
+            let geometry = Geometry {
+                x: output.loc.x + (output.size.w - width) / 2,
+                y: output.loc.y + (output.size.h - height - placement.bottom_offset as i32).max(0),
+                width,
+                height,
+            };
+            self.configure_window(&plugin, geometry);
+            let location = Self::shell_surface_location(&plugin, geometry);
+            self.map_buffered_window(plugin.clone(), location, false);
+            self.space.raise_element(&plugin, false);
         }
         if self.launcher_visibility.is_visible()
             && let Some(launcher) = self.launcher_window.clone()

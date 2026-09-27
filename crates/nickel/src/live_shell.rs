@@ -3110,6 +3110,10 @@ impl LiveShell {
         &self.plugin_panel_surface
     }
 
+    pub(crate) fn plugin_panel_owner(&self) -> &str {
+        &self.plugin_panel_owner
+    }
+
     #[cfg(test)]
     pub(crate) fn lock_password_len(&self) -> usize {
         self.lock_host.application().password.len()

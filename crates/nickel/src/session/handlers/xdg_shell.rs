@@ -1107,6 +1107,7 @@ impl NickelSession {
                     | ShellRole::Screenshot
                     | ShellRole::OnScreenKeyboard
                     | ShellRole::Recovery
+                    | ShellRole::PluginSurface
             )
         );
         if let Some(id) = registry_id {
@@ -1183,6 +1184,12 @@ impl NickelSession {
                     identity
                         .as_ref()
                         .and_then(|identity| identity.output.clone()),
+                    identity
+                        .as_ref()
+                        .map(|identity| identity.application_id.clone()),
+                    identity
+                        .as_ref()
+                        .and_then(|identity| identity.plugin_surface.clone()),
                 );
             }
         }

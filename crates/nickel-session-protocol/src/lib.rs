@@ -263,6 +263,17 @@ pub struct ShellSurfaceIdentity {
     pub application_id: String,
     pub role: ShellRole,
     pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_surface: Option<PluginSurfacePlacement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSurfacePlacement {
+    pub plugin_id: String,
+    pub surface_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub bottom_offset: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1759,6 +1770,7 @@ const fn default_output_scale_120() -> u32 {
 pub enum ShellRole {
     Desktop,
     Panel,
+    PluginSurface,
     Launcher,
     ControlCenter,
     ContextMenu,
@@ -1777,6 +1789,7 @@ impl ShellRole {
         match self {
             Self::Desktop => "io.nickel.shell.desktop",
             Self::Panel => "io.nickel.shell.panel",
+            Self::PluginSurface => "io.nickel.shell.plugin-surface",
             Self::Launcher => "io.nickel.shell.launcher",
             Self::ControlCenter => "io.nickel.shell.control-center",
             Self::ContextMenu => "io.nickel.shell.context-menu",
@@ -1795,6 +1808,7 @@ impl ShellRole {
         [
             Self::Desktop,
             Self::Panel,
+            Self::PluginSurface,
             Self::Launcher,
             Self::ControlCenter,
             Self::ContextMenu,
@@ -2297,6 +2311,7 @@ mod tests {
                     application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.7"),
                     role: ShellRole::Panel,
                     output: Some("Unknown - Display - DP-2".into()),
+                    plugin_surface: None,
                 },
             }),
         };
@@ -2304,6 +2319,34 @@ mod tests {
             decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn plugin_surface_identity_round_trips_independently_of_taskbar() {
+        let identity = ShellSurfaceIdentity {
+            application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.8"),
+            role: ShellRole::PluginSurface,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.example.dock".into(),
+                surface_id: "main".into(),
+                width: 360,
+                height: 64,
+                bottom_offset: 24,
+            }),
+        };
+        let request = ClientEnvelope {
+            token: "capability".into(),
+            request_id: 42,
+            request: Request::Command(Command::RegisterShellSurface {
+                identity: identity.clone(),
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+        assert_ne!(identity.role, ShellRole::Panel);
     }
 
     #[test]

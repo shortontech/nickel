@@ -6167,6 +6167,8 @@ fn destroying_a_shell_surface_retires_only_its_registration() {
         role: ShellRole::Launcher,
         output: None,
         surface: retired.clone(),
+        application_id: None,
+        plugin_surface: None,
     }];
     retire_shell_surface(&mut registrations, &retired);
     assert!(registrations.is_empty());
@@ -6178,6 +6180,8 @@ fn destroying_a_shell_surface_retires_only_its_registration() {
         role: ShellRole::Launcher,
         output: None,
         surface: retained,
+        application_id: None,
+        plugin_surface: None,
     });
     assert_eq!(registrations.len(), 1);
 }
@@ -6189,6 +6193,8 @@ fn live_surface_role_transitions_invalidate_historical_readiness() {
         role: ShellRole::Launcher,
         output: None,
         surface: surface.clone(),
+        application_id: None,
+        plugin_surface: None,
     }];
 
     assert!(!shell_registration_role_changed(
@@ -6215,21 +6221,29 @@ fn disconnected_output_roles_are_dormant_until_the_output_returns() {
             role: ShellRole::Desktop,
             output: Some("winit".into()),
             surface: ObjectId::null(),
+            application_id: None,
+            plugin_surface: None,
         },
         RegisteredShellRole {
             role: ShellRole::Desktop,
             output: Some("DP-test".into()),
             surface: ObjectId::null(),
+            application_id: None,
+            plugin_surface: None,
         },
         RegisteredShellRole {
             role: ShellRole::Panel,
             output: Some("DP-test".into()),
             surface: ObjectId::null(),
+            application_id: None,
+            plugin_surface: None,
         },
         RegisteredShellRole {
             role: ShellRole::Lock,
             output: Some("DP-test".into()),
             surface: ObjectId::null(),
+            application_id: None,
+            plugin_surface: None,
         },
     ];
     let connected = HashSet::from(["winit".to_owned(), "DP-test".to_owned()]);
@@ -6261,6 +6275,8 @@ fn panel_registration_tracks_the_configured_output_set() {
         role: ShellRole::Panel,
         output: Some("DP-test".into()),
         surface: ObjectId::null(),
+        application_id: None,
+        plugin_surface: None,
     };
     let connected = HashSet::from(["winit".to_owned(), "DP-test".to_owned()]);
     let primary_only = HashSet::from(["winit".to_owned()]);
@@ -6296,11 +6312,33 @@ fn locked_test_output_disconnect_projects_readiness_to_live_topology() {
                 role,
                 output: Some("DP-test".into()),
                 surface: ObjectId::null(),
+                application_id: None,
+                plugin_surface: None,
             });
     }
     let connected = session.protocol_shell_readiness();
     assert_eq!((connected.outputs, connected.desktops), (1, 1));
     assert_eq!((connected.panels, connected.locks), (1, 1));
+
+    for id in ["mail", "dock"] {
+        session
+            .registered_shell_role_slots
+            .push(RegisteredShellRole {
+                role: ShellRole::PluginSurface,
+                output: Some("DP-test".into()),
+                surface: ObjectId::null(),
+                application_id: Some(format!("io.nickel.shell.surface.42.{id}")),
+                plugin_surface: Some(nickel_session_protocol::PluginSurfacePlacement {
+                    plugin_id: id.into(),
+                    surface_id: "main".into(),
+                    width: 360,
+                    height: 64,
+                    bottom_offset: 24,
+                }),
+            });
+    }
+    let with_plugins = session.protocol_shell_readiness();
+    assert_eq!((with_plugins.panels, with_plugins.locks), (1, 1));
 
     session.locked = true;
     session
@@ -6312,7 +6350,7 @@ fn locked_test_output_disconnect_projects_readiness_to_live_topology() {
     let disconnected = session.protocol_shell_readiness();
     assert_eq!((disconnected.outputs, disconnected.desktops), (0, 0));
     assert_eq!((disconnected.panels, disconnected.locks), (0, 0));
-    assert!(session.registered_shell_role_slots.len() == 3);
+    assert_eq!(session.registered_shell_role_slots.len(), 5);
 }
 
 #[test]
@@ -9578,6 +9616,7 @@ fn surface_identity_registration_requires_the_authenticated_shell() {
                 application_id: "io.nickel.shell.surface.42.1".into(),
                 role: ShellRole::Desktop,
                 output: Some("DP-1".into()),
+                plugin_surface: None,
             },
         }
     ));

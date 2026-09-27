@@ -1099,7 +1099,10 @@ impl NickelSession {
             SessionCommand::RegisterShellSurface { mut identity } => {
                 let output_scoped = matches!(
                     identity.role,
-                    ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
+                    ShellRole::Desktop
+                        | ShellRole::Panel
+                        | ShellRole::PluginSurface
+                        | ShellRole::Lock
                 );
                 if !identity
                     .application_id
@@ -1107,6 +1110,19 @@ impl NickelSession {
                     || identity.application_id.len()
                         > nickel_session_protocol::MAX_WINDOW_APP_ID_BYTES
                     || identity.output.is_some() != output_scoped
+                    || (identity.role == ShellRole::PluginSurface)
+                        != identity.plugin_surface.is_some()
+                    || identity.plugin_surface.as_ref().is_some_and(|surface| {
+                        surface.plugin_id.is_empty()
+                            || surface.plugin_id.len() > 128
+                            || surface.surface_id.is_empty()
+                            || surface.surface_id.len() > 128
+                            || surface.width == 0
+                            || surface.width > 8192
+                            || surface.height == 0
+                            || surface.height > 8192
+                            || surface.bottom_offset > 8192
+                    })
                 {
                     return protocol_error(
                         ErrorCode::InvalidRequest,
@@ -1128,7 +1144,18 @@ impl NickelSession {
                     return protocol_error(ErrorCode::ResourceLimit, "shell surface limit reached");
                 }
                 self.shell_surface_identities
-                    .insert(identity.application_id.clone(), identity);
+                    .insert(identity.application_id.clone(), identity.clone());
+                if identity.role == ShellRole::PluginSurface {
+                    for registration in &mut self.registered_shell_role_slots {
+                        if registration.application_id.as_deref()
+                            == Some(identity.application_id.as_str())
+                        {
+                            registration.output = identity.output.clone();
+                            registration.plugin_surface = identity.plugin_surface.clone();
+                        }
+                    }
+                    self.relayout_shell_surfaces();
+                }
             }
             SessionCommand::RequestOnScreenKeyboard => self.request_on_screen_keyboard(),
             SessionCommand::ConfigureOnScreenKeyboard {
@@ -2378,6 +2405,7 @@ impl NickelSession {
             Some(match role {
                 ShellRole::Desktop => SurfaceRole::Desktop,
                 ShellRole::Panel => SurfaceRole::Taskbar,
+                ShellRole::PluginSurface => SurfaceRole::Panel,
                 ShellRole::Launcher => SurfaceRole::Launcher,
                 ShellRole::ControlCenter => SurfaceRole::ControlCenter,
                 ShellRole::ContextMenu => SurfaceRole::WindowContextMenu,

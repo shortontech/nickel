@@ -5202,6 +5202,7 @@ impl WindowsRemoteControl {
                                     Ok(changed) => {
                                         if changed
                                             && let Err(reason) = shell.set_plugin_panel_surface(
+                                                state.plugin_panel_owner(),
                                                 state.plugin_panel_surface(),
                                             )
                                         {
