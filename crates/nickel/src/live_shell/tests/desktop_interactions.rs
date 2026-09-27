@@ -231,6 +231,9 @@
         assert!(!shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::DesktopOpen { id: "7:9".into() },
         ]));
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::DesktopSelect { id: "7:9".into() },
+        ]));
         assert!(requests.try_recv().is_err());
 
         shell.desktop_host.application_mut().layout.reconcile(vec![(
@@ -240,6 +243,9 @@
         shell.scene(SurfaceRole::Desktop, 400, 300);
         assert!(!shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::DesktopOpen { id: "7:9".into() },
+        ]));
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::DesktopSelect { id: "7:9".into() },
         ]));
         for click in 0..2 {
             assert!(shell.desktop_host.application_mut().pointer_press(point, false, Default::default()));

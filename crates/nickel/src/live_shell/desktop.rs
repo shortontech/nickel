@@ -45,6 +45,7 @@ pub struct DesktopApplication {
     pub(super) pointer_dragged: bool,
     pub(super) last_click: Option<(DesktopEntryId, Instant)>,
     pub(super) pending_plugin_open: Option<DesktopEntryId>,
+    pub(super) pending_plugin_select: Option<(DesktopEntryId, SelectionModifiers)>,
     pub(super) modifiers: SelectionModifiers,
     pub(super) context_menu: Option<DesktopMenuContext>,
     #[cfg(target_os = "windows")]
@@ -222,6 +223,7 @@ impl DesktopApplication {
             pointer_dragged: false,
             last_click: None,
             pending_plugin_open: None,
+            pending_plugin_select: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             #[cfg(target_os = "windows")]
@@ -501,8 +503,27 @@ impl DesktopApplication {
         secondary: bool,
         modifiers: SelectionModifiers,
     ) -> bool {
+        self.pointer_press_with_selection(local, secondary, modifiers, false)
+    }
+
+    pub(super) fn pointer_press_for_plugin(
+        &mut self,
+        local: DesktopPoint,
+        modifiers: SelectionModifiers,
+    ) -> bool {
+        self.pointer_press_with_selection(local, false, modifiers, true)
+    }
+
+    fn pointer_press_with_selection(
+        &mut self,
+        local: DesktopPoint,
+        secondary: bool,
+        modifiers: SelectionModifiers,
+        defer_selection: bool,
+    ) -> bool {
         self.pointer_position = local;
         self.pointer_seen = true;
+        self.pending_plugin_select = None;
         let hit = self.hit(local);
         if secondary {
             self.replacing_context_menu();
@@ -527,7 +548,11 @@ impl DesktopApplication {
         }
         self.dismiss_context_menu(DesktopMenuDismissReason::OutsidePress);
         if let Some(id) = hit {
-            self.layout.select(id, modifiers);
+            if defer_selection {
+                self.pending_plugin_select = Some((id, modifiers));
+            } else {
+                self.layout.select(id, modifiers);
+            }
             self.pointer_down = Some((id, local));
             self.selection_start = None;
             self.pointer_dragged = false;
@@ -628,6 +653,7 @@ impl DesktopApplication {
     pub(super) fn cancel_pointer_transaction(&mut self) -> bool {
         let changed = self.pointer_down.take().is_some() || self.selection_start.take().is_some();
         self.pointer_dragged = false;
+        self.pending_plugin_select = None;
         changed
     }
 
@@ -1911,6 +1937,7 @@ impl DesktopApplication {
             pointer_dragged: false,
             last_click: None,
             pending_plugin_open: None,
+            pending_plugin_select: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             #[cfg(target_os = "windows")]

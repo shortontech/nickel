@@ -3025,6 +3025,8 @@ impl LiveShell {
             nickel_input::InputEvent::Key(_)
                 | nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button { .. })
         );
+        let plugin_desktop_active =
+            self.plugin_desktop_host.is_some() && self.desktop_host.application().plugin_background;
         let application = self.desktop_host.application_mut();
         let changed = match event {
             nickel_input::InputEvent::Key(key) => application.key(&key),
@@ -3041,7 +3043,11 @@ impl LiveShell {
                 if edge == nickel_input::KeyEdge::Pressed
                     && button == nickel_input::PointerButton::Primary
                 {
-                    application.pointer_press(point, false, application.modifiers)
+                    if plugin_desktop_active {
+                        application.pointer_press_for_plugin(point, application.modifiers)
+                    } else {
+                        application.pointer_press(point, false, application.modifiers)
+                    }
                 } else if button == nickel_input::PointerButton::Primary {
                     application.pointer_release(point, Instant::now())
                 } else {
@@ -3072,7 +3078,9 @@ impl LiveShell {
             }
             _ => false,
         };
-        let changed = changed | (reveal_selection && application.reveal_active());
+        let changed = changed | self.dispatch_desktop_plugin_select();
+        let changed =
+            changed | (reveal_selection && self.desktop_host.application_mut().reveal_active());
         let changed = changed | self.dispatch_desktop_plugin_open();
         if changed && coalesce_motion {
             self.desktop_application_dirty = true;
@@ -3115,6 +3123,41 @@ impl LiveShell {
             self.apply_plugin_effects(effects)
         } else {
             self.desktop_host.application_mut().activate(entry);
+            true
+        }
+    }
+
+    fn dispatch_desktop_plugin_select(&mut self) -> bool {
+        let Some((entry, modifiers)) = self
+            .desktop_host
+            .application_mut()
+            .pending_plugin_select
+            .take()
+        else {
+            return false;
+        };
+        let id = format!("{}:{}", entry.0.0, entry.0.1);
+        let (handled, effects) =
+            self.plugin_desktop_host
+                .as_mut()
+                .map_or((false, Vec::new()), |host| {
+                    let handled = host.application_mut().select_desktop_tile(&id);
+                    let effects = host.application_mut().take_effects();
+                    if handled {
+                        host.step(HostBatch {
+                            application_changed: true,
+                            ..HostBatch::default()
+                        });
+                    }
+                    (handled, effects)
+                });
+        if handled {
+            self.apply_plugin_effects(effects)
+        } else {
+            self.desktop_host
+                .application_mut()
+                .layout
+                .select(entry, modifiers);
             true
         }
     }
@@ -4753,6 +4796,25 @@ impl LiveShell {
             match effect {
                 crate::plugin_panel::PluginEffect::ShowLauncher => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
+                }
+                crate::plugin_panel::PluginEffect::DesktopSelect { id } => {
+                    let entry = id.split_once(':').and_then(|(first, second)| {
+                        Some(nickel_file::desktop::DesktopEntryId(
+                            nickel_file::FileIdentity(first.parse().ok()?, second.parse().ok()?),
+                        ))
+                    });
+                    if let Some(entry) = entry.filter(|_| self.plugin_desktop_host.is_some()) {
+                        let desktop = self.desktop_host.application();
+                        let visible =
+                            desktop.layout.items().iter().any(|item| {
+                                item.id == entry && item.output == desktop.active_output
+                            });
+                        if visible {
+                            let desktop = self.desktop_host.application_mut();
+                            desktop.layout.select(entry, desktop.modifiers);
+                            changed = true;
+                        }
+                    }
                 }
                 crate::plugin_panel::PluginEffect::DesktopOpen { id } => {
                     let entry = id.split_once(':').and_then(|(first, second)| {

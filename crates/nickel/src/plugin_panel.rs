@@ -249,6 +249,8 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onContextMenu) - 1 : null;
     const dragAction = typeof props?.onDrag === 'function'
         ? __handlers.push(props.onDrag) - 1 : null;
+    const selectAction = typeof props?.onSelect === 'function'
+        ? __handlers.push(props.onSelect) - 1 : null;
     const closeAction = typeof props?.onClose === 'function'
         ? __handlers.push(props.onClose) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
@@ -262,7 +264,7 @@ function h(kind, props, ...children) {
         item: props?.item, count: props?.count,
         asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
-        showLabel: props?.showLabel, contextAction, dragAction, closeAction,
+        showLabel: props?.showLabel, contextAction, dragAction, selectAction, closeAction,
         value: props?.value, placeholder: props?.placeholder,
         percent: props?.percent,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
@@ -369,6 +371,7 @@ enum PanelNode {
     FileTile {
         id: String,
         action: Option<usize>,
+        select_action: Option<usize>,
         asset: String,
         label: String,
         x: f32,
@@ -490,6 +493,25 @@ impl PanelNode {
         }
     }
 
+    fn file_tile_select_action(&self, id: &str) -> Option<usize> {
+        match self {
+            Self::FileTile {
+                id: tile_id,
+                select_action,
+                ..
+            } if tile_id == id => *select_action,
+            Self::Box { children, .. }
+            | Self::Surface { children, .. }
+            | Self::Panel { children, .. }
+            | Self::Row(children)
+            | Self::Column(children)
+            | Self::ScrollView { children, .. } => children
+                .iter()
+                .find_map(|child| child.file_tile_select_action(id)),
+            _ => None,
+        }
+    }
+
     fn parse(value: &Value) -> Result<Self, String> {
         let kind = value
             .get("kind")
@@ -588,6 +610,10 @@ impl PanelNode {
                         .to_owned(),
                     action: value
                         .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
+                    select_action: value
+                        .get("selectAction")
                         .and_then(Value::as_u64)
                         .and_then(|action| usize::try_from(action).ok()),
                     asset: value
@@ -1010,6 +1036,7 @@ impl PanelNode {
             Self::FileTile {
                 id,
                 action,
+                select_action: _,
                 asset,
                 label,
                 x,
@@ -1501,6 +1528,9 @@ pub struct DesktopPluginWidget {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
+    DesktopSelect {
+        id: String,
+    },
     DesktopOpen {
         id: String,
     },
@@ -2570,6 +2600,17 @@ impl PluginPanelApplication {
         self.last_error.is_none()
     }
 
+    pub fn select_desktop_tile(&mut self, id: &str) -> bool {
+        if self.manifest.id != desktop_manifest().id {
+            return false;
+        }
+        let Some(action) = self.node.file_tile_select_action(id) else {
+            return false;
+        };
+        nickel_ui::Application::update(self, PluginMessage::Click(action));
+        self.last_error.is_none()
+    }
+
     pub fn take_effects(&mut self) -> Vec<PluginEffect> {
         std::mem::take(&mut self.effects)
     }
@@ -2749,6 +2790,27 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::DesktopOpen { id: id.to_owned() });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("desktop-select")
+                            && self.manifest.id == desktop_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DesktopRead) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("desktop file ID is missing".into());
+                                return;
+                            };
+                            let valid_id = id.split_once(':').is_some_and(|(first, second)| {
+                                first.parse::<u64>().is_ok() && second.parse::<u64>().is_ok()
+                            });
+                            if !valid_id || self.node.file_tile_select_action(id).is_none() {
+                                self.last_error = Some("desktop file ID is stale".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::DesktopSelect { id: id.to_owned() });
                         }
                         _ if effect.get("type").and_then(Value::as_str) == Some("run-submit")
                             && self.manifest.id == run_manifest().id
@@ -3589,6 +3651,32 @@ mod tests {
         invalid.source = invalid.source.replace("Math.min(100, unread * 5)", "101");
         assert_ne!(invalid.source, package.source);
         assert!(PluginPanelApplication::validate_package(&invalid).is_err());
+    }
+
+    #[test]
+    fn bundled_desktop_tile_selection_requests_a_typed_effect() {
+        let data = serde_json::json!({
+            "width": 400, "height": 300, "background": 0xff101820_u32,
+            "wallpaper": false, "surfaceColor": 0xff202830_u32,
+            "text": 0xfff0f0f0_u32, "error": null, "widgets": [],
+            "tiles": [{
+                "id": "7:9", "asset": "file", "label": "Example",
+                "x": 0, "y": 0, "width": 90, "height": 110,
+                "selected": false, "hovered": false, "dragging": false,
+                "color": 0xffffffff_u32, "outline": 0xff101820_u32,
+                "hoverBackground": 0xff202830_u32,
+                "selectedBackground": 0xff304050_u32,
+                "accent": 0xff507090_u32, "complement": 0xff90a0b0_u32,
+            }],
+        });
+        let mut application = PluginPanelApplication::desktop_with_data(&data).unwrap();
+        assert!(application.select_desktop_tile("7:9"));
+        assert_eq!(
+            application.take_effects(),
+            vec![PluginEffect::DesktopSelect { id: "7:9".into() }]
+        );
+        assert!(!application.select_desktop_tile("7:10"));
+        assert!(application.take_effects().is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // @jsx h
 // Nickel supplies bounded desktop data and image assets. JSX owns presentation
-// and requests file activation; Rust validates the current file identity.
+// and requests selection or activation; Rust validates the current file identity.
 /** @typedef {{ label: string, value: string, percent: number, color: number }} DesktopWidget */
 /** @typedef {{ width: number, height: number, background: number,
  * wallpaper: boolean, tiles: NickelFileTileProps[], widgets: DesktopWidget[], error: string | null,
@@ -9,7 +9,7 @@ function App() {
     const data = /** @type {DesktopData} */ ( /** @type {unknown} */(nickel.data));
     return h(Surface, { width: data.width, height: data.height, background: data.background },
         data.wallpaper ? h(Image, { asset: "wallpaper", width: data.width, height: data.height, fit: "stretch" }) : null,
-        (data.tiles || []).map(tile => h(FileTile, { key: tile.id, ...tile, onClick: () => nickel.request({ type: "desktop-open", id: tile.id }) })),
+        (data.tiles || []).map(tile => h(FileTile, { key: tile.id, ...tile, onSelect: () => nickel.request({ type: "desktop-select", id: tile.id }), onClick: () => nickel.request({ type: "desktop-open", id: tile.id }) })),
         (data.widgets || []).slice(0, 3).map((widget, index) => h(Box, { key: index, x: Math.max(0, data.width - 224), y: 20 + index * 92, width: Math.min(204, data.width), height: 76, background: data.surfaceColor, radius: 10 },
             h(Column, null,
                 h(Text, { color: data.text }, widget.label),

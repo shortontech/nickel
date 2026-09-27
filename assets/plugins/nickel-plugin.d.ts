@@ -118,6 +118,7 @@ interface NickelFileTileProps extends NickelProps {
     accent: NickelColor;
     complement: NickelColor;
     onClick?: NickelClick;
+    onSelect?: NickelClick;
 }
 
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
