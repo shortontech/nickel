@@ -616,25 +616,44 @@ impl PanelNode {
         }
     }
 
-    fn dialog(&self) -> Option<&Self> {
+    fn dialog(&self, requested_id: &str) -> Option<&Self> {
         match self {
-            Self::Dialog { .. } => Some(self),
+            Self::Dialog { id, .. } if id == requested_id => Some(self),
             Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
-            | Self::ScrollView { children, .. } => children.iter().find_map(Self::dialog),
+            | Self::ScrollView { children, .. } => {
+                children.iter().find_map(|child| child.dialog(requested_id))
+            }
             _ => None,
         }
     }
 
-    fn menu(&self) -> Option<&Self> {
+    fn menu(&self, requested_id: &str) -> Option<&Self> {
         match self {
-            Self::Menu { .. } => Some(self),
+            Self::Menu { id, .. } if id == requested_id => Some(self),
             Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
-            | Self::ScrollView { children, .. } => children.iter().find_map(Self::menu),
+            | Self::ScrollView { children, .. } => {
+                children.iter().find_map(|child| child.menu(requested_id))
+            }
             _ => None,
+        }
+    }
+
+    fn transients<'a>(&'a self, output: &mut Vec<&'a Self>) {
+        match self {
+            Self::Dialog { .. } | Self::Menu { .. } => output.push(self),
+            Self::Panel { children, .. }
+            | Self::Row(children)
+            | Self::Column(children)
+            | Self::ScrollView { children, .. } => {
+                for child in children {
+                    child.transients(output);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -1476,7 +1495,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
-                            match node.dialog() {
+                            match node.dialog(id) {
                                 Some(PanelNode::Dialog {
                                     id: declared,
                                     anchor,
@@ -1497,7 +1516,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         Some(effect) if effect.starts_with("open-menu:") => {
                             let id = &effect["open-menu:".len()..];
-                            match node.menu() {
+                            match node.menu(id) {
                                 Some(PanelNode::Menu {
                                     id: declared,
                                     anchor,
@@ -1813,56 +1832,61 @@ impl nickel_ui::Application for PluginPanelApplication {
 
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
         let mut overlays = Vec::new();
-        if let Some(PanelNode::Dialog {
-            id,
-            anchor,
-            open: true,
-            width,
-            height,
-            children,
-        }) = self.node.dialog()
-        {
-            let mut content = Column::new().fill_width();
-            for child in children {
-                content = content.child(child.view(&self.images));
-            }
-            overlays.push(FrameOverlay::surface(
-                TransientSurface::dialog(
-                    format!("plugin-{id}"),
-                    OverlayAnchor::Node(UiId::from(anchor.clone())),
-                    Size::new(*width as f32, *height as f32),
-                    OverlayStyle {
-                        background: 0xf12b_303c,
-                        foreground: 0xffffff,
-                        border: 0x657188,
-                        selected: 0x405a82,
-                        radius: 12,
-                    },
-                ),
-                content,
-            ));
-        }
-        if let Some(PanelNode::Menu {
-            id,
-            anchor,
-            open: true,
-            items,
-        }) = self.node.menu()
-        {
-            let mut menu = OverlayMenu::new(
-                format!("plugin-menu-{id}"),
-                OverlayAnchor::Node(UiId::from(anchor.clone())),
-            );
-            for item in items {
-                if let PanelNode::MenuItem { id, label, action } = item {
-                    menu = menu.item(OverlayMenuItem::action(
-                        id.clone(),
-                        label.clone(),
-                        PluginMessage::Click(*action),
+        let mut transients = Vec::new();
+        self.node.transients(&mut transients);
+        for transient in transients {
+            match transient {
+                PanelNode::Dialog {
+                    id,
+                    anchor,
+                    open: true,
+                    width,
+                    height,
+                    children,
+                } => {
+                    let mut content = Column::new().fill_width();
+                    for child in children {
+                        content = content.child(child.view(&self.images));
+                    }
+                    overlays.push(FrameOverlay::surface(
+                        TransientSurface::dialog(
+                            format!("plugin-{id}"),
+                            OverlayAnchor::Node(UiId::from(anchor.clone())),
+                            Size::new(*width as f32, *height as f32),
+                            OverlayStyle {
+                                background: 0xf12b_303c,
+                                foreground: 0xffffff,
+                                border: 0x657188,
+                                selected: 0x405a82,
+                                radius: 12,
+                            },
+                        ),
+                        content,
                     ));
                 }
+                PanelNode::Menu {
+                    id,
+                    anchor,
+                    open: true,
+                    items,
+                } => {
+                    let mut menu = OverlayMenu::new(
+                        format!("plugin-menu-{id}"),
+                        OverlayAnchor::Node(UiId::from(anchor.clone())),
+                    );
+                    for item in items {
+                        if let PanelNode::MenuItem { id, label, action } = item {
+                            menu = menu.item(OverlayMenuItem::action(
+                                id.clone(),
+                                label.clone(),
+                                PluginMessage::Click(*action),
+                            ));
+                        }
+                    }
+                    overlays.push(FrameOverlay::Menu(menu));
+                }
+                _ => {}
             }
-            overlays.push(FrameOverlay::Menu(menu));
         }
         overlays
     }
@@ -1893,6 +1917,45 @@ mod tests {
         assert!(format!("{:?}", panel.node).contains("Count: 0"));
         panel.update(PluginMessage::Click(0));
         assert!(format!("{:?}", panel.node).contains("Count: 1"));
+        assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn bundled_panel_dialog_opens_and_cancels() {
+        let mut panel = PluginPanelApplication::bundled().expect("bundled plugin loads");
+        panel.update(PluginMessage::Click(1));
+        assert!(panel.pending_transient.is_some());
+        assert!(matches!(
+            panel.node.dialog("launcher-dialog"),
+            Some(PanelNode::Dialog { open: true, .. })
+        ));
+        panel.pending_transient.take();
+        panel.update(PluginMessage::Click(3));
+        assert!(matches!(
+            panel.node.dialog("launcher-dialog"),
+            Some(PanelNode::Dialog { open: false, .. })
+        ));
+        assert!(panel.take_effects().is_empty());
+        assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn later_declared_dialog_can_open_by_id() {
+        let source = r#"
+            function App() {
+                return h(Panel, null,
+                    h(Button, {id: 'first-button', onClick: () => nickel.openDialog('first')}, 'First'),
+                    h(Button, {id: 'second-button', onClick: () => nickel.openDialog('second')}, 'Second'),
+                    h(Dialog, {id: 'first', anchor: 'first-button', open: true}, h(Text, null, 'First dialog')),
+                    h(Dialog, {id: 'second', anchor: 'second-button', open: true}, h(Text, null, 'Second dialog')));
+            }
+        "#;
+        let mut panel = PluginPanelApplication::new(source).unwrap();
+        panel.update(PluginMessage::Click(1));
+        assert_eq!(
+            panel.pending_transient,
+            Some((OverlayId::new("plugin-second"), UiId::from("second-button")))
+        );
         assert!(panel.last_error().is_none());
     }
 
