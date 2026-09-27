@@ -5,6 +5,7 @@ on:
     branches:
       - feature/plugins
     paths:
+      - ".github/workflows/plugin-windows.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/nickel/**"
