@@ -2738,6 +2738,7 @@ mod tests {
                 surfaces: vec!["main: window".into()],
                 memory: nickel_session_protocol::PluginMemorySnapshot {
                     native_ui_bytes: Some(4096),
+                    tracked_peak_bytes: Some(8192),
                     ..Default::default()
                 },
             }],
@@ -2758,6 +2759,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(labels.contains(&"applications-read, applications-launch"));
         assert!(labels.contains(&"4 KiB"));
+        assert!(labels.contains(&"8 KiB"));
         assert!(labels.contains(&"Unavailable"));
     }
 

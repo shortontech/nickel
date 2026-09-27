@@ -2704,6 +2704,7 @@ impl LiveShell {
                         js_heap_bytes: entry.memory.js_heap_bytes,
                         native_ui_bytes: entry.memory.native_ui_bytes,
                         texture_bytes: entry.memory.texture_bytes,
+                        tracked_peak_bytes: entry.tracked_peak_bytes,
                         timers: entry.memory.timers,
                         subscriptions: entry.memory.subscriptions,
                     },

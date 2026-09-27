@@ -285,6 +285,18 @@ pub struct PluginMemory {
     pub subscriptions: u32,
 }
 
+impl PluginMemory {
+    pub fn tracked_bytes(&self) -> Option<u64> {
+        let measured = [self.js_heap_bytes, self.native_ui_bytes, self.texture_bytes];
+        measured.iter().any(Option::is_some).then(|| {
+            measured
+                .into_iter()
+                .flatten()
+                .fold(0_u64, u64::saturating_add)
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginHealth {
     Disabled,
@@ -299,6 +311,7 @@ pub struct RegisteredPlugin {
     pub desired_enabled: bool,
     pub health: PluginHealth,
     pub memory: PluginMemory,
+    pub tracked_peak_bytes: Option<u64>,
 }
 
 #[derive(Default)]
@@ -319,6 +332,7 @@ impl PluginRegistry {
                 desired_enabled: false,
                 health: PluginHealth::Disabled,
                 memory: PluginMemory::default(),
+                tracked_peak_bytes: None,
             },
         );
         Ok(())
@@ -349,6 +363,7 @@ impl PluginRegistry {
             PluginHealth::Disabled
         };
         entry.memory = PluginMemory::default();
+        entry.tracked_peak_bytes = None;
         Ok(true)
     }
 
@@ -371,6 +386,7 @@ impl PluginRegistry {
             .ok_or_else(|| format!("unknown plugin {id:?}"))?;
         entry.health = PluginHealth::Failed(error);
         entry.memory = PluginMemory::default();
+        entry.tracked_peak_bytes = None;
         Ok(())
     }
 
@@ -381,6 +397,9 @@ impl PluginRegistry {
             .ok_or_else(|| format!("unknown plugin {id:?}"))?;
         if entry.health != PluginHealth::Running {
             return Err(format!("plugin {id:?} is not running"));
+        }
+        if let Some(current) = memory.tracked_bytes() {
+            entry.tracked_peak_bytes = Some(entry.tracked_peak_bytes.unwrap_or(0).max(current));
         }
         entry.memory = memory;
         Ok(())
@@ -478,8 +497,20 @@ mod tests {
             registry.get(&id).unwrap().memory.native_ui_bytes,
             Some(4096)
         );
+        assert_eq!(registry.get(&id).unwrap().tracked_peak_bytes, Some(4096));
+        registry
+            .record_memory(
+                &id,
+                PluginMemory {
+                    native_ui_bytes: Some(1024),
+                    ..PluginMemory::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(registry.get(&id).unwrap().tracked_peak_bytes, Some(4096));
         registry.set_enabled(&id, false).unwrap();
         assert_eq!(registry.get(&id).unwrap().memory, PluginMemory::default());
+        assert_eq!(registry.get(&id).unwrap().tracked_peak_bytes, None);
         assert!(registry.mark_running(&id).is_err());
     }
 }

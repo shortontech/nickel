@@ -1140,6 +1140,8 @@ pub struct PluginMemorySnapshot {
     pub js_heap_bytes: Option<u64>,
     pub native_ui_bytes: Option<u64>,
     pub texture_bytes: Option<u64>,
+    #[serde(default)]
+    pub tracked_peak_bytes: Option<u64>,
     pub timers: u32,
     pub subscriptions: u32,
 }
@@ -1908,6 +1910,7 @@ mod tests {
                     js_heap_bytes: None,
                     native_ui_bytes: Some(4096),
                     texture_bytes: None,
+                    tracked_peak_bytes: Some(4096),
                     timers: 0,
                     subscriptions: 0,
                 },

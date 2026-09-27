@@ -128,6 +128,11 @@ impl SettingsApp {
                     ))
                     .child(SettingsRow::new(
                         theme,
+                        "Peak tracked memory (lower bound)",
+                        plugin_memory_label(plugin.memory.tracked_peak_bytes),
+                    ))
+                    .child(SettingsRow::new(
+                        theme,
                         "JavaScript heap",
                         plugin_memory_label(plugin.memory.js_heap_bytes),
                     ))
