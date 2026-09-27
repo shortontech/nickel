@@ -672,11 +672,14 @@ fn codex_approval_notification_revises_in_place_and_retires_on_resolution() {
 
     let mut shell = LiveShell::new().expect("live shell");
     shell.apply_session_launcher_visibility(true);
-    shell.launcher_host.step(HostBatch {
-        surface_size: Some((920, 680)),
-        ..HostBatch::default()
-    });
-    let typing_focus = shell.launcher_host.inspect().keyboard_focus.clone();
+    shell.scene(SurfaceRole::Launcher, 920, 680);
+    let typing_focus = shell
+        .plugin_launcher_host
+        .as_ref()
+        .expect("bundled launcher")
+        .inspect()
+        .keyboard_focus
+        .clone();
     assert!(typing_focus.is_some());
     let mut surfaces = nickel_ui::InternalSurfaceSet::new();
     let id = surfaces.insert(
@@ -715,7 +718,15 @@ fn codex_approval_notification_revises_in_place_and_retires_on_resolution() {
     };
     shell.sync_codex_approval_notifications(vec![(owner, snapshot("/safe"))]);
     shell.refresh_fast();
-    assert_eq!(shell.launcher_host.inspect().keyboard_focus, typing_focus);
+    assert_eq!(
+        shell
+            .plugin_launcher_host
+            .as_ref()
+            .unwrap()
+            .inspect()
+            .keyboard_focus,
+        typing_focus
+    );
     let first = shell
         .notification_feed
         .snapshot()
@@ -1493,10 +1504,24 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
     shell.volume_osd_scene(320, 88);
     assert!(
         shell
-            .volume_osd_host
-            .application()
+            .volume_osd_projection()
             .label
             .starts_with("Volume 31%")
+    );
+    assert!(
+        shell
+            .plugin_volume_osd_host
+            .as_ref()
+            .unwrap()
+            .accessibility_nodes()
+            .iter()
+            .any(|node| {
+                node.semantic_role == Some(SemanticRole::Text)
+                    && node
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| label.starts_with("Volume 31%"))
+            })
     );
     // A hidden unavailable/available transition must not turn a different device's
     // initial volume into apparent user feedback.
@@ -1620,12 +1645,13 @@ fn injected_session_host_receives_shell_commands_without_platform_transport() {
 
     let host = Arc::new(RecordingHost(AtomicUsize::new(0)));
     let shell = LiveShell::new_with_session_host(host.clone()).expect("live shell");
+    let startup_commands = host.0.load(Ordering::Relaxed);
 
     assert!(shell.dispatch_session_command(
         "test-direct-session-host",
         crate::platform::ShellCommand::CreateWorkspace,
     ));
-    assert_eq!(host.0.load(Ordering::Relaxed), 1);
+    assert_eq!(host.0.load(Ordering::Relaxed), startup_commands + 1);
 }
 
 #[cfg(target_os = "linux")]

@@ -342,8 +342,11 @@
     }
 
     #[test]
-    fn codex_windows_share_one_animated_project_face_in_the_panel() {
+    fn native_taskbar_fallback_shares_one_animated_project_face() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+            .unwrap();
         shell.launcher = crate::launcher::Launcher::new(Vec::new());
         shell.windows = [
             (1, "io.nickel.codex.project.alpha"),
