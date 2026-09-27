@@ -1777,6 +1777,13 @@ impl SettingsApp {
             )
             .id("appearance-transparency"),
         );
+        let transparency_row = self
+            .appearance_choices_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.transparency_view(theme))
+            .unwrap_or_else(|| AnyView::new(transparency_row));
         let animation_label = self.localizer.text(match self.shell_settings.animations {
             AnimationLevel::Off => "settings-animations-off",
             AnimationLevel::Reduced => "settings-animations-reduced",

@@ -13,5 +13,6 @@ function App() {
         h("settings-hue-dialog", { id: "appearance-custom-hue-dialog", label: data.customHueTitle, value: data.customHueDescription, open: data.customHueOpen },
             h("settings-input", { id: "appearance-custom-hue-input", label: data.customHueField, placeholder: data.customHuePlaceholder, value: data.customHueDraft, onChange: value => nickel.request({ type: 'custom-hue-draft', value }) }),
             h("settings-button", { id: "appearance-custom-hue-apply", label: data.customHueApply, value: "primary", onClick: () => nickel.request({ type: 'apply-custom-hue', value: data.customHueDraft }) }),
-            h("settings-button", { id: "appearance-custom-hue-cancel", label: data.customHueCancel, value: "secondary", onClick: () => nickel.request({ type: 'cancel-custom-hue' }) })));
+            h("settings-button", { id: "appearance-custom-hue-cancel", label: data.customHueCancel, value: "secondary", onClick: () => nickel.request({ type: 'cancel-custom-hue' }) })),
+        h("settings-transparency", { id: "appearance-transparency", label: data.transparencyTitle, value: data.transparencyDescription, selected: data.reduceTransparency, onClick: () => nickel.request({ type: 'reduce-transparency', value: !data.reduceTransparency }) }));
 }

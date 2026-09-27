@@ -8,7 +8,7 @@ use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, Column,
     FrameOverlay, Insets, OverlayAnchor, OverlayStyle, Popover, Row, SemanticTheme, SettingsCard,
-    SettingsRow, Size, Surface, SurfaceRole, TextField, UiId, ui,
+    SettingsRow, Size, Surface, SurfaceRole, Switch, TextField, UiId, ui,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -53,7 +53,61 @@ struct AppearanceTree {
     mode: ModeTree,
     accent: AccentTree,
     dialog: DialogTree,
+    transparency: TransparencyTree,
     accent_first: bool,
+}
+
+#[derive(Clone)]
+struct TransparencyTree {
+    label: String,
+    description: String,
+    selected: bool,
+    action: usize,
+}
+
+impl TransparencyTree {
+    fn parse(value: &Value) -> Result<Self, String> {
+        if value.get("kind").and_then(Value::as_str) != Some("settings-transparency")
+            || value.get("id").and_then(Value::as_str) != Some("appearance-transparency")
+        {
+            return Err("Appearance transparency control is invalid".into());
+        }
+        Ok(Self {
+            label: text(value, "label")?,
+            description: text(value, "value")?,
+            selected: value
+                .get("selected")
+                .and_then(Value::as_bool)
+                .ok_or("Appearance transparency value is invalid")?,
+            action: value
+                .get("action")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or("Appearance transparency action is invalid")?,
+        })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.label.capacity() + self.description.capacity()
+    }
+
+    fn view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
+        AnyView::new(
+            SettingsRow::new(theme, &self.label, &self.description).trailing(
+                Switch::with_state_action(
+                    if self.selected {
+                        nickel_ui::SwitchState::On
+                    } else {
+                        nickel_ui::SwitchState::Off
+                    },
+                    Some(SettingsMessage::AppearanceChoicesJsxAction(self.action)),
+                    theme,
+                )
+                .id("appearance-transparency")
+                .accessibility_label(&self.label),
+            ),
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -184,8 +238,10 @@ impl AppearanceTree {
             .get("children")
             .and_then(Value::as_array)
             .ok_or("Appearance choice cards are missing")?;
-        if children.len() != 3 {
-            return Err("Appearance needs mode, accent, and dialog components".into());
+        if children.len() != 4 {
+            return Err(
+                "Appearance needs mode, accent, dialog, and transparency components".into(),
+            );
         }
         let accent_first =
             children[0].get("kind").and_then(Value::as_str) == Some("settings-accent-choices");
@@ -204,12 +260,16 @@ impl AppearanceTree {
             mode,
             accent,
             dialog: DialogTree::parse(&children[2])?,
+            transparency: TransparencyTree::parse(&children[3])?,
             accent_first,
         })
     }
 
     fn retained_bytes(&self) -> usize {
-        self.mode.retained_bytes() + self.accent.retained_bytes() + self.dialog.retained_bytes()
+        self.mode.retained_bytes()
+            + self.accent.retained_bytes()
+            + self.dialog.retained_bytes()
+            + self.transparency.retained_bytes()
     }
 
     fn view(&self, theme: SemanticTheme, appearance: Appearance) -> AnyView<SettingsMessage> {
@@ -225,11 +285,16 @@ impl AppearanceTree {
         self.dialog.open.then(|| self.dialog.view(theme))
     }
 
+    fn transparency_view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
+        self.transparency.view(theme)
+    }
+
     #[cfg(test)]
     fn action_for_id(&self, id: &str) -> Option<usize> {
         self.mode
             .action_for_id(id)
             .or_else(|| self.dialog.action_for_id(id))
+            .or_else(|| (id == "appearance-transparency").then_some(self.transparency.action))
             .or_else(|| {
                 self.accent
                     .swatches
@@ -547,6 +612,13 @@ impl AppearanceChoicesPage {
         self.tree.as_ref()?.dialog_view(theme)
     }
 
+    pub(super) fn transparency_view(
+        &self,
+        theme: SemanticTheme,
+    ) -> Option<AnyView<SettingsMessage>> {
+        Some(self.tree.as_ref()?.transparency_view(theme))
+    }
+
     fn dispatch(
         &mut self,
         index: usize,
@@ -597,6 +669,7 @@ enum AppearanceRequest {
     CustomHueDraft { value: String },
     ApplyCustomHue { value: String },
     CancelCustomHue,
+    ReduceTransparency { value: bool },
 }
 
 fn validate_request(request: AppearanceRequest, data: &Value) -> Result<SettingsMessage, String> {
@@ -650,6 +723,12 @@ fn validate_request(request: AppearanceRequest, data: &Value) -> Result<Settings
             }
             Ok(SettingsMessage::CancelCustomHue)
         }
+        AppearanceRequest::ReduceTransparency { value } => {
+            if data.get("reduceTransparency").and_then(Value::as_bool) != Some(!value) {
+                return Err("Transparency preference changed".into());
+            }
+            Ok(SettingsMessage::SetReduceTransparency(value))
+        }
     }
 }
 
@@ -683,6 +762,9 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         "customHueCancel":app.localizer.text("settings-appearance-custom-hue-cancel"),
         "customHueField":app.localizer.text("settings-appearance-custom-hue-field"),
         "customHuePlaceholder":app.localizer.text("settings-appearance-custom-hue-placeholder"),
+        "transparencyTitle":app.localizer.text("settings-reduce-transparency"),
+        "transparencyDescription":app.localizer.text("settings-reduce-transparency-description"),
+        "reduceTransparency":app.shell_settings.reduce_transparency,
     })
 }
 
@@ -839,11 +921,14 @@ mod tests {
             {"kind":"settings-button","id":"appearance-custom-hue-apply","label":"Apply","action":6},
             {"kind":"settings-button","id":"appearance-custom-hue-cancel","label":"Cancel","action":7},
         ]});
-        let root =
-            json!({"kind":"settings-appearance-choices","children":[accents, modes, dialog]});
+        let transparency = json!({"kind":"settings-transparency","id":"appearance-transparency",
+            "label":"Transparency","value":"Description","selected":false,"action":8});
+        let root = json!({"kind":"settings-appearance-choices",
+            "children":[accents, modes, dialog, transparency]});
         let tree = AppearanceTree::parse(&root).unwrap();
         assert!(tree.accent_first);
         assert_eq!(tree.action_for_id("appearance-accent-224"), Some(3));
+        assert_eq!(tree.action_for_id("appearance-transparency"), Some(8));
     }
 
     #[test]
@@ -886,6 +971,28 @@ mod tests {
             page.dispatch(action, Value::Null, &projection(&app))
                 .unwrap_err(),
             STALE_STATUS
+        );
+    }
+
+    #[test]
+    fn jsx_transparency_switch_checks_current_value() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.shell_settings.reduce_transparency = false;
+        let data = projection(&app);
+        let mut page = AppearanceChoicesPage::new().unwrap();
+        page.render(&data, app.ui_theme(), nickel_platform::appearance())
+            .unwrap();
+        let action = page.action_for_id("appearance-transparency").unwrap();
+        assert_eq!(
+            page.dispatch(action, Value::Null, &data).unwrap(),
+            SettingsMessage::SetReduceTransparency(true)
+        );
+        assert!(
+            validate_request(
+                AppearanceRequest::ReduceTransparency { value: false },
+                &data,
+            )
+            .is_err()
         );
     }
 }

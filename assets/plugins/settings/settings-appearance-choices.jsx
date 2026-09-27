@@ -32,5 +32,8 @@ function App() {
             <settings-button id="appearance-custom-hue-cancel" label={data.customHueCancel}
                 value="secondary" onClick={() => nickel.request({type: 'cancel-custom-hue'})} />
         </settings-hue-dialog>
+        <settings-transparency id="appearance-transparency" label={data.transparencyTitle}
+            value={data.transparencyDescription} selected={data.reduceTransparency}
+            onClick={() => nickel.request({type: 'reduce-transparency', value: !data.reduceTransparency})} />
     </settings-appearance-choices>;
 }

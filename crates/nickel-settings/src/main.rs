@@ -3596,7 +3596,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_appearance_jsx_keeps_native_mode_and_accent_choices_available() {
+    fn failed_appearance_jsx_keeps_native_choices_and_transparency_available() {
         let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         *app.appearance_choices_page.borrow_mut() = Some(Err("JSX failed".into()));
         let tree = app.build_ui(850.0, 900.0);
@@ -3605,6 +3605,7 @@ mod tests {
             SettingsMessage::AppearanceDark,
             SettingsMessage::AppearanceSystem,
             SettingsMessage::SetAccentHue(224),
+            SettingsMessage::SetReduceTransparency(true),
         ] {
             assert_eq!(tree.semantic_targets_for_message(&message).len(), 1);
         }
@@ -4464,7 +4465,6 @@ mod tests {
         for message in [
             SettingsMessage::WallpaperChoose,
             SettingsMessage::WallpaperRemove,
-            SettingsMessage::SetReduceTransparency(true),
             SettingsMessage::AppearanceReset,
         ] {
             assert!(
@@ -4472,6 +4472,16 @@ mod tests {
                 "missing Appearance control for {message:?}"
             );
         }
+        let transparency_action = appearance_choice_action(&app, "appearance-transparency");
+        assert_eq!(
+            expanded
+                .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(
+                    transparency_action,
+                ))
+                .len(),
+            1,
+            "missing JSX transparency control"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -5200,9 +5210,12 @@ mod tests {
                 "{via:?}"
             );
 
+            let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+            let _ = app.build_ui(1424.0, 1800.0);
+            let transparency_action = appearance_choice_action(&app, "appearance-transparency");
             let mut scenario = activate(
-                SettingsApp::with_initial_page(SettingsPage::Appearance),
-                SettingsMessage::SetReduceTransparency(true),
+                app,
+                SettingsMessage::AppearanceChoicesJsxAction(transparency_action),
                 via,
             );
             assert!(
