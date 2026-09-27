@@ -9,8 +9,13 @@ tsc --allowJs --checkJs false --jsx react --jsxFactory h --target ES2020 \
 ```
 
 Set `NICKEL_DEV_PLUGIN_TASKBAR=1` in a nested Nickel session to compare this
-view with the current Rust taskbar. The host supplies bounded grouped tasks
-and a clock label. The plugin requests typed launcher, task, and control-center
-actions; the host rechecks the task ID against its current group before
-focusing or launching anything. Icons, tray, menus, drag behavior, and
-multi-output state are still in the migration queue.
+view with the current Rust taskbar. The host supplies bounded grouped tasks,
+tray items, icon slots, and a clock label. The plugin requests typed launcher,
+task, tray, and control-center actions; the host rechecks item IDs against live
+groups and the visible tray before acting. Task menus, pin/drag behavior,
+Codex and keyboard controls, and full visual parity are still in the migration
+queue.
+
+The image slots reference buffers already owned by the host. Settings' tracked
+native UI figure remains a lower bound and does not charge shared icon buffers
+to this plugin.

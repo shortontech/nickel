@@ -11,6 +11,9 @@
     "control-center-show",
     "windows-read",
     "windows-focus",
-    "applications-launch"
+    "applications-launch",
+    "tray-read",
+    "tray-activate",
+    "tray-context"
   ]
 }

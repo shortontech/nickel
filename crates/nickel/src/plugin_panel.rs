@@ -1,12 +1,15 @@
 //! Experimental JavaScript panel host. The bundled example uses the same small
 //! component vocabulary as an external plugin; native surfaces remain shell-owned.
 
-use std::sync::OnceLock;
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::{Arc, OnceLock},
+};
 
 use boa_engine::{Context, Source};
 use nickel_core::plugins::{PluginCapability, PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Insets, OverlayAnchor,
+    AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, Insets, OverlayAnchor,
     OverlayId, OverlayStyle, Row, SemanticRole, Size, Spacer, Text, TextField as UiTextField,
     TransientSurface, UiId, ViewContext,
 };
@@ -154,9 +157,11 @@ function h(kind, props, ...children) {
     }
     const handler = typeof props?.onClick === 'function' ? props.onClick : props?.onChange;
     const action = typeof handler === 'function' ? __handlers.push(handler) - 1 : null;
+    const contextAction = typeof props?.onContextMenu === 'function'
+        ? __handlers.push(props.onContextMenu) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         width: props?.width, height: props?.height, background: props?.background,
-        accessibilityLabel: props?.accessibilityLabel,
+        accessibilityLabel: props?.accessibilityLabel, icon: props?.icon, contextAction,
         value: props?.value, placeholder: props?.placeholder,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
 }
@@ -202,7 +207,9 @@ enum PanelNode {
         id: String,
         label: String,
         accessibility_label: String,
+        icon: Option<String>,
         action: usize,
+        context_action: Option<usize>,
     },
     Dialog {
         id: String,
@@ -294,12 +301,21 @@ impl PanelNode {
                         .and_then(Value::as_str)
                         .unwrap_or(&label)
                         .to_owned(),
+                    icon: value
+                        .get("icon")
+                        .and_then(Value::as_str)
+                        .filter(|asset| asset.len() <= 128)
+                        .map(str::to_owned),
                     label,
                     action: value
                         .get("action")
                         .and_then(Value::as_u64)
                         .ok_or("button needs an onClick handler")?
                         as usize,
+                    context_action: value
+                        .get("contextAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
                 })
             }
             "dialog" => Ok(Self::Dialog {
@@ -325,7 +341,7 @@ impl PanelNode {
         }
     }
 
-    fn view(&self) -> AnyView<PluginMessage> {
+    fn view(&self, images: &PluginImages) -> AnyView<PluginMessage> {
         match self {
             Self::Panel {
                 children,
@@ -337,7 +353,7 @@ impl PanelNode {
                     .height((*height).saturating_sub(16) as f32);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        row = row.child(child.view());
+                        row = row.child(child.view(images));
                     }
                 }
                 AnyView::new(
@@ -352,14 +368,14 @@ impl PanelNode {
             Self::Row(children) => {
                 let mut row = Row::new().fill_width().height(48.0);
                 for child in children {
-                    row = row.child(child.view());
+                    row = row.child(child.view(images));
                 }
                 AnyView::new(row)
             }
             Self::Column(children) => {
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column = column.child(child.view());
+                    column = column.child(child.view(images));
                 }
                 AnyView::new(column)
             }
@@ -388,9 +404,22 @@ impl PanelNode {
                 id,
                 label,
                 accessibility_label,
+                icon,
                 action,
-            } => AnyView::new(
-                Container::new()
+                context_action,
+            } => {
+                let visual = icon
+                    .as_ref()
+                    .and_then(|asset| images.get(asset))
+                    .map_or_else(
+                        || AnyView::new(Text::new(label).color(0xffffff)),
+                        |(id, image)| {
+                            AnyView::new(
+                                Image::new(*id, Arc::clone(image)).width(32.0).height(32.0),
+                            )
+                        },
+                    );
+                let mut container = Container::new()
                     .id(id.clone())
                     .accessibility_label(accessibility_label)
                     .semantic_role(SemanticRole::Button)
@@ -398,9 +427,12 @@ impl PanelNode {
                     .height(42.0)
                     .padding(Insets::all(10.0))
                     .background(0x6645_5675)
-                    .radius(10.0)
-                    .child(Text::new(label).color(0xffffff)),
-            ),
+                    .radius(10.0);
+                if let Some(action) = context_action {
+                    container = container.context_message(PluginMessage::Context(*action));
+                }
+                AnyView::new(container.child(visual))
+            }
             Self::Dialog { .. } => AnyView::new(Spacer::fixed(0.0)),
         }
     }
@@ -436,7 +468,10 @@ pub struct PluginPanelApplication {
     last_error: Option<String>,
     manifest: &'static PluginManifest,
     projection_data: Option<String>,
+    images: PluginImages,
 }
+
+pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginEffect {
@@ -445,12 +480,15 @@ pub enum PluginEffect {
     SetLauncherQuery(String),
     ActivateLauncherResult { index: usize, id: String },
     ActivateTaskbarItem { index: usize, id: String },
+    ActivateTrayItem { id: String },
+    ContextTrayItem { id: String },
     ToggleControlCenter,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginMessage {
     Click(usize),
+    Context(usize),
     Text(usize, String),
 }
 
@@ -474,29 +512,47 @@ pub struct TaskbarPluginItem {
     pub name: String,
     pub active: bool,
     pub pinned: bool,
+    pub icon: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarPluginTrayItem {
+    pub id: String,
+    pub title: String,
+    pub icon: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskbarPluginProjection {
     pub items: Vec<TaskbarPluginItem>,
+    pub tray: Vec<TaskbarPluginTrayItem>,
     pub clock: String,
 }
 
 impl TaskbarPluginProjection {
     pub fn from_groups(groups: &[TaskbarApplication], clock: &str) -> Self {
+        let mut seen = HashSet::new();
         Self {
             items: groups
                 .iter()
                 .take(12)
                 .enumerate()
-                .map(|(index, group)| TaskbarPluginItem {
-                    index,
-                    id: taskbar_item_id(group),
-                    name: group.application_name.clone(),
-                    active: group.active(),
-                    pinned: group.pinned,
+                .filter_map(|(index, group)| {
+                    let id = taskbar_item_id(group);
+                    if id.is_empty() || id.len() > 256 || !seen.insert(id.clone()) {
+                        return None;
+                    }
+                    Some(TaskbarPluginItem {
+                        index,
+                        id,
+                        name: group.application_name.chars().take(120).collect(),
+                        active: group.active(),
+                        pinned: group.pinned,
+                        icon: false,
+                    })
                 })
                 .collect(),
+            tray: Vec::new(),
             clock: clock.to_owned(),
         }
     }
@@ -504,8 +560,12 @@ impl TaskbarPluginProjection {
     fn to_json(&self) -> String {
         serde_json::json!({"items": self.items.iter().map(|item| serde_json::json!({
             "index": item.index, "id": item.id, "name": item.name,
-            "active": item.active, "pinned": item.pinned,
-        })).collect::<Vec<_>>(), "clock": self.clock})
+            "active": item.active, "pinned": item.pinned, "icon": item.icon,
+        })).collect::<Vec<_>>(),
+        "tray": self.tray.iter().map(|item| serde_json::json!({
+            "id": item.id, "title": item.title, "icon": item.icon,
+        })).collect::<Vec<_>>(),
+        "clock": self.clock})
         .to_string()
     }
 }
@@ -619,7 +679,21 @@ impl PluginPanelApplication {
             last_error: None,
             manifest,
             projection_data: data,
+            images: PluginImages::new(),
         })
+    }
+
+    pub fn sync_images(&mut self, images: PluginImages) -> bool {
+        let changed = self.images.len() != images.len()
+            || self.images.iter().any(|(key, (id, image))| {
+                images
+                    .get(key)
+                    .is_none_or(|(next_id, next)| id != next_id || !Arc::ptr_eq(image, next))
+            });
+        if changed {
+            self.images = images;
+        }
+        changed
     }
 
     pub fn sync_launcher(&mut self, launcher: &Launcher) -> Result<bool, String> {
@@ -690,7 +764,9 @@ impl nickel_ui::Application for PluginPanelApplication {
 
     fn update(&mut self, message: Self::Message) {
         let expression = match message {
-            PluginMessage::Click(action) => format!("__nickelDispatch({action})"),
+            PluginMessage::Click(action) | PluginMessage::Context(action) => {
+                format!("__nickelDispatch({action})")
+            }
             PluginMessage::Text(action, value) => {
                 let encoded = serde_json::to_string(&value).expect("string serialization");
                 format!("__nickelDispatch({action}, {encoded})")
@@ -776,6 +852,42 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 index,
                                 id: id.to_owned(),
                             });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-activate-tray")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::TrayActivate) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("tray item ID is missing".into());
+                                return;
+                            };
+                            if id.is_empty() || id.len() > 256 {
+                                self.last_error = Some("tray item ID is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ActivateTrayItem { id: id.to_owned() });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-context-tray")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::TrayContext) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("tray item ID is missing".into());
+                                return;
+                            };
+                            if id.is_empty() || id.len() > 256 {
+                                self.last_error = Some("tray item ID is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ContextTrayItem { id: id.to_owned() });
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
@@ -864,10 +976,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .height(680.0)
                     .padding(Insets::all(20.0))
                     .background(0xf12b_303c)
-                    .child(self.node.view()),
+                    .child(self.node.view(&self.images)),
             )
         } else if self.manifest.id == taskbar_manifest().id {
-            AnyView::new(self.node.view())
+            AnyView::new(self.node.view(&self.images))
         } else {
             AnyView::new(
                 Column::new()
@@ -878,7 +990,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         Row::new()
                             .fill_width()
                             .child(Spacer::flex())
-                            .child(self.node.view())
+                            .child(self.node.view(&self.images))
                             .child(Spacer::flex()),
                     ),
             )
@@ -899,7 +1011,7 @@ impl nickel_ui::Application for PluginPanelApplication {
         };
         let mut content = Column::new().fill_width();
         for child in children {
-            content = content.child(child.view());
+            content = content.child(child.view(&self.images));
         }
         vec![FrameOverlay::surface(
             TransientSurface::dialog(

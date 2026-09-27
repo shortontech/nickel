@@ -872,6 +872,49 @@ fn shortcut_capability_status(
     Some(format!("Global shortcuts unavailable: {reason}."))
 }
 
+fn taskbar_plugin_data(
+    panel: &TaskbarUi,
+    clock: &str,
+) -> (
+    crate::plugin_panel::TaskbarPluginProjection,
+    crate::plugin_panel::PluginImages,
+) {
+    let mut projection =
+        crate::plugin_panel::TaskbarPluginProjection::from_groups(panel.groups.as_ref(), clock);
+    let mut images = crate::plugin_panel::PluginImages::new();
+    images.insert("logo".into(), (2, Arc::clone(&panel.panel_icon)));
+    for item in &mut projection.items {
+        if let Some((image_id, image)) = panel.task_icons.get(item.index).and_then(Option::as_ref) {
+            item.icon = true;
+            images.insert(
+                format!("task:{}", item.index),
+                (*image_id, Arc::clone(image)),
+            );
+        }
+    }
+    let mut seen_tray = std::collections::HashSet::new();
+    for (index, item) in panel.tray.iter().rev().take(4).rev().enumerate() {
+        if item.id.is_empty() || item.id.len() > 256 || !seen_tray.insert(item.id.clone()) {
+            continue;
+        }
+        let icon = panel.tray_icons.get(index);
+        if let Some(icon) = icon {
+            images.insert(
+                format!("tray:{}", item.id),
+                (0x6000 + index as u16, Arc::clone(icon)),
+            );
+        }
+        projection
+            .tray
+            .push(crate::plugin_panel::TaskbarPluginTrayItem {
+                id: item.id.clone(),
+                title: item.title.chars().take(120).collect(),
+                icon: icon.is_some(),
+            });
+    }
+    (projection, images)
+}
+
 // This shared shell implementation includes the compositor-facing API. The
 // Windows winit owner calls its own subset and leaves those Linux methods idle.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -1231,13 +1274,12 @@ impl LiveShell {
         ) {
             let id = &crate::plugin_panel::taskbar_manifest().id;
             plugin_registry.set_enabled(id, true)?;
-            let projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(
-                panel_host.application().groups.as_ref(),
-                &panel_host.application().clock,
-            );
+            let (projection, images) =
+                taskbar_plugin_data(panel_host.application(), &panel_host.application().clock);
             match crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection)
             {
-                Ok(application) => {
+                Ok(mut application) => {
+                    application.sync_images(images);
                     plugin_registry.mark_running(id)?;
                     Some(nickel_ui::UiHost::new(application, 1920, 56))
                 }
@@ -2733,12 +2775,13 @@ impl LiveShell {
             self.sync_panel_host();
             self.plugin_taskbar_hosts.clear();
             self.plugin_taskbar_memory.clear();
-            let projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(
-                self.panel_host.application().groups.as_ref(),
+            let (projection, images) = taskbar_plugin_data(
+                self.panel_host.application(),
                 &self.panel_host.application().clock,
             );
             crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection).map(
-                |application| {
+                |mut application| {
+                    application.sync_images(images);
                     self.plugin_taskbar_host = Some(nickel_ui::UiHost::new(application, 1920, 56));
                 },
             )
@@ -3435,6 +3478,18 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::ActivateTrayItem { id } => {
+                    if self.tray.iter().rev().take(4).any(|item| item.id == id) {
+                        self.apply_panel_action(TaskbarAction::Tray(id));
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ContextTrayItem { id } => {
+                    if self.tray.iter().rev().take(4).any(|item| item.id == id) {
+                        self.apply_panel_action(TaskbarAction::TrayContext(id));
+                        changed = true;
+                    }
+                }
                 crate::plugin_panel::PluginEffect::SetLauncherQuery(query) => {
                     self.apply_launcher_action(LauncherAction::SetQuery(query));
                     changed = true;
@@ -4124,6 +4179,14 @@ impl LiveShell {
                         Some(TaskbarHover::Launcher)
                     } else if id == "taskbar-control" {
                         Some(TaskbarHover::Control)
+                    } else if let Some(tray_id) = id.strip_prefix("taskbar-tray-") {
+                        self.tray
+                            .iter()
+                            .rev()
+                            .take(4)
+                            .rev()
+                            .position(|item| item.id == tray_id)
+                            .map(TaskbarHover::Tray)
                     } else {
                         id.strip_prefix("taskbar-item-")
                             .and_then(|index| index.parse().ok())
@@ -4228,14 +4291,15 @@ impl LiveShell {
                 .or_else(|| {
                     self.sync_panel_host();
                     let (clock, _) = panel_clock_text();
-                    let projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(
-                        self.panel_host.application().groups.as_ref(),
-                        &clock,
-                    );
+                    let (projection, images) =
+                        taskbar_plugin_data(self.panel_host.application(), &clock);
                     match crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(
                         &projection,
                     ) {
-                        Ok(application) => Some(nickel_ui::UiHost::new(application, 1920, 56)),
+                        Ok(mut application) => {
+                            application.sync_images(images);
+                            Some(nickel_ui::UiHost::new(application, 1920, 56))
+                        }
                         Err(error) => {
                             tracing::error!(%error, "taskbar plugin failed on an output");
                             let _ = self
@@ -7063,13 +7127,10 @@ impl LiveShell {
     ) -> Option<nickel_ui::HostEventOutcome> {
         self.sync_panel_host();
         let (clock, _) = panel_clock_text();
-        let projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(
-            self.panel_host.application().groups.as_ref(),
-            &clock,
-        );
+        let (projection, images) = taskbar_plugin_data(self.panel_host.application(), &clock);
         let host = self.plugin_taskbar_host.as_mut()?;
-        let application_changed = match host.application_mut().sync_taskbar_projection(&projection)
-        {
+        let image_changed = host.application_mut().sync_images(images);
+        let projection_changed = match host.application_mut().sync_taskbar_projection(&projection) {
             Ok(changed) => changed,
             Err(error) => {
                 tracing::error!(%error, "taskbar plugin projection failed");
@@ -7077,7 +7138,7 @@ impl LiveShell {
             }
         };
         let mut outcome = host.step(HostBatch {
-            application_changed,
+            application_changed: image_changed || projection_changed,
             surface_size: Some((width, 56)),
             events,
             ..HostBatch::default()

@@ -1,7 +1,8 @@
 use nickel_shell::plugin_panel::{
     LauncherPluginProjection, LauncherPluginResult, PluginEffect, PluginPanelApplication,
-    TaskbarPluginItem, TaskbarPluginProjection, surface,
+    TaskbarPluginItem, TaskbarPluginProjection, TaskbarPluginTrayItem, surface,
 };
+use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueSnapshot, UiEvent,
     UiHost,
@@ -292,13 +293,34 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
             name: "Editor".into(),
             active: true,
             pinned: true,
+            icon: true,
+        }],
+        tray: vec![TaskbarPluginTrayItem {
+            id: "mail".into(),
+            title: "Mail".into(),
+            icon: true,
         }],
         clock: "4:20 PM".into(),
     };
-    let mut host = UiHost::new(
-        PluginPanelApplication::taskbar_with_projection(&projection).unwrap(),
-        900,
-        56,
+    let icon = std::sync::Arc::new(image::RgbaImage::from_pixel(
+        16,
+        16,
+        image::Rgba([40, 140, 240, 255]),
+    ));
+    let mut application = PluginPanelApplication::taskbar_with_projection(&projection).unwrap();
+    application.sync_images(
+        [
+            ("logo".into(), (2, std::sync::Arc::clone(&icon))),
+            ("task:0".into(), (3, std::sync::Arc::clone(&icon))),
+            ("tray:mail".into(), (4, std::sync::Arc::clone(&icon))),
+        ]
+        .into(),
+    );
+    let mut host = UiHost::new(application, 900, 56);
+    assert!(
+        host.commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::Image { id: 3, .. }))
     );
     let editor = host
         .query_unique(&SemanticSelector::RoleAndName {
@@ -318,7 +340,7 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
     let launcher = host
         .query_unique(&SemanticSelector::RoleAndName {
             role: SemanticRole::Button,
-            name: "Nickel".into(),
+            name: "Open Nickel Start".into(),
         })
         .unwrap()
         .id;
@@ -338,5 +360,29 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
     assert_eq!(
         host.application_mut().take_effects(),
         vec![PluginEffect::ToggleControlCenter]
+    );
+    let tray = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Mail".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(tray, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ActivateTrayItem { id: "mail".into() }]
+    );
+    let tray = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Mail".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(tray, SemanticAction::Invoke(ActionKind::ContextMenu));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ContextTrayItem { id: "mail".into() }]
     );
 }
