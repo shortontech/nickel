@@ -56,6 +56,25 @@
     }
 
     #[test]
+    fn volume_osd_plugin_can_retire_and_restore_native_fallback() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::volume_osd_manifest().id;
+        assert!(shell.plugin_volume_osd_host.is_some());
+        shell.scene(SurfaceRole::VolumeOsd, 420, 96);
+        assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.plugin_volume_osd_host.is_none());
+        assert_eq!(
+            shell.plugin_registry().get(id).unwrap().memory,
+            nickel_core::plugins::PluginMemory::default()
+        );
+        shell.scene(SurfaceRole::VolumeOsd, 420, 96);
+        assert!(!shell.volume_osd_host.commands().is_empty());
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.plugin_volume_osd_host.is_some());
+    }
+
+    #[test]
     fn notification_plugin_action_uses_the_host_reducer() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::notification_manifest().id;

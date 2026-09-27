@@ -235,9 +235,15 @@ impl LiveShell {
                     })?))
                 }
             }
-            SurfaceRole::VolumeOsd => project(&self.volume_osd_host, |_| {
-                RemoteActionDisposition::Unavailable
-            }),
+            SurfaceRole::VolumeOsd => {
+                if let Some(host) = self.plugin_volume_osd_host.as_ref() {
+                    Ok(observe_only(plugin_projection(host, |_, _| false)?))
+                } else {
+                    project(&self.volume_osd_host, |_| {
+                        RemoteActionDisposition::Unavailable
+                    })
+                }
+            }
             SurfaceRole::WindowPreview => self
                 .preview_frame
                 .as_ref()
@@ -500,13 +506,18 @@ impl LiveShell {
                 self.panel_change_token = token;
                 result?
             }
-            SurfaceRole::VolumeOsd => mutate(
-                &mut self.volume_osd_host,
-                generation,
-                node,
-                action,
-                clipboard_limit,
-            )?,
+            SurfaceRole::VolumeOsd => {
+                if self.plugin_volume_osd_host.is_some() {
+                    return Err("volume overlay has no remote actions".into());
+                }
+                mutate(
+                    &mut self.volume_osd_host,
+                    generation,
+                    node,
+                    action,
+                    clipboard_limit,
+                )?
+            }
             // Desktop messages currently perform native file effects directly.
             // They require staging before the remote dispatcher can admit them.
             _ => return Err("semantic mutation effects are unavailable for this role".into()),
@@ -738,5 +749,24 @@ mod tests {
             .expect("projected submit node");
         assert!(!submit.actions.contains(&nickel_ui::ActionKind::Activate));
         assert!(!submit.enabled);
+    }
+
+    #[test]
+    fn volume_overlay_semantics_follow_the_active_jsx_host() {
+        let mut shell = LiveShell::new().expect("live shell");
+        shell.audio.volume_percent = 47;
+        shell.audio.muted = false;
+        shell.volume_osd_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let _ = shell.scene(SurfaceRole::VolumeOsd, 420, 96);
+        let (_, nodes) = shell
+            .bounded_shell_semantics(SurfaceRole::VolumeOsd, None)
+            .expect("volume overlay semantics");
+        assert!(nodes.iter().any(|node| node.name.as_deref() == Some("47%")));
+        assert!(nodes.iter().any(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("Volume 47%"))
+        }));
     }
 }

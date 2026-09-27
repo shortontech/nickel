@@ -66,6 +66,16 @@ pub fn notification_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn volume_osd_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/volume-osd/plugin.json"
+        ))
+        .expect("bundled volume OSD plugin manifest must be valid")
+    })
+}
+
 pub fn run_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -107,6 +117,7 @@ const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
 const Text = 'text';
+const Progress = 'progress';
 const TextField = 'text-field';
 const Button = 'button';
 const Spacer = 'spacer';
@@ -199,6 +210,7 @@ function h(kind, props, ...children) {
         accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
         showLabel: props?.showLabel, contextAction,
         value: props?.value, placeholder: props?.placeholder,
+        percent: props?.percent,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
 }
 
@@ -268,6 +280,11 @@ enum PanelNode {
         children: Vec<Self>,
     },
     Text(String),
+    Progress {
+        percent: u8,
+        width: u32,
+        height: u32,
+    },
     Spacer,
     TextField {
         id: String,
@@ -361,6 +378,32 @@ impl PanelNode {
                 }
             }
             "text" => Ok(Self::Text(child_text(children)?)),
+            "progress" => {
+                if !children.is_empty() {
+                    return Err("progress cannot have children".into());
+                }
+                let percent = value
+                    .get("percent")
+                    .and_then(Value::as_u64)
+                    .filter(|percent| *percent <= 100)
+                    .ok_or("progress percent must be 0 to 100")?
+                    as u8;
+                let width = value
+                    .get("width")
+                    .and_then(Value::as_u64)
+                    .filter(|width| (1..=8192).contains(width))
+                    .ok_or("progress width must be 1 to 8192")? as u32;
+                let height = value
+                    .get("height")
+                    .and_then(Value::as_u64)
+                    .filter(|height| (1..=256).contains(height))
+                    .ok_or("progress height must be 1 to 256")? as u32;
+                Ok(Self::Progress {
+                    percent,
+                    width,
+                    height,
+                })
+            }
             "spacer" => Ok(Self::Spacer),
             "text-field" => Ok(Self::TextField {
                 id: value
@@ -566,6 +609,26 @@ impl PanelNode {
                     .height(48.0)
                     .padding(Insets::all(10.0))
                     .child(Text::new(text).color(0xf4f6fa).scale(1.0)),
+            ),
+            Self::Progress {
+                percent,
+                width,
+                height,
+            } => AnyView::new(
+                Container::new()
+                    .semantic_role(SemanticRole::Status)
+                    .accessibility_label(format!("{percent}%"))
+                    .width(*width as f32)
+                    .height(*height as f32)
+                    .background(0xff4a5262)
+                    .radius(*height as f32 / 2.0)
+                    .child(
+                        Container::new()
+                            .width(*width as f32 * f32::from(*percent) / 100.0)
+                            .height(*height as f32)
+                            .background(0xff7ba6ff)
+                            .radius(*height as f32 / 2.0),
+                    ),
             ),
             Self::Spacer => AnyView::new(Spacer::flex()),
             Self::TextField {
@@ -837,6 +900,22 @@ pub struct TaskbarMenuPluginProjection {
     pub application_id: Option<String>,
     pub pinned: bool,
     pub close_all: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeOsdPluginProjection {
+    pub label: String,
+    pub percent: u8,
+}
+
+impl VolumeOsdPluginProjection {
+    fn to_json(&self) -> String {
+        serde_json::json!({
+            "label": self.label.chars().take(640).collect::<String>(),
+            "percent": self.percent.min(100),
+        })
+        .to_string()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1213,6 +1292,13 @@ impl PluginPanelApplication {
         Ok(application)
     }
 
+    pub fn volume_osd_with_projection(
+        projection: &VolumeOsdPluginProjection,
+    ) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/volume-osd/main.js");
+        Self::new_with_manifest(source, volume_osd_manifest(), Some(projection.to_json()))
+    }
+
     pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
         let source = include_str!("../../../assets/plugins/run/main.js");
         let data = serde_json::json!({ "status": status }).to_string();
@@ -1372,6 +1458,25 @@ impl PluginPanelApplication {
             projection.notification.as_ref().map(|item| item.id),
             projection.history_visible,
         ));
+        Ok(true)
+    }
+
+    pub fn sync_volume_osd_projection(
+        &mut self,
+        projection: &VolumeOsdPluginProjection,
+    ) -> Result<bool, String> {
+        if self.manifest.id != volume_osd_manifest().id {
+            return Err("this plugin is not the volume overlay".into());
+        }
+        let data = projection.to_json();
+        if self.projection_data.as_deref() == Some(data.as_str()) {
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.projection_data = Some(data);
         Ok(true)
     }
 
@@ -2158,6 +2263,20 @@ impl nickel_ui::Application for PluginPanelApplication {
 mod tests {
     use super::*;
     use nickel_ui::Application;
+
+    #[test]
+    fn progress_component_rejects_out_of_range_geometry() {
+        for properties in [
+            "percent: 101, width: 100, height: 8",
+            "percent: 50, width: 0, height: 8",
+            "percent: 50, width: 100, height: 0",
+        ] {
+            let source = format!(
+                "function App() {{ return h(Panel, {{}}, h(Progress, {{{properties}}})); }}"
+            );
+            assert!(PluginPanelApplication::new(&source).is_err());
+        }
+    }
 
     #[test]
     fn bundled_panel_updates_from_javascript_click() {

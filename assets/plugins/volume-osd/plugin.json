@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.volume-osd",
+  "name": "Nickel Volume Overlay",
+  "entry": "main.js",
+  "surfaces": [
+    {"id":"main","kind":"overlay","width":420,"height":96}
+  ],
+  "capabilities": ["audio-read"]
+}

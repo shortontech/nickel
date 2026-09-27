@@ -1099,6 +1099,7 @@
     #[test]
     fn confirmed_audio_changes_coalesce_one_bounded_volume_osd() {
         let mut shell = LiveShell::new().unwrap();
+        assert!(shell.plugin_volume_osd_host.is_some());
         // The production constructor may discover the developer machine's live
         // default output. Keep this state-machine test independent of that
         // ambient device while the explicit-output case below covers labeling.
@@ -1114,26 +1115,29 @@
         let first_deadline = shell.volume_osd_until.unwrap();
         assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
         shell.volume_osd_scene(320, 88);
+        assert!(shell.volume_osd_projection().label.starts_with("Volume 47%"));
         assert!(
             shell
-                .volume_osd_host
-                .application()
-                .label
-                .starts_with("Volume 47%")
-        );
-        assert!(
-            shell
-                .volume_osd_host
+                .plugin_volume_osd_host
+                .as_ref()
+                .unwrap()
                 .accessibility_nodes()
                 .iter()
                 .any(|node| {
-                    node.semantic_role == Some(SemanticRole::Status)
+                    node.semantic_role == Some(SemanticRole::Text)
                         && node
                             .label
                             .as_deref()
                             .is_some_and(|label| label.starts_with("Volume 47%"))
                 })
         );
+        assert!(shell
+            .plugin_registry()
+            .get(&crate::plugin_panel::volume_osd_manifest().id)
+            .unwrap()
+            .memory
+            .native_ui_bytes
+            .is_some());
 
         shell.global_shortcut(GlobalShortcut::AudioChanged {
             available: true,
@@ -1143,13 +1147,7 @@
         });
         assert!(shell.volume_osd_until.unwrap() >= first_deadline);
         shell.volume_osd_scene(320, 88);
-        assert!(
-            shell
-                .volume_osd_host
-                .application()
-                .label
-                .starts_with("Muted")
-        );
+        assert!(shell.volume_osd_projection().label.starts_with("Muted"));
 
         let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
         assert!(outcome.visibility_changed);
@@ -1178,15 +1176,14 @@
             output_name: Some("Private Bluetooth Headset".into()),
         });
         shell.volume_osd_scene(320, 88);
-        assert_eq!(
-            shell.volume_osd_host.application().label,
-            "Volume 47% · Audio output"
-        );
+        assert_eq!(shell.volume_osd_projection().label, "Volume 47% · Audio output");
         assert!(
             !shell
-                .volume_osd_host
-                .application()
-                .label
-                .contains("Private")
+                .plugin_volume_osd_host
+                .as_ref()
+                .unwrap()
+                .accessibility_nodes()
+                .iter()
+                .any(|node| node.label.as_deref().is_some_and(|label| label.contains("Private")))
         );
     }

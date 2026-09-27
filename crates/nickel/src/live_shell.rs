@@ -665,6 +665,7 @@ pub struct LiveShell {
     audio_status_observed: bool,
     volume_osd_until: Option<Instant>,
     volume_osd_host: nickel_ui::UiHost<VolumeOsdApplication>,
+    plugin_volume_osd_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     launcher_visible: bool,
     run_visible: bool,
     run_host: nickel_ui::UiHost<RunApplication>,
@@ -1279,6 +1280,7 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::run_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::taskbar_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::notification_manifest().clone())?;
+        plugin_registry.register(crate::plugin_panel::volume_osd_manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
         #[cfg(not(test))]
@@ -1292,6 +1294,10 @@ impl LiveShell {
         }
         let mut external_plugin_packages = std::collections::BTreeMap::new();
         for (id, descriptor) in catalog.packages {
+            if plugin_registry.entries().count() >= 64 {
+                tracing::warn!(plugin = %id, "plugin status capacity reached");
+                continue;
+            }
             match plugin_registry.register(descriptor.manifest.clone()) {
                 Ok(()) => {
                     external_plugin_packages.insert(id, descriptor);
@@ -1431,6 +1437,31 @@ impl LiveShell {
         } else {
             None
         };
+        let plugin_volume_osd_host = if plugin_activation
+            .desired_enabled(&crate::plugin_panel::volume_osd_manifest().id, true)
+        {
+            let id = &crate::plugin_panel::volume_osd_manifest().id;
+            plugin_registry.set_enabled(id, true)?;
+            let projection = crate::plugin_panel::VolumeOsdPluginProjection {
+                label: String::new(),
+                percent: audio.volume_percent.min(100),
+            };
+            match crate::plugin_panel::PluginPanelApplication::volume_osd_with_projection(
+                &projection,
+            ) {
+                Ok(application) => {
+                    plugin_registry.mark_running(id)?;
+                    Some(nickel_ui::UiHost::new(application, 420, 96))
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    plugin_registry.mark_failed(id, error)?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let launcher_icon_revision = launcher_icons.revision();
         let mut shell = Self {
             session_host: session_host.clone(),
@@ -1496,6 +1527,7 @@ impl LiveShell {
             volume_osd_until: None,
             audio_status_observed: false,
             volume_osd_host,
+            plugin_volume_osd_host,
             launcher_visible: false,
             run_visible: false,
             run_host,
@@ -2245,7 +2277,10 @@ impl LiveShell {
                         && (!self.remote_lease_notifications.is_empty()
                             || !self.codex_approval_notifications.is_empty()))
             }
-            SurfaceRole::VolumeOsd => self.volume_osd_host.remote_access_protected(),
+            SurfaceRole::VolumeOsd => self.plugin_volume_osd_host.as_ref().map_or_else(
+                || self.volume_osd_host.remote_access_protected(),
+                |host| host.remote_access_protected(),
+            ),
             SurfaceRole::WindowPreview => self
                 .preview_frame
                 .as_ref()
@@ -3011,6 +3046,8 @@ impl LiveShell {
                 self.window_menu_plugin_host = None;
             } else if id == crate::plugin_panel::notification_manifest().id {
                 self.plugin_notification_host = None;
+            } else if id == crate::plugin_panel::volume_osd_manifest().id {
+                self.plugin_volume_osd_host = None;
             }
             self.maybe_publish_plugin_status();
             return Ok(true);
@@ -3070,6 +3107,13 @@ impl LiveShell {
                 .map(|application| {
                     self.plugin_notification_host =
                         Some(nickel_ui::UiHost::new(application, 420, 180));
+                })
+        } else if id == crate::plugin_panel::volume_osd_manifest().id {
+            let projection = self.volume_osd_projection();
+            crate::plugin_panel::PluginPanelApplication::volume_osd_with_projection(&projection)
+                .map(|application| {
+                    self.plugin_volume_osd_host =
+                        Some(nickel_ui::UiHost::new(application, 420, 96));
                 })
         } else {
             Err(format!("plugin {id:?} has no runtime host"))
@@ -3185,7 +3229,10 @@ impl LiveShell {
                     .as_ref()
                     .map_or_else(|| self.notification_host.inspect(), |host| host.inspect()),
             )),
-            SurfaceRole::VolumeOsd => None,
+            SurfaceRole::VolumeOsd => self
+                .plugin_volume_osd_host
+                .as_ref()
+                .map(|host| host_token(host.inspect())),
             SurfaceRole::WindowPreview => {
                 self.preview_frame.as_ref().map(|host| host.change_token())
             }
@@ -6365,6 +6412,10 @@ impl LiveShell {
             })
             || self.desktop_overlay_pointer_capture.is_some()
             || self.volume_osd_host.pointer_interaction_active()
+            || self
+                .plugin_volume_osd_host
+                .as_ref()
+                .is_some_and(|host| host.pointer_interaction_active())
             || self.plugin_run_host.as_ref().map_or_else(
                 || self.run_host.pointer_interaction_active(),
                 |host| host.pointer_interaction_active(),
@@ -7161,7 +7212,7 @@ impl LiveShell {
         }
     }
 
-    fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+    fn volume_osd_projection(&self) -> crate::plugin_panel::VolumeOsdPluginProjection {
         let percent = self.audio.volume_percent.min(100);
         let mut label = if self.audio.muted {
             "Muted".to_owned()
@@ -7181,12 +7232,40 @@ impl LiveShell {
             label.push_str(" · ");
             label.push_str(output);
         }
+        crate::plugin_panel::VolumeOsdPluginProjection { label, percent }
+    }
+
+    fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        let projection = self.volume_osd_projection();
+        if let Some(host) = self.plugin_volume_osd_host.as_mut() {
+            let changed = host
+                .application_mut()
+                .sync_volume_osd_projection(&projection)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "volume OSD plugin projection failed");
+                    false
+                });
+            let outcome = host.step(HostBatch {
+                application_changed: changed,
+                surface_size: Some((width, height)),
+                ..HostBatch::default()
+            });
+            let commands = host.commands().to_vec();
+            let _ = self.plugin_registry.record_memory(
+                &crate::plugin_panel::volume_osd_manifest().id,
+                nickel_core::plugins::PluginMemory {
+                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    ..nickel_core::plugins::PluginMemory::default()
+                },
+            );
+            return commands;
+        }
         let application = self.volume_osd_host.application_mut();
-        let changed = application.label != label
-            || application.percent != percent
+        let changed = application.label != projection.label
+            || application.percent != projection.percent
             || application.palette != self.palette;
-        application.label = label;
-        application.percent = percent;
+        application.label = projection.label;
+        application.percent = projection.percent;
         application.palette = self.palette;
         self.volume_osd_host.step(HostBatch {
             application_changed: changed,
