@@ -192,7 +192,15 @@ impl SettingsApp {
                         SettingsRow::new(theme, "Enabled", health).trailing(
                             Switch::with_state_action(switch_state, action, theme)
                                 .id(format!("plugin-enable-{}", plugin.id))
-                                .accessibility_label(format!("Enable {}", plugin.name)),
+                                .accessibility_label(format!(
+                                    "{} {}",
+                                    if plugin.desired_enabled {
+                                        "Disable"
+                                    } else {
+                                        "Enable"
+                                    },
+                                    plugin.name
+                                )),
                         ),
                     )
                     .child(SettingsRow::new(theme, "Access", grants))

@@ -2924,6 +2924,11 @@ mod tests {
                 },
             }],
         });
+        let mut enabled_app = SettingsApp::with_initial_page(SettingsPage::Plugins);
+        let mut enabled_status = app.plugin_status.clone().unwrap();
+        enabled_status.plugins[0].desired_enabled = true;
+        enabled_status.plugins[0].health = nickel_session_protocol::PluginRuntimeHealth::Running;
+        enabled_app.plugin_status = Some(enabled_status);
         let host = UiHost::new(app, 1100, 800);
         assert_eq!(
             host.semantic_targets_for_message(&SettingsMessage::ReviewPluginEnable(
@@ -2944,6 +2949,23 @@ mod tests {
         assert!(labels.contains(&"Setting: Show count"));
         assert!(labels.contains(&"Nickel"));
         assert!(labels.contains(&"0.1.0"));
+        assert!(labels.contains(&"Enable Nickel Launcher"));
+        let enabled_host = UiHost::new(enabled_app, 1100, 800);
+        assert!(
+            enabled_host
+                .accessibility_nodes()
+                .iter()
+                .any(|node| node.label.as_deref() == Some("Disable Nickel Launcher"))
+        );
+        assert_eq!(
+            enabled_host
+                .semantic_targets_for_message(&SettingsMessage::SetPluginEnabled {
+                    id: "org.nickel.launcher".into(),
+                    enabled: false,
+                })
+                .len(),
+            1
+        );
         assert_eq!(
             host.semantic_targets_for_message(&SettingsMessage::SetPluginSetting {
                 id: "org.nickel.launcher".into(),
