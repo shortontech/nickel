@@ -1245,7 +1245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ServerMessage::ShellSurfaces(surfaces) => {
             for surface in surfaces {
                 println!(
-                    "{:?}\t{}\t{}",
+                    "{:?}\t{}\t{}{}",
                     surface.role,
                     surface.output.as_deref().unwrap_or("unmapped"),
                     surface.geometry.map_or_else(
@@ -1254,7 +1254,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "{},{} {}x{}",
                             geometry.x, geometry.y, geometry.width, geometry.height
                         )
-                    )
+                    ),
+                    surface.plugin.as_ref().map_or_else(String::new, |plugin| {
+                        format!("\t{}/{}", plugin.plugin_id, plugin.surface_id)
+                    })
                 );
             }
             Ok(())

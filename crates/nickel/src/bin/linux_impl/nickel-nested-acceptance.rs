@@ -60,7 +60,7 @@ fn run() -> Result<(), String> {
     fs::create_dir_all(&plugin).map_err(|error| error.to_string())?;
     fs::write(
         plugin.join("plugin.json"),
-        r#"{"api_version":1,"id":"org.example.acceptance-panel","name":"Acceptance Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"primary"}],"settings":[{"id":"show-label","label":"Show label","kind":"boolean","default":true}]}"#,
+        r#"{"api_version":1,"id":"org.example.acceptance-panel","name":"Acceptance Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"all"}],"settings":[{"id":"show-label","label":"Show label","kind":"boolean","default":true}]}"#,
     )
     .map_err(|error| error.to_string())?;
     fs::write(
@@ -140,7 +140,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-            "PASS: nested compositor ran bundled UI and an installed panel, changed a live plugin setting, toggled Settings plugin activation and memory, confirmed launcher fallback and restart through scoped test input, and shut down cleanly"
+            "PASS: nested compositor ran bundled UI and an installed panel across a scaled hotplugged output, changed a live plugin setting, toggled Settings plugin activation and memory, confirmed launcher fallback and restart through scoped test input, and shut down cleanly"
     );
     Ok(())
 }
@@ -294,6 +294,47 @@ fn exercise(
         return Err("installed panel did not start with its declared setting".into());
     }
     wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(5))?;
+    wait_for_plugin_panel_on_output(
+        test_input,
+        &environment,
+        "winit",
+        true,
+        Duration::from_secs(5),
+    )?;
+    checked(
+        test_input,
+        &environment,
+        &["output-connect", "DP-plugin-test", "1024", "768", "180", "normal"],
+    )?;
+    let outputs = checked(test_input, &environment, &["outputs"])?;
+    if !outputs
+        .lines()
+        .any(|line| line.starts_with("DP-plugin-test\t") && line.contains("\tscale=180/120\t"))
+    {
+        return Err(format!("scaled plugin test output is missing: {outputs}"));
+    }
+    wait_for_plugin_panel_on_output(
+        test_input,
+        &environment,
+        "DP-plugin-test",
+        true,
+        Duration::from_secs(5),
+    )?;
+    checked(test_input, &environment, &["output-disconnect", "DP-plugin-test"])?;
+    wait_for_plugin_panel_on_output(
+        test_input,
+        &environment,
+        "DP-plugin-test",
+        false,
+        Duration::from_secs(5),
+    )?;
+    wait_for_plugin_panel_on_output(
+        test_input,
+        &environment,
+        "winit",
+        true,
+        Duration::from_secs(5),
+    )?;
     let changed = checked(
         test_input,
         &environment,
@@ -457,6 +498,33 @@ fn wait_for_settings_memory(
             return Err(format!(
                 "Settings did not follow shell activation: desired={}, memory={:?}",
                 plugin.desired_enabled, plugin.memory.native_ui_bytes
+            ));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn wait_for_plugin_panel_on_output(
+    test_input: &Path,
+    environment: &[(String, String)],
+    output: &str,
+    expected: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        let present = surfaces.lines().any(|line| {
+            line.starts_with(&format!("PluginSurface\t{output}\t"))
+                && line.contains("360x96\t")
+                && line.ends_with("org.example.acceptance-panel/main")
+        });
+        if present == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "plugin panel presence on {output} stayed {present}, expected {expected}: {surfaces}"
             ));
         }
         thread::sleep(POLL);

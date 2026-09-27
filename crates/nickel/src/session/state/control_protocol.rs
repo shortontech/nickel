@@ -2248,7 +2248,7 @@ impl NickelSession {
                     let role = match surface.role {
                         crate::winit_shell::SurfaceRole::Desktop => ShellRole::Desktop,
                         crate::winit_shell::SurfaceRole::Taskbar => ShellRole::Panel,
-                        crate::winit_shell::SurfaceRole::Panel => return None,
+                        crate::winit_shell::SurfaceRole::Panel => ShellRole::PluginSurface,
                         crate::winit_shell::SurfaceRole::Launcher => ShellRole::Launcher,
                         crate::winit_shell::SurfaceRole::ControlCenter => ShellRole::ControlCenter,
                         crate::winit_shell::SurfaceRole::Notification => ShellRole::Notification,
@@ -2308,6 +2308,12 @@ impl NickelSession {
                         role,
                         geometry,
                         output: surface.output.clone(),
+                        plugin: surface.plugin.as_ref().map(|key| {
+                            nickel_session_protocol::PluginSurfaceIdentity {
+                                plugin_id: key.plugin_id.clone(),
+                                surface_id: key.surface_id.clone(),
+                            }
+                        }),
                     })
                 })
                 .collect();
@@ -2363,6 +2369,15 @@ impl NickelSession {
                     role,
                     geometry,
                     output,
+                    plugin: self
+                        .registered_shell_role_slots
+                        .iter()
+                        .find(|registration| registration.surface == surface.id())
+                        .and_then(|registration| registration.plugin_surface.as_ref())
+                        .map(|placement| nickel_session_protocol::PluginSurfaceIdentity {
+                            plugin_id: placement.plugin_id.clone(),
+                            surface_id: placement.surface_id.clone(),
+                        }),
                 })
             })
             .take(nickel_session_protocol::MAX_WINDOWS)
@@ -2380,6 +2395,12 @@ impl NickelSession {
                     role: registration.role,
                     geometry: None,
                     output: registration.output.clone(),
+                    plugin: registration.plugin_surface.as_ref().map(|placement| {
+                        nickel_session_protocol::PluginSurfaceIdentity {
+                            plugin_id: placement.plugin_id.clone(),
+                            surface_id: placement.surface_id.clone(),
+                        }
+                    }),
                 });
             }
         }

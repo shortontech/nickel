@@ -1687,6 +1687,14 @@ pub struct ShellSurfaceSnapshot {
     pub role: ShellRole,
     pub geometry: Option<Geometry>,
     pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginSurfaceIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSurfaceIdentity {
+    pub plugin_id: String,
+    pub surface_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2869,16 +2877,33 @@ mod tests {
 
     #[test]
     fn shell_surface_diagnostics_round_trip_authoritative_placement() {
-        let message = ServerMessage::ShellSurfaces(vec![ShellSurfaceSnapshot {
-            role: ShellRole::Launcher,
-            geometry: Some(Geometry {
-                x: 1298,
-                y: 24,
-                width: 920,
-                height: 680,
-            }),
-            output: Some("DP-test".into()),
-        }]);
+        let message = ServerMessage::ShellSurfaces(vec![
+            ShellSurfaceSnapshot {
+                role: ShellRole::Launcher,
+                geometry: Some(Geometry {
+                    x: 1298,
+                    y: 24,
+                    width: 920,
+                    height: 680,
+                }),
+                output: Some("DP-test".into()),
+                plugin: None,
+            },
+            ShellSurfaceSnapshot {
+                role: ShellRole::PluginSurface,
+                geometry: Some(Geometry {
+                    x: 1520,
+                    y: 688,
+                    width: 360,
+                    height: 96,
+                }),
+                output: Some("DP-test".into()),
+                plugin: Some(PluginSurfaceIdentity {
+                    plugin_id: "org.example.panel".into(),
+                    surface_id: "main".into(),
+                }),
+            },
+        ]);
         let envelope = ServerEnvelope {
             request_id: 18,
             message: message.clone(),
