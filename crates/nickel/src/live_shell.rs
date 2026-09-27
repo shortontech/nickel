@@ -2567,6 +2567,46 @@ impl LiveShell {
         &self.plugin_registry
     }
 
+    /// Starts or retires a bundled plugin instance. Settings can call this
+    /// after reviewing its manifest and grants.
+    pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
+        if !self.plugin_registry.set_enabled(id, enabled)? {
+            return Ok(false);
+        }
+        if !enabled {
+            if id == crate::plugin_panel::manifest().id {
+                self.plugin_panel_host = None;
+            } else if id == crate::plugin_panel::launcher_manifest().id {
+                self.plugin_launcher_host = None;
+            }
+            return Ok(true);
+        }
+        let started = if id == crate::plugin_panel::manifest().id {
+            crate::plugin_panel::PluginPanelApplication::bundled().map(|application| {
+                self.plugin_panel_host = Some(nickel_ui::UiHost::new(
+                    application,
+                    crate::plugin_panel::surface().width,
+                    crate::plugin_panel::surface().height,
+                ));
+            })
+        } else if id == crate::plugin_panel::launcher_manifest().id {
+            crate::plugin_panel::PluginPanelApplication::launcher(&self.launcher).map(
+                |application| {
+                    self.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+                },
+            )
+        } else {
+            Err(format!("plugin {id:?} has no runtime host"))
+        };
+        match started {
+            Ok(()) => self.plugin_registry.mark_running(id).map(|()| true),
+            Err(error) => {
+                self.plugin_registry.mark_failed(id, error.clone())?;
+                Err(error)
+            }
+        }
+    }
+
     pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
         self.run_visible
             .then_some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT))

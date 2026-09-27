@@ -19,6 +19,26 @@
     }
 
     #[test]
+    fn disabling_plugin_retires_host_and_clears_reported_memory() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.plugin_panel_host.is_some());
+        shell.scene(
+            super::SurfaceRole::Panel,
+            crate::plugin_panel::surface().width,
+            crate::plugin_panel::surface().height,
+        );
+        assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.plugin_panel_host.is_none());
+        let entry = shell.plugin_registry().get(id).unwrap();
+        assert_eq!(entry.health, nickel_core::plugins::PluginHealth::Disabled);
+        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+    }
+
+    #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
         use nickel_input::global::{ShortcutCapability, UnavailableReason};
 
