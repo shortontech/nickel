@@ -11,7 +11,7 @@ use nickel_core::plugins::{PluginCapability, PluginManifest, PluginSurface, Plug
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, Insets, OverlayAnchor,
     OverlayId, OverlayStyle, Row, SemanticRole, Size, Spacer, Text, TextField as UiTextField,
-    TransientSurface, UiId, ViewContext,
+    TransientSurface, UiId, VerticalScroll, ViewContext,
 };
 use serde_json::Value;
 
@@ -75,6 +75,7 @@ const BOOTSTRAP: &str = r#"
 const Panel = 'panel';
 const Row = 'row';
 const Column = 'column';
+const ScrollView = 'scroll-view';
 const Text = 'text';
 const TextField = 'text-field';
 const Button = 'button';
@@ -195,6 +196,11 @@ enum PanelNode {
     },
     Row(Vec<Self>),
     Column(Vec<Self>),
+    ScrollView {
+        id: String,
+        height: u32,
+        children: Vec<Self>,
+    },
     Text(String),
     Spacer,
     TextField {
@@ -232,7 +238,7 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
-            "panel" | "row" | "column" => {
+            "panel" | "row" | "column" | "scroll-view" => {
                 let children = children
                     .iter()
                     .filter(|value| !value.is_null())
@@ -255,6 +261,23 @@ impl PanelNode {
                     })
                 } else if kind == "row" {
                     Ok(Self::Row(children))
+                } else if kind == "scroll-view" {
+                    let id = value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or("scroll view needs an id")?;
+                    if id.is_empty() || id.len() > 128 {
+                        return Err("scroll view ID must contain 1 to 128 characters".into());
+                    }
+                    let height = value.get("height").and_then(Value::as_u64).unwrap_or(480);
+                    if !(1..=8192).contains(&height) {
+                        return Err("scroll view height must be 1 to 8192".into());
+                    }
+                    Ok(Self::ScrollView {
+                        id: id.to_owned(),
+                        height: height as u32,
+                        children,
+                    })
                 } else {
                     Ok(Self::Column(children))
                 }
@@ -379,6 +402,22 @@ impl PanelNode {
                 }
                 AnyView::new(column)
             }
+            Self::ScrollView {
+                id,
+                height,
+                children,
+            } => {
+                let mut column = Column::new().fill_width();
+                for child in children {
+                    column = column.child(child.view(images));
+                }
+                AnyView::new(
+                    VerticalScroll::new(PluginMessage::Scroll, 0.0)
+                        .id(id.clone())
+                        .height(*height as f32)
+                        .child(column),
+                )
+            }
             Self::Text(text) => AnyView::new(
                 Container::new()
                     .height(48.0)
@@ -440,9 +479,10 @@ impl PanelNode {
     fn dialog(&self) -> Option<&Self> {
         match self {
             Self::Dialog { .. } => Some(self),
-            Self::Panel { children, .. } | Self::Row(children) | Self::Column(children) => {
-                children.iter().find_map(Self::dialog)
-            }
+            Self::Panel { children, .. }
+            | Self::Row(children)
+            | Self::Column(children)
+            | Self::ScrollView { children, .. } => children.iter().find_map(Self::dialog),
             _ => None,
         }
     }
@@ -491,6 +531,7 @@ pub enum PluginMessage {
     Click(usize),
     Context(usize),
     Text(usize, String),
+    Scroll,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -811,6 +852,9 @@ impl nickel_ui::Application for PluginPanelApplication {
     type Message = PluginMessage;
 
     fn update(&mut self, message: Self::Message) {
+        if message == PluginMessage::Scroll {
+            return;
+        }
         let expression = match message {
             PluginMessage::Click(action) | PluginMessage::Context(action) => {
                 format!("__nickelDispatch({action})")
@@ -819,6 +863,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                 let encoded = serde_json::to_string(&value).expect("string serialization");
                 format!("__nickelDispatch({action}, {encoded})")
             }
+            PluginMessage::Scroll => unreachable!(),
         };
         let rendered = evaluate_tree(&mut self.context, &expression);
         let effects = self

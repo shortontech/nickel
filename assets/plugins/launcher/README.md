@@ -17,7 +17,7 @@ NICKEL_DEV_PLUGIN_LAUNCHER=1 cargo run -p nickel --no-default-features \
 
 The host supplies `nickel.data.query`, up to 12 ranked search results, a
 bounded pinned and recent app list, and Places. The plugin renders dashboard
-and search buttons, then requests `launcher-set-query`,
+and search buttons inside native scroll views, then requests `launcher-set-query`,
 `launcher-activate-result`, or `launcher-launch-dashboard` through
 `nickel.request`. The host checks declared capabilities and confirms the app
 ID against current launcher state before launching it. Search ranking and

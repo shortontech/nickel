@@ -1,11 +1,12 @@
 use nickel_shell::plugin_panel::{
-    LauncherPluginProjection, LauncherPluginResult, PluginEffect, PluginPanelApplication,
-    TaskbarPluginItem, TaskbarPluginProjection, TaskbarPluginTrayItem, surface,
+    LauncherPluginProjection, LauncherPluginResult, PluginEffect, PluginMessage,
+    PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection, TaskbarPluginTrayItem,
+    surface,
 };
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueSnapshot, UiEvent,
-    UiHost,
+    ActionKind, Point, SemanticAction, SemanticRole, SemanticSelector, SemanticValueSnapshot,
+    UiEvent, UiHost,
 };
 
 #[test]
@@ -249,6 +250,36 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
             id: "calculator".into(),
         }]
     );
+}
+
+#[test]
+fn launcher_dashboard_scrolls_without_dispatching_a_plugin_handler() {
+    let dashboard = (0..12)
+        .map(|index| LauncherPluginResult {
+            index,
+            id: format!("app-{index}"),
+            name: format!("Application {index}"),
+        })
+        .collect();
+    let application = PluginPanelApplication::launcher_with_projection(&LauncherPluginProjection {
+        query: String::new(),
+        dashboard_visible: true,
+        results: vec![],
+        dashboard,
+        places: vec![],
+    })
+    .expect("launcher script loads");
+    let mut host = UiHost::new(application, 920, 680);
+    let extent = host
+        .scroll_extent(&PluginMessage::Scroll)
+        .expect("dashboard scroll surface");
+    assert!(extent.can_scroll());
+    host.handle_event(UiEvent::Scroll {
+        point: Point { x: 100.0, y: 150.0 },
+        delta_y: 240.0,
+    });
+    assert!(host.scroll_extent(&PluginMessage::Scroll).unwrap().offset > 0.0);
+    assert!(host.application_mut().take_effects().is_empty());
 }
 
 #[test]
