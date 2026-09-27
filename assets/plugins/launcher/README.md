@@ -21,7 +21,9 @@ and search buttons inside native scroll views. The dashboard also shows recent
 projects, account, Settings, and a component logout dialog. Actions go through
 typed `nickel.request` calls. The host checks declared capabilities and current
 launcher state, including app and project IDs, before acting. Search ranking,
-application execution, and session authority remain Rust services.
+favorite state, application execution, and session authority remain Rust
+services. View switching and pin buttons request those Rust state changes.
 
-This is a comparison path while the full launcher, including view switching,
-pinning, keyboard and controller behavior, and menus, is migrated and tested.
+This is a comparison path while the full launcher, including keyboard and
+controller behavior, complete catalog paging, and menus, is migrated and
+tested.

@@ -1,7 +1,7 @@
 use nickel_shell::plugin_panel::{
-    LauncherPluginProject, LauncherPluginProjection, LauncherPluginResult, PluginEffect,
-    PluginMessage, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
-    TaskbarPluginTrayItem, surface,
+    LauncherPluginProject, LauncherPluginProjection, LauncherPluginResult, LauncherView,
+    PluginEffect, PluginMessage, PluginPanelApplication, TaskbarPluginItem,
+    TaskbarPluginProjection, TaskbarPluginTrayItem, surface,
 };
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
@@ -179,15 +179,18 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
     let projection = LauncherPluginProjection {
         query: String::new(),
         dashboard_visible: true,
+        view: LauncherView::Favorites,
         results: vec![LauncherPluginResult {
             index: 0,
             id: "calculator".into(),
             name: "Calculator".into(),
+            pinned: false,
         }],
         dashboard: vec![LauncherPluginResult {
             index: 0,
             id: "editor".into(),
             name: "Editor".into(),
+            pinned: false,
         }],
         places: vec![],
         projects: vec![],
@@ -215,6 +218,20 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
             id: "editor".into()
         }]
     );
+    let pin = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Pin Editor".into(),
+        })
+        .expect("pin action")
+        .id;
+    host.perform_semantic_action(pin, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ToggleLauncherPin {
+            id: "editor".into()
+        }]
+    );
     let field = host
         .query_unique(&SemanticSelector::Role(SemanticRole::TextField))
         .expect("launcher search field")
@@ -229,6 +246,7 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
     let mut updated = projection.clone();
     updated.query = "calc".into();
     updated.dashboard_visible = false;
+    updated.results[0].pinned = true;
     assert!(
         host.application_mut()
             .sync_launcher_projection(&updated)
@@ -239,6 +257,11 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
         ..nickel_ui::HostBatch::default()
     });
     assert_eq!(host.inspect().keyboard_focus, Some(field));
+    host.query_unique(&SemanticSelector::RoleAndName {
+        role: SemanticRole::Button,
+        name: "Unpin Calculator".into(),
+    })
+    .expect("updated pin state");
     let result = host
         .query_unique(&SemanticSelector::RoleAndName {
             role: SemanticRole::Button,
@@ -263,11 +286,13 @@ fn launcher_dashboard_scrolls_without_dispatching_a_plugin_handler() {
             index,
             id: format!("app-{index}"),
             name: format!("Application {index}"),
+            pinned: false,
         })
         .collect();
     let application = PluginPanelApplication::launcher_with_projection(&LauncherPluginProjection {
         query: String::new(),
         dashboard_visible: true,
+        view: LauncherView::Favorites,
         results: vec![],
         dashboard,
         places: vec![],
@@ -295,6 +320,7 @@ fn launcher_dashboard_requests_projects_settings_account_and_logout() {
     let application = PluginPanelApplication::launcher_with_projection(&LauncherPluginProjection {
         query: String::new(),
         dashboard_visible: true,
+        view: LauncherView::Favorites,
         results: vec![],
         dashboard: vec![],
         places: vec![],
@@ -350,6 +376,73 @@ fn launcher_dashboard_requests_projects_settings_account_and_logout() {
     assert_eq!(
         host.application_mut().take_effects(),
         vec![PluginEffect::LauncherRequestLogout]
+    );
+}
+
+#[test]
+fn launcher_plugin_switches_dashboard_views_from_host_projection() {
+    let mut projection = LauncherPluginProjection {
+        query: String::new(),
+        dashboard_visible: true,
+        view: LauncherView::Favorites,
+        results: vec![],
+        dashboard: vec![LauncherPluginResult {
+            index: 0,
+            id: "favorite".into(),
+            name: "Favorite app".into(),
+            pinned: true,
+        }],
+        places: vec![],
+        projects: vec![],
+        codex_available: false,
+        account_name: "Local session".into(),
+        logout_available: false,
+    };
+    let mut host = UiHost::new(
+        PluginPanelApplication::launcher_with_projection(&projection)
+            .expect("launcher script loads"),
+        920,
+        680,
+    );
+    let switch = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "All applications".into(),
+        })
+        .expect("view switch")
+        .id;
+    host.perform_semantic_action(switch, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::SetLauncherView(LauncherView::Applications)]
+    );
+    projection.view = LauncherView::Applications;
+    projection.dashboard = vec![LauncherPluginResult {
+        index: 0,
+        id: "calculator".into(),
+        name: "Calculator".into(),
+        pinned: false,
+    }];
+    assert!(
+        host.application_mut()
+            .sync_launcher_projection(&projection)
+            .unwrap()
+    );
+    host.step(nickel_ui::HostBatch {
+        application_changed: true,
+        ..Default::default()
+    });
+    host.query_unique(&SemanticSelector::RoleAndName {
+        role: SemanticRole::Button,
+        name: "Calculator".into(),
+    })
+    .expect("host supplied application list");
+    assert!(
+        host.query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Favorite app".into(),
+        })
+        .is_err()
     );
 }
 

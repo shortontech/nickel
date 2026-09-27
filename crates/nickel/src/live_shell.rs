@@ -3520,6 +3520,30 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::SetLauncherView(view) => {
+                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard {
+                        self.apply_launcher_action(LauncherAction::SetView(view));
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ToggleLauncherPin { id } => {
+                    let projection = crate::plugin_panel::LauncherPluginProjection::from_launcher(
+                        &self.launcher,
+                    );
+                    let visible = if projection.dashboard_visible {
+                        projection
+                            .dashboard
+                            .iter()
+                            .chain(projection.places.iter())
+                            .any(|item| item.id == id)
+                    } else {
+                        projection.results.iter().any(|item| item.id == id)
+                    };
+                    if visible {
+                        self.apply_launcher_action(LauncherAction::TogglePin(id));
+                        changed = true;
+                    }
+                }
                 crate::plugin_panel::PluginEffect::LauncherOpenSettings => {
                     if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard {
                         self.apply_launcher_action(LauncherAction::OpenSettings(

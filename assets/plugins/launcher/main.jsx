@@ -9,10 +9,16 @@ function App() {
             onChange={query => nickel.request({type: "launcher-set-query", query})} />
         {data.dashboardVisible ? <ScrollView id="launcher-dashboard-scroll" height={580}>
             <Text>Places</Text>
-            {data.places.map(place => <Button id={"launcher-place-" + place.index}
-                onClick={() => nickel.request({type: "launcher-launch-dashboard", id: place.id})}>
-                {place.name}
-            </Button>)}
+            {data.places.map(place => <Row>
+                <Button id={"launcher-place-" + place.index}
+                    onClick={() => nickel.request({type: "launcher-launch-dashboard", id: place.id})}>
+                    {place.name}
+                </Button>
+                <Button id={"launcher-pin-place-" + place.index}
+                    onClick={() => nickel.request({type: "launcher-toggle-pin", id: place.id})}>
+                    {place.pinned ? "Unpin" : "Pin"}
+                </Button>
+            </Row>)}
             {data.codexAvailable ? <Column>
                 <Text>Recent projects</Text>
                 {data.projects.map(project => <Button id={"launcher-project-" + project.id}
@@ -24,11 +30,30 @@ function App() {
                     All projects
                 </Button>
             </Column> : null}
-            <Text>Pinned and recent</Text>
-            {data.dashboard.map(app => <Button id={"launcher-dashboard-" + app.index}
-                onClick={() => nickel.request({type: "launcher-launch-dashboard", id: app.id})}>
-                {app.name}
-            </Button>)}
+            <Row>
+                <Button id="launcher-view-favorites" onClick={() => nickel.request({type: "launcher-set-view", view: "favorites"})}>
+                    Pinned &amp; recent
+                </Button>
+                <Button id="launcher-view-applications" onClick={() => nickel.request({type: "launcher-set-view", view: "applications"})}>
+                    All applications
+                </Button>
+                <Button id="launcher-view-places" onClick={() => nickel.request({type: "launcher-set-view", view: "places"})}>
+                    Places
+                </Button>
+            </Row>
+            <Text>{data.view === "favorites" ? "Pinned and recent" : data.view === "applications" ? "All applications" : "Places"}</Text>
+            {data.dashboard.length === 0 ? <Text>No applications in this view</Text> : null}
+            {data.dashboard.map(app => <Row>
+                <Button id={"launcher-dashboard-" + app.index}
+                    onClick={() => nickel.request({type: "launcher-launch-dashboard", id: app.id})}>
+                    {app.name}
+                </Button>
+                <Button id={"launcher-pin-dashboard-" + app.index}
+                    accessibilityLabel={(app.pinned ? "Unpin " : "Pin ") + app.name}
+                    onClick={() => nickel.request({type: "launcher-toggle-pin", id: app.id})}>
+                    {app.pinned ? "Unpin" : "Pin"}
+                </Button>
+            </Row>)}
             <Button id="launcher-account" onClick={() => nickel.request({type: "launcher-open-account"})}>
                 {data.accountName}
             </Button>
@@ -43,10 +68,17 @@ function App() {
         {!data.dashboardVisible ?
         <ScrollView id="launcher-search-scroll" height={580}>
             {data.results.length === 0 ? <Text>No applications found</Text> : null}
-            {data.results.map(result => <Button id={"launcher-result-" + result.index}
-                onClick={() => nickel.request({type: "launcher-activate-result", index: result.index, id: result.id})}>
-                {result.name}
-            </Button>)}
+            {data.results.map(result => <Row>
+                <Button id={"launcher-result-" + result.index}
+                    onClick={() => nickel.request({type: "launcher-activate-result", index: result.index, id: result.id})}>
+                    {result.name}
+                </Button>
+                <Button id={"launcher-pin-result-" + result.index}
+                    accessibilityLabel={(result.pinned ? "Unpin " : "Pin ") + result.name}
+                    onClick={() => nickel.request({type: "launcher-toggle-pin", id: result.id})}>
+                    {result.pinned ? "Unpin" : "Pin"}
+                </Button>
+            </Row>)}
         </ScrollView> : null}
         <Dialog id="launcher-logout-dialog" anchor="launcher-logout" open={logoutOpen} width={320} height={160}>
             <Column>

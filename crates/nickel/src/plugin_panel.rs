@@ -15,6 +15,7 @@ use nickel_ui::{
 };
 use serde_json::Value;
 
+pub use crate::launcher::LauncherView;
 use crate::launcher::{Application, DashboardSection, Launcher, LauncherMode, TaskbarApplication};
 
 pub fn manifest() -> &'static PluginManifest {
@@ -520,6 +521,8 @@ pub enum PluginEffect {
     SetLauncherQuery(String),
     ActivateLauncherResult { index: usize, id: String },
     LaunchDashboardApplication { id: String },
+    SetLauncherView(LauncherView),
+    ToggleLauncherPin { id: String },
     LauncherOpenSettings,
     LauncherOpenAccount,
     LauncherOpenProject { id: String },
@@ -544,6 +547,7 @@ pub struct LauncherPluginResult {
     pub index: usize,
     pub id: String,
     pub name: String,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -556,6 +560,7 @@ pub struct LauncherPluginProject {
 pub struct LauncherPluginProjection {
     pub query: String,
     pub dashboard_visible: bool,
+    pub view: LauncherView,
     pub results: Vec<LauncherPluginResult>,
     pub dashboard: Vec<LauncherPluginResult>,
     pub places: Vec<LauncherPluginResult>,
@@ -654,40 +659,28 @@ impl LauncherPluginProjection {
             .filter_map(|index| {
                 launcher
                     .result_at(index)
-                    .and_then(|application| launcher_plugin_result(index, application))
+                    .and_then(|application| launcher_plugin_result(launcher, index, application))
             })
             .collect();
         Self {
             query: launcher.query().to_owned(),
             dashboard_visible: launcher.mode() == LauncherMode::Dashboard,
+            view: launcher.view(),
             results,
-            dashboard: {
-                let mut seen = HashSet::new();
-                let home = launcher
-                    .favorite_applications()
-                    .into_iter()
-                    .chain(launcher.recent_applications())
-                    .filter(|application| seen.insert(application.id().to_owned()))
-                    .take(12)
-                    .collect::<Vec<_>>();
-                let home = if home.is_empty() {
-                    launcher
-                        .discovered_applications()
-                        .take(12)
-                        .collect::<Vec<_>>()
-                } else {
-                    home
-                };
-                home.into_iter()
-                    .enumerate()
-                    .filter_map(|(index, application)| launcher_plugin_result(index, application))
-                    .collect()
-            },
+            dashboard: (0..launcher.result_count().min(48))
+                .filter_map(|index| {
+                    launcher.result_at(index).and_then(|application| {
+                        launcher_plugin_result(launcher, index, application)
+                    })
+                })
+                .collect(),
             places: launcher
                 .place_applications()
                 .take(12)
                 .enumerate()
-                .filter_map(|(index, application)| launcher_plugin_result(index, application))
+                .filter_map(|(index, application)| {
+                    launcher_plugin_result(launcher, index, application)
+                })
                 .collect(),
             projects: match launcher.dashboard_projects() {
                 DashboardSection::Ready(projects) if launcher.codex_available() => {
@@ -724,14 +717,19 @@ impl LauncherPluginProjection {
 
     fn to_json(&self) -> String {
         let results = self.results.iter().map(|result| {
-            serde_json::json!({"index": result.index, "id": result.id, "name": result.name})
+            serde_json::json!({"index": result.index, "id": result.id, "name": result.name, "pinned": result.pinned})
         }).collect::<Vec<_>>();
         let items = |items: &[LauncherPluginResult]| {
             items.iter().map(|item| {
-            serde_json::json!({"index": item.index, "id": item.id, "name": item.name})
+            serde_json::json!({"index": item.index, "id": item.id, "name": item.name, "pinned": item.pinned})
         }).collect::<Vec<_>>()
         };
-        serde_json::json!({"query": self.query, "dashboardVisible": self.dashboard_visible, "results": results,
+        let view = match self.view {
+            LauncherView::Favorites => "favorites",
+            LauncherView::Applications => "applications",
+            LauncherView::Places => "places",
+        };
+        serde_json::json!({"query": self.query, "dashboardVisible": self.dashboard_visible, "view": view, "results": results,
             "dashboard": items(&self.dashboard), "places": items(&self.places),
             "projects": self.projects.iter().map(|project| serde_json::json!({"id": project.id, "name": project.name})).collect::<Vec<_>>(),
             "codexAvailable": self.codex_available, "accountName": self.account_name,
@@ -740,12 +738,17 @@ impl LauncherPluginProjection {
     }
 }
 
-fn launcher_plugin_result(index: usize, application: &Application) -> Option<LauncherPluginResult> {
+fn launcher_plugin_result(
+    launcher: &Launcher,
+    index: usize,
+    application: &Application,
+) -> Option<LauncherPluginResult> {
     let id = application.id();
     (!id.is_empty() && id.len() <= 256).then(|| LauncherPluginResult {
         index,
         id: id.to_owned(),
         name: application.name().chars().take(120).collect(),
+        pinned: launcher.is_pinned(id),
     })
 }
 
@@ -1111,6 +1114,43 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::LaunchDashboardApplication {
                                 id: id.to_owned(),
                             });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-set-view")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsRead) =>
+                        {
+                            let view = match effect.get("view").and_then(Value::as_str) {
+                                Some("favorites") => LauncherView::Favorites,
+                                Some("applications") => LauncherView::Applications,
+                                Some("places") => LauncherView::Places,
+                                _ => {
+                                    self.last_error = Some("launcher view is invalid".into());
+                                    return;
+                                }
+                            };
+                            approved.push(PluginEffect::SetLauncherView(view));
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-toggle-pin")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsPin) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("pinned application ID is missing".into());
+                                return;
+                            };
+                            if id.is_empty() || id.len() > 256 {
+                                self.last_error = Some("pinned application ID is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ToggleLauncherPin { id: id.to_owned() });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-open-settings")
