@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.notification",
+  "name": "Nickel Notifications",
+  "entry": "main.js",
+  "surfaces": [
+    {"id":"main","kind":"overlay","width":420,"height":180}
+  ],
+  "capabilities": ["notifications-read", "notifications-act"]
+}

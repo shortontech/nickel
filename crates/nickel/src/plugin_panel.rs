@@ -19,6 +19,7 @@ use serde_json::Value;
 
 pub use crate::launcher::LauncherView;
 use crate::launcher::{Application, DashboardSection, Launcher, LauncherMode, TaskbarApplication};
+use crate::notification::DesktopNotification;
 
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
@@ -53,6 +54,20 @@ pub fn taskbar_manifest() -> &'static PluginManifest {
         PluginManifest::from_json(include_str!("../../../assets/plugins/taskbar/plugin.json"))
             .expect("bundled taskbar plugin manifest must be valid")
     })
+}
+
+pub fn notification_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/notification/plugin.json"
+        ))
+        .expect("bundled notification plugin manifest must be valid")
+    })
+}
+
+pub fn notification_enabled() -> bool {
+    std::env::var_os("NICKEL_DEV_PLUGIN_NOTIFICATION").is_some()
 }
 
 pub fn taskbar_enabled() -> bool {
@@ -645,6 +660,7 @@ pub struct PluginPanelApplication {
     manifest: PluginManifest,
     projection_data: Option<String>,
     launcher_shortcuts: Option<LauncherShortcutState>,
+    notification_shortcuts: Option<(Option<u32>, bool)>,
     overlay_open: bool,
     images: PluginImages,
 }
@@ -693,6 +709,9 @@ pub enum PluginEffect {
     ActivateTrayItem { id: String },
     ContextTrayItem { id: String },
     ToggleControlCenter,
+    InvokeNotification { id: u32, key: String },
+    DismissNotification { id: u32 },
+    CloseNotificationHistory,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -759,6 +778,77 @@ pub struct TaskbarPluginProjection {
     pub clock: String,
     pub keyboard_enabled: bool,
     pub codex_available: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationPluginAction {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationPluginItem {
+    pub id: u32,
+    pub app_name: String,
+    pub summary: String,
+    pub body: String,
+    pub actions: Vec<NotificationPluginAction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationPluginProjection {
+    pub notification: Option<NotificationPluginItem>,
+    pub history: Vec<NotificationPluginItem>,
+    pub history_visible: bool,
+}
+
+impl NotificationPluginProjection {
+    pub fn from_feed(
+        notification: Option<&DesktopNotification>,
+        history: &[DesktopNotification],
+        history_visible: bool,
+    ) -> Self {
+        let item = |notification: &DesktopNotification| NotificationPluginItem {
+            id: notification.id,
+            app_name: notification.app_name.clone(),
+            summary: notification.summary.clone(),
+            body: notification.body.clone(),
+            actions: notification
+                .actions
+                .iter()
+                .take(crate::notification::MAX_NOTIFICATION_ACTIONS)
+                .map(|action| NotificationPluginAction {
+                    key: action.key.clone(),
+                    label: action.label.clone(),
+                })
+                .collect(),
+        };
+        Self {
+            notification: notification.map(item),
+            history: if history_visible {
+                history.iter().take(12).map(item).collect()
+            } else {
+                Vec::new()
+            },
+            history_visible,
+        }
+    }
+
+    fn to_json(&self) -> String {
+        let item = |item: &NotificationPluginItem| {
+            serde_json::json!({"id": item.id, "appName": item.app_name,
+                "summary": item.summary, "body": item.body,
+                "actions": item.actions.iter().map(|action| serde_json::json!({
+                    "key": action.key, "label": action.label
+                })).collect::<Vec<_>>()})
+        };
+        serde_json::json!({
+            "notification": self.notification.as_ref().map(item),
+            "history": self.history.iter().map(item).collect::<Vec<_>>(),
+            "historyVisible": self.history_visible,
+        })
+        .to_string()
+    }
 }
 
 impl TaskbarPluginProjection {
@@ -990,6 +1080,19 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
     }
 
+    pub fn notification_with_projection(
+        projection: &NotificationPluginProjection,
+    ) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/notification/main.js");
+        let mut application =
+            Self::new_with_manifest(source, notification_manifest(), Some(projection.to_json()))?;
+        application.notification_shortcuts = Some((
+            projection.notification.as_ref().map(|item| item.id),
+            projection.history_visible,
+        ));
+        Ok(application)
+    }
+
     fn new_with_manifest(
         source: &str,
         manifest: &PluginManifest,
@@ -1017,6 +1120,7 @@ impl PluginPanelApplication {
             manifest: manifest.clone(),
             projection_data: data,
             launcher_shortcuts: None,
+            notification_shortcuts: None,
             overlay_open: false,
             images: PluginImages::new(),
         })
@@ -1083,6 +1187,33 @@ impl PluginPanelApplication {
         Ok(true)
     }
 
+    pub fn sync_notification_projection(
+        &mut self,
+        projection: &NotificationPluginProjection,
+    ) -> Result<bool, String> {
+        if self.manifest.id != notification_manifest().id {
+            return Err("this plugin is not notifications".into());
+        }
+        let data = projection.to_json();
+        if self.projection_data.as_deref() == Some(data.as_str()) {
+            self.notification_shortcuts = Some((
+                projection.notification.as_ref().map(|item| item.id),
+                projection.history_visible,
+            ));
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.projection_data = Some(data);
+        self.notification_shortcuts = Some((
+            projection.notification.as_ref().map(|item| item.id),
+            projection.history_visible,
+        ));
+        Ok(true)
+    }
+
     pub fn take_effects(&mut self) -> Vec<PluginEffect> {
         std::mem::take(&mut self.effects)
     }
@@ -1119,6 +1250,18 @@ impl nickel_ui::Application for PluginPanelApplication {
     type Message = PluginMessage;
 
     fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
+        if shortcut == Shortcut::Escape
+            && let Some((id, history_visible)) = self.notification_shortcuts
+        {
+            if history_visible {
+                self.effects.push(PluginEffect::CloseNotificationHistory);
+                return nickel_ui::ShortcutOutcome::handled(true);
+            }
+            if let Some(id) = id {
+                self.effects.push(PluginEffect::DismissNotification { id });
+                return nickel_ui::ShortcutOutcome::handled(true);
+            }
+        }
         if self.overlay_open && shortcut == Shortcut::Escape {
             return nickel_ui::ShortcutOutcome::from_changed(false);
         }
@@ -1562,6 +1705,65 @@ impl nickel_ui::Application for PluginPanelApplication {
                         {
                             approved.push(PluginEffect::LauncherRequestLogout);
                         }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("notification-invoke")
+                            && self.manifest.id == notification_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::NotificationsAct) =>
+                        {
+                            let Some(id) = effect
+                                .get("id")
+                                .and_then(Value::as_u64)
+                                .and_then(|id| u32::try_from(id).ok())
+                                .filter(|id| *id != 0)
+                            else {
+                                self.last_error = Some("notification ID is invalid".into());
+                                return;
+                            };
+                            let Some(key) = effect
+                                .get("key")
+                                .and_then(Value::as_str)
+                                .filter(|key| !key.is_empty() && key.len() <= 128)
+                            else {
+                                self.last_error = Some("notification action key is invalid".into());
+                                return;
+                            };
+                            approved.push(PluginEffect::InvokeNotification {
+                                id,
+                                key: key.to_owned(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("notification-dismiss")
+                            && self.manifest.id == notification_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::NotificationsAct) =>
+                        {
+                            let Some(id) = effect
+                                .get("id")
+                                .and_then(Value::as_u64)
+                                .and_then(|id| u32::try_from(id).ok())
+                                .filter(|id| *id != 0)
+                            else {
+                                self.last_error = Some("notification ID is invalid".into());
+                                return;
+                            };
+                            approved.push(PluginEffect::DismissNotification { id });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("notification-close-history")
+                            && self.manifest.id == notification_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::NotificationsRead) =>
+                        {
+                            approved.push(PluginEffect::CloseNotificationHistory);
+                        }
                         _ => {
                             self.last_error =
                                 Some(format!("plugin effect {effect:?} is not granted"));
@@ -1588,7 +1790,9 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .background(0xf12b_303c)
                     .child(self.node.view(&self.images)),
             )
-        } else if self.manifest.id == taskbar_manifest().id {
+        } else if self.manifest.id == taskbar_manifest().id
+            || self.manifest.id == notification_manifest().id
+        {
             AnyView::new(self.node.view(&self.images))
         } else {
             AnyView::new(

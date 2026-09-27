@@ -682,6 +682,8 @@ pub struct LiveShell {
     plugin_panel_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_launcher_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
+    plugin_notification_host:
+        Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_hosts:
         HashMap<Option<String>, nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_memory: HashMap<Option<String>, u64>,
@@ -1252,6 +1254,7 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::launcher_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::taskbar_manifest().clone())?;
+        plugin_registry.register(crate::plugin_panel::notification_manifest().clone())?;
         let plugin_activation = nickel_core::plugins::PluginActivationSettings::load_default()
             .unwrap_or_else(|error| {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -1322,6 +1325,30 @@ impl LiveShell {
                     application.sync_images(images);
                     plugin_registry.mark_running(id)?;
                     Some(nickel_ui::UiHost::new(application, 1920, 56))
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    plugin_registry.mark_failed(id, error)?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let plugin_notification_host = if plugin_activation.desired_enabled(
+            &crate::plugin_panel::notification_manifest().id,
+            crate::plugin_panel::notification_enabled(),
+        ) {
+            let id = &crate::plugin_panel::notification_manifest().id;
+            plugin_registry.set_enabled(id, true)?;
+            let projection =
+                crate::plugin_panel::NotificationPluginProjection::from_feed(None, &[], false);
+            match crate::plugin_panel::PluginPanelApplication::notification_with_projection(
+                &projection,
+            ) {
+                Ok(application) => {
+                    plugin_registry.mark_running(id)?;
+                    Some(nickel_ui::UiHost::new(application, 420, 180))
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1416,6 +1443,7 @@ impl LiveShell {
             plugin_panel_host,
             plugin_launcher_host,
             plugin_taskbar_host,
+            plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
             plugin_taskbar_memory: HashMap::new(),
             panel_hosts: HashMap::new(),
@@ -2109,7 +2137,19 @@ impl LiveShell {
                 |host| host.remote_access_protected(),
             ),
             SurfaceRole::ControlCenter => self.control_host.remote_access_protected(),
-            SurfaceRole::Notification => self.notification_host.remote_access_protected(),
+            SurfaceRole::Notification => {
+                self.notification_host.remote_access_protected()
+                    || self.notification.as_ref().is_some_and(|notification| {
+                        self.remote_lease_notifications
+                            .contains_key(&notification.id)
+                            || self
+                                .codex_approval_notifications
+                                .contains_key(&notification.id)
+                    })
+                    || (self.notification_history_visible
+                        && (!self.remote_lease_notifications.is_empty()
+                            || !self.codex_approval_notifications.is_empty()))
+            }
             SurfaceRole::VolumeOsd => self.volume_osd_host.remote_access_protected(),
             SurfaceRole::WindowPreview => self
                 .preview_frame
@@ -2159,8 +2199,18 @@ impl LiveShell {
                 self.control_host.commands().to_vec()
             }
             SurfaceRole::Notification => {
-                self.sync_notification_host(width, height);
-                self.notification_host.commands().to_vec()
+                if self.plugin_notification_host.is_some() {
+                    self.step_notification_plugin(HostBatch {
+                        surface_size: Some((width, height)),
+                        ..HostBatch::default()
+                    });
+                    self.plugin_notification_host
+                        .as_ref()
+                        .map_or_else(Vec::new, |host| host.commands().to_vec())
+                } else {
+                    self.sync_notification_host(width, height);
+                    self.notification_host.commands().to_vec()
+                }
             }
             SurfaceRole::VolumeOsd => self.volume_osd_scene(width, height),
             SurfaceRole::WindowPreview => self.window_preview_scene(),
@@ -2714,6 +2764,11 @@ impl LiveShell {
         &self.plugin_registry
     }
 
+    #[cfg(test)]
+    pub(crate) fn lock_password_len(&self) -> usize {
+        self.lock_host.application().password.len()
+    }
+
     pub fn plugin_status_snapshot(&self) -> nickel_session_protocol::PluginStatusSnapshot {
         use nickel_core::plugins::PluginHealth;
         use nickel_session_protocol::{
@@ -2805,6 +2860,8 @@ impl LiveShell {
                 self.plugin_taskbar_host = None;
                 self.plugin_taskbar_hosts.clear();
                 self.plugin_taskbar_memory.clear();
+            } else if id == crate::plugin_panel::notification_manifest().id {
+                self.plugin_notification_host = None;
             }
             self.maybe_publish_plugin_status();
             return Ok(true);
@@ -2844,6 +2901,13 @@ impl LiveShell {
                     self.plugin_taskbar_host = Some(nickel_ui::UiHost::new(application, 1920, 56));
                 },
             )
+        } else if id == crate::plugin_panel::notification_manifest().id {
+            let projection = self.notification_plugin_projection();
+            crate::plugin_panel::PluginPanelApplication::notification_with_projection(&projection)
+                .map(|application| {
+                    self.plugin_notification_host =
+                        Some(nickel_ui::UiHost::new(application, 420, 180));
+                })
         } else {
             Err(format!("plugin {id:?} has no runtime host"))
         };
@@ -2949,7 +3013,11 @@ impl LiveShell {
                     .map_or_else(|| self.launcher_host.inspect(), |host| host.inspect()),
             )),
             SurfaceRole::ControlCenter => Some(self.control_change_token),
-            SurfaceRole::Notification => Some(host_token(self.notification_host.inspect())),
+            SurfaceRole::Notification => Some(host_token(
+                self.plugin_notification_host
+                    .as_ref()
+                    .map_or_else(|| self.notification_host.inspect(), |host| host.inspect()),
+            )),
             SurfaceRole::VolumeOsd => None,
             SurfaceRole::WindowPreview => {
                 self.preview_frame.as_ref().map(|host| host.change_token())
@@ -3337,6 +3405,19 @@ impl LiveShell {
         if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
+        if self.plugin_notification_host.is_some() {
+            let point = Point { x, y };
+            return self
+                .step_notification_plugin(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![
+                        HostEvent::Ui(UiEvent::PointerPressed(point)),
+                        HostEvent::Ui(UiEvent::PointerReleased(point)),
+                    ],
+                    ..HostBatch::default()
+                })
+                .is_some_and(|outcome| outcome.changed);
+        }
         self.sync_notification_host(width, height);
         let point = Point { x, y };
         let outcome = self.notification_host.step(HostBatch {
@@ -3362,6 +3443,16 @@ impl LiveShell {
         if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
+        if let Some(host) = self.plugin_notification_host.as_ref() {
+            let (ingress, authority) =
+                internal_normalized_ingress(input, None, "notification", host.inspect(), None);
+            return self.notification_host_event_authorized(
+                ingress,
+                width,
+                height,
+                Some(authority),
+            );
+        }
         self.sync_notification_host(width, height);
         let (ingress, authority) = internal_normalized_ingress(
             input,
@@ -3383,6 +3474,16 @@ impl LiveShell {
         if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
+        if self.plugin_notification_host.is_some() {
+            return self
+                .step_notification_plugin(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![ingress],
+                    normalized_authorities: authority.into_iter().collect(),
+                    ..HostBatch::default()
+                })
+                .is_some_and(|outcome| outcome.changed);
+        }
         self.sync_notification_host(width, height);
         let outcome = self.notification_host.step(HostBatch {
             events: vec![ingress],
@@ -3396,7 +3497,6 @@ impl LiveShell {
         if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
-        self.sync_notification_host(420, 180);
         let event = match key {
             Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
             Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
@@ -3410,6 +3510,14 @@ impl LiveShell {
             }
             _ => return false,
         };
+        if self.plugin_notification_host.is_some() {
+            self.step_notification_plugin(HostBatch {
+                events: vec![event],
+                ..HostBatch::default()
+            });
+            return true;
+        }
+        self.sync_notification_host(420, 180);
         self.notification_host.step(HostBatch {
             events: vec![event],
             ..HostBatch::default()
@@ -3422,12 +3530,20 @@ impl LiveShell {
         if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
-        self.sync_notification_host(420, 180);
         let event = if action == ControllerAction::Cancel {
             HostEvent::Shortcut(Shortcut::Escape)
         } else {
             HostEvent::Controller(action)
         };
+        if self.plugin_notification_host.is_some() {
+            return self
+                .step_notification_plugin(HostBatch {
+                    events: vec![event],
+                    ..HostBatch::default()
+                })
+                .is_some_and(|outcome| outcome.changed);
+        }
+        self.sync_notification_host(420, 180);
         let outcome = self.notification_host.step(HostBatch {
             events: vec![event],
             ..HostBatch::default()
@@ -3692,6 +3808,39 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::InvokeNotification { id, key } => {
+                    if !self.notification_history_visible
+                        && self.notification.as_ref().is_some_and(|item| item.id == id)
+                    {
+                        self.notification_host.application_mut().request_effect(
+                            NotificationEffect::Invoke {
+                                notification_id: id,
+                                key,
+                            },
+                        );
+                        changed |= self.apply_notification_effects();
+                    }
+                }
+                crate::plugin_panel::PluginEffect::DismissNotification { id } => {
+                    if !self.notification_history_visible
+                        && self.notification.as_ref().is_some_and(|item| item.id == id)
+                    {
+                        self.notification_host.application_mut().request_effect(
+                            NotificationEffect::Dismiss {
+                                notification_id: id,
+                            },
+                        );
+                        changed |= self.apply_notification_effects();
+                    }
+                }
+                crate::plugin_panel::PluginEffect::CloseNotificationHistory => {
+                    if self.notification_history_visible {
+                        self.notification_host
+                            .application_mut()
+                            .request_effect(NotificationEffect::CloseHistory);
+                        changed |= self.apply_notification_effects();
+                    }
+                }
             }
         }
         changed
@@ -3829,6 +3978,15 @@ impl LiveShell {
             SurfaceRole::Notification => {
                 if self.notification.is_none() && !self.notification_history_visible {
                     return false;
+                }
+                if self.plugin_notification_host.is_some() {
+                    return self
+                        .step_notification_plugin(HostBatch {
+                            surface_size: Some((width, height)),
+                            events: vec![HostEvent::Ui(event)],
+                            ..HostBatch::default()
+                        })
+                        .is_some_and(|outcome| outcome.changed);
                 }
                 self.sync_notification_host(width, height);
                 let outcome = self.notification_host.step(HostBatch {
@@ -5723,6 +5881,10 @@ impl LiveShell {
                 .as_ref()
                 .is_some_and(|host| host.pointer_interaction_active())
             || self.notification_host.pointer_interaction_active()
+            || self
+                .plugin_notification_host
+                .as_ref()
+                .is_some_and(|host| host.pointer_interaction_active())
             || self.control_host.pointer_interaction_active()
             || self.launcher_host.pointer_interaction_active()
             || self.keyboard_host.pointer_interaction_active()
@@ -6649,6 +6811,49 @@ impl LiveShell {
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+    }
+
+    fn notification_plugin_projection(&self) -> crate::plugin_panel::NotificationPluginProjection {
+        let history = if self.notification_history_visible {
+            self.notification_feed.history()
+        } else {
+            Vec::new()
+        };
+        crate::plugin_panel::NotificationPluginProjection::from_feed(
+            self.notification.as_ref(),
+            &history,
+            self.notification_history_visible,
+        )
+    }
+
+    fn step_notification_plugin(
+        &mut self,
+        mut batch: HostBatch,
+    ) -> Option<nickel_ui::HostEventOutcome> {
+        let projection = self.notification_plugin_projection();
+        let host = self.plugin_notification_host.as_mut()?;
+        batch.application_changed |= match host
+            .application_mut()
+            .sync_notification_projection(&projection)
+        {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::error!(%error, "notification plugin projection failed");
+                false
+            }
+        };
+        let mut outcome = host.step(batch);
+        let effects = host.application_mut().take_effects();
+        let _ = self.plugin_registry.record_memory(
+            &crate::plugin_panel::notification_manifest().id,
+            nickel_core::plugins::PluginMemory {
+                native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                ..nickel_core::plugins::PluginMemory::default()
+            },
+        );
+        outcome.changed |= self.apply_plugin_effects(effects);
+        self.maybe_publish_plugin_status();
+        Some(outcome)
     }
 
     fn apply_notification_effects(&mut self) -> bool {

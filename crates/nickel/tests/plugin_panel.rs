@@ -1,8 +1,9 @@
 use nickel_core::plugins::PluginPackage;
 use nickel_shell::plugin_panel::{
     LauncherPluginProject, LauncherPluginProjection, LauncherPluginResult, LauncherView,
-    PluginEffect, PluginMessage, PluginPanelApplication, TaskbarPluginItem,
-    TaskbarPluginProjection, TaskbarPluginTrayItem, surface,
+    NotificationPluginAction, NotificationPluginItem, NotificationPluginProjection, PluginEffect,
+    PluginMessage, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
+    TaskbarPluginTrayItem, surface,
 };
 
 #[test]
@@ -1014,5 +1015,83 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
     assert_eq!(
         host.application_mut().take_effects(),
         vec![PluginEffect::ContextTrayItem { id: "mail".into() }]
+    );
+}
+
+#[test]
+fn bundled_notification_invokes_current_actions_and_closes_history() {
+    let mut projection = NotificationPluginProjection {
+        notification: Some(NotificationPluginItem {
+            id: 41,
+            app_name: "Mail".into(),
+            summary: "New message".into(),
+            body: "A message arrived".into(),
+            actions: vec![NotificationPluginAction {
+                key: "open".into(),
+                label: "Open".into(),
+            }],
+        }),
+        history: vec![],
+        history_visible: false,
+    };
+    let mut host = UiHost::new(
+        PluginPanelApplication::notification_with_projection(&projection).unwrap(),
+        420,
+        180,
+    );
+    let open = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Open".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(open, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::InvokeNotification {
+            id: 41,
+            key: "open".into(),
+        }]
+    );
+    let dismiss = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Dismiss".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(dismiss, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::DismissNotification { id: 41 }]
+    );
+    assert!(host.shortcut(Shortcut::Escape));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::DismissNotification { id: 41 }]
+    );
+    projection.history = vec![projection.notification.clone().unwrap()];
+    projection.history_visible = true;
+    assert!(
+        host.application_mut()
+            .sync_notification_projection(&projection)
+            .unwrap()
+    );
+    host.step(HostBatch {
+        application_changed: true,
+        ..HostBatch::default()
+    });
+    let close = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Close".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(close, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::CloseNotificationHistory]
     );
 }
