@@ -3,7 +3,7 @@
 function Task(props) {
     const item = props.item;
     const label = (item.active ? "●" : "") + (item.name.charAt(0).toUpperCase() || "?");
-    return h(Button, { id: "taskbar-item-" + item.index, accessibilityLabel: item.name, icon: item.icon ? "task:" + item.index : null, onClick: () => nickel.request({ type: "taskbar-activate-item", index: item.index, id: item.id }) }, label);
+    return h(Button, { id: "taskbar-item-" + item.index, accessibilityLabel: item.name, icon: item.icon ? "task:" + item.index : null, onContextMenu: () => nickel.request({ type: "taskbar-context-item", index: item.index, id: item.id }), onClick: () => nickel.request({ type: "taskbar-activate-item", index: item.index, id: item.id }) }, label);
 }
 function TrayItem(props) {
     const item = props.item;

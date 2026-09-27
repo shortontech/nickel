@@ -3488,6 +3488,12 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::ContextTaskbarItem { index, id } => {
+                    if crate::plugin_panel::taskbar_item_matches(&self.panel_groups(), index, &id) {
+                        self.apply_panel_action(TaskbarAction::TaskContext(index));
+                        changed = true;
+                    }
+                }
                 crate::plugin_panel::PluginEffect::ActivateTrayItem { id } => {
                     if self.tray.iter().rev().take(4).any(|item| item.id == id) {
                         self.apply_panel_action(TaskbarAction::Tray(id));

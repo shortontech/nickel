@@ -12,9 +12,12 @@ Set `NICKEL_DEV_PLUGIN_TASKBAR=1` in a nested Nickel session to compare this
 view with the current Rust taskbar. The host supplies bounded grouped tasks,
 tray items, icon slots, and a clock label. The plugin requests typed launcher,
 task, tray, and control-center actions; the host rechecks item IDs against live
-groups and the visible tray before acting. Task menus, pin/drag behavior,
-Codex and keyboard controls, and full visual parity are still in the migration
-queue.
+groups and the visible tray before acting. JavaScript-owned task menus,
+pin/drag behavior, Codex and keyboard controls, and full visual parity are
+still in the migration queue.
+Right-clicking a task now requests its host-owned application menu through a
+separate `windows-context` capability. The host checks the current group ID
+and index before showing the menu.
 
 The image slots reference buffers already owned by the host. Settings' tracked
 native UI figure remains a lower bound and does not charge shared icon buffers

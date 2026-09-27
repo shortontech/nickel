@@ -551,6 +551,7 @@ pub enum PluginEffect {
     LauncherSeeAllProjects,
     LauncherRequestLogout,
     ActivateTaskbarItem { index: usize, id: String },
+    ContextTaskbarItem { index: usize, id: String },
     ActivateTrayItem { id: String },
     ContextTrayItem { id: String },
     ToggleControlCenter,
@@ -1053,6 +1054,37 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::ActivateTaskbarItem {
+                                index,
+                                id: id.to_owned(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-context-item")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::WindowsContext) =>
+                        {
+                            let Some(index) = effect
+                                .get("index")
+                                .and_then(Value::as_u64)
+                                .and_then(|index| usize::try_from(index).ok())
+                            else {
+                                self.last_error =
+                                    Some("taskbar context item index is invalid".into());
+                                return;
+                            };
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("taskbar context item ID is missing".into());
+                                return;
+                            };
+                            if id.is_empty() || id.len() > 256 || index >= 12 {
+                                self.last_error =
+                                    Some("taskbar context item reference is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ContextTaskbarItem {
                                 index,
                                 id: id.to_owned(),
                             });

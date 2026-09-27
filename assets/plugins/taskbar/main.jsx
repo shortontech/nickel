@@ -6,6 +6,7 @@ function Task(props) {
     return <Button id={"taskbar-item-" + item.index}
         accessibilityLabel={item.name}
         icon={item.icon ? "task:" + item.index : null}
+        onContextMenu={() => nickel.request({type: "taskbar-context-item", index: item.index, id: item.id})}
         onClick={() => nickel.request({type: "taskbar-activate-item", index: item.index, id: item.id})}>
         {label}
     </Button>;

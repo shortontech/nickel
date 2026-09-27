@@ -588,6 +588,21 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
             id: "org.example.editor".into(),
         }]
     );
+    let editor = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Editor".into(),
+        })
+        .expect("task group context target")
+        .id;
+    host.perform_semantic_action(editor, SemanticAction::Invoke(ActionKind::ContextMenu));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ContextTaskbarItem {
+            index: 0,
+            id: "org.example.editor".into()
+        }]
+    );
     let launcher = host
         .query_unique(&SemanticSelector::RoleAndName {
             role: SemanticRole::Button,
