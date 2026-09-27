@@ -71,6 +71,44 @@ fn bundled_jsx_panel_click_updates_visible_state() {
 }
 
 #[test]
+fn jsx_menu_opens_and_dispatches_a_typed_item_action() {
+    let script = r#"
+        function App() {
+            return h(Panel, {height: 96},
+                h(Button, {id: 'menu-anchor', onClick: () => nickel.openMenu('actions')}, 'Actions'),
+                h(Menu, {id: 'actions', anchor: 'menu-anchor', open: true},
+                    h(MenuItem, {id: 'show', onClick: () => nickel.request('show-launcher')}, 'Show launcher')));
+        }
+    "#;
+    let mut host = UiHost::new(
+        PluginPanelApplication::new(script).expect("menu script loads"),
+        700,
+        280,
+    );
+    let anchor = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Actions".into(),
+        })
+        .expect("menu anchor")
+        .id;
+    host.perform_semantic_action(anchor, SemanticAction::Invoke(ActionKind::Activate));
+    assert!(host.inspect().open_overlay.is_some());
+    let item = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::MenuItem,
+            name: "Show launcher".into(),
+        })
+        .expect("menu item")
+        .id;
+    host.perform_semantic_action(item, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ShowLauncher]
+    );
+}
+
+#[test]
 fn ungranted_effect_prevents_the_entire_action_batch() {
     let script = r#"
         function App() {
@@ -226,6 +264,29 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
         .expect("pin action")
         .id;
     host.perform_semantic_action(pin, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ToggleLauncherPin {
+            id: "editor".into()
+        }]
+    );
+    let editor = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Editor".into(),
+        })
+        .expect("application context target")
+        .id;
+    host.perform_semantic_action(editor, SemanticAction::Invoke(ActionKind::ContextMenu));
+    assert!(host.inspect().open_overlay.is_some());
+    let menu_pin = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::MenuItem,
+            name: "Pin to Nickel Bar".into(),
+        })
+        .expect("JSX app menu pin item")
+        .id;
+    host.perform_semantic_action(menu_pin, SemanticAction::Invoke(ActionKind::Activate));
     assert_eq!(
         host.application_mut().take_effects(),
         vec![PluginEffect::ToggleLauncherPin {

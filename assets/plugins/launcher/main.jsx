@@ -3,6 +3,11 @@
 function App() {
     const data = nickel.data;
     const [logoutOpen, setLogoutOpen] = useState(false);
+    const [menuTarget, setMenuTarget] = useState(null);
+    const openAppMenu = (item, kind, anchor) => {
+        setMenuTarget({id: item.id, index: item.index, pinned: item.pinned, kind, anchor});
+        nickel.openMenu("launcher-app-actions");
+    };
     return <Column>
         <Text>Nickel Launcher</Text>
         <TextField id="launcher-query" value={data.query} placeholder="Search applications"
@@ -11,6 +16,7 @@ function App() {
             <Text>Places</Text>
             {data.places.map(place => <Row>
                 <Button id={"launcher-place-" + place.index}
+                    onContextMenu={() => openAppMenu(place, "dashboard", "launcher-place-" + place.index)}
                     onClick={() => nickel.request({type: "launcher-launch-dashboard", id: place.id})}>
                     {place.name}
                 </Button>
@@ -45,6 +51,7 @@ function App() {
             {data.dashboard.length === 0 ? <Text>No applications in this view</Text> : null}
             {data.dashboard.map(app => <Row>
                 <Button id={"launcher-dashboard-" + app.index}
+                    onContextMenu={() => openAppMenu(app, "dashboard", "launcher-dashboard-" + app.index)}
                     onClick={() => nickel.request({type: "launcher-launch-dashboard", id: app.id})}>
                     {app.name}
                 </Button>
@@ -70,6 +77,7 @@ function App() {
             {data.results.length === 0 ? <Text>No applications found</Text> : null}
             {data.results.map(result => <Row>
                 <Button id={"launcher-result-" + result.index}
+                    onContextMenu={() => openAppMenu(result, "search", "launcher-result-" + result.index)}
                     onClick={() => nickel.request({type: "launcher-activate-result", index: result.index, id: result.id})}>
                     {result.name}
                 </Button>
@@ -90,5 +98,17 @@ function App() {
                 <Button id="launcher-cancel-logout" onClick={() => setLogoutOpen(false)}>Cancel</Button>
             </Column>
         </Dialog>
+        {menuTarget ? <Menu id="launcher-app-actions" anchor={menuTarget.anchor} open={true}>
+            <MenuItem id="launch" onClick={() => {
+                if (menuTarget.kind === "search") {
+                    nickel.request({type: "launcher-activate-result", index: menuTarget.index, id: menuTarget.id});
+                } else {
+                    nickel.request({type: "launcher-launch-dashboard", id: menuTarget.id});
+                }
+            }}>Launch</MenuItem>
+            <MenuItem id="toggle-pin" onClick={() => nickel.request({type: "launcher-toggle-pin", id: menuTarget.id})}>
+                {menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"}
+            </MenuItem>
+        </Menu> : null}
     </Column>;
 }

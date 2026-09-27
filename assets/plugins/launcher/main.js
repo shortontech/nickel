@@ -3,13 +3,18 @@
 function App() {
     const data = nickel.data;
     const [logoutOpen, setLogoutOpen] = useState(false);
+    const [menuTarget, setMenuTarget] = useState(null);
+    const openAppMenu = (item, kind, anchor) => {
+        setMenuTarget({ id: item.id, index: item.index, pinned: item.pinned, kind, anchor });
+        nickel.openMenu("launcher-app-actions");
+    };
     return h(Column, null,
         h(Text, null, "Nickel Launcher"),
         h(TextField, { id: "launcher-query", value: data.query, placeholder: "Search applications", onChange: query => nickel.request({ type: "launcher-set-query", query }) }),
         data.dashboardVisible ? h(ScrollView, { id: "launcher-dashboard-scroll", height: 580 },
             h(Text, null, "Places"),
             data.places.map(place => h(Row, null,
-                h(Button, { id: "launcher-place-" + place.index, onClick: () => nickel.request({ type: "launcher-launch-dashboard", id: place.id }) }, place.name),
+                h(Button, { id: "launcher-place-" + place.index, onContextMenu: () => openAppMenu(place, "dashboard", "launcher-place-" + place.index), onClick: () => nickel.request({ type: "launcher-launch-dashboard", id: place.id }) }, place.name),
                 h(Button, { id: "launcher-pin-place-" + place.index, onClick: () => nickel.request({ type: "launcher-toggle-pin", id: place.id }) }, place.pinned ? "Unpin" : "Pin"))),
             data.codexAvailable ? h(Column, null,
                 h(Text, null, "Recent projects"),
@@ -22,7 +27,7 @@ function App() {
             h(Text, null, data.view === "favorites" ? "Pinned and recent" : data.view === "applications" ? "All applications" : "Places"),
             data.dashboard.length === 0 ? h(Text, null, "No applications in this view") : null,
             data.dashboard.map(app => h(Row, null,
-                h(Button, { id: "launcher-dashboard-" + app.index, onClick: () => nickel.request({ type: "launcher-launch-dashboard", id: app.id }) }, app.name),
+                h(Button, { id: "launcher-dashboard-" + app.index, onContextMenu: () => openAppMenu(app, "dashboard", "launcher-dashboard-" + app.index), onClick: () => nickel.request({ type: "launcher-launch-dashboard", id: app.id }) }, app.name),
                 h(Button, { id: "launcher-pin-dashboard-" + app.index, accessibilityLabel: (app.pinned ? "Unpin " : "Pin ") + app.name, onClick: () => nickel.request({ type: "launcher-toggle-pin", id: app.id }) }, app.pinned ? "Unpin" : "Pin"))),
             h(Button, { id: "launcher-account", onClick: () => nickel.request({ type: "launcher-open-account" }) }, data.accountName),
             h(Button, { id: "launcher-settings", onClick: () => nickel.request({ type: "launcher-open-settings" }) }, "Settings"),
@@ -34,7 +39,7 @@ function App() {
             h(ScrollView, { id: "launcher-search-scroll", height: 580 },
                 data.results.length === 0 ? h(Text, null, "No applications found") : null,
                 data.results.map(result => h(Row, null,
-                    h(Button, { id: "launcher-result-" + result.index, onClick: () => nickel.request({ type: "launcher-activate-result", index: result.index, id: result.id }) }, result.name),
+                    h(Button, { id: "launcher-result-" + result.index, onContextMenu: () => openAppMenu(result, "search", "launcher-result-" + result.index), onClick: () => nickel.request({ type: "launcher-activate-result", index: result.index, id: result.id }) }, result.name),
                     h(Button, { id: "launcher-pin-result-" + result.index, accessibilityLabel: (result.pinned ? "Unpin " : "Pin ") + result.name, onClick: () => nickel.request({ type: "launcher-toggle-pin", id: result.id }) }, result.pinned ? "Unpin" : "Pin")))) : null,
         h(Dialog, { id: "launcher-logout-dialog", anchor: "launcher-logout", open: logoutOpen, width: 320, height: 160 },
             h(Column, null,
@@ -43,5 +48,15 @@ function App() {
                         setLogoutOpen(false);
                         nickel.request({ type: "launcher-request-logout" });
                     } }, "Log out"),
-                h(Button, { id: "launcher-cancel-logout", onClick: () => setLogoutOpen(false) }, "Cancel"))));
+                h(Button, { id: "launcher-cancel-logout", onClick: () => setLogoutOpen(false) }, "Cancel"))),
+        menuTarget ? h(Menu, { id: "launcher-app-actions", anchor: menuTarget.anchor, open: true },
+            h(MenuItem, { id: "launch", onClick: () => {
+                    if (menuTarget.kind === "search") {
+                        nickel.request({ type: "launcher-activate-result", index: menuTarget.index, id: menuTarget.id });
+                    }
+                    else {
+                        nickel.request({ type: "launcher-launch-dashboard", id: menuTarget.id });
+                    }
+                } }, "Launch"),
+            h(MenuItem, { id: "toggle-pin", onClick: () => nickel.request({ type: "launcher-toggle-pin", id: menuTarget.id }) }, menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar")) : null);
 }

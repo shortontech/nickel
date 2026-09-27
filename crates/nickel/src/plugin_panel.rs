@@ -10,8 +10,8 @@ use boa_engine::{Context, Source};
 use nickel_core::plugins::{PluginCapability, PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, Insets, OverlayAnchor,
-    OverlayId, OverlayStyle, Row, SemanticRole, Shortcut, Size, Spacer, Text,
-    TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
+    OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Row, SemanticRole, Shortcut, Size,
+    Spacer, Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
 };
 use serde_json::Value;
 
@@ -82,6 +82,8 @@ const TextField = 'text-field';
 const Button = 'button';
 const Spacer = 'spacer';
 const Dialog = 'dialog';
+const Menu = 'menu';
+const MenuItem = 'menu-item';
 const __componentIds = new WeakMap();
 let __nextComponentId = 0;
 const __componentHooks = new Map();
@@ -96,6 +98,7 @@ let __nickelData = Object.freeze({query: '', results: []});
 const nickel = Object.freeze({
     request(effect) { __effects.push(effect); },
     openDialog(id) { __effects.push(`open-dialog:${id}`); },
+    openMenu(id) { __effects.push(`open-menu:${id}`); },
     get data() { return __nickelData; }
 });
 
@@ -225,6 +228,17 @@ enum PanelNode {
         width: u32,
         height: u32,
         children: Vec<Self>,
+    },
+    Menu {
+        id: String,
+        anchor: String,
+        open: bool,
+        items: Vec<Self>,
+    },
+    MenuItem {
+        id: String,
+        label: String,
+        action: usize,
     },
 }
 
@@ -361,6 +375,65 @@ impl PanelNode {
                     .map(Self::parse)
                     .collect::<Result<Vec<_>, _>>()?,
             }),
+            "menu" => {
+                let id = value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or("menu needs an id")?;
+                let anchor = value
+                    .get("anchor")
+                    .and_then(Value::as_str)
+                    .ok_or("menu needs an anchor")?;
+                if id.is_empty() || id.len() > 128 || anchor.is_empty() || anchor.len() > 128 {
+                    return Err("menu ID and anchor must contain 1 to 128 characters".into());
+                }
+                if children.is_empty() || children.len() > 16 {
+                    return Err("menu needs 1 to 16 items".into());
+                }
+                let items = children
+                    .iter()
+                    .map(Self::parse)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut seen = HashSet::new();
+                for item in &items {
+                    let Self::MenuItem { id, .. } = item else {
+                        return Err("menu children must be MenuItem components".into());
+                    };
+                    if !seen.insert(id) {
+                        return Err("menu item IDs must be unique".into());
+                    }
+                }
+                Ok(Self::Menu {
+                    id: id.to_owned(),
+                    anchor: anchor.to_owned(),
+                    open: value.get("open").and_then(Value::as_bool).unwrap_or(false),
+                    items,
+                })
+            }
+            "menu-item" => {
+                let id = value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or("menu item needs an id")?;
+                let label = child_text(children)?;
+                if id.is_empty()
+                    || id.len() > 128
+                    || label.is_empty()
+                    || label.chars().count() > 120
+                {
+                    return Err("menu item ID or label is invalid".into());
+                }
+                let action = value
+                    .get("action")
+                    .and_then(Value::as_u64)
+                    .and_then(|action| usize::try_from(action).ok())
+                    .ok_or("menu item needs an onClick handler")?;
+                Ok(Self::MenuItem {
+                    id: id.to_owned(),
+                    label,
+                    action,
+                })
+            }
             _ => Err(format!("unknown component {kind:?}")),
         }
     }
@@ -473,7 +546,9 @@ impl PanelNode {
                 }
                 AnyView::new(container.child(visual))
             }
-            Self::Dialog { .. } => AnyView::new(Spacer::fixed(0.0)),
+            Self::Dialog { .. } | Self::Menu { .. } | Self::MenuItem { .. } => {
+                AnyView::new(Spacer::fixed(0.0))
+            }
         }
     }
 
@@ -484,6 +559,17 @@ impl PanelNode {
             | Self::Row(children)
             | Self::Column(children)
             | Self::ScrollView { children, .. } => children.iter().find_map(Self::dialog),
+            _ => None,
+        }
+    }
+
+    fn menu(&self) -> Option<&Self> {
+        match self {
+            Self::Menu { .. } => Some(self),
+            Self::Panel { children, .. }
+            | Self::Row(children)
+            | Self::Column(children)
+            | Self::ScrollView { children, .. } => children.iter().find_map(Self::menu),
             _ => None,
         }
     }
@@ -1146,6 +1232,27 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 }
                             }
                         }
+                        Some(effect) if effect.starts_with("open-menu:") => {
+                            let id = &effect["open-menu:".len()..];
+                            match node.menu() {
+                                Some(PanelNode::Menu {
+                                    id: declared,
+                                    anchor,
+                                    open: true,
+                                    ..
+                                }) if declared == id => {
+                                    requested_dialog = Some((
+                                        OverlayId::new(format!("plugin-menu-{id}")),
+                                        UiId::from(anchor.clone()),
+                                    ));
+                                }
+                                _ => {
+                                    self.last_error =
+                                        Some(format!("menu {id:?} is not declared and open"));
+                                    return;
+                                }
+                            }
+                        }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-set-query")
                             && self
@@ -1351,7 +1458,8 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
-        let Some(PanelNode::Dialog {
+        let mut overlays = Vec::new();
+        if let Some(PanelNode::Dialog {
             id,
             anchor,
             open: true,
@@ -1359,28 +1467,50 @@ impl nickel_ui::Application for PluginPanelApplication {
             height,
             children,
         }) = self.node.dialog()
-        else {
-            return Vec::new();
-        };
-        let mut content = Column::new().fill_width();
-        for child in children {
-            content = content.child(child.view(&self.images));
+        {
+            let mut content = Column::new().fill_width();
+            for child in children {
+                content = content.child(child.view(&self.images));
+            }
+            overlays.push(FrameOverlay::surface(
+                TransientSurface::dialog(
+                    format!("plugin-{id}"),
+                    OverlayAnchor::Node(UiId::from(anchor.clone())),
+                    Size::new(*width as f32, *height as f32),
+                    OverlayStyle {
+                        background: 0xf12b_303c,
+                        foreground: 0xffffff,
+                        border: 0x657188,
+                        selected: 0x405a82,
+                        radius: 12,
+                    },
+                ),
+                content,
+            ));
         }
-        vec![FrameOverlay::surface(
-            TransientSurface::dialog(
-                format!("plugin-{id}"),
+        if let Some(PanelNode::Menu {
+            id,
+            anchor,
+            open: true,
+            items,
+        }) = self.node.menu()
+        {
+            let mut menu = OverlayMenu::new(
+                format!("plugin-menu-{id}"),
                 OverlayAnchor::Node(UiId::from(anchor.clone())),
-                Size::new(*width as f32, *height as f32),
-                OverlayStyle {
-                    background: 0xf12b_303c,
-                    foreground: 0xffffff,
-                    border: 0x657188,
-                    selected: 0x405a82,
-                    radius: 12,
-                },
-            ),
-            content,
-        )]
+            );
+            for item in items {
+                if let PanelNode::MenuItem { id, label, action } = item {
+                    menu = menu.item(OverlayMenuItem::action(
+                        id.clone(),
+                        label.clone(),
+                        PluginMessage::Click(*action),
+                    ));
+                }
+            }
+            overlays.push(FrameOverlay::Menu(menu));
+        }
+        overlays
     }
 
     fn take_transient_request(&mut self) -> Option<(OverlayId, UiId)> {

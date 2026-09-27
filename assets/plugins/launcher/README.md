@@ -26,6 +26,8 @@ services. View switching and pin buttons request those Rust state changes.
 Enter submits the leading host result while search is active. Escape clears a
 query, then dismisses the launcher; an open component dialog receives Escape
 first.
+Right-clicking an application opens a JSX-defined native menu with Launch and
+Pin actions. Its requests still pass through the host's current-ID checks.
 
 This is a comparison path while the full launcher, including keyboard and
 controller behavior, complete catalog paging, and menus, is migrated and
