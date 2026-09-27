@@ -236,6 +236,17 @@ impl SettingsApp {
                         "Timers and subscriptions",
                         format!("{} / {}", plugin.memory.timers, plugin.memory.subscriptions),
                     ));
+                if plugin
+                    .composition
+                    .iter()
+                    .any(|entry| entry.starts_with("add ") || entry.starts_with("replace "))
+                {
+                    card = card.child(SettingsRow::new(
+                        theme,
+                        "Memory attribution",
+                        "Extension UI also appears in the target plugin's native UI count",
+                    ));
+                }
                 for setting in &plugin.settings {
                     let value = match &setting.value {
                         serde_json::Value::Bool(value) => {
