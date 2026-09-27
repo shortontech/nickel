@@ -2963,12 +2963,19 @@ impl LiveShell {
             return outcome;
         }
         if let Some(host) = self.plugin_launcher_host.as_mut() {
+            let overlay_open = host.inspect().open_overlay.is_some();
+            host.application_mut().set_overlay_open(overlay_open);
             let application_changed = match host.application_mut().sync_launcher(&self.launcher) {
                 Ok(changed) => changed,
                 Err(error) => {
                     tracing::error!(%error, "launcher plugin projection failed");
                     false
                 }
+            };
+            let event = if matches!(&event, HostEvent::Shortcut(Shortcut::Escape)) && overlay_open {
+                HostEvent::Ui(UiEvent::Dismiss)
+            } else {
+                event
             };
             let outcome = host.step(HostBatch {
                 clipboard_text_limit: limit,
@@ -3028,6 +3035,8 @@ impl LiveShell {
             return outcome.changed;
         }
         if let Some(host) = self.plugin_launcher_host.as_mut() {
+            let overlay_open = host.inspect().open_overlay.is_some();
+            host.application_mut().set_overlay_open(overlay_open);
             let application_changed = host
                 .application_mut()
                 .sync_launcher(&self.launcher)
@@ -3494,6 +3503,12 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::SetLauncherQuery(query) => {
                     self.apply_launcher_action(LauncherAction::SetQuery(query));
                     changed = true;
+                }
+                crate::plugin_panel::PluginEffect::DismissLauncher => {
+                    if self.launcher_visible {
+                        self.apply_launcher_action(LauncherAction::Dismiss);
+                        changed = true;
+                    }
                 }
                 crate::plugin_panel::PluginEffect::ActivateLauncherResult { index, id } => {
                     if self

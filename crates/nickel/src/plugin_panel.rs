@@ -10,8 +10,8 @@ use boa_engine::{Context, Source};
 use nickel_core::plugins::{PluginCapability, PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, Insets, OverlayAnchor,
-    OverlayId, OverlayStyle, Row, SemanticRole, Size, Spacer, Text, TextField as UiTextField,
-    TransientSurface, UiId, VerticalScroll, ViewContext,
+    OverlayId, OverlayStyle, Row, SemanticRole, Shortcut, Size, Spacer, Text,
+    TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
 };
 use serde_json::Value;
 
@@ -509,7 +509,28 @@ pub struct PluginPanelApplication {
     last_error: Option<String>,
     manifest: &'static PluginManifest,
     projection_data: Option<String>,
+    launcher_shortcuts: Option<LauncherShortcutState>,
+    overlay_open: bool,
     images: PluginImages,
+}
+
+struct LauncherShortcutState {
+    query: String,
+    dashboard_visible: bool,
+    first_result: Option<(usize, String)>,
+}
+
+impl From<&LauncherPluginProjection> for LauncherShortcutState {
+    fn from(projection: &LauncherPluginProjection) -> Self {
+        Self {
+            query: projection.query.clone(),
+            dashboard_visible: projection.dashboard_visible,
+            first_result: projection
+                .results
+                .first()
+                .map(|result| (result.index, result.id.clone())),
+        }
+    }
 }
 
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
@@ -523,6 +544,7 @@ pub enum PluginEffect {
     LaunchDashboardApplication { id: String },
     SetLauncherView(LauncherView),
     ToggleLauncherPin { id: String },
+    DismissLauncher,
     LauncherOpenSettings,
     LauncherOpenAccount,
     LauncherOpenProject { id: String },
@@ -782,7 +804,9 @@ impl PluginPanelApplication {
     pub fn launcher_with_projection(projection: &LauncherPluginProjection) -> Result<Self, String> {
         let source = include_str!("../../../assets/plugins/launcher/main.js");
         let data = projection.to_json();
-        Self::new_with_manifest(source, launcher_manifest(), Some(data))
+        let mut application = Self::new_with_manifest(source, launcher_manifest(), Some(data))?;
+        application.launcher_shortcuts = Some(projection.into());
+        Ok(application)
     }
 
     pub fn taskbar_with_projection(projection: &TaskbarPluginProjection) -> Result<Self, String> {
@@ -816,6 +840,8 @@ impl PluginPanelApplication {
             last_error: None,
             manifest,
             projection_data: data,
+            launcher_shortcuts: None,
+            overlay_open: false,
             images: PluginImages::new(),
         })
     }
@@ -837,6 +863,10 @@ impl PluginPanelApplication {
         self.sync_launcher_projection(&LauncherPluginProjection::from_launcher(launcher))
     }
 
+    pub fn set_overlay_open(&mut self, open: bool) {
+        self.overlay_open = open;
+    }
+
     pub fn sync_launcher_projection(
         &mut self,
         projection: &LauncherPluginProjection,
@@ -846,6 +876,7 @@ impl PluginPanelApplication {
         }
         let data = projection.to_json();
         if self.projection_data.as_deref() == Some(data.as_str()) {
+            self.launcher_shortcuts = Some(projection.into());
             return Ok(false);
         }
         self.context
@@ -853,6 +884,7 @@ impl PluginPanelApplication {
             .map_err(|error| error.to_string())?;
         self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
         self.projection_data = Some(data);
+        self.launcher_shortcuts = Some(projection.into());
         Ok(true)
     }
 
@@ -898,6 +930,37 @@ fn evaluate_tree(context: &mut Context, expression: &str) -> Result<PanelNode, S
 
 impl nickel_ui::Application for PluginPanelApplication {
     type Message = PluginMessage;
+
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
+        if self.overlay_open && shortcut == Shortcut::Escape {
+            return nickel_ui::ShortcutOutcome::from_changed(false);
+        }
+        let Some(shortcuts) = &self.launcher_shortcuts else {
+            return nickel_ui::ShortcutOutcome::from_changed(false);
+        };
+        match shortcut {
+            Shortcut::Escape => {
+                if shortcuts.query.is_empty() {
+                    self.effects.push(PluginEffect::DismissLauncher);
+                } else {
+                    self.effects
+                        .push(PluginEffect::SetLauncherQuery(String::new()));
+                }
+                nickel_ui::ShortcutOutcome::handled(true)
+            }
+            Shortcut::Submit if !shortcuts.dashboard_visible => {
+                let Some((index, id)) = &shortcuts.first_result else {
+                    return nickel_ui::ShortcutOutcome::handled(false);
+                };
+                self.effects.push(PluginEffect::ActivateLauncherResult {
+                    index: *index,
+                    id: id.clone(),
+                });
+                nickel_ui::ShortcutOutcome::handled(true)
+            }
+            _ => nickel_ui::ShortcutOutcome::from_changed(false),
+        }
+    }
 
     fn update(&mut self, message: Self::Message) {
         if message == PluginMessage::Scroll {

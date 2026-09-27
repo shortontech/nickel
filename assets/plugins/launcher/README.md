@@ -23,6 +23,9 @@ typed `nickel.request` calls. The host checks declared capabilities and current
 launcher state, including app and project IDs, before acting. Search ranking,
 favorite state, application execution, and session authority remain Rust
 services. View switching and pin buttons request those Rust state changes.
+Enter submits the leading host result while search is active. Escape clears a
+query, then dismisses the launcher; an open component dialog receives Escape
+first.
 
 This is a comparison path while the full launcher, including keyboard and
 controller behavior, complete catalog paging, and menus, is migrated and

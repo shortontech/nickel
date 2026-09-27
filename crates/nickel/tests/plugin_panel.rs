@@ -5,8 +5,8 @@ use nickel_shell::plugin_panel::{
 };
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    ActionKind, Point, SemanticAction, SemanticRole, SemanticSelector, SemanticValueSnapshot,
-    UiEvent, UiHost,
+    ActionKind, HostBatch, HostEvent, Point, SemanticAction, SemanticRole, SemanticSelector,
+    SemanticValueSnapshot, Shortcut, UiEvent, UiHost,
 };
 
 #[test]
@@ -262,6 +262,25 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
         name: "Unpin Calculator".into(),
     })
     .expect("updated pin state");
+    host.step(HostBatch {
+        events: vec![HostEvent::Shortcut(Shortcut::Submit)],
+        ..HostBatch::default()
+    });
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ActivateLauncherResult {
+            index: 0,
+            id: "calculator".into()
+        }]
+    );
+    host.step(HostBatch {
+        events: vec![HostEvent::Shortcut(Shortcut::Escape)],
+        ..HostBatch::default()
+    });
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::SetLauncherQuery(String::new())]
+    );
     let result = host
         .query_unique(&SemanticSelector::RoleAndName {
             role: SemanticRole::Button,
@@ -369,13 +388,28 @@ fn launcher_dashboard_requests_projects_settings_account_and_logout() {
     invoke(&mut host, "Log out");
     assert!(host.inspect().open_overlay.is_some());
     assert!(host.application_mut().take_effects().is_empty());
+    host.application_mut().set_overlay_open(true);
+    host.step(HostBatch {
+        events: vec![HostEvent::Shortcut(Shortcut::Escape)],
+        ..HostBatch::default()
+    });
+    assert!(host.application_mut().take_effects().is_empty());
     invoke(&mut host, "Cancel");
     assert!(host.inspect().open_overlay.is_none());
+    host.application_mut().set_overlay_open(false);
     invoke(&mut host, "Log out");
     invoke(&mut host, "Confirm log out");
     assert_eq!(
         host.application_mut().take_effects(),
         vec![PluginEffect::LauncherRequestLogout]
+    );
+    host.step(HostBatch {
+        events: vec![HostEvent::Shortcut(Shortcut::Escape)],
+        ..HostBatch::default()
+    });
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::DismissLauncher]
     );
 }
 
