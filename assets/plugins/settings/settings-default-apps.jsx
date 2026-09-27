@@ -22,5 +22,13 @@ function App() {
                     onClick={() => nickel.request({type: 'set-family', index: family.index})} />)}
             </settings-grid>
         </settings-card>
+        <settings-compact-list>
+            {data.catalogRows.map(row => <settings-row key={row.key}
+                label={row.key} value={row.family}>
+                <settings-button id={`default-app-target-${row.index}`}
+                    label="Choose app" value="quiet"
+                    onClick={() => nickel.request({type: 'browse-target', index: row.index, key: row.key})} />
+            </settings-row>)}
+        </settings-compact-list>
     </settings-stack>;
 }

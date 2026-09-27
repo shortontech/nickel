@@ -73,9 +73,9 @@ typed requests before opening the file picker or saving settings. Invalid hue
 input leaves the dialog open for correction. Native controls remain available
 if JSX fails. Build it with the same command and its source filename.
 
-`settings-default-apps.jsx` renders the curated association rows, catalog search,
-and family filters. A chooser request includes the current target identity,
-which Rust checks before opening the host-owned handler picker. The virtualized
-association results and picker remain native until their list and transient
-focus behavior can move through the plugin API. Build it with the same command
+`settings-default-apps.jsx` renders the curated association rows, catalog
+search, family filters, and visible catalog rows. Rust owns the virtual list's
+scroll geometry and projects only its current bounded window into JavaScript.
+Typed chooser requests carry the projected target identity and are checked
+before Rust opens the host-owned handler picker. Build it with the same command
 and its source filename.

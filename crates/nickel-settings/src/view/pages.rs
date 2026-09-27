@@ -427,8 +427,9 @@ impl SettingsApp {
                 </Container>
             }
         });
+        let matching_targets = crate::default_apps_plugin::matching_targets(self);
         let curated = if self.settings_jsx_enabled {
-            let data = crate::default_apps_plugin::projection(self);
+            let data = crate::default_apps_plugin::projection_for_targets(self, &matching_targets);
             self.default_apps_page
                 .borrow_mut()
                 .get_or_insert_with(crate::default_apps_plugin::DefaultAppsPage::new)
@@ -440,22 +441,12 @@ impl SettingsApp {
             None
         };
         let jsx_active = curated.is_some();
-        let curated =
-            curated.unwrap_or_else(|| AnyView::new(Column::new().gap(2.0).children(rows)));
-        let target_query = self.default_app_target_query.trim().to_lowercase();
-        let matching_targets = self
-            .default_app_targets
-            .iter()
-            .filter(|target| {
-                (target_query.is_empty()
-                    || target.platform_key().to_lowercase().contains(&target_query))
-                    && self
-                        .default_app_target_family
-                        .is_none_or(|family| target.family() == family)
-                    && !self.default_apps.iter().any(|row| row.target == **target)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let (curated, catalog_nodes) = curated.unwrap_or_else(|| {
+            (
+                AnyView::new(Column::new().gap(2.0).children(rows)),
+                std::collections::BTreeMap::new(),
+            )
+        });
         let target_results = if self.default_apps_loading && self.default_app_targets.is_empty() {
             AnyView::new(
                 Text::new(
@@ -479,15 +470,20 @@ impl SettingsApp {
                 |target| target.platform_key(),
                 move |target: nickel_platform::AssociationTarget| {
                     let key = target.platform_key();
+                    if let Some(node) = catalog_nodes.get(&key) {
+                        return node.view(theme, "", SettingsMessage::DefaultAppsJsxAction);
+                    }
                     let kind = target.family().label();
-                    SettingsRow::new(theme, key, kind).trailing(
-                        Button::semantic(
-                            theme,
-                            SettingsMessage::BrowseDefaultAppTarget(target),
-                            "Choose app",
-                            ButtonPresentation::Quiet,
-                        )
-                        .width(112.0),
+                    AnyView::new(
+                        SettingsRow::new(theme, key, kind).trailing(
+                            Button::semantic(
+                                theme,
+                                SettingsMessage::BrowseDefaultAppTarget(target),
+                                "Choose app",
+                                ButtonPresentation::Quiet,
+                            )
+                            .width(112.0),
+                        ),
                     )
                 },
             )

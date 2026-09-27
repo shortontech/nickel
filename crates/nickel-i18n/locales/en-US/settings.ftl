@@ -10,6 +10,7 @@ settings-bluetooth-title = Bluetooth settings
 settings-bluetooth-subtitle = Connect and manage nearby devices
 settings-default-apps-title = Default applications
 settings-default-apps-subtitle = Operating-system handlers for files and links
+settings-default-apps-search-placeholder = Search file types and protocols
 
 settings-nav-display = Display
 settings-nav-bar = Nickel Bar

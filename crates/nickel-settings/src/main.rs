@@ -3224,6 +3224,14 @@ mod tests {
             .expect("default app chooser has a JSX action")
     }
 
+    fn default_app_target_action(app: &SettingsApp, index: usize) -> Option<usize> {
+        app.default_apps_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id(&format!("default-app-target-{index}")))
+    }
+
     fn network_action(app: &SettingsApp, id: &str) -> Option<usize> {
         app.network_page
             .borrow()
@@ -4474,15 +4482,23 @@ mod tests {
                 .is_empty(),
             "the catalog must not eagerly construct an off-screen final row"
         );
+        assert!(default_app_target_action(app, 249).is_none());
         app.update(SettingsMessage::DefaultAppTargetChanged(
             "x-nickel-fixture-249".into(),
         ));
         let associations = app.build_ui(850.0, 900.0);
+        let action = default_app_target_action(app, 0)
+            .expect("the searched uncommon association has a JSX action");
         assert!(
             !associations
-                .semantic_targets_for_message(&SettingsMessage::BrowseDefaultAppTarget(uncommon,))
+                .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(action))
                 .is_empty(),
             "platform-reported uncommon associations must be searchable"
+        );
+        assert!(
+            crate::default_apps_plugin::projection(app)["catalogRows"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["key"] == uncommon.platform_key()))
         );
         assert!(!app.default_apps.iter().any(|row| {
             matches!(row.target, nickel_platform::AssociationTarget::Mime(ref mime) if mime == "inode/directory")
@@ -4567,6 +4583,32 @@ mod tests {
         );
         assert!(host.inspect().open_overlay.is_none());
         assert_eq!(host.inspect().keyboard_focus, Some(anchor.id));
+    }
+
+    #[test]
+    fn jsx_catalog_choice_adds_the_projected_association() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
+        let target = nickel_platform::AssociationTarget::mime("application/x-nickel-fixture");
+        app.default_app_targets = vec![target.clone()];
+        let mut host = UiHost::new(app, 850, 900);
+        let action = default_app_target_action(host.application_mut(), 0)
+            .expect("visible catalog row has a JSX action");
+        let target_id = host
+            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(action))
+            .into_iter()
+            .next()
+            .expect("catalog row is reachable")
+            .id;
+        host.perform_semantic_action(
+            target_id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(
+            host.application_mut()
+                .default_apps
+                .iter()
+                .any(|row| row.target == target)
+        );
     }
 
     #[test]

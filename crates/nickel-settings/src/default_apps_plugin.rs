@@ -1,7 +1,9 @@
 //! Default application rows declared by the bundled Settings plugin.
-//! The host retains association discovery and the native handler picker.
+//! The host retains association discovery, virtual list geometry, and the picker.
 
-use nickel_ui::{AnyView, SemanticTheme};
+use std::collections::BTreeMap;
+
+use nickel_ui::{AnyView, Column, SemanticTheme, VirtualWindow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -36,13 +38,50 @@ impl DefaultAppsPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<AnyView<SettingsMessage>, String> {
-        Ok(self.context.render(data)?.view_with_input(
-            theme,
-            "Search file types and protocols",
-            SettingsMessage::DefaultAppsJsxAction,
-            SettingsMessage::DefaultAppsJsxInput,
-        ))
+    ) -> Result<(AnyView<SettingsMessage>, BTreeMap<String, Node>), String> {
+        let node = self.context.render(data)?;
+        let Node::Stack(children) = node else {
+            return Err("Default Apps page structure is invalid".into());
+        };
+        let Node::CompactList(catalog) = &children[2] else {
+            return Err("Default Apps catalog structure is invalid".into());
+        };
+        let projected = data["catalogRows"]
+            .as_array()
+            .ok_or("Default Apps catalog projection is invalid")?;
+        let search_placeholder = data["searchPlaceholder"]
+            .as_str()
+            .ok_or("Default Apps search placeholder is invalid")?;
+        if catalog.len() != projected.len() {
+            return Err("Default Apps catalog row count changed".into());
+        }
+        let catalog_nodes = projected
+            .iter()
+            .zip(catalog)
+            .map(|(row, node)| {
+                Ok((
+                    row["key"]
+                        .as_str()
+                        .ok_or("Default Apps catalog target is invalid")?
+                        .to_owned(),
+                    node.clone(),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        if catalog_nodes.len() != catalog.len() {
+            return Err("Default Apps catalog has duplicate targets".into());
+        }
+        let view = AnyView::new(Column::new().fill_width().gap(16.0).children(
+            children[..2].iter().map(|child| {
+                child.view_with_input(
+                    theme,
+                    search_placeholder,
+                    SettingsMessage::DefaultAppsJsxAction,
+                    SettingsMessage::DefaultAppsJsxInput,
+                )
+            }),
+        ));
+        Ok((view, catalog_nodes))
     }
 
     fn dispatch(
@@ -70,9 +109,10 @@ fn parse_tree(value: &Value) -> Result<Node, String> {
         .and_then(Value::as_array)
         .ok_or("Default Apps page has no children")?;
     if value.get("kind").and_then(Value::as_str) != Some("settings-stack")
-        || children.len() != 2
+        || children.len() != 3
         || children[0].get("kind").and_then(Value::as_str) != Some("settings-compact-list")
         || children[1].get("kind").and_then(Value::as_str) != Some("settings-card")
+        || children[2].get("kind").and_then(Value::as_str) != Some("settings-compact-list")
     {
         return Err("Default Apps page structure is invalid".into());
     }
@@ -84,6 +124,10 @@ fn parse_tree(value: &Value) -> Result<Node, String> {
         .get("children")
         .and_then(Value::as_array)
         .ok_or("Default Apps filters are missing")?;
+    let catalog = children[2]
+        .get("children")
+        .and_then(Value::as_array)
+        .ok_or("Default Apps catalog rows are missing")?;
     if rows.is_empty()
         || rows.len() > 64
         || rows
@@ -92,6 +136,10 @@ fn parse_tree(value: &Value) -> Result<Node, String> {
         || advanced.len() != 2
         || advanced[0].get("kind").and_then(Value::as_str) != Some("settings-input")
         || advanced[1].get("kind").and_then(Value::as_str) != Some("settings-grid")
+        || catalog.len() > 32
+        || catalog
+            .iter()
+            .any(|child| child.get("kind").and_then(Value::as_str) != Some("settings-row"))
     {
         return Err("Default Apps controls are invalid".into());
     }
@@ -104,6 +152,7 @@ enum DefaultAppsRequest {
     ChooseDefault { index: usize, target: String },
     SearchTargets { value: String },
     SetFamily { index: usize },
+    BrowseTarget { index: usize, key: String },
 }
 
 fn validate_request(request: DefaultAppsRequest, data: &Value) -> Result<SettingsMessage, String> {
@@ -144,6 +193,31 @@ fn validate_request(request: DefaultAppsRequest, data: &Value) -> Result<Setting
                 index,
             )?))
         }
+        DefaultAppsRequest::BrowseTarget { index, key } => {
+            let row = data
+                .get("catalogRows")
+                .and_then(Value::as_array)
+                .and_then(|rows| {
+                    rows.iter().find(|row| {
+                        row["index"].as_u64() == Some(index as u64)
+                            && row["key"].as_str() == Some(key.as_str())
+                    })
+                })
+                .ok_or(STALE_STATUS)?;
+            let value = row["targetValue"]
+                .as_str()
+                .ok_or("Association target is invalid")?;
+            let target = match row["targetKind"].as_str() {
+                Some("extension") => nickel_platform::AssociationTarget::extension(value),
+                Some("mime") => nickel_platform::AssociationTarget::mime(value),
+                Some("scheme") => nickel_platform::AssociationTarget::scheme(value),
+                _ => return Err("Association target kind is invalid".into()),
+            };
+            if target.platform_key() != key {
+                return Err(STALE_STATUS.into());
+            }
+            Ok(SettingsMessage::BrowseDefaultAppTarget(target))
+        }
     }
 }
 
@@ -163,7 +237,37 @@ fn family_by_index(index: usize) -> Result<Option<nickel_platform::AssociationFa
     })
 }
 
+pub(super) fn matching_targets(app: &SettingsApp) -> Vec<nickel_platform::AssociationTarget> {
+    let query = app.default_app_target_query.trim().to_lowercase();
+    app.default_app_targets
+        .iter()
+        .filter(|target| {
+            (query.is_empty() || target.platform_key().to_lowercase().contains(&query))
+                && app
+                    .default_app_target_family
+                    .is_none_or(|family| target.family() == family)
+                && !app.default_apps.iter().any(|row| row.target == **target)
+        })
+        .cloned()
+        .collect()
+}
+
 pub(super) fn projection(app: &SettingsApp) -> Value {
+    projection_for_targets(app, &matching_targets(app))
+}
+
+pub(super) fn projection_for_targets(
+    app: &SettingsApp,
+    matching: &[nickel_platform::AssociationTarget],
+) -> Value {
+    let heights = vec![58.0; matching.len()];
+    let window = VirtualWindow::from_heights(
+        &heights,
+        2.0,
+        app.default_app_catalog_scroll_offset,
+        300.0,
+        116.0,
+    );
     json!({
         "rows":app.default_apps.iter().enumerate().map(|(index,row)| {
             let current = row.snapshot.as_ref()
@@ -180,6 +284,7 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         }).collect::<Vec<_>>(),
         "advancedTitle":"File types and links",
         "advancedStatus":app.default_app_target_status.as_deref().unwrap_or_default(),
+        "searchPlaceholder":app.localizer.text("settings-default-apps-search-placeholder"),
         "query":app.default_app_target_query,
         "families":(0..=8).filter_map(|index| {
             let family = family_by_index(index).ok()?;
@@ -193,6 +298,20 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
                 "label":format!("{label} ({count})"),
                 "selected":app.default_app_target_family == family,
             }))
+        }).collect::<Vec<_>>(),
+        "catalogRows":matching[window.range.clone()].iter().enumerate().map(|(offset,target)| {
+            let (kind,value) = match target {
+                nickel_platform::AssociationTarget::Extension(value) => ("extension",value),
+                nickel_platform::AssociationTarget::Mime(value) => ("mime",value),
+                nickel_platform::AssociationTarget::Scheme(value) => ("scheme",value),
+            };
+            json!({
+                "index":window.range.start + offset,
+                "key":target.platform_key(),
+                "family":target.family().label(),
+                "targetKind":kind,
+                "targetValue":value,
+            })
         }).collect::<Vec<_>>()
     })
 }
@@ -212,7 +331,12 @@ impl SettingsApp {
             .and_then(|page| page.dispatch(index, value, &data));
         match result {
             Ok(message) => self.handle_settings_message(message),
-            Err(error) => self.plugin_notice = Some(error),
+            Err(error) => {
+                if error != STALE_STATUS {
+                    *self.default_apps_page.borrow_mut() = Some(Err(error));
+                }
+                self.request_redraw();
+            }
         }
     }
 }
@@ -289,6 +413,61 @@ mod tests {
             validate_request(
                 DefaultAppsRequest::SearchTargets {
                     value: "x".repeat(257)
+                },
+                &data,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn catalog_renders_a_bounded_window_and_validates_target_kind() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
+        app.default_app_targets = (0..250)
+            .map(|index| {
+                nickel_platform::AssociationTarget::mime(format!(
+                    "application/x-nickel-fixture-{index:03}"
+                ))
+            })
+            .collect();
+        let initial = projection(&app);
+        assert!(initial["catalogRows"].as_array().unwrap().len() < 20);
+        assert!(
+            initial["catalogRows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| { row["key"] != "application/x-nickel-fixture-249" })
+        );
+
+        app.default_app_catalog_scroll_offset = 20_000.0;
+        let scrolled = projection(&app);
+        assert!(
+            scrolled["catalogRows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["key"] == "application/x-nickel-fixture-249")
+        );
+
+        app.default_app_catalog_scroll_offset = 0.0;
+        app.default_app_target_query = "x-nickel-fixture-249".into();
+        let data = projection(&app);
+        let mut page = DefaultAppsPage::new().unwrap();
+        let (_, catalog) = page.render(&data, app.ui_theme()).unwrap();
+        assert!(catalog.contains_key("application/x-nickel-fixture-249"));
+        let action = page.action_for_id("default-app-target-0").unwrap();
+        assert_eq!(
+            page.dispatch(action, Value::Null, &data).unwrap(),
+            SettingsMessage::BrowseDefaultAppTarget(nickel_platform::AssociationTarget::mime(
+                "application/x-nickel-fixture-249"
+            ))
+        );
+        assert!(
+            validate_request(
+                DefaultAppsRequest::BrowseTarget {
+                    index: 0,
+                    key: "different".into(),
                 },
                 &data,
             )
