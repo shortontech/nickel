@@ -533,6 +533,8 @@ pub(super) fn wide_text(buffer: &[u16]) -> String {
 pub(super) fn session_request(request: SessionRequest) -> std::io::Result<ServerMessage> {
     use std::{os::unix::net::UnixDatagram, path::PathBuf, time::Duration};
 
+    static NEXT_CLIENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     let server = std::env::var_os("NICKEL_SESSION_CONTROL")
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -541,7 +543,11 @@ pub(super) fn session_request(request: SessionRequest) -> std::io::Result<Server
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let client = runtime.join(format!("nickel-settings-{}.sock", std::process::id()));
+    let sequence = NEXT_CLIENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let client = runtime.join(format!(
+        "nickel-settings-{}-{sequence}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&client);
     let socket = UnixDatagram::bind(&client)?;
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;

@@ -5,6 +5,7 @@ Build and run the bounded live nested-session check with:
 ```sh
 cargo build -p nickel --no-default-features --features backend-winit \
   --bin nickel-nested --bin nickel-test-input --bin nickel-nested-acceptance
+cargo build -p nickel-settings --bin nickel-settings
 ./target/debug/nickel-nested-acceptance
 ```
 
@@ -17,8 +18,11 @@ plugins, measures the launcher's rendered native UI memory, then disables and
 re-enables it while checking memory cleanup and the native fallback. It injects
 Meta through the nested session's test-control socket and verifies that the
 internal launcher becomes visible and closes again. It then samples compositor
-CPU ticks across a two-second idle interval and requests logout. The default
-harness does not create a uinput controller: Linux exposes that device to the
+CPU ticks across a two-second idle interval. After the idle sample it opens
+Settings in the private nested session, waits for
+its measured plugin UI memory to appear in shell status, closes Settings, and
+checks that the report expires before requesting logout. The harness does not
+create a uinput controller: Linux exposes that device to the
 host desktop too, where its Guide button can activate the host launcher. Every
 phase has a deadline. On
 failure, the harness terminates its compositor child and removes its temporary
@@ -56,6 +60,10 @@ memory, disabled and re-enabled the launcher with its native fallback, accepted
 Meta input through the private test-control socket, and shut down cleanly. The
 two-second idle sample used 14 compositor CPU ticks. The harness did not create
 a uinput controller or send a Guide button to the host.
+
+A later run on the same date also passed the Settings process memory report:
+the nested Settings window published nonzero UI memory, then its shell status
+row disappeared after the bounded report expiry.
 
 The X11 host command reached the nested test-control listener but the host X
 server returned an XIO error. Readiness then failed with `WouldBlock`, so this

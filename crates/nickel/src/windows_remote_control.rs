@@ -3762,6 +3762,7 @@ impl WindowsDesktopAuthority {
 
 pub(crate) struct WindowsRemoteControl {
     _transport: Option<nickel_platform::local_control::LocalControlServer>,
+    settings_plugin_report: Option<crate::settings_plugin_report::SettingsPluginReport>,
     receiver: Receiver<OwnerRequest>,
     remote_control: RemoteControlRuntime,
     local_cues: crate::local_cues::LocalCues,
@@ -3959,6 +3960,7 @@ impl WindowsRemoteControl {
             desktop_session.is_some_and(crate::platform::remote_observation::desktop_is_unlocked);
         let mut owner = Self {
             _transport: Some(transport),
+            settings_plugin_report: None,
             receiver,
             remote_control: RemoteControlRuntime::default(),
             local_cues: Default::default(),
@@ -5184,8 +5186,30 @@ impl WindowsRemoteControl {
                     let result = match request.envelope.request {
                         Request::Query(Query::Plugins) => shell.as_ref().map_or_else(
                             || error("Windows shell is unavailable"),
-                            |(_, state)| ServerMessage::Plugins(state.plugin_status_snapshot()),
+                            |(_, state)| {
+                                let mut snapshot = state.plugin_status_snapshot();
+                                if let Some(report) = &self.settings_plugin_report {
+                                    report.append_to(&mut snapshot, Instant::now());
+                                }
+                                ServerMessage::Plugins(snapshot)
+                            },
                         ),
+                        Request::Command(Command::ReportSettingsPluginMemory {
+                            enabled,
+                            memory,
+                        }) => {
+                            match crate::settings_plugin_report::SettingsPluginReport::new(
+                                enabled,
+                                memory,
+                                Instant::now(),
+                            ) {
+                                Ok(report) => {
+                                    self.settings_plugin_report = Some(report);
+                                    ServerMessage::Ack
+                                }
+                                Err(message) => error(message),
+                            }
+                        }
                         Request::Command(Command::SetPluginEnabled {
                             id,
                             enabled,

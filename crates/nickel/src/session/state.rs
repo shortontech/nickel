@@ -2337,6 +2337,15 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
     )
 }
 
+fn settings_process_is_peer(peer_pid: u32) -> bool {
+    peer_pid != 0
+        && same_session_user(peer_pid)
+        && std::fs::read_link(format!("/proc/{peer_pid}/exe"))
+            .ok()
+            .and_then(|path| path.file_name().map(std::ffi::OsStr::to_os_string))
+            .is_some_and(|name| name.to_string_lossy() == "nickel-settings")
+}
+
 fn test_control_may_invoke(command: &SessionCommand) -> bool {
     matches!(
         command,
@@ -2776,6 +2785,7 @@ pub struct NickelSession {
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
     plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
+    settings_plugin_report: Option<crate::settings_plugin_report::SettingsPluginReport>,
     plugin_shell_subscriber: Option<PathBuf>,
     controller_broker: ControllerBroker<ControllerEnvelopePayload>,
     controller_internal_connection: ControllerConnectionGeneration,
@@ -8667,6 +8677,7 @@ impl NickelSession {
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
             plugin_status: None,
+            settings_plugin_report: None,
             plugin_shell_subscriber: None,
             controller_broker,
             controller_internal_connection,

@@ -94,6 +94,9 @@ pub(super) struct SettingsApp {
     pub(super) plugin_setting_edit: Option<(String, String, String)>,
     pub(super) plugin_refresh_rx: Option<std::sync::mpsc::Receiver<Result<ServerMessage, String>>>,
     pub(super) next_plugin_refresh: Instant,
+    pub(super) settings_memory_report_rx:
+        Option<std::sync::mpsc::Receiver<std::io::Result<ServerMessage>>>,
+    pub(super) next_settings_memory_report: Instant,
     pub(super) wallpaper_settings: WallpaperSettings,
     pub(super) wallpaper_preview: Option<Arc<image::RgbaImage>>,
     pub(super) wallpaper_dimensions: Option<(u32, u32)>,
@@ -303,6 +306,8 @@ impl Default for SettingsApp {
             plugin_setting_edit: None,
             plugin_refresh_rx: None,
             next_plugin_refresh: Instant::now(),
+            settings_memory_report_rx: None,
+            next_settings_memory_report: Instant::now(),
             wallpaper_settings,
             wallpaper_preview,
             wallpaper_dimensions,

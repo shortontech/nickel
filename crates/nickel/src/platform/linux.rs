@@ -1315,6 +1315,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::ReloadShellSettings => "reload-shell-settings",
             SessionCommand::ApplyShellBehavior { .. } => "apply-shell-behavior",
             SessionCommand::PublishPluginStatus { .. } => "publish-plugin-status",
+            SessionCommand::ReportSettingsPluginMemory { .. } => "report-settings-plugin-memory",
             SessionCommand::SetPluginEnabled { .. } => "set-plugin-enabled",
             SessionCommand::SetPluginSetting { .. } => "set-plugin-setting",
             SessionCommand::ApplyRemoteControl { .. } => "apply-remote-control",

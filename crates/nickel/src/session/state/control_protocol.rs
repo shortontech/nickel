@@ -729,6 +729,14 @@ impl NickelSession {
             }
             Request::Query(query) => self.handle_authority_request(query.into()),
             Request::Command(command) => {
+                if matches!(command, SessionCommand::ReportSettingsPluginMemory { .. })
+                    && !settings_process_is_peer(peer_pid)
+                {
+                    return protocol_error(
+                        ErrorCode::Unauthorized,
+                        "Settings memory requires the Nickel Settings process",
+                    );
+                }
                 if command_requires_shell_identity(&command)
                     && !control.authenticated_shell_pids.contains(&peer_pid)
                     && !(self.test_control_enabled && test_control_may_invoke(&command))
@@ -968,16 +976,21 @@ impl NickelSession {
                 let _ = self.refresh_output_topology_generation();
                 ServerMessage::ShellBehavior(self.protocol_shell_behavior())
             }
-            Query::Plugins => ServerMessage::Plugins(
-                self.internal_shell
+            Query::Plugins => {
+                let mut snapshot = self
+                    .internal_shell
                     .as_ref()
                     .map(|coordinator| coordinator.plugin_status_snapshot())
                     .or_else(|| self.plugin_status.clone())
                     .unwrap_or_else(|| nickel_session_protocol::PluginStatusSnapshot {
                         activation_generation: 0,
                         plugins: Vec::new(),
-                    }),
-            ),
+                    });
+                if let Some(report) = &self.settings_plugin_report {
+                    report.append_to(&mut snapshot, Instant::now());
+                }
+                ServerMessage::Plugins(snapshot)
+            }
             Query::RemoteControl => self.remote_control_snapshot(),
             Query::Preview { window } => {
                 let id = WindowId(window.0);
@@ -1223,6 +1236,17 @@ impl NickelSession {
                 }
                 self.plugin_status = Some(snapshot.clone());
                 self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot));
+            }
+            SessionCommand::ReportSettingsPluginMemory { enabled, memory } => {
+                let report = match crate::settings_plugin_report::SettingsPluginReport::new(
+                    enabled,
+                    memory,
+                    Instant::now(),
+                ) {
+                    Ok(report) => report,
+                    Err(message) => return protocol_error(ErrorCode::ResourceLimit, message),
+                };
+                self.settings_plugin_report = Some(report);
             }
             SessionCommand::SetPluginEnabled {
                 id,

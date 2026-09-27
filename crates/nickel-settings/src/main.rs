@@ -1117,6 +1117,7 @@ impl SettingsApp {
             return;
         }
         self.settings_jsx_enabled = enabled;
+        self.next_settings_memory_report = Instant::now();
         self.settings_jsx_peak_bytes.set(0);
         self.settings_jsx_displayed_memory.get_mut().take();
         self.ordinary_pages.get_mut().take();
@@ -1238,6 +1239,39 @@ impl SettingsApp {
             native_ui_bytes: Some(total),
             tracked_peak_bytes: Some(self.settings_jsx_peak_bytes.get()),
             ..Default::default()
+        }
+    }
+
+    fn poll_settings_memory_report(&mut self, now: Instant) {
+        if cfg!(test) {
+            return;
+        }
+        if let Some(receiver) = &self.settings_memory_report_rx {
+            match receiver.try_recv() {
+                Ok(_) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.settings_memory_report_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+            }
+        }
+        if now < self.next_settings_memory_report {
+            return;
+        }
+        self.next_settings_memory_report = now + Duration::from_secs(2);
+        let enabled = self.settings_jsx_enabled;
+        let memory = self.settings_plugin_memory();
+        let (sender, receiver) = mpsc::channel();
+        if std::thread::Builder::new()
+            .name("nickel-settings-memory-report".into())
+            .spawn(move || {
+                let response = session_request(SessionRequest::Command(
+                    SessionCommand::ReportSettingsPluginMemory { enabled, memory },
+                ));
+                let _ = sender.send(response);
+            })
+            .is_ok()
+        {
+            self.settings_memory_report_rx = Some(receiver);
         }
     }
 
@@ -2465,6 +2499,7 @@ impl SettingsApp {
         }
         let now = Instant::now();
         self.poll_plugin_requests(now);
+        self.poll_settings_memory_report(now);
         if self
             .pending_display_revert
             .as_ref()
@@ -2966,6 +3001,12 @@ impl Application for SettingsApp {
         }
         if self.page == SettingsPage::Plugins {
             deadlines.push(self.next_plugin_refresh);
+        }
+        if !cfg!(test) {
+            deadlines.push(self.next_settings_memory_report);
+            if self.settings_memory_report_rx.is_some() {
+                deadlines.push(now + Duration::from_millis(50));
+            }
         }
         if self.plugin_activation_rx.is_some()
             || self.plugin_setting_rx.is_some()

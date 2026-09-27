@@ -1,6 +1,6 @@
 // Bounded live acceptance harness for Nickel's nested compositor.
 //
-// Build all three participating binaries, then run this binary from the same
+// Build the participating binaries, then run this binary from the same
 // target directory. The harness uses an isolated runtime directory, launches
 // compositor-owned shell UI, and always asks the compositor to log out before
 // its deadline.
@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const DEADLINE: Duration = Duration::from_secs(30);
+const DEADLINE: Duration = Duration::from_secs(45);
 const POLL: Duration = Duration::from_millis(100);
 
 fn main() -> ExitCode {
@@ -43,6 +43,7 @@ fn run() -> Result<(), String> {
         .ok_or("acceptance harness has no parent directory")?;
     let nickel = sibling(directory, "nickel-nested")?;
     let test_input = sibling(directory, "nickel-test-input")?;
+    let settings = sibling(directory, "nickel-settings")?;
     let runtime = env::temp_dir().join(format!(
         "nickel-nested-acceptance-{}-{}",
         std::process::id(),
@@ -96,7 +97,7 @@ fn run() -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("could not start nested compositor: {error}"))?;
 
-    let result = exercise(&mut compositor, &test_input, &capability_file);
+    let result = exercise(&mut compositor, &test_input, &settings, &capability_file);
     if compositor
         .try_wait()
         .map_err(|error| error.to_string())?
@@ -139,7 +140,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-            "PASS: nested compositor ran bundled UI and an installed panel, changed a live plugin setting, measured plugin UI memory, confirmed launcher fallback and restart through scoped test input, and shut down cleanly"
+            "PASS: nested compositor ran bundled UI and an installed panel, changed a live plugin setting, measured shell and Settings plugin UI memory, confirmed launcher fallback and restart through scoped test input, and shut down cleanly"
     );
     Ok(())
 }
@@ -147,6 +148,7 @@ fn run() -> Result<(), String> {
 fn exercise(
     compositor: &mut Child,
     test_input: &Path,
+    settings: &Path,
     capability_file: &Path,
 ) -> Result<(), String> {
     let deadline = Instant::now() + DEADLINE;
@@ -353,7 +355,62 @@ fn exercise(
             "internal runtime consumed {idle_ticks} CPU ticks during bounded idle"
         ));
     }
+    verify_settings_memory_report(settings, test_input, &environment)?;
     Ok(())
+}
+
+fn verify_settings_memory_report(
+    settings: &Path,
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let mut process = Command::new(settings)
+        .args(["--screen", "plugins"])
+        .envs(environment.iter().cloned())
+        .spawn()
+        .map_err(|error| format!("could not launch nested Settings: {error}"))?;
+    let result = (|| {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(status) = process.try_wait().map_err(|error| error.to_string())? {
+                return Err(format!("nested Settings exited before reporting memory: {status}"));
+            }
+            let output = checked(test_input, environment, &["plugins"])?;
+            let snapshot: nickel_session_protocol::PluginStatusSnapshot =
+                serde_json::from_str(&output).map_err(|error| error.to_string())?;
+            if snapshot.plugins.iter().any(|plugin| {
+                plugin.id == "org.nickel.settings"
+                    && plugin.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0)
+            }) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("nested Settings did not publish plugin UI memory".into());
+            }
+            thread::sleep(POLL);
+        }
+        Ok(())
+    })();
+    let _ = process.kill();
+    let _ = process.wait();
+    result?;
+    let deadline = Instant::now() + Duration::from_secs(7);
+    loop {
+        let output = checked(test_input, environment, &["plugins"])?;
+        let snapshot: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&output).map_err(|error| error.to_string())?;
+        if snapshot
+            .plugins
+            .iter()
+            .all(|plugin| plugin.id != "org.nickel.settings")
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("stale Settings plugin memory remained in shell status".into());
+        }
+        thread::sleep(POLL);
+    }
 }
 
 fn wait_for_launcher_visibility(
@@ -513,7 +570,7 @@ fn sibling(directory: &Path, name: &str) -> Result<PathBuf, String> {
     let path = directory.join(name);
     path.is_file().then_some(path).ok_or_else(|| {
         format!(
-            "missing {}; build nickel-nested, nickel-test-input, and nickel-nested-acceptance together",
+            "missing {}; build nickel-nested, nickel-test-input, nickel-settings, and nickel-nested-acceptance together",
             name
         )
     })
