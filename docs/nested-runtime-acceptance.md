@@ -46,3 +46,19 @@ LIBGL_ALWAYS_SOFTWARE=1 ./target/debug/nickel-nested-acceptance
 The idle check allows up to one fully occupied CPU core across its two-second
 window (on the Linux 100 Hz process clock), a deliberately broad bound intended
 to catch an unbounded redraw loop without imposing a benchmark-grade threshold.
+
+## Recorded plugin run, 2026-09-27
+
+On the Wayland host display, the Mesa software command above passed. The nested
+compositor ran bundled plugin UI and an installed panel, changed a live plugin
+setting, measured plugin UI memory, disabled and re-enabled the launcher with
+its native fallback, accepted native input, and shut down cleanly. The two-second
+idle sample used 13 compositor CPU ticks.
+
+The X11 host command reached the nested test-control listener but the host X
+server returned an XIO error. Readiness then failed with `WouldBlock`, so this
+run does not establish X11 presentation parity.
+
+`cargo check -p nickel --target x86_64-pc-windows-gnu --all-targets` passed on
+the same branch. This checks Windows compilation; native Windows input and
+presentation still require a Windows session.
