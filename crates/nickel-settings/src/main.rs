@@ -5,6 +5,7 @@ mod effects;
 mod model;
 mod persistence;
 mod platform;
+mod settings_plugin;
 mod view;
 
 use model::SettingsApp;

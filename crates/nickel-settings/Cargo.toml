@@ -13,6 +13,7 @@ nickel-i18n = { path = "../nickel-i18n" }
 nickel-input = { path = "../nickel-input", features = ["winit"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
+nickel-plugin-runtime = { path = "../nickel-plugin-runtime" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 image.workspace = true
 resvg.workspace = true

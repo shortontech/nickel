@@ -2009,70 +2009,18 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn keyboard_shortcuts_components(
-        &self,
-    ) -> impl nickel_ui::Component<SettingsMessage> {
-        let theme = self.ui_theme();
-        SettingsCard::titled(
-            theme,
-            self.localizer.text("settings-keyboard-card-title"),
-            self.localizer.text("settings-keyboard-card-description"),
-        )
-        .child(SettingsRow::new(
-            theme,
-            self.localizer.text("settings-keyboard-open-launcher"),
-            "Super",
-        ))
-        .child(SettingsRow::new(
-            theme,
-            self.localizer.text("settings-keyboard-search"),
-            self.localizer.text("settings-keyboard-search-value"),
-        ))
-        .child(SettingsRow::new(
-            theme,
-            self.localizer.text("settings-keyboard-navigate"),
-            "Arrow keys · Tab · Shift+Tab",
-        ))
-        .child(SettingsRow::new(
-            theme,
-            self.localizer.text("settings-keyboard-activate"),
-            "Enter",
-        ))
-        .child(SettingsRow::new(
-            theme,
-            self.localizer.text("settings-keyboard-back"),
-            "Escape",
-        ))
-        .child(SettingsRow::new(
-            theme,
-            self.localizer.text("settings-keyboard-workspaces"),
-            if cfg!(target_os = "windows") {
-                self.localizer
-                    .text("settings-keyboard-workspaces-unavailable")
-            } else {
-                self.localizer.text("settings-keyboard-workspaces-value")
-            },
-        ))
+    pub(super) fn keyboard_shortcuts_components(&self) -> AnyView<SettingsMessage> {
+        self.ordinary_pages
+            .borrow_mut()
+            .render_keyboard(&self.localizer, self.ui_theme())
+            .expect("bundled Settings keyboard page must render")
     }
 
-    pub(super) fn about_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
-        let theme = self.ui_theme();
-        let platform = format!("{} · {}", std::env::consts::OS, std::env::consts::ARCH);
-        SettingsCard::titled(
-            theme,
-            self.localizer.text("settings-about-card-title"),
-            self.localizer.text("settings-about-card-description"),
-        )
-        .child(SettingsRow::new(
-            theme,
-            self.localizer.text("settings-about-version"),
-            env!("CARGO_PKG_VERSION"),
-        ))
-        .child(SettingsRow::new(
-            theme,
-            self.localizer.text("settings-about-platform"),
-            platform,
-        ))
+    pub(super) fn about_components(&self) -> AnyView<SettingsMessage> {
+        self.ordinary_pages
+            .borrow_mut()
+            .render_about(&self.localizer, self.ui_theme())
+            .expect("bundled Settings About page must render")
     }
 }
 

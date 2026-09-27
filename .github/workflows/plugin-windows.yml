@@ -10,6 +10,7 @@ on:
       - "crates/nickel/**"
       - "crates/nickel-core/**"
       - "crates/nickel-plugin-runtime/**"
+      - "crates/nickel-settings/**"
       - "crates/nickel-ui/**"
       - "assets/plugins/**"
       - "assets/plugin-runtime/**"
@@ -21,6 +22,7 @@ on:
       - "crates/nickel/**"
       - "crates/nickel-core/**"
       - "crates/nickel-plugin-runtime/**"
+      - "crates/nickel-settings/**"
       - "crates/nickel-ui/**"
       - "assets/plugins/**"
       - "assets/plugin-runtime/**"
@@ -50,6 +52,8 @@ jobs:
         shell: pwsh
         run: |
           cargo test --locked -p nickel-plugin-runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel-settings --bin nickel-settings settings_plugin::tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --test plugin_panel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

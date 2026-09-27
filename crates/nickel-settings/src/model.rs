@@ -6,6 +6,7 @@ use crate::persistence::{
 pub(super) struct SettingsApp {
     pub(super) controller_family: nickel_ui::ControllerFamily,
     pub(super) localizer: Localizer,
+    pub(super) ordinary_pages: std::cell::RefCell<crate::settings_plugin::OrdinaryPages>,
     pub(super) redraw_requested: Cell<bool>,
     pub(super) displays: Vec<DisplayCard>,
     pub(super) selected: usize,
@@ -192,6 +193,10 @@ impl Default for SettingsApp {
         Self {
             controller_family: nickel_ui::ControllerFamily::Generic,
             localizer,
+            ordinary_pages: std::cell::RefCell::new(
+                crate::settings_plugin::OrdinaryPages::new()
+                    .expect("bundled Settings JSX pages must load"),
+            ),
             redraw_requested: Cell::new(true),
             displays: displays.clone(),
             selected: 1,
