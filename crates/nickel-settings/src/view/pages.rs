@@ -1347,7 +1347,27 @@ impl SettingsApp {
         })
     }
 
-    pub(super) fn bar_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+    pub(super) fn bar_components(&self) -> AnyView<SettingsMessage> {
+        if self.page != SettingsPage::Bar {
+            return AnyView::new(Container::new());
+        }
+        let data = crate::bar_plugin::projection(
+            &self.localizer,
+            &self.shell_settings,
+            self.displays.len(),
+            self.shell_topology_generation,
+        );
+        let result = self
+            .bar_page
+            .borrow_mut()
+            .get_or_insert_with(crate::bar_plugin::BarPage::new)
+            .as_mut()
+            .map_err(|error| error.clone())
+            .and_then(|page| page.render(&data, self.ui_theme(), self.palette()));
+        result.unwrap_or_else(|_| AnyView::new(self.native_bar_components()))
+    }
+
+    fn native_bar_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let theme = self.ui_theme();
         let display_count = self.displays.len().max(1);

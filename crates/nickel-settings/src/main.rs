@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod bar_plugin;
 mod cli;
 mod effects;
 mod model;
@@ -564,6 +565,8 @@ enum SettingsMessage {
     BarAllDisplays,
     BarDisplayWindows,
     BarAllWindows,
+    BarJsxAction(usize),
+    BarJsxSlider(u16),
     SetDesktopCount(u8),
     DisplayScroll,
     DisplayIdentify,
@@ -1566,6 +1569,12 @@ impl SettingsApp {
                 let previous = self.shell_settings.clone();
                 self.shell_settings.all_windows_on_every_bar = true;
                 self.persist_shell_behavior(previous);
+            }
+            SettingsMessage::BarJsxAction(index) => {
+                self.handle_bar_jsx_action(index, serde_json::Value::Null);
+            }
+            SettingsMessage::BarJsxSlider(position) => {
+                self.handle_bar_jsx_slider(f32::from(position) / f32::from(u16::MAX));
             }
             SettingsMessage::DisplayIdentify => {
                 match session_request(SessionRequest::Command(SessionCommand::IdentifyOutputs)) {
@@ -3122,10 +3131,12 @@ mod tests {
         assert!(app.navigation_plugin.borrow().is_none());
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
+        assert!(app.bar_page.borrow().is_none());
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.navigation_plugin.borrow().is_some());
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
+        assert!(app.bar_page.borrow().is_none());
 
         app.page = SettingsPage::Plugins;
         let _ = app.build_ui(1100.0, 800.0);
@@ -3135,6 +3146,37 @@ mod tests {
         app.page = SettingsPage::About;
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.ordinary_pages.borrow().is_some());
+
+        app.page = SettingsPage::Bar;
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.bar_page.borrow().is_some());
+    }
+
+    #[test]
+    fn failed_jsx_bar_page_keeps_native_controls_available() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bar);
+        app.persistence_enabled = false;
+        *app.bar_page.borrow_mut() = Some(Err("JSX failed".into()));
+        let host = UiHost::new(app, 850, 580);
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::BarPrimaryDisplay)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn jsx_bar_slider_reaches_the_desktop_count_reducer() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bar);
+        app.persistence_enabled = false;
+        app.shell_settings.desktop_count = 2;
+        let mut host = UiHost::new(app, 850, 580);
+        host.application_mut()
+            .handle_settings_message(SettingsMessage::BarJsxSlider(u16::MAX));
+        assert_eq!(
+            host.application().shell_settings.desktop_count,
+            nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES
+        );
     }
 
     #[test]
@@ -4942,15 +4984,22 @@ mod tests {
         app.shell_settings.all_windows_on_every_bar = true;
         let mut host = UiHost::new(app, 850, 580);
 
-        for (order, message) in [
-            SettingsMessage::BarPrimaryDisplay,
-            SettingsMessage::BarDisplayWindows,
-        ]
-        .into_iter()
-        .enumerate()
+        for (order, id) in ["bar-primary-display", "bar-display-windows"]
+            .into_iter()
+            .enumerate()
         {
+            let action = host
+                .application()
+                .bar_page
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .action_for_id(id)
+                .expect("JSX bar radio action");
             let target = host
-                .unique_semantic_target_for_message(&message)
+                .unique_semantic_target_for_message(&SettingsMessage::BarJsxAction(action))
                 .expect("bar radio option");
             let x = f64::from(target.bounds.origin.x + target.bounds.size.width / 2.0);
             let y = f64::from(target.bounds.origin.y + target.bounds.size.height / 2.0);
@@ -5157,6 +5206,7 @@ mod tests {
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         app.codex_feature.capability.installation = FeatureInstallation::Installed;
         app.codex_feature.capability.support = FeatureSupport::Supported;
+        app.codex_feature.capability.policy = FeaturePolicy::Editable;
         let frame = app.build_ui(1100.0, 720.0);
         assert!(
             frame
