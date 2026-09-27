@@ -1,0 +1,52 @@
+name: Windows plugin runtime
+
+on:
+  push:
+    branches:
+      - feature/plugins
+  pull_request:
+    paths:
+      - ".github/workflows/plugin-windows.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/nickel/**"
+      - "crates/nickel-core/**"
+      - "crates/nickel-ui/**"
+      - "assets/plugins/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTC_WRAPPER: ""
+
+jobs:
+  plugin-runtime:
+    name: JSX host and package contracts
+    runs-on: windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup default 1.94.1
+
+      - name: Test the JSX host and plugin packages
+        shell: pwsh
+        run: |
+          cargo test --locked -p nickel --test plugin_panel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib plugin_panel::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate shipped extension examples
+        shell: pwsh
+        run: |
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-task-action
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-control-section
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
