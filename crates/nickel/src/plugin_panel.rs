@@ -12,6 +12,8 @@ use nickel_ui::{
 };
 use serde_json::Value;
 
+use crate::launcher::Launcher;
+
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -29,6 +31,18 @@ pub fn surface() -> &'static PluginSurface {
         .expect("bundled panel needs a surface");
     assert_eq!(surface.kind, PluginSurfaceKind::Panel);
     surface
+}
+
+pub fn launcher_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!("../../../assets/plugins/launcher/plugin.json"))
+            .expect("bundled launcher plugin manifest must be valid")
+    })
+}
+
+pub fn launcher_enabled() -> bool {
+    std::env::var_os("NICKEL_DEV_PLUGIN_LAUNCHER").is_some()
 }
 
 pub fn bottom_offset() -> u32 {
@@ -54,11 +68,15 @@ let __hooks = [];
 let __hookIndex = 0;
 let __handlers = [];
 let __effects = [];
+let __nickelData = Object.freeze({query: '', results: []});
 
 const nickel = Object.freeze({
     request(effect) { __effects.push(effect); },
-    openDialog(id) { __effects.push(`open-dialog:${id}`); }
+    openDialog(id) { __effects.push(`open-dialog:${id}`); },
+    get data() { return __nickelData; }
 });
+
+function __nickelSetData(data) { __nickelData = Object.freeze(data); }
 
 function __nickelTakeEffects() {
     return JSON.stringify(__effects.splice(0));
@@ -326,17 +344,61 @@ pub struct PluginPanelApplication {
     effects: Vec<PluginEffect>,
     pending_transient: Option<(OverlayId, UiId)>,
     last_error: Option<String>,
+    manifest: &'static PluginManifest,
+    launcher_data: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
+    SetLauncherQuery(String),
+    ActivateLauncherResult { index: usize, id: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginMessage {
     Click(usize),
     Text(usize, String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherPluginResult {
+    pub index: usize,
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherPluginProjection {
+    pub query: String,
+    pub results: Vec<LauncherPluginResult>,
+}
+
+impl LauncherPluginProjection {
+    fn from_launcher(launcher: &Launcher) -> Self {
+        let results = (0..launcher.result_count().min(12))
+            .filter_map(|index| {
+                launcher
+                    .result_at(index)
+                    .map(|application| LauncherPluginResult {
+                        index,
+                        id: application.id().to_owned(),
+                        name: application.name().to_owned(),
+                    })
+            })
+            .collect();
+        Self {
+            query: launcher.query().to_owned(),
+            results,
+        }
+    }
+
+    fn to_json(&self) -> String {
+        let results = self.results.iter().map(|result| {
+            serde_json::json!({"index": result.index, "id": result.id, "name": result.name})
+        }).collect::<Vec<_>>();
+        serde_json::json!({"query": self.query, "results": results}).to_string()
+    }
 }
 
 impl PluginPanelApplication {
@@ -359,10 +421,33 @@ impl PluginPanelApplication {
     }
 
     pub fn new(source: &str) -> Result<Self, String> {
+        Self::new_with_manifest(source, manifest(), None)
+    }
+
+    pub fn launcher(launcher: &Launcher) -> Result<Self, String> {
+        Self::launcher_with_projection(&LauncherPluginProjection::from_launcher(launcher))
+    }
+
+    pub fn launcher_with_projection(projection: &LauncherPluginProjection) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/launcher/main.js");
+        let data = projection.to_json();
+        Self::new_with_manifest(source, launcher_manifest(), Some(data))
+    }
+
+    fn new_with_manifest(
+        source: &str,
+        manifest: &'static PluginManifest,
+        data: Option<String>,
+    ) -> Result<Self, String> {
         let mut context = Context::default();
         context
             .eval(Source::from_bytes(BOOTSTRAP))
             .map_err(|error| error.to_string())?;
+        if let Some(data) = &data {
+            context
+                .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
+                .map_err(|error| error.to_string())?;
+        }
         context
             .eval(Source::from_bytes(source))
             .map_err(|error| error.to_string())?;
@@ -373,7 +458,32 @@ impl PluginPanelApplication {
             effects: Vec::new(),
             pending_transient: None,
             last_error: None,
+            manifest,
+            launcher_data: data,
         })
+    }
+
+    pub fn sync_launcher(&mut self, launcher: &Launcher) -> Result<bool, String> {
+        self.sync_launcher_projection(&LauncherPluginProjection::from_launcher(launcher))
+    }
+
+    pub fn sync_launcher_projection(
+        &mut self,
+        projection: &LauncherPluginProjection,
+    ) -> Result<bool, String> {
+        if self.manifest.id != launcher_manifest().id {
+            return Err("this plugin is not the launcher".into());
+        }
+        let data = projection.to_json();
+        if self.launcher_data.as_deref() == Some(data.as_str()) {
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.launcher_data = Some(data);
+        Ok(true)
     }
 
     pub fn take_effects(&mut self) -> Vec<PluginEffect> {
@@ -419,7 +529,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .map_err(|error| error.to_string())
             })
             .and_then(|value| {
-                serde_json::from_str::<Vec<String>>(&value.to_std_string_escaped())
+                serde_json::from_str::<Vec<Value>>(&value.to_std_string_escaped())
                     .map_err(|error| error.to_string())
             });
         match (rendered, effects) {
@@ -428,14 +538,15 @@ impl nickel_ui::Application for PluginPanelApplication {
                 let mut requested_dialog = None;
                 for effect in effects {
                     match effect.as_str() {
-                        "show-launcher"
-                            if manifest()
+                        Some("show-launcher")
+                            if self
+                                .manifest
                                 .capabilities
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
                             approved.push(PluginEffect::ShowLauncher);
                         }
-                        effect if effect.starts_with("open-dialog:") => {
+                        Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
                             match node.dialog() {
                                 Some(PanelNode::Dialog {
@@ -456,6 +567,48 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 }
                             }
                         }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-set-query")
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsRead) =>
+                        {
+                            let Some(query) = effect.get("query").and_then(Value::as_str) else {
+                                self.last_error = Some("launcher query must be text".into());
+                                return;
+                            };
+                            if query.chars().count() > 512 {
+                                self.last_error =
+                                    Some("launcher query exceeds 512 characters".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::SetLauncherQuery(query.to_owned()));
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-activate-result")
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsLaunch) =>
+                        {
+                            let Some(index) = effect
+                                .get("index")
+                                .and_then(Value::as_u64)
+                                .and_then(|index| usize::try_from(index).ok())
+                            else {
+                                self.last_error = Some("launcher result index is invalid".into());
+                                return;
+                            };
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("launcher result ID is missing".into());
+                                return;
+                            };
+                            approved.push(PluginEffect::ActivateLauncherResult {
+                                index,
+                                id: id.to_owned(),
+                            });
+                        }
                         _ => {
                             self.last_error =
                                 Some(format!("plugin effect {effect:?} is not granted"));
@@ -473,17 +626,30 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        Column::new()
-            .fill_width()
-            .height(surface().height as f32)
-            .child(Spacer::flex())
-            .child(
-                Row::new()
+        if self.launcher_data.is_some() {
+            AnyView::new(
+                Container::new()
                     .fill_width()
-                    .child(Spacer::flex())
-                    .child(self.node.view())
-                    .child(Spacer::flex()),
+                    .height(680.0)
+                    .padding(Insets::all(20.0))
+                    .background(0xf12b_303c)
+                    .child(self.node.view()),
             )
+        } else {
+            AnyView::new(
+                Column::new()
+                    .fill_width()
+                    .height(surface().height as f32)
+                    .child(Spacer::flex())
+                    .child(
+                        Row::new()
+                            .fill_width()
+                            .child(Spacer::flex())
+                            .child(self.node.view())
+                            .child(Spacer::flex()),
+                    ),
+            )
+        }
     }
 
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
@@ -524,7 +690,11 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn title(&self) -> &str {
-        "Plugin Panel"
+        if self.launcher_data.is_some() {
+            "Plugin Launcher"
+        } else {
+            "Plugin Panel"
+        }
     }
 }
 

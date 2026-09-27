@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.launcher",
+  "name": "Nickel Launcher",
+  "entry": "main.js",
+  "surfaces": [
+    {"id": "main", "kind": "window", "width": 920, "height": 680}
+  ],
+  "capabilities": ["applications-read", "applications-launch"]
+}

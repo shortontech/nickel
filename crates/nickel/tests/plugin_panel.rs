@@ -1,4 +1,6 @@
-use nickel_shell::plugin_panel::{PluginEffect, PluginPanelApplication, surface};
+use nickel_shell::plugin_panel::{
+    LauncherPluginProjection, LauncherPluginResult, PluginEffect, PluginPanelApplication, surface,
+};
 use nickel_ui::{
     ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueSnapshot, UiEvent,
     UiHost,
@@ -167,4 +169,60 @@ fn javascript_text_fields_route_to_their_own_handlers() {
         Some(SemanticValueSnapshot::Text("second".into()))
     );
     assert!(host.application().last_error().is_none());
+}
+
+#[test]
+fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
+    let projection = LauncherPluginProjection {
+        query: String::new(),
+        results: vec![LauncherPluginResult {
+            index: 0,
+            id: "calculator".into(),
+            name: "Calculator".into(),
+        }],
+    };
+    let mut host = UiHost::new(
+        PluginPanelApplication::launcher_with_projection(&projection)
+            .expect("launcher script loads"),
+        920,
+        680,
+    );
+    let field = host
+        .query_unique(&SemanticSelector::Role(SemanticRole::TextField))
+        .expect("launcher search field")
+        .id;
+    host.request_focus(field.clone());
+    host.handle_event(UiEvent::TextInput("calc".into()));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::SetLauncherQuery("calc".into())]
+    );
+
+    let mut updated = projection.clone();
+    updated.query = "calc".into();
+    assert!(
+        host.application_mut()
+            .sync_launcher_projection(&updated)
+            .expect("host projection updates")
+    );
+    host.step(nickel_ui::HostBatch {
+        application_changed: true,
+        ..nickel_ui::HostBatch::default()
+    });
+    assert_eq!(host.inspect().keyboard_focus, Some(field));
+    let result = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Calculator".into(),
+        })
+        .expect("launcher result")
+        .id;
+    host.perform_semantic_action(result, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ActivateLauncherResult {
+            index: 0,
+            id: "calculator".into(),
+        }]
+    );
 }
