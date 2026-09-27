@@ -95,13 +95,13 @@ use windows::{
                 SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
                 SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE,
-                WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN,
-                WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-                WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, ShowWindowAsync,
+                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE,
+                WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
+                WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -1302,6 +1302,7 @@ static WINDOWS_INPUT_ADAPTER: std::sync::OnceLock<Mutex<WindowsInputAdapter<Hotk
     std::sync::OnceLock::new();
 static WINDOW_SWITCH_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static SHOW_DESKTOP_WINDOWS: Mutex<Option<Vec<ShowDesktopWindow>>> = Mutex::new(None);
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
@@ -1562,6 +1563,12 @@ struct NativeWindowFingerprint {
     process_id: u32,
     thread_id: u32,
     process_created: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ShowDesktopWindow {
+    fingerprint: NativeWindowFingerprint,
+    maximized: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2548,7 +2555,6 @@ fn is_host_owned_action(action: HotkeyAction) -> bool {
             | HotkeyAction::RestoreOrMinimizeActiveWindow
             | HotkeyAction::MoveWindowToPreviousOutput
             | HotkeyAction::MoveWindowToNextOutput
-            | HotkeyAction::ShowDesktop
             | HotkeyAction::ProjectDisplays
     )
 }
@@ -2563,6 +2569,7 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         Some(HotkeyAction::ShowControlCenter) => GlobalShortcut::ShowControlCenter,
         Some(HotkeyAction::ShowNotifications) => GlobalShortcut::ShowNotifications,
         Some(HotkeyAction::ShowWindowMenu) => GlobalShortcut::ShowWindowMenu,
+        Some(HotkeyAction::ShowDesktop) => GlobalShortcut::ShowDesktop,
         Some(HotkeyAction::SwitchNext) => GlobalShortcut::SwitchNext,
         Some(HotkeyAction::SwitchPrevious) => GlobalShortcut::SwitchPrevious,
         Some(HotkeyAction::SwitchGroupNext) => GlobalShortcut::SwitchGroupNext,
@@ -2593,7 +2600,6 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
             | HotkeyAction::RestoreOrMinimizeActiveWindow
             | HotkeyAction::MoveWindowToPreviousOutput
             | HotkeyAction::MoveWindowToNextOutput
-            | HotkeyAction::ShowDesktop
             | HotkeyAction::ProjectDisplays,
         ) => return,
         None => return,
@@ -4883,6 +4889,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         ShellCommand::SessionAction(crate::platform::SessionAction::Lock) => {
             return lock_workstation();
         }
+        ShellCommand::ToggleShowDesktop => return toggle_show_desktop(),
         ShellCommand::Show | ShellCommand::ShowFromController => {
             let foreground = unsafe { GetForegroundWindow() };
             PREVIOUS_FOREGROUND_WINDOW.store(foreground.0 as isize, Ordering::Relaxed);
@@ -5048,6 +5055,68 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             WindowAction::SnapLeading | WindowAction::SnapTrailing => false,
         }
     }
+}
+
+fn toggle_show_desktop() -> bool {
+    let Ok(mut state) = SHOW_DESKTOP_WINDOWS.lock() else {
+        return false;
+    };
+    if let Some(windows) = state.take() {
+        // EnumWindows visits windows from front to back. Restore in reverse order so the
+        // previously foreground window ends up in front again.
+        for window in windows.into_iter().rev() {
+            if native_window_fingerprint(window.fingerprint.window) != Some(window.fingerprint) {
+                continue;
+            }
+            let hwnd = HWND(window.fingerprint.window as *mut c_void);
+            if unsafe { IsIconic(hwnd).as_bool() } {
+                let command = if window.maximized {
+                    SW_MAXIMIZE
+                } else {
+                    SW_RESTORE
+                };
+                let _ = focus::request_show_state(hwnd, command);
+            }
+        }
+        return true;
+    }
+
+    let mut windows: Vec<ShowDesktopWindow> = Vec::new();
+    // SAFETY: The callback only reads each live HWND and stores process fingerprints.
+    if unsafe {
+        EnumWindows(
+            Some(collect_show_desktop_window),
+            LPARAM((&mut windows as *mut Vec<ShowDesktopWindow>) as isize),
+        )
+    }
+    .is_err()
+    {
+        return false;
+    }
+    for window in &windows {
+        if native_window_fingerprint(window.fingerprint.window) != Some(window.fingerprint) {
+            continue;
+        }
+        let hwnd = HWND(window.fingerprint.window as *mut c_void);
+        let _ = focus::request_show_state(hwnd, SW_MINIMIZE);
+    }
+    *state = Some(windows);
+    true
+}
+
+unsafe extern "system" fn collect_show_desktop_window(hwnd: HWND, state: LPARAM) -> BOOL {
+    if ordinary_window_metadata(hwnd).is_some()
+        && !unsafe { IsIconic(hwnd).as_bool() }
+        && let Some(fingerprint) = native_window_fingerprint(hwnd.0 as isize)
+    {
+        // SAFETY: state points to the live Vec passed to EnumWindows by toggle_show_desktop.
+        let windows = unsafe { &mut *(state.0 as *mut Vec<ShowDesktopWindow>) };
+        windows.push(ShowDesktopWindow {
+            fingerprint,
+            maximized: unsafe { IsZoomed(hwnd).as_bool() },
+        });
+    }
+    BOOL(1)
 }
 
 pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
@@ -5455,8 +5524,8 @@ impl WindowFeed {
 
     pub fn snapshot(&self, _: &Launcher) -> FeedState<Vec<OpenWindow>> {
         let mut windows = Vec::new();
-        // SAFETY: The callback only reads top-level window metadata and the LPARAM points to this
-        // live vector for the duration of the synchronous EnumWindows call.
+        // SAFETY: The callback inspects top-level windows, hides narrowly matched Codex helper
+        // terminals, and the LPARAM points to this live vector for the synchronous call.
         unsafe {
             let state = LPARAM((&mut windows as *mut Vec<OpenWindow>) as isize);
             if EnumWindows(Some(collect_window), state).is_err() {
@@ -5518,6 +5587,16 @@ fn ordinary_window_metadata(hwnd: HWND) -> Option<(u32, String, String)> {
 }
 
 unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
+    if unsafe { IsWindowVisible(hwnd).as_bool() }
+        && let Some(title) = window_title(hwnd)
+        && let Some(class) = window_class(hwnd)
+        && is_codex_helper_terminal(&title, &class)
+    {
+        // SAFETY: EnumWindows supplied this live top-level HWND. The asynchronous request avoids
+        // waiting for the Windows Terminal UI thread while hiding its helper window from Alt-Tab.
+        let _ = unsafe { ShowWindowAsync(hwnd, SW_HIDE) };
+        return BOOL(1);
+    }
     let Some((_process_id, title, class)) = ordinary_window_metadata(hwnd) else {
         return BOOL(1);
     };
@@ -5568,6 +5647,64 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
         },
     });
     BOOL(1)
+}
+
+fn is_codex_helper_terminal(title: &str, class: &str) -> bool {
+    if !class.eq_ignore_ascii_case("CASCADIA_HOSTING_WINDOW_CLASS") {
+        return false;
+    }
+    static RUNTIME_ROOT: LazyLock<Option<String>> = LazyLock::new(|| {
+        env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|path| {
+                path.join("OpenAI")
+                    .join("Codex")
+                    .join("runtimes")
+                    .join("cua_node")
+            })
+            .map(|path| {
+                format!(
+                    "{}\\",
+                    normalized_codex_window_path(&path.to_string_lossy())
+                )
+            })
+    });
+    static NPM_ROOT: LazyLock<Option<String>> = LazyLock::new(|| {
+        env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| {
+                path.join("npm")
+                    .join("node_modules")
+                    .join("@openai")
+                    .join("codex")
+            })
+            .map(|path| {
+                format!(
+                    "{}\\",
+                    normalized_codex_window_path(&path.to_string_lossy())
+                )
+            })
+    });
+    let title = normalized_codex_window_path(title);
+    if let Some(relative) = RUNTIME_ROOT
+        .as_ref()
+        .and_then(|root| title.strip_prefix(root))
+    {
+        let Some((version, executable)) = relative.split_once("\\bin\\") else {
+            return false;
+        };
+        return !version.is_empty()
+            && !version.contains('\\')
+            && matches!(executable, "node.exe" | "node_repl.exe");
+    }
+    NPM_ROOT
+        .as_ref()
+        .and_then(|root| title.strip_prefix(root))
+        .is_some_and(|relative| relative.ends_with("\\bin\\codex-code-mode-host.exe"))
+}
+
+fn normalized_codex_window_path(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
 }
 
 fn window_application_user_model_id(hwnd: HWND) -> Option<String> {

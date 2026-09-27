@@ -502,19 +502,42 @@ fn run_worker(
                     .find(|probe| probe.candidate == candidate)
                     .and_then(|probe| probe.version.clone())
                     .unwrap_or_else(|| "compatible version".into());
-                let fallback_reason = rejected_installed_reason(&selection, &candidate);
-                let provenance = codex_attribution(&version);
+                let mut fallback_reason = rejected_installed_reason(&selection, &candidate);
+                let mut provenance = codex_attribution(&version);
                 let isolated_home = std::env::var_os("NICKEL_CODEX_HOME").map(PathBuf::from);
-                let client = if matches!(scope, SnapshotScope::NewProjectChat) {
-                    CodexClient::spawn_without_remote_control(
-                        &candidate.path,
-                        &cwd,
-                        isolated_home.as_deref(),
-                    )
-                } else {
-                    match isolated_home.as_deref() {
-                        Some(home) => CodexClient::spawn_with_home(&candidate.path, &cwd, home),
-                        None => CodexClient::spawn(&candidate.path, &cwd),
+                let client = match CodexClient::connect_local_daemon(
+                    &candidate.path,
+                    &cwd,
+                    isolated_home.as_deref(),
+                    &version,
+                ) {
+                    Ok((client, daemon_version)) => {
+                        provenance = format!(
+                            "{} Local daemon.",
+                            codex_attribution(&format!("codex-cli {daemon_version}"))
+                        );
+                        Ok(client)
+                    }
+                    Err(daemon_error) => {
+                        let reason = format!("local daemon unavailable: {daemon_error}");
+                        fallback_reason = Some(match fallback_reason {
+                            Some(previous) => format!("{previous}; {reason}"),
+                            None => reason,
+                        });
+                        if matches!(scope, SnapshotScope::NewProjectChat) {
+                            CodexClient::spawn_without_remote_control(
+                                &candidate.path,
+                                &cwd,
+                                isolated_home.as_deref(),
+                            )
+                        } else {
+                            match isolated_home.as_deref() {
+                                Some(home) => {
+                                    CodexClient::spawn_with_home(&candidate.path, &cwd, home)
+                                }
+                                None => CodexClient::spawn(&candidate.path, &cwd),
+                            }
+                        }
                     }
                 };
                 match client {

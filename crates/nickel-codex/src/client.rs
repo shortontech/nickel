@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader, ErrorKind, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Stdio},
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     sync::{Arc, Mutex, mpsc},
@@ -18,6 +18,11 @@ use tungstenite::{
     stream::MaybeTlsStream,
 };
 use url::Url;
+
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use uds_windows::UnixStream;
 
 use crate::process::command;
 use crate::protocol::*;
@@ -682,9 +687,116 @@ impl CodexClient {
                 .map_err(|_| CodexError::Unavailable("remote bearer token is invalid".into()))?;
             request.headers_mut().insert(AUTHORIZATION, value);
         }
-        let (mut socket, _) = connect(request).map_err(|error| {
+        let (socket, _) = connect(request).map_err(|error| {
             CodexError::Unavailable(format!("remote app-server connection failed: {error}"))
         })?;
+        Self::from_websocket(socket, request_timeout, |stream| {
+            set_socket_timeout(stream, Duration::from_millis(50));
+        })
+    }
+
+    /// Starts or reuses the managed local daemon and connects over its local socket.
+    /// Dropping this client closes only its connection; the daemon owns its lifecycle.
+    pub fn connect_local_daemon(
+        executable: &Path,
+        cwd: &Path,
+        codex_home: Option<&Path>,
+        expected_version: &str,
+    ) -> Result<(Self, String), CodexError> {
+        let home = match codex_home {
+            Some(home) if home.is_absolute() => home.to_path_buf(),
+            Some(_) => {
+                return Err(CodexError::Unavailable(
+                    "isolated CODEX_HOME must be an absolute path".into(),
+                ));
+            }
+            None => std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+                .ok_or_else(|| CodexError::Unavailable("Codex home is unavailable".into()))?,
+        };
+        if !home.is_absolute() {
+            return Err(CodexError::Unavailable(
+                "CODEX_HOME must be an absolute path".into(),
+            ));
+        }
+        let mut start = command(executable);
+        start
+            .args(["app-server", "daemon", "start"])
+            .current_dir(cwd)
+            .env("CODEX_HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = start.spawn()?;
+        let began = std::time::Instant::now();
+        loop {
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            if began.elapsed() > Duration::from_secs(15) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CodexError::Timeout("daemon start timed out".into()));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Err(CodexError::Unavailable(format!(
+                "daemon start failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(4096)
+                    .collect::<String>()
+            )));
+        }
+        let info: Value = serde_json::from_slice(&output.stdout)?;
+        let running_version = info["appServerVersion"]
+            .as_str()
+            .ok_or_else(|| CodexError::Protocol("daemon omitted appServerVersion".into()))?;
+        let expected_version = expected_version
+            .split_whitespace()
+            .last()
+            .unwrap_or(expected_version);
+        if running_version != expected_version
+            && running_version.rsplit_once('.').map(|(minor, _)| minor)
+                != expected_version.rsplit_once('.').map(|(minor, _)| minor)
+        {
+            return Err(CodexError::Incompatible(format!(
+                "running daemon {running_version} differs from selected Codex {expected_version}"
+            )));
+        }
+        let socket_path = info["socketPath"]
+            .as_str()
+            .map(PathBuf::from)
+            .ok_or_else(|| CodexError::Protocol("daemon omitted socketPath".into()))?;
+        let expected_socket = home
+            .join("app-server-control")
+            .join("app-server-control.sock");
+        if socket_path != expected_socket {
+            return Err(CodexError::Unavailable(format!(
+                "daemon reported unexpected socket path: {}",
+                socket_path.display()
+            )));
+        }
+        let stream = UnixStream::connect(&socket_path)?;
+        stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+        let (socket, _) = tungstenite::client("ws://localhost/rpc", stream).map_err(|error| {
+            CodexError::Unavailable(format!("local daemon connection failed: {error}"))
+        })?;
+        let client = Self::from_websocket(socket, Duration::from_secs(15), |stream| {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+        })?;
+        Ok((client, running_version.to_owned()))
+    }
+
+    fn from_websocket<S: Read + Write + Send + 'static>(
+        mut socket: tungstenite::WebSocket<S>,
+        request_timeout: Duration,
+        set_timeout: impl FnOnce(&mut S),
+    ) -> Result<Self, CodexError> {
         socket.set_config(|config| {
             config.max_message_size = Some(MAX_INBOUND_FRAME_BYTES);
             config.max_frame_size = Some(MAX_INBOUND_FRAME_BYTES);
@@ -707,7 +819,7 @@ impl CodexClient {
             stderr: Mutex::new(Vec::new()),
         });
         let client = Self { inner };
-        client.start_websocket(socket, outbound, outbound_closed);
+        client.start_websocket(socket, outbound, outbound_closed, set_timeout);
         client.initialize()?;
         Ok(client)
     }
@@ -809,13 +921,14 @@ impl CodexClient {
         });
     }
 
-    fn start_websocket(
+    fn start_websocket<S: Read + Write + Send + 'static>(
         &self,
-        mut socket: tungstenite::WebSocket<MaybeTlsStream<std::net::TcpStream>>,
+        mut socket: tungstenite::WebSocket<S>,
         outbound: mpsc::Receiver<QueuedRemoteWrite>,
         closed: Arc<AtomicBool>,
+        set_timeout: impl FnOnce(&mut S),
     ) {
-        set_socket_timeout(socket.get_mut(), Duration::from_millis(50));
+        set_timeout(socket.get_mut());
         let inner = Arc::downgrade(&self.inner);
         thread::spawn(move || {
             loop {
@@ -2852,6 +2965,29 @@ mod tests {
 
     use proptest::prelude::*;
     use tungstenite::{Message, accept_hdr};
+
+    #[test]
+    #[ignore = "requires an installed Codex CLI and starts its managed daemon"]
+    fn managed_local_daemon_completes_initialize() {
+        let selection = crate::Selector::platform_default().select(crate::BackendChoice::Installed);
+        let candidate = selection.selected.expect("installed Codex CLI");
+        let version = selection
+            .probes
+            .iter()
+            .find(|probe| probe.candidate == candidate)
+            .and_then(|probe| probe.version.as_deref())
+            .expect("selected version");
+        let cwd = std::env::current_dir().unwrap();
+        let (client, running_version) =
+            CodexClient::connect_local_daemon(&candidate.path, &cwd, None, version).unwrap();
+        let (second, _) =
+            CodexClient::connect_local_daemon(&candidate.path, &cwd, None, version).unwrap();
+        assert_eq!(client.state(), ConnectionState::Ready);
+        assert!(!running_version.is_empty());
+        client.shutdown();
+        assert!(second.account().is_ok());
+        second.shutdown();
+    }
 
     #[test]
     fn turn_input_associates_text_and_images_exactly_once() {
