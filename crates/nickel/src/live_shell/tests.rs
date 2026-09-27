@@ -38,6 +38,37 @@ fn safe_mode_suppresses_installed_autostart_without_discarding_saved_choice() {
     assert!(!super::should_auto_start_installed_plugin(false, false));
 }
 
+#[test]
+fn jsx_taskbar_projection_does_not_read_native_task_groups_or_icons() {
+    let mut shell = LiveShell::new().unwrap();
+    let (clock, _) = super::panel_clock_text();
+    let before = shell.taskbar_plugin_projection(&clock);
+    shell.sync_panel_host();
+    let from_native = super::taskbar_plugin_data(
+        super::TaskbarProjectionInput::from(shell.panel_host.application()),
+        &clock,
+    );
+    assert_eq!(before.0, from_native.0);
+    assert_eq!(
+        before.1.keys().collect::<Vec<_>>(),
+        from_native.1.keys().collect::<Vec<_>>()
+    );
+    let native = shell.panel_host.application_mut();
+    native.groups = Arc::new(Vec::new());
+    native.task_icons.clear();
+    native.tray.clear();
+    let after = shell.taskbar_plugin_projection(&clock);
+    assert_eq!(before.0, after.0);
+    assert_eq!(
+        before.1.keys().collect::<Vec<_>>(),
+        after.1.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        before.1.values().map(|(id, _)| id).collect::<Vec<_>>(),
+        after.1.values().map(|(id, _)| id).collect::<Vec<_>>()
+    );
+}
+
 include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
 

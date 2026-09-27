@@ -934,24 +934,50 @@ fn shortcut_capability_status(
     Some(format!("Global shortcuts unavailable: {reason}."))
 }
 
+struct TaskbarProjectionInput<'a> {
+    groups: &'a [crate::launcher::TaskbarApplication],
+    keyboard_enabled: bool,
+    codex_available: bool,
+    panel_icon: &'a Arc<image::RgbaImage>,
+    codex_icon: &'a Arc<image::RgbaImage>,
+    task_icons: &'a [Option<(u16, Arc<image::RgbaImage>)>],
+    tray: &'a [crate::model::TrayItem],
+    tray_icons: &'a [Arc<image::RgbaImage>],
+}
+
+impl<'a> From<&'a TaskbarUi> for TaskbarProjectionInput<'a> {
+    fn from(panel: &'a TaskbarUi) -> Self {
+        Self {
+            groups: panel.groups.as_ref(),
+            keyboard_enabled: panel.keyboard_enabled,
+            codex_available: panel.codex_available,
+            panel_icon: &panel.panel_icon,
+            codex_icon: &panel.codex_icon,
+            task_icons: &panel.task_icons,
+            tray: &panel.tray,
+            tray_icons: &panel.tray_icons,
+        }
+    }
+}
+
 fn taskbar_plugin_data(
-    panel: &TaskbarUi,
+    input: TaskbarProjectionInput<'_>,
     clock: &str,
 ) -> (
     crate::plugin_panel::TaskbarPluginProjection,
     crate::plugin_panel::PluginImages,
 ) {
     let mut projection =
-        crate::plugin_panel::TaskbarPluginProjection::from_groups(panel.groups.as_ref(), clock);
-    projection.keyboard_enabled = panel.keyboard_enabled;
-    projection.codex_available = panel.codex_available;
+        crate::plugin_panel::TaskbarPluginProjection::from_groups(input.groups, clock);
+    projection.keyboard_enabled = input.keyboard_enabled;
+    projection.codex_available = input.codex_available;
     let mut images = crate::plugin_panel::PluginImages::new();
-    images.insert("logo".into(), (2, Arc::clone(&panel.panel_icon)));
-    if panel.codex_available {
-        images.insert("codex".into(), (0x5000, Arc::clone(&panel.codex_icon)));
+    images.insert("logo".into(), (2, Arc::clone(input.panel_icon)));
+    if input.codex_available {
+        images.insert("codex".into(), (0x5000, Arc::clone(input.codex_icon)));
     }
     for item in &mut projection.items {
-        if let Some((image_id, image)) = panel.task_icons.get(item.index).and_then(Option::as_ref) {
+        if let Some((image_id, image)) = input.task_icons.get(item.index).and_then(Option::as_ref) {
             item.icon = true;
             images.insert(
                 format!("task:{}", item.index),
@@ -960,11 +986,11 @@ fn taskbar_plugin_data(
         }
     }
     let mut seen_tray = std::collections::HashSet::new();
-    for (index, item) in panel.tray.iter().rev().take(4).rev().enumerate() {
+    for (index, item) in input.tray.iter().rev().take(4).rev().enumerate() {
         if item.id.is_empty() || item.id.len() > 256 || !seen_tray.insert(item.id.clone()) {
             continue;
         }
-        let icon = panel.tray_icons.get(index);
+        let icon = input.tray_icons.get(index);
         if let Some(icon) = icon {
             images.insert(
                 format!("tray:{}", item.id),
@@ -1746,8 +1772,10 @@ impl LiveShell {
         ) {
             let id = &crate::plugin_panel::taskbar_manifest().id;
             plugin_registry.set_enabled(id, true)?;
-            let (projection, images) =
-                taskbar_plugin_data(panel_host.application(), &panel_host.application().clock);
+            let (projection, images) = taskbar_plugin_data(
+                TaskbarProjectionInput::from(panel_host.application()),
+                &panel_host.application().clock,
+            );
             match crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection)
             {
                 Ok(mut application) => {
@@ -4129,13 +4157,10 @@ impl LiveShell {
                 self.plugin_run_host = Some(nickel_ui::UiHost::new(application, 620, 180));
             })
         } else if id == crate::plugin_panel::taskbar_manifest().id {
-            self.sync_panel_host();
             self.plugin_taskbar_hosts.clear();
             self.plugin_taskbar_memory.clear();
-            let (projection, images) = taskbar_plugin_data(
-                self.panel_host.application(),
-                &self.panel_host.application().clock,
-            );
+            let (clock, _) = panel_clock_text();
+            let (projection, images) = self.taskbar_plugin_projection(&clock);
             crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection).map(
                 |mut application| {
                     application.sync_images(images);
@@ -6361,10 +6386,8 @@ impl LiveShell {
                 .plugin_taskbar_hosts
                 .remove(&self.panel_output)
                 .or_else(|| {
-                    self.sync_panel_host();
                     let (clock, _) = panel_clock_text();
-                    let (projection, images) =
-                        taskbar_plugin_data(self.panel_host.application(), &clock);
+                    let (projection, images) = self.taskbar_plugin_projection(&clock);
                     match crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(
                         &projection,
                     ) {
@@ -10222,9 +10245,8 @@ impl LiveShell {
         events: Vec<HostEvent>,
         width: u32,
     ) -> Option<nickel_ui::HostEventOutcome> {
-        self.sync_panel_host();
         let (clock, _) = panel_clock_text();
-        let (mut projection, images) = taskbar_plugin_data(self.panel_host.application(), &clock);
+        let (mut projection, images) = self.taskbar_plugin_projection(&clock);
         compose_taskbar_badges(&mut projection, &self.plugin_taskbar_badge_hosts);
         let host = self.plugin_taskbar_host.as_mut()?;
         let image_changed = host.application_mut().sync_images(images);
@@ -10339,11 +10361,12 @@ impl LiveShell {
         });
     }
 
-    fn sync_panel_host(&mut self) -> bool {
-        let groups = self.panel_groups();
-        let tasks_changed = !Arc::ptr_eq(&groups, &self.panel_host.application().groups);
-        let pet_frame = self.panel_host.application().pet_frame;
-        let task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>> = groups
+    fn resolve_task_icons(
+        &mut self,
+        groups: &[crate::launcher::TaskbarApplication],
+        pet_frame: u8,
+    ) -> Vec<Option<(u16, Arc<image::RgbaImage>)>> {
+        groups
             .iter()
             .take(12)
             .map(|group| {
@@ -10383,7 +10406,39 @@ impl LiveShell {
                         })
                     })
             })
-            .collect();
+            .collect()
+    }
+
+    fn taskbar_plugin_projection(
+        &mut self,
+        clock: &str,
+    ) -> (
+        crate::plugin_panel::TaskbarPluginProjection,
+        crate::plugin_panel::PluginImages,
+    ) {
+        let groups = self.panel_groups();
+        let pet_frame = self.panel_host.application().pet_frame;
+        let task_icons = self.resolve_task_icons(groups.as_ref(), pet_frame);
+        taskbar_plugin_data(
+            TaskbarProjectionInput {
+                groups: groups.as_ref(),
+                keyboard_enabled: self.keyboard_enabled,
+                codex_available: self.launcher.codex_available(),
+                panel_icon: &self.panel_icon,
+                codex_icon: &self.codex_icon,
+                task_icons: &task_icons,
+                tray: &self.tray,
+                tray_icons: &self.tray_icons,
+            },
+            clock,
+        )
+    }
+
+    fn sync_panel_host(&mut self) -> bool {
+        let groups = self.panel_groups();
+        let tasks_changed = !Arc::ptr_eq(&groups, &self.panel_host.application().groups);
+        let pet_frame = self.panel_host.application().pet_frame;
+        let task_icons = self.resolve_task_icons(groups.as_ref(), pet_frame);
         let visible_panel_hover = self.visible_panel_hover();
         let application = self.panel_host.application_mut();
         let keyboard_changed = application.keyboard_enabled != self.keyboard_enabled
