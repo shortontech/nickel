@@ -253,20 +253,28 @@ impl LiveShell {
                     })
                 }
             }
-            SurfaceRole::WindowPreview => self
-                .preview_frame
-                .as_ref()
-                .ok_or_else(|| "window preview is unavailable".to_owned())
-                .and_then(|frame| {
-                    Ok(observe_only((
-                        frame.change_token().semantic_generation,
-                        frame
-                            .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
-                            .map_err(|_| {
-                                "shell semantics are protected or exceed budget".to_owned()
-                            })?,
-                    )))
-                }),
+            SurfaceRole::WindowPreview => {
+                if self.preview_plugin_active() {
+                    Ok(observe_only(plugin_projection(
+                        self.plugin_preview_host.as_ref().unwrap(),
+                        |_, _| false,
+                    )?))
+                } else {
+                    self.preview_frame
+                        .as_ref()
+                        .ok_or_else(|| "window preview is unavailable".to_owned())
+                        .and_then(|frame| {
+                            Ok(observe_only((
+                                frame.change_token().semantic_generation,
+                                frame
+                                    .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
+                                    .map_err(|_| {
+                                        "shell semantics are protected or exceed budget".to_owned()
+                                    })?,
+                            )))
+                        })
+                }
+            }
             SurfaceRole::WindowContextMenu => {
                 if let Some(host) = self.window_menu_plugin_host.as_ref() {
                     Ok(observe_only(plugin_projection(host, |_, _| false)?))

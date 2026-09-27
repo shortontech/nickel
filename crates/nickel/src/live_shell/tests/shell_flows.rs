@@ -56,6 +56,45 @@
     }
 
     #[test]
+    fn window_preview_plugin_reports_memory_and_can_be_disabled_or_enabled() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(Vec::new());
+        shell.windows = vec![OpenWindow {
+            id: WindowId(71),
+            application_id: None,
+            active: true,
+            title: "Document".into(),
+            state: Default::default(),
+        }];
+        let id = &crate::plugin_panel::window_preview_manifest().id;
+        shell.open_window_preview(0);
+        assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
+        assert!(shell.preview_plugin_active());
+        let status = shell
+            .plugin_status_snapshot()
+            .plugins
+            .into_iter()
+            .find(|plugin| &plugin.id == id)
+            .unwrap();
+        assert!(status.desired_enabled);
+        assert!(status.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0));
+
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(!shell.preview_plugin_active());
+        assert_eq!(
+            shell.plugin_registry().get(id).unwrap().memory,
+            nickel_core::plugins::PluginMemory::default()
+        );
+        assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
+        assert!(shell.preview_frame.is_some());
+
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.preview_plugin_active());
+        assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
+        assert!(shell.preview_frame.is_none());
+    }
+
+    #[test]
     fn volume_osd_plugin_can_retire_and_restore_native_fallback() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::volume_osd_manifest().id;
@@ -1641,6 +1680,10 @@
         let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
         shell.open_window_preview(0);
         let _ = shell.scene(SurfaceRole::WindowPreview, 640, 240);
+        assert!(shell.preview_plugin_active());
+        assert!(shell
+            .preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(71)))
+            .is_some());
         let (preview_width, preview_height) = super::preview_dimensions(2);
         assert_eq!(
             shell.preview_geometry(),
@@ -1661,29 +1704,17 @@
 
         shell.window_menu = None;
         let card = shell
-            .preview_frame
-            .as_ref()
-            .and_then(|frame| frame.semantic_bounds(crate::window_preview::PreviewAction::Activate(
-                WindowId(71),
-            )))
+            .preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(71)))
             .expect("first preview card");
         let touch = Point {
             x: card.origin.x + card.size.width / 2.0,
             y: card.origin.y + card.size.height / 2.0,
         };
-        let frame = shell.preview_frame.as_mut().unwrap();
-        frame.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::TouchLongPress(touch))],
-            ..HostBatch::default()
-        });
-        let actions = frame.take_actions();
-        assert_eq!(
-            actions,
-            vec![crate::window_preview::PreviewAction::OpenMenu(WindowId(71))]
+        shell.preview_plugin_event(
+            HostEvent::Ui(UiEvent::TouchLongPress(touch)),
+            (preview_width, preview_height),
+            None,
         );
-        for action in actions {
-            shell.apply_preview_action(action);
-        }
         assert_eq!(shell.window_menu, Some(WindowId(71)));
         assert_eq!(shell.window_menu_anchor_x, Some(first));
     }

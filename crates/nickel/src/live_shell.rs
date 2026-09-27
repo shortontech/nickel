@@ -714,6 +714,7 @@ pub struct LiveShell {
     preview_images: HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
     preview_refresh_deadline: Option<Instant>,
     preview_frame: Option<WindowPreviewFrame>,
+    plugin_preview_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     window_menu: Option<crate::model::WindowId>,
     window_menu_snapshot: Option<OpenWindow>,
     window_menu_generation: u64,
@@ -1283,6 +1284,7 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::notification_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::volume_osd_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::control_center_manifest().clone())?;
+        plugin_registry.register(crate::plugin_panel::window_preview_manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
         #[cfg(not(test))]
@@ -1579,6 +1581,7 @@ impl LiveShell {
             preview_images: HashMap::new(),
             preview_refresh_deadline: None,
             preview_frame: None,
+            plugin_preview_host: None,
             window_menu: None,
             window_menu_snapshot: None,
             window_menu_generation: 0,
@@ -1649,6 +1652,23 @@ impl LiveShell {
             match crate::plugin_panel::PluginPanelApplication::control_center_with_data(&data) {
                 Ok(application) => {
                     shell.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+                    shell.plugin_registry.mark_running(id)?;
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    shell.plugin_registry.mark_failed(id, error)?;
+                }
+            }
+        }
+        if plugin_activation
+            .desired_enabled(&crate::plugin_panel::window_preview_manifest().id, true)
+        {
+            let id = &crate::plugin_panel::window_preview_manifest().id;
+            shell.plugin_registry.set_enabled(id, true)?;
+            let data = serde_json::json!({"windows": []});
+            match crate::plugin_panel::PluginPanelApplication::window_preview_with_data(&data) {
+                Ok(application) => {
+                    shell.plugin_preview_host = Some(nickel_ui::UiHost::new(application, 300, 214));
                     shell.plugin_registry.mark_running(id)?;
                 }
                 Err(error) => {
@@ -2309,10 +2329,13 @@ impl LiveShell {
                 || self.volume_osd_host.remote_access_protected(),
                 |host| host.remote_access_protected(),
             ),
-            SurfaceRole::WindowPreview => self
-                .preview_frame
-                .as_ref()
-                .is_none_or(WindowPreviewFrame::remote_access_protected),
+            SurfaceRole::WindowPreview => {
+                self.preview_plugin_active()
+                    || self
+                        .preview_frame
+                        .as_ref()
+                        .is_none_or(WindowPreviewFrame::remote_access_protected)
+            }
             SurfaceRole::WindowContextMenu => {
                 if let Some(host) = self.window_menu_plugin_host.as_ref() {
                     host.remote_access_protected()
@@ -3082,6 +3105,8 @@ impl LiveShell {
                 self.plugin_volume_osd_host = None;
             } else if id == crate::plugin_panel::control_center_manifest().id {
                 self.plugin_control_host = None;
+            } else if id == crate::plugin_panel::window_preview_manifest().id {
+                self.plugin_preview_host = None;
             }
             self.maybe_publish_plugin_status();
             return Ok(true);
@@ -3154,6 +3179,13 @@ impl LiveShell {
             crate::plugin_panel::PluginPanelApplication::control_center_with_data(&data).map(
                 |application| {
                     self.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+                },
+            )
+        } else if id == crate::plugin_panel::window_preview_manifest().id {
+            let data = serde_json::json!({"windows": []});
+            crate::plugin_panel::PluginPanelApplication::window_preview_with_data(&data).map(
+                |application| {
+                    self.plugin_preview_host = Some(nickel_ui::UiHost::new(application, 300, 214));
                 },
             )
         } else {
@@ -3234,9 +3266,15 @@ impl LiveShell {
         push("screenshot", self.screenshot.next_deadline());
         push(
             "window-preview-host",
-            self.preview_frame
+            self.plugin_preview_host
                 .as_ref()
-                .and_then(WindowPreviewFrame::next_deadline),
+                .filter(|_| self.preview_plugin_active())
+                .and_then(|host| host.next_deadline())
+                .or_else(|| {
+                    self.preview_frame
+                        .as_ref()
+                        .and_then(WindowPreviewFrame::next_deadline)
+                }),
         );
         push(
             "window-preview-open",
@@ -3284,9 +3322,10 @@ impl LiveShell {
                 .plugin_volume_osd_host
                 .as_ref()
                 .map(|host| host_token(host.inspect())),
-            SurfaceRole::WindowPreview => {
-                self.preview_frame.as_ref().map(|host| host.change_token())
-            }
+            SurfaceRole::WindowPreview => self
+                .preview_plugin_active()
+                .then(|| host_token(self.plugin_preview_host.as_ref().unwrap().inspect()))
+                .or_else(|| self.preview_frame.as_ref().map(|host| host.change_token())),
             SurfaceRole::WindowContextMenu => self
                 .window_menu_plugin_host
                 .as_ref()
@@ -4232,6 +4271,12 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::Preview(action) => {
+                    if self.preview_plugin_action_allowed(action) {
+                        self.apply_preview_action(action);
+                        changed = true;
+                    }
+                }
             }
         }
         changed
@@ -4403,6 +4448,11 @@ impl LiveShell {
                 outcome.changed | self.apply_notification_effects()
             }
             SurfaceRole::WindowPreview => {
+                if self.preview_plugin_active() {
+                    return self
+                        .preview_plugin_event(HostEvent::Ui(event), (width, height), None)
+                        .changed;
+                }
                 let Some(frame) = self.preview_frame.as_mut() else {
                     return false;
                 };
@@ -4906,10 +4956,13 @@ impl LiveShell {
                     PreviewTargetAction::Close => PreviewAction::Close(window),
                     PreviewTargetAction::OpenMenu => PreviewAction::OpenMenu(window),
                 };
-                let bounds = self
-                    .preview_frame
-                    .as_ref()?
-                    .semantic_bounds(preview_action)?;
+                let bounds = if self.preview_plugin_active() {
+                    self.preview_plugin_bounds(preview_action)?
+                } else {
+                    self.preview_frame
+                        .as_ref()?
+                        .semantic_bounds(preview_action)?
+                };
                 let point = Point {
                     x: bounds.origin.x + bounds.size.width / 2.0,
                     y: bounds.origin.y + bounds.size.height / 2.0,
@@ -5246,6 +5299,29 @@ impl LiveShell {
         if self.window_menu.is_some() || self.application_menu_target.is_some() {
             return self.window_menu_host_controller(action);
         }
+        if self.preview_plugin_active() {
+            if action == ControllerAction::Cancel {
+                self.close_window_preview();
+                return true;
+            }
+            let Some(size) = self.preview_plugin_size() else {
+                return false;
+            };
+            if self
+                .plugin_preview_host
+                .as_ref()
+                .is_some_and(|host| host.inspect().controller_target.is_none())
+            {
+                self.preview_plugin_event(
+                    HostEvent::Controller(ControllerAction::Right),
+                    size,
+                    None,
+                );
+            }
+            return self
+                .preview_plugin_event(HostEvent::Controller(action), size, None)
+                .changed;
+        }
         let Some(frame) = self.preview_frame.as_mut() else {
             return false;
         };
@@ -5285,6 +5361,43 @@ impl LiveShell {
     }
 
     pub fn preview_pointer_moved(&mut self, x: f32, y: f32) -> bool {
+        if self.preview_plugin_active() {
+            let Some(size) = self.preview_plugin_size() else {
+                return false;
+            };
+            let event_changed = self
+                .preview_plugin_event(
+                    HostEvent::Ui(UiEvent::PointerMoved(Point { x, y })),
+                    size,
+                    None,
+                )
+                .changed;
+            let group = self.preview_group.and_then(|index| {
+                self.panel_groups()
+                    .get(index)
+                    .map(|task| task.window_group())
+            });
+            let hovered = group.and_then(|group| {
+                group.windows.iter().take(12).find_map(|window| {
+                    let bounds = self.preview_plugin_bounds(PreviewAction::Activate(window.id))?;
+                    (x >= bounds.origin.x
+                        && y >= bounds.origin.y
+                        && x < bounds.origin.x + bounds.size.width
+                        && y < bounds.origin.y + bounds.size.height)
+                        .then_some(window.id)
+                })
+            });
+            if hovered == self.preview_hovered {
+                return event_changed;
+            }
+            self.preview_hovered = hovered;
+            let command = hovered.map_or(
+                ShellCommand::ClearWindowHighlight,
+                ShellCommand::HighlightWindow,
+            );
+            let _ = self.send_session_command("highlight-preview-window", command);
+            return true;
+        }
         let hovered = self
             .preview_frame
             .as_mut()
@@ -5302,6 +5415,24 @@ impl LiveShell {
     }
 
     pub fn preview_click(&mut self, x: f32, y: f32, right_click: bool) -> bool {
+        if self.preview_plugin_active() {
+            let Some(size) = self.preview_plugin_size() else {
+                return false;
+            };
+            let point = Point { x, y };
+            if right_click {
+                return self
+                    .preview_plugin_event(HostEvent::Ui(UiEvent::PointerContext(point)), size, None)
+                    .changed;
+            }
+            let pressed = self
+                .preview_plugin_event(HostEvent::Ui(UiEvent::PointerPressed(point)), size, None)
+                .changed;
+            let released = self
+                .preview_plugin_event(HostEvent::Ui(UiEvent::PointerReleased(point)), size, None)
+                .changed;
+            return pressed || released;
+        }
         let Some(action) = self
             .preview_frame
             .as_mut()
@@ -5317,6 +5448,14 @@ impl LiveShell {
         &mut self,
         input: nickel_input::InputEvent,
     ) -> nickel_ui::HostEventOutcome {
+        if self.preview_plugin_active() {
+            let Some(host) = self.plugin_preview_host.as_ref() else {
+                return Default::default();
+            };
+            let (ingress, authority) =
+                internal_normalized_ingress(input, None, "window-preview", host.inspect(), None);
+            return self.preview_host_event_authorized(ingress, Some(authority));
+        }
         let Some(frame) = self.preview_frame.as_ref() else {
             return nickel_ui::HostEventOutcome::default();
         };
@@ -5330,6 +5469,12 @@ impl LiveShell {
         ingress: HostEvent,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
+        if self.preview_plugin_active() {
+            let Some(size) = self.preview_plugin_size() else {
+                return Default::default();
+            };
+            return self.preview_plugin_event(ingress, size, authority);
+        }
         let Some(frame) = self.preview_frame.as_mut() else {
             return nickel_ui::HostEventOutcome::default();
         };
@@ -5362,10 +5507,13 @@ impl LiveShell {
                         let group = groups.get(index)?;
                         let (width, _) = preview_dimensions(group.windows.len());
                         let preview_origin = self.preview_origin_x(index, width);
-                        let card = self
-                            .preview_frame
-                            .as_ref()?
-                            .semantic_bounds(PreviewAction::Activate(window))?;
+                        let card = if self.preview_plugin_active() {
+                            self.preview_plugin_bounds(PreviewAction::Activate(window))?
+                        } else {
+                            self.preview_frame
+                                .as_ref()?
+                                .semantic_bounds(PreviewAction::Activate(window))?
+                        };
                         Some(preview_origin + card.origin.x.round() as i32)
                     })
                     .unwrap_or(self.panel_origin_x);
@@ -5404,6 +5552,60 @@ impl LiveShell {
     pub fn preview_key(&mut self, key: Option<KeyCode>) -> bool {
         if self.window_menu.is_some() || self.application_menu_target.is_some() {
             return self.window_menu_host_key(key);
+        }
+        if self.preview_plugin_active() {
+            let Some(size) = self.preview_plugin_size() else {
+                return false;
+            };
+            match key {
+                Some(KeyCode::Escape) => {
+                    self.close_window_preview();
+                    #[cfg(target_os = "linux")]
+                    let _ = self.send_session_command(
+                        "restore-application-focus",
+                        ShellCommand::RestoreApplicationFocus,
+                    );
+                    return true;
+                }
+                Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
+                    return self
+                        .preview_plugin_event(
+                            HostEvent::Controller(ControllerAction::Left),
+                            size,
+                            None,
+                        )
+                        .changed;
+                }
+                Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
+                    return self
+                        .preview_plugin_event(
+                            HostEvent::Controller(ControllerAction::Right),
+                            size,
+                            None,
+                        )
+                        .changed;
+                }
+                Some(KeyCode::Delete) => {
+                    let Some(window) = self.preview_plugin_selected_window() else {
+                        return false;
+                    };
+                    if self.preview_plugin_action_allowed(PreviewAction::Close(window)) {
+                        self.apply_preview_action(PreviewAction::Close(window));
+                        return true;
+                    }
+                    return false;
+                }
+                Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
+                    return self
+                        .preview_plugin_event(
+                            HostEvent::Controller(ControllerAction::Confirm),
+                            size,
+                            None,
+                        )
+                        .changed;
+                }
+                _ => return false,
+            }
         }
         let Some(frame) = self.preview_frame.as_mut() else {
             return false;
@@ -6125,6 +6327,26 @@ impl LiveShell {
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
         self.preview_frame = None;
+        if let Some(host) = self.plugin_preview_host.as_mut() {
+            let data_changed = host
+                .application_mut()
+                .sync_window_preview_data(&serde_json::json!({"windows": []}))
+                .unwrap_or(false);
+            let images_changed = host.application_mut().sync_images(Default::default());
+            let outcome = host.step(HostBatch {
+                application_changed: data_changed || images_changed,
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            let _ = self.plugin_registry.record_memory(
+                &crate::plugin_panel::window_preview_manifest().id,
+                nickel_core::plugins::PluginMemory {
+                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        self.maybe_publish_plugin_status();
         self.window_menu = None;
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
@@ -8029,6 +8251,36 @@ impl LiveShell {
             self.preview_frame = None;
             return Vec::new();
         };
+        if self.preview_plugin_active() {
+            let (data, images) = self.preview_plugin_projection(&group);
+            let host = self.plugin_preview_host.as_mut().unwrap();
+            let data_changed = host
+                .application_mut()
+                .sync_window_preview_data(&data)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "window preview plugin projection failed");
+                    false
+                });
+            let images_changed = host.application_mut().sync_images(images);
+            let (width, height) = preview_dimensions(group.windows.len());
+            let outcome = host.step(HostBatch {
+                application_changed: data_changed || images_changed,
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            self.preview_frame = None;
+            let commands = host.commands().to_vec();
+            let _ = self.plugin_registry.record_memory(
+                &crate::plugin_panel::window_preview_manifest().id,
+                nickel_core::plugins::PluginMemory {
+                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    ..Default::default()
+                },
+            );
+            self.maybe_publish_plugin_status();
+            return commands;
+        }
         let theme = self.semantic_theme();
         if let Some(frame) = self.preview_frame.as_mut() {
             frame.sync(&group, &self.preview_images, self.preview_hovered, theme);
@@ -8044,6 +8296,180 @@ impl LiveShell {
             let _change_token = frame.change_token();
             frame.commands().to_vec()
         })
+    }
+
+    fn preview_plugin_active(&self) -> bool {
+        self.plugin_preview_host.is_some()
+            && self.preview_group.is_some()
+            && self.task_switcher_group.is_none()
+    }
+
+    fn preview_plugin_action_allowed(&mut self, action: PreviewAction) -> bool {
+        if !self.preview_plugin_active() {
+            return false;
+        }
+        let (PreviewAction::Activate(id) | PreviewAction::Close(id) | PreviewAction::OpenMenu(id)) =
+            action
+        else {
+            return action == PreviewAction::Dismiss;
+        };
+        let Some(group) = self.preview_group.and_then(|index| {
+            self.panel_groups()
+                .get(index)
+                .map(|task| task.window_group())
+        }) else {
+            return false;
+        };
+        let Some(projected) = group.windows.iter().take(12).find(|window| window.id == id) else {
+            return false;
+        };
+        let Some(current) = self.windows.iter().find(|window| window.id == id) else {
+            return false;
+        };
+        if current.application_id != projected.application_id {
+            return false;
+        }
+        match action {
+            PreviewAction::Activate(_) => current.state.capabilities.activate,
+            PreviewAction::Close(_) => current.state.capabilities.close,
+            PreviewAction::OpenMenu(_) => true,
+            PreviewAction::Dismiss => true,
+        }
+    }
+
+    fn preview_plugin_bounds(&self, action: PreviewAction) -> Option<Rect> {
+        let id = match action {
+            PreviewAction::Activate(window) | PreviewAction::OpenMenu(window) => {
+                format!("preview-window-{}", window.0)
+            }
+            PreviewAction::Close(window) => format!("preview-close-{}", window.0),
+            PreviewAction::Dismiss => return None,
+        };
+        let host = self.plugin_preview_host.as_ref()?;
+        let message = host.application().button_message(&id)?;
+        host.semantic_targets_for_message(&message)
+            .into_iter()
+            .next()
+            .map(|target| target.bounds)
+    }
+
+    fn preview_plugin_size(&mut self) -> Option<(u32, u32)> {
+        let group = self.preview_group.and_then(|index| {
+            self.panel_groups()
+                .get(index)
+                .map(|task| task.window_group())
+        })?;
+        Some(preview_dimensions(group.windows.len()))
+    }
+
+    fn preview_plugin_selected_window(&mut self) -> Option<crate::model::WindowId> {
+        let selected = self
+            .plugin_preview_host
+            .as_ref()?
+            .inspect()
+            .controller_target?;
+        let group = self.preview_group.and_then(|index| {
+            self.panel_groups()
+                .get(index)
+                .map(|task| task.window_group())
+        })?;
+        group.windows.iter().take(12).find_map(|window| {
+            let message = self
+                .plugin_preview_host
+                .as_ref()?
+                .application()
+                .button_message(&format!("preview-window-{}", window.id.0))?;
+            self.plugin_preview_host
+                .as_ref()?
+                .semantic_targets_for_message(&message)
+                .iter()
+                .any(|target| target.id == selected)
+                .then_some(window.id)
+        })
+    }
+
+    fn preview_plugin_projection(
+        &self,
+        group: &crate::model::WindowGroup,
+    ) -> (serde_json::Value, crate::plugin_panel::PluginImages) {
+        let windows = group
+            .windows
+            .iter()
+            .take(12)
+            .enumerate()
+            .map(|(index, window)| {
+                let title = if window.title.is_empty() {
+                    &group.application_name
+                } else {
+                    &window.title
+                };
+                let title = if title.is_empty() {
+                    "Untitled window"
+                } else {
+                    title
+                };
+                serde_json::json!({
+                    "id": window.id.0.to_string(),
+                    "title": title.chars().take(120).collect::<String>(),
+                    "accessibleName": title.chars().take(120).collect::<String>(),
+                    "closable": window.state.capabilities.close,
+                    "index": index,
+                })
+            })
+            .collect::<Vec<_>>();
+        let images = group
+            .windows
+            .iter()
+            .take(12)
+            .enumerate()
+            .filter_map(|(index, window)| {
+                self.preview_images.get(&window.id).map(|image| {
+                    (
+                        format!("window:{}", window.id.0),
+                        (0x7000_u16 + index as u16, Arc::clone(image)),
+                    )
+                })
+            })
+            .collect();
+        (serde_json::json!({"windows": windows}), images)
+    }
+
+    fn preview_plugin_event(
+        &mut self,
+        event: HostEvent,
+        size: (u32, u32),
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> nickel_ui::HostEventOutcome {
+        let Some(group) = self.preview_group.and_then(|index| {
+            self.panel_groups()
+                .get(index)
+                .map(|task| task.window_group())
+        }) else {
+            return Default::default();
+        };
+        let (data, images) = self.preview_plugin_projection(&group);
+        let host = self
+            .plugin_preview_host
+            .as_mut()
+            .expect("active preview plugin");
+        let data_changed = host
+            .application_mut()
+            .sync_window_preview_data(&data)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "window preview plugin projection failed");
+                false
+            });
+        let images_changed = host.application_mut().sync_images(images);
+        let mut outcome = host.step(HostBatch {
+            application_changed: data_changed || images_changed,
+            surface_size: Some(size),
+            events: vec![event],
+            normalized_authorities: authority.into_iter().collect(),
+            ..Default::default()
+        });
+        let effects = host.application_mut().take_effects();
+        outcome.changed |= self.apply_plugin_effects(effects);
+        outcome
     }
 
     fn taskbar_window_menu_projection(

@@ -42,6 +42,7 @@
     fn native_preview_delivery_preserves_unchanged_pixels_and_retires_hidden_cards() {
         use crate::window_preview::PreviewAction;
         let mut shell = LiveShell::new().unwrap();
+        shell.plugin_preview_host = None;
         shell.launcher = crate::launcher::Launcher::new(Vec::new());
         let id = WindowId(42);
         shell.windows = vec![OpenWindow { id, application_id: None, active: true, title: "Native preview".into(), state: Default::default() }];

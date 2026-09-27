@@ -25,6 +25,7 @@ use nickel_core::display_projection::ProjectionMode;
 pub use crate::launcher::LauncherView;
 use crate::launcher::{Application, DashboardSection, Launcher, LauncherMode, TaskbarApplication};
 use crate::notification::DesktopNotification;
+use crate::window_preview::PreviewAction;
 
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
@@ -88,6 +89,16 @@ pub fn control_center_manifest() -> &'static PluginManifest {
             "../../../assets/plugins/control-center/plugin.json"
         ))
         .expect("bundled control center plugin manifest must be valid")
+    })
+}
+
+pub fn window_preview_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/window-preview/plugin.json"
+        ))
+        .expect("bundled window preview plugin manifest must be valid")
     })
 }
 
@@ -981,6 +992,35 @@ pub enum PluginEffect {
     DismissNotification { id: u32 },
     CloseNotificationHistory,
     Control(ControlAction),
+    Preview(PreviewAction),
+}
+
+fn preview_request(effect: &Value) -> Result<(PreviewAction, PluginCapability), String> {
+    let action = effect
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or("preview action is missing")?;
+    let window = effect
+        .get("window")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(crate::model::WindowId)
+        .ok_or("preview window ID is invalid")?;
+    match action {
+        "activate" => Ok((
+            PreviewAction::Activate(window),
+            PluginCapability::WindowsFocus,
+        )),
+        "close" => Ok((
+            PreviewAction::Close(window),
+            PluginCapability::WindowsContext,
+        )),
+        "menu" => Ok((
+            PreviewAction::OpenMenu(window),
+            PluginCapability::WindowsContext,
+        )),
+        _ => Err("unknown preview action".into()),
+    }
 }
 
 fn control_request(effect: &Value) -> Result<(ControlAction, PluginCapability), String> {
@@ -1513,6 +1553,10 @@ fn launcher_plugin_result(
 }
 
 impl PluginPanelApplication {
+    pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
+        self.node.button_action(id).map(PluginMessage::Click)
+    }
+
     pub fn bundled() -> Result<Self, String> {
         if let Some(path) = std::env::var_os("NICKEL_DEV_PLUGIN_PANEL_SOURCE") {
             let source = std::fs::read_to_string(&path).map_err(|error| {
@@ -1593,6 +1637,11 @@ impl PluginPanelApplication {
     pub fn control_center_with_data(data: &Value) -> Result<Self, String> {
         let source = include_str!("../../../assets/plugins/control-center/main.js");
         Self::new_with_manifest(source, control_center_manifest(), Some(data.to_string()))
+    }
+
+    pub fn window_preview_with_data(data: &Value) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/window-preview/main.js");
+        Self::new_with_manifest(source, window_preview_manifest(), Some(data.to_string()))
     }
 
     pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
@@ -1779,6 +1828,24 @@ impl PluginPanelApplication {
     pub fn sync_control_center_data(&mut self, data: &Value) -> Result<bool, String> {
         if self.manifest.id != control_center_manifest().id {
             return Err("this plugin is not the control center".into());
+        }
+        let serialized = data.to_string();
+        if self.projection_data.as_deref() == Some(serialized.as_str()) {
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!(
+                "__nickelSetData({serialized})"
+            )))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.projection_data = Some(serialized);
+        Ok(true)
+    }
+
+    pub fn sync_window_preview_data(&mut self, data: &Value) -> Result<bool, String> {
+        if self.manifest.id != window_preview_manifest().id {
+            return Err("this plugin is not the window preview".into());
         }
         let serialized = data.to_string();
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
@@ -2158,6 +2225,26 @@ impl nickel_ui::Application for PluginPanelApplication {
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
+                            == Some("preview-action")
+                            && self.manifest.id == window_preview_manifest().id =>
+                        {
+                            match preview_request(&effect) {
+                                Ok((action, capability))
+                                    if self.manifest.capabilities.contains(&capability) =>
+                                {
+                                    approved.push(PluginEffect::Preview(action));
+                                }
+                                Ok(_) => {
+                                    self.last_error = Some("preview action is not granted".into());
+                                    return;
+                                }
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("control-action")
                             && self.manifest.id == control_center_manifest().id =>
                         {
@@ -2496,6 +2583,7 @@ impl nickel_ui::Application for PluginPanelApplication {
         } else if self.manifest.id == taskbar_manifest().id
             || self.manifest.id == notification_manifest().id
             || self.manifest.id == run_manifest().id
+            || self.manifest.id == window_preview_manifest().id
         {
             AnyView::new(self.node.view(&self.images))
         } else {
@@ -2639,6 +2727,34 @@ mod tests {
         assert_eq!(
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowLauncher]
+        );
+    }
+
+    #[test]
+    fn bundled_window_preview_renders_and_requests_a_typed_window_action() {
+        let data = serde_json::json!({"windows": [{
+            "id": "71", "title": "Document", "accessibleName": "Document",
+            "closable": true, "index": 0
+        }]});
+        let app = PluginPanelApplication::window_preview_with_data(&data).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 300, 214);
+        let target = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Document".into(),
+            })
+            .expect("window preview image button");
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(target.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::Preview(PreviewAction::Activate(
+                crate::model::WindowId(71)
+            ))]
         );
     }
 
