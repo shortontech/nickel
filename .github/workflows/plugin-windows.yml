@@ -9,6 +9,7 @@ on:
       - "Cargo.toml"
       - "crates/nickel/**"
       - "crates/nickel-core/**"
+      - "crates/nickel-plugin-runtime/**"
       - "crates/nickel-ui/**"
       - "assets/plugins/**"
   pull_request:
@@ -18,6 +19,7 @@ on:
       - "Cargo.toml"
       - "crates/nickel/**"
       - "crates/nickel-core/**"
+      - "crates/nickel-plugin-runtime/**"
       - "crates/nickel-ui/**"
       - "assets/plugins/**"
   workflow_dispatch:
@@ -45,6 +47,8 @@ jobs:
       - name: Test the JSX host and plugin packages
         shell: pwsh
         run: |
+          cargo test --locked -p nickel-plugin-runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --test plugin_panel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib plugin_panel::tests

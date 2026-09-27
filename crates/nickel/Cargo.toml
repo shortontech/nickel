@@ -43,6 +43,7 @@ nickel-i18n = { path = "../nickel-i18n" }
 nickel-input = { path = "../nickel-input", features = ["winit", "windows"] }
 nickel-remote-control = { path = "../nickel-remote-control" }
 nickel-logging = { path = "../nickel-logging" }
+nickel-plugin-runtime = { path = "../nickel-plugin-runtime" }
 nickel-render-assets = { path = "../nickel-render-assets" }
 nickel-storage = { path = "../nickel-storage" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
@@ -54,7 +55,6 @@ tracing.workspace = true
 winit.workspace = true
 zeroize.workspace = true
 nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
-boa_engine = { version = "0.22", default-features = false }
 serde_json.workspace = true
 tempfile = "3.25.0"
 ctrlc.workspace = true

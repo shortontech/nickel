@@ -3422,7 +3422,6 @@ dependencies = [
  "async-io",
  "base64 0.22.1",
  "bitflags 2.13.1",
- "boa_engine",
  "bytemuck",
  "ctrlc",
  "dirs",
@@ -3444,6 +3443,7 @@ dependencies = [
  "nickel-input",
  "nickel-logging",
  "nickel-platform",
+ "nickel-plugin-runtime",
  "nickel-remote-control",
  "nickel-render-assets",
  "nickel-session-protocol",
@@ -3709,6 +3709,15 @@ dependencies = [
  "winit 0.30.13",
  "zbus",
  "zvariant",
+]
+
+[[package]]
+name = "nickel-plugin-runtime"
+version = "0.1.0"
+dependencies = [
+ "boa_engine",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

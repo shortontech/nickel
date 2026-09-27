@@ -6,10 +6,10 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use boa_engine::{Context, Source};
 use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
+use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, DragPhase, FilePlaneItem,
     FrameOverlay, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayId, OverlayMenu,
@@ -144,8 +144,6 @@ pub fn bottom_offset() -> u32 {
 pub fn enabled() -> bool {
     std::env::var_os("NICKEL_DEV_PLUGIN_PANEL").is_some()
 }
-
-const BOOTSTRAP: &str = include_str!("../../../assets/plugin-runtime/bootstrap.js");
 
 #[derive(Clone, Debug, PartialEq)]
 enum PanelNode {
@@ -1458,7 +1456,7 @@ fn child_text(children: &[Value]) -> Result<String, String> {
 }
 
 pub struct PluginPanelApplication {
-    context: Context,
+    runtime: JsxRuntime,
     node: PanelNode,
     effects: Vec<PluginEffect>,
     pending_transient: Option<(OverlayId, UiId)>,
@@ -2463,10 +2461,8 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(data.as_str()) {
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&data)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -2476,21 +2472,10 @@ impl PluginPanelApplication {
         manifest: &PluginManifest,
         data: Option<String>,
     ) -> Result<Self, String> {
-        let mut context = Context::default();
-        context
-            .eval(Source::from_bytes(BOOTSTRAP))
-            .map_err(|error| error.to_string())?;
-        if let Some(data) = &data {
-            context
-                .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
-                .map_err(|error| error.to_string())?;
-        }
-        context
-            .eval(Source::from_bytes(source))
-            .map_err(|error| error.to_string())?;
-        let node = evaluate_tree(&mut context, "__nickelRender()")?;
+        let mut runtime = JsxRuntime::new(source, data.as_deref())?;
+        let node = runtime.render("__nickelRender()", PanelNode::parse)?;
         Ok(Self {
-            context,
+            runtime,
             node,
             effects: Vec::new(),
             pending_transient: None,
@@ -2537,10 +2522,8 @@ impl PluginPanelApplication {
             self.launcher_shortcuts = Some(projection.into());
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&data)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(data);
         self.launcher_shortcuts = Some(projection.into());
         Ok(true)
@@ -2557,10 +2540,8 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(data.as_str()) {
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&data)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -2576,10 +2557,8 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(data.as_str()) {
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&data)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -2599,10 +2578,8 @@ impl PluginPanelApplication {
             ));
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&data)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(data);
         self.notification_shortcuts = Some((
             projection.notification.as_ref().map(|item| item.id),
@@ -2622,10 +2599,8 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(data.as_str()) {
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&data)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -2638,12 +2613,8 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!(
-                "__nickelSetData({serialized})"
-            )))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&serialized)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -2656,12 +2627,8 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!(
-                "__nickelSetData({serialized})"
-            )))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&serialized)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -2674,12 +2641,8 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
-        self.context
-            .eval(Source::from_bytes(&format!(
-                "__nickelSetData({serialized})"
-            )))
-            .map_err(|error| error.to_string())?;
-        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.runtime.set_data(&serialized)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -2724,29 +2687,6 @@ impl PluginPanelApplication {
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
-}
-
-fn evaluate_tree(context: &mut Context, expression: &str) -> Result<PanelNode, String> {
-    let parsed = (|| {
-        let value = context
-            .eval(Source::from_bytes(expression))
-            .map_err(|error| error.to_string())?;
-        let text = value
-            .to_string(context)
-            .map_err(|error| error.to_string())?
-            .to_std_string_escaped();
-        let value: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
-        PanelNode::parse(&value)
-    })();
-    let finalizer = if parsed.is_ok() {
-        "__nickelCommitRender()"
-    } else {
-        "__nickelRollbackRender()"
-    };
-    context
-        .eval(Source::from_bytes(finalizer))
-        .map_err(|error| format!("could not finalize plugin render: {error}"))?;
-    parsed
 }
 
 impl nickel_ui::Application for PluginPanelApplication {
@@ -2855,20 +2795,8 @@ impl nickel_ui::Application for PluginPanelApplication {
             }
             PluginMessage::Scroll => unreachable!(),
         };
-        let rendered = evaluate_tree(&mut self.context, &expression);
-        let effects = self
-            .context
-            .eval(Source::from_bytes("__nickelTakeEffects()"))
-            .map_err(|error| error.to_string())
-            .and_then(|value| {
-                value
-                    .to_string(&mut self.context)
-                    .map_err(|error| error.to_string())
-            })
-            .and_then(|value| {
-                serde_json::from_str::<Vec<Value>>(&value.to_std_string_escaped())
-                    .map_err(|error| error.to_string())
-            });
+        let rendered = self.runtime.render(&expression, PanelNode::parse);
+        let effects = self.runtime.take_effects();
         (|| match (rendered, effects) {
             (Ok(node), Ok(effects)) => {
                 let mut approved = Vec::new();
@@ -3650,13 +3578,8 @@ impl nickel_ui::Application for PluginPanelApplication {
             }
             (Err(error), _) | (_, Err(error)) => self.last_error = Some(error),
         })();
-        let finalizer = if self.last_error.is_some() {
-            "__nickelRollbackEvent()"
-        } else {
-            "__nickelAcceptEvent()"
-        };
-        if let Err(error) = self.context.eval(Source::from_bytes(finalizer)) {
-            self.last_error = Some(format!("could not finalize plugin event: {error}"));
+        if let Err(error) = self.runtime.finish_event(self.last_error.is_none()) {
+            self.last_error = Some(error);
         }
     }
 
