@@ -1257,6 +1257,11 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::run_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::taskbar_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::notification_manifest().clone())?;
+        // Unit tests exercise activation in parallel; core storage tests cover
+        // persistence without sharing the user's activation file.
+        #[cfg(test)]
+        let plugin_activation = nickel_core::plugins::PluginActivationSettings::default();
+        #[cfg(not(test))]
         let plugin_activation = nickel_core::plugins::PluginActivationSettings::load_default()
             .unwrap_or_else(|error| {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -2871,6 +2876,7 @@ impl LiveShell {
         if entry.desired_enabled == enabled {
             return Ok(false);
         }
+        #[cfg(not(test))]
         nickel_core::plugins::PluginActivationSettings::update_default(id, enabled)
             .map_err(|error| format!("could not save plugin activation: {error}"))?;
         self.plugin_registry.set_enabled(id, enabled)?;

@@ -79,7 +79,7 @@ pub fn run_enabled() -> bool {
 }
 
 pub fn notification_enabled() -> bool {
-    std::env::var_os("NICKEL_DEV_PLUGIN_NOTIFICATION").is_some()
+    true
 }
 
 pub fn taskbar_enabled() -> bool {

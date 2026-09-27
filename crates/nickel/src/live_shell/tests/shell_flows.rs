@@ -56,6 +56,85 @@
     }
 
     #[test]
+    fn notification_plugin_action_uses_the_host_reducer() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::notification_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        shell.set_plugin_enabled(id, true).unwrap();
+        shell.notification_feed.notify_internal(NotificationRequest {
+            app_name: "Test".into(),
+            summary: "Ready".into(),
+            body: "Choose".into(),
+            actions: vec![NotificationAction {
+                key: "open".into(),
+                label: "Open".into(),
+            }],
+            expire_timeout_ms: 0,
+        });
+        shell.notification = shell.notification_feed.snapshot();
+        shell.scene(SurfaceRole::Notification, 420, 180);
+        let target = shell
+            .plugin_notification_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .unwrap();
+        let point = Point {
+            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+        };
+        assert!(shell.notification_click(point.x, point.y, 420, 180));
+        assert!(shell.notification.is_none());
+    }
+
+    #[test]
+    fn notification_plugin_cancel_dismisses_the_visible_notification() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::notification_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        shell.set_plugin_enabled(id, true).unwrap();
+        shell.notification_feed.notify_internal(NotificationRequest {
+            app_name: "Test".into(),
+            summary: "Ready".into(),
+            body: "Choose".into(),
+            actions: Vec::new(),
+            expire_timeout_ms: 0,
+        });
+        shell.notification = shell.notification_feed.snapshot();
+        shell.scene(SurfaceRole::Notification, 420, 180);
+        assert!(shell.notification_controller(ControllerAction::Cancel));
+        assert!(shell.notification.is_none());
+    }
+
+    #[test]
+    fn notification_plugin_closes_history_from_its_component() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::notification_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        shell.set_plugin_enabled(id, true).unwrap();
+        shell.notification_history_visible = true;
+        shell.scene(SurfaceRole::Notification, 420, 180);
+        let target = shell
+            .plugin_notification_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Close".into(),
+            })
+            .unwrap();
+        let point = Point {
+            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+        };
+        assert!(shell.notification_click(point.x, point.y, 420, 180));
+        assert!(!shell.notification_history_visible);
+    }
+
+    #[test]
     fn run_plugin_can_start_render_and_retire() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::run_manifest().id;
@@ -1315,6 +1394,9 @@
     #[test]
     fn notification_host_effects_stay_at_the_transport_boundary() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::notification_manifest().id, false)
+            .unwrap();
         shell.notification_feed.notify_internal(NotificationRequest {
             app_name: "Test".into(),
             summary: "Ready".into(),
@@ -1354,6 +1436,9 @@
     #[test]
     fn notification_controller_cancel_uses_the_typed_host_effect() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::notification_manifest().id, false)
+            .unwrap();
         let mut store = NotificationStore::default();
         store.notify(
             0,
@@ -1384,6 +1469,9 @@
     #[test]
     fn compositor_owned_notification_ui_uses_production_effect_reducer() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::notification_manifest().id, false)
+            .unwrap();
         shell.notification_feed.notify_internal(NotificationRequest {
             app_name: "Test".into(),
             summary: "Ready".into(),

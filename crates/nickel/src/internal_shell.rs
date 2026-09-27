@@ -98,7 +98,7 @@ impl Application for ShellSurfaceSlot {
 /// socket-backed shell surface. Session mutations go through the injected
 /// typed host.
 pub(crate) struct InternalShellCoordinator {
-    shell: LiveShell,
+    shell: Box<LiveShell>,
     surfaces: InternalSurfaceSet,
     entries: Vec<InternalShellSurface>,
     indices: HashMap<(SurfaceRole, Option<String>), usize>,
@@ -118,7 +118,10 @@ impl InternalShellCoordinator {
         let bar_on_all_displays =
             nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays;
         Ok(Self {
-            shell: LiveShell::new_with_internal_hosts(session_host, file_window_host)?,
+            shell: Box::new(LiveShell::new_with_internal_hosts(
+                session_host,
+                file_window_host,
+            )?),
             surfaces: InternalSurfaceSet::new(),
             entries: Vec::new(),
             indices: HashMap::new(),
