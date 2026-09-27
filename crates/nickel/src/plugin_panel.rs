@@ -75,7 +75,7 @@ pub fn run_manifest() -> &'static PluginManifest {
 }
 
 pub fn run_enabled() -> bool {
-    std::env::var_os("NICKEL_DEV_PLUGIN_RUN").is_some()
+    true
 }
 
 pub fn notification_enabled() -> bool {
@@ -2087,6 +2087,42 @@ mod tests {
             nickel_ui::EventDisposition::Handled
         );
         assert_eq!(panel.take_effects(), vec![PluginEffect::RunDismiss]);
+    }
+
+    #[test]
+    fn run_plugin_host_accepts_text_and_submit_from_focused_field() {
+        let mut host = nickel_ui::UiHost::new(
+            PluginPanelApplication::run_with_status(None).unwrap(),
+            620,
+            180,
+        );
+        host.step(nickel_ui::HostBatch {
+            window_focused: Some(true),
+            ..nickel_ui::HostBatch::default()
+        });
+        let field = host
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .unwrap();
+        let field_id = field.id;
+        host.request_focus(field_id.clone());
+        assert_eq!(host.inspect().keyboard_focus, Some(field_id));
+        host.handle_event(nickel_ui::UiEvent::TextInput("nickel-test".into()));
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Shortcut(Shortcut::Submit)],
+            ..nickel_ui::HostBatch::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::RunSubmit("nickel-test".into())]
+        );
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Shortcut(Shortcut::Escape)],
+            ..nickel_ui::HostBatch::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::RunDismiss]
+        );
     }
 
     #[test]

@@ -62,7 +62,9 @@
         shell.set_plugin_enabled(id, false).unwrap();
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.plugin_run_host.is_some());
-        shell.run_visible = true;
+        shell.apply_session_launcher_visibility(true);
+        assert!(shell.set_run_visible(true));
+        assert!(shell.plugin_run_host.as_ref().unwrap().inspect().keyboard_focus.is_some());
         shell.scene(super::SurfaceRole::Launcher, 620, 180);
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
