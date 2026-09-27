@@ -118,7 +118,7 @@ function h(kind, props, ...children) {
         hoverBackground: props?.hoverBackground,
         selectedBackground: props?.selectedBackground, accent: props?.accent,
         complement: props?.complement,
-        item: props?.item, count: props?.count,
+        item: props?.item, count: props?.count, hue: props?.hue, custom: props?.custom,
         asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, state: props?.state, icon: props?.icon,
         showLabel: props?.showLabel, contextAction, dragAction, selectAction, moveAction, closeAction,

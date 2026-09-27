@@ -7,8 +7,8 @@ and native recovery controls remain owned by Rust. Settings persists the bundled
 package's enabled state in Nickel's activation settings. Disabling it retires
 its JSX contexts and leaves the native Plugins recovery view available to
 review and re-enable it. The shell activation registry does not yet manage the
-separate Settings process, and its process-owned memory account is a remaining
-migration step.
+separate Settings process; publishing its process-owned memory account to the
+shell is a remaining migration step.
 The Plugins page reports a measured lower bound for the Settings package's
 retained Rust component trees and cached page projections. Boa heap, textures,
 the shared native Settings frame, and process RSS remain unattributed.
@@ -65,7 +65,8 @@ adapter state and device identity before using the existing Bluetooth handlers.
 The native Bluetooth view remains available if JSX fails. Build it with the
 same command and its source filename.
 
-`settings-appearance-mode.jsx` owns the Light, Dark, and Automatic mode choices.
-The Settings host renders their existing native preview cards and checks each
-typed choice before persisting the preference. The native mode card remains
-available if JSX fails. Build it with the same command and its source filename.
+`settings-appearance-choices.jsx` owns the Light, Dark, and Automatic mode
+choices and preset accent swatches. The Settings host renders their existing
+native preview cards and color controls, and checks each typed choice before
+persisting the preference. The native choice cards remain available if JSX
+fails. Build it with the same command and its source filename.

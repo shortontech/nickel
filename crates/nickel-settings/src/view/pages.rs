@@ -1691,19 +1691,7 @@ impl SettingsApp {
         )
         .id("appearance-mode-card")
         .child(mode_group);
-        let mode_card = if self.settings_jsx_enabled {
-            let data = crate::appearance_mode_plugin::projection(self);
-            self.appearance_mode_page
-                .borrow_mut()
-                .get_or_insert_with(crate::appearance_mode_plugin::AppearanceModePage::new)
-                .as_mut()
-                .map_err(|error| error.clone())
-                .and_then(|page| page.render(&data, theme, appearance))
-                .unwrap_or_else(|_| AnyView::new(native_mode_card))
-        } else {
-            AnyView::new(native_mode_card)
-        };
-        let accent_card = SettingsCard::titled(
+        let native_accent_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-appearance-accent"),
             self.localizer
@@ -1711,6 +1699,26 @@ impl SettingsApp {
         )
         .id("appearance-accent-card")
         .child(swatch_row);
+        let native_choices = || {
+            AnyView::new(
+                Column::new()
+                    .gap(10.0)
+                    .child(native_mode_card)
+                    .child(native_accent_card),
+            )
+        };
+        let appearance_choices = if self.settings_jsx_enabled {
+            let data = crate::appearance_choices_plugin::projection(self);
+            self.appearance_choices_page
+                .borrow_mut()
+                .get_or_insert_with(crate::appearance_choices_plugin::AppearanceChoicesPage::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| page.render(&data, theme, appearance))
+                .unwrap_or_else(|_| native_choices())
+        } else {
+            native_choices()
+        };
         let wallpaper_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-wallpaper-image"),
@@ -1900,8 +1908,7 @@ impl SettingsApp {
         });
         let mut general = nickel_ui::Column::new()
             .gap(10.0)
-            .child(mode_card)
-            .child(accent_card)
+            .child(appearance_choices)
             .child(wallpaper_card)
             .child(interface_card)
             .child(
