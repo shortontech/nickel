@@ -12,9 +12,10 @@ The harness creates a private `XDG_RUNTIME_DIR`, starts the dedicated `nickel-ne
 binary with explicit test control, then waits for
 compositor-owned shell readiness. It asserts that no
 shell PID is expected or authenticated and no `--role shell` child exists,
-checks the internal surface inventory and live bundled launcher/taskbar plugin
-health, disables and re-enables the launcher plugin while checking its native
-fallback and memory cleanup, injects Meta and verifies that the
+checks the internal surface inventory and live health of eight bundled UI
+plugins, measures the launcher's rendered native UI memory, then disables and
+re-enables it while checking memory cleanup and the native fallback. It injects
+Meta and verifies that the
 internal launcher becomes visible, closes it again, creates a kernel uinput controller, and verifies
 that the production gilrs/controller route opens the launcher. It then disconnects and reconnects
 the controller, verifies the fresh device generation can close the launcher without inheriting

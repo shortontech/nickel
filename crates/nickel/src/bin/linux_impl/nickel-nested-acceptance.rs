@@ -126,7 +126,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-            "PASS: nested compositor became ready, ran bundled launcher and taskbar plugins, disabled and restored the launcher with native fallback, exposed shell surfaces, accepted keyboard and kernel-uinput controller ingress across reconnect, reported idle diagnostics, and shut down cleanly"
+            "PASS: nested compositor became ready, ran eight bundled UI plugins, measured and cleared launcher UI memory across disable, confirmed native fallback and plugin restart, accepted keyboard and kernel-uinput controller ingress across reconnect, reported idle diagnostics, and shut down cleanly"
     );
     Ok(())
 }
@@ -185,7 +185,16 @@ fn exercise(
     let plugin_output = checked(test_input, &environment, &["plugins"])?;
     let plugins: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&plugin_output).map_err(|error| error.to_string())?;
-    for id in ["org.nickel.taskbar", "org.nickel.launcher"] {
+    for id in [
+        "org.nickel.taskbar",
+        "org.nickel.launcher",
+        "org.nickel.run",
+        "org.nickel.notification",
+        "org.nickel.volume-osd",
+        "org.nickel.control-center",
+        "org.nickel.window-preview",
+        "org.nickel.desktop",
+    ] {
         let plugin = plugins
             .plugins
             .iter()
@@ -198,6 +207,21 @@ fn exercise(
         }
     }
     assert_no_shell_child(compositor.id())?;
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
+    let launcher_memory = wait_for_plugin_native_memory(
+        test_input,
+        &environment,
+        "org.nickel.launcher",
+        Duration::from_secs(2),
+    )?;
+    if launcher_memory == 0 {
+        return Err("rendered launcher reported zero native UI memory".into());
+    }
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
     let disabled = checked(
         test_input,
         &environment,
@@ -310,6 +334,34 @@ fn wait_for_launcher_visibility(
                     "hidden"
                 }
             ));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn wait_for_plugin_native_memory(
+    test_input: &Path,
+    environment: &[(String, String)],
+    id: &str,
+    timeout: Duration,
+) -> Result<u64, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = checked(test_input, environment, &["plugins"])?;
+        let snapshot: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&output).map_err(|error| error.to_string())?;
+        let plugin = snapshot
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .ok_or_else(|| format!("missing plugin {id} while awaiting memory"))?;
+        if let Some(bytes) = plugin.memory.native_ui_bytes {
+            if bytes > 0 && plugin.memory.tracked_peak_bytes.is_some_and(|peak| peak >= bytes) {
+                return Ok(bytes);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("plugin {id} did not report rendered UI memory"));
         }
         thread::sleep(POLL);
     }
