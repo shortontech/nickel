@@ -2,6 +2,8 @@
   "api_version": 1,
   "id": "org.nickel.notification",
   "name": "Nickel Notifications",
+  "author": "Nickel",
+  "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [
     {"id":"main","kind":"overlay","width":420,"height":180}

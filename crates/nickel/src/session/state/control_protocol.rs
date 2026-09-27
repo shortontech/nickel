@@ -1165,6 +1165,14 @@ impl NickelSession {
                     || snapshot.plugins.iter().any(|plugin| {
                         plugin.id.len() > 96
                             || plugin.name.len() > 120
+                            || plugin
+                                .author
+                                .as_ref()
+                                .is_some_and(|author| author.len() > 120)
+                            || plugin
+                                .version
+                                .as_ref()
+                                .is_some_and(|version| version.len() > 64)
                             || plugin.capabilities.len() > 32
                             || plugin.surfaces.len() > 32
                             || plugin.settings.len() > 32

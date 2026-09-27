@@ -82,3 +82,11 @@ its effective values through `nickel.data.settings`, and the Plugins page
 shows the registered values. Settings provides switches, increment controls,
 choice cycling, and a text editor. Changes are validated against the manifest
 and applied to a running installed panel or badge without disabling it.
+The manifest may also declare bounded `author` and `version` strings. Settings
+shows both in the plugin list and in the enable review; missing values are
+labeled unknown or unspecified.
+For installed plugins, Nickel saves the reviewed manifest access and package
+identity when enabling. If the package later changes its JavaScript entry code,
+entry path, version, capabilities, surfaces, or extension declarations, automatic startup stops and
+Settings shows that a fresh review is required. Re-enabling records the new
+declarations.

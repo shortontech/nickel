@@ -1825,6 +1825,15 @@ impl LiveShell {
             .collect::<Vec<_>>()
         {
             if plugin_activation.desired_enabled(&id, false) {
+                if let Some(descriptor) = shell.external_plugin_packages.get(&id)
+                    && !plugin_activation
+                        .approval_current(&descriptor.manifest, &descriptor.source_digest)
+                {
+                    let reason =
+                        "Plugin package changed; review access in Settings before enabling";
+                    shell.plugin_registry.mark_failed(&id, reason.into())?;
+                    continue;
+                }
                 if let Err(error) = shell.set_plugin_enabled(&id, true) {
                     tracing::warn!(plugin = %id, %error, "installed plugin could not start");
                 }
@@ -3129,6 +3138,8 @@ impl LiveShell {
                 .map(|entry| PluginStatus {
                     id: entry.manifest.id.clone(),
                     name: entry.manifest.name.clone(),
+                    author: entry.manifest.author.clone(),
+                    version: entry.manifest.version.clone(),
                     desired_enabled: entry.desired_enabled,
                     health: match &entry.health {
                         PluginHealth::Disabled => PluginRuntimeHealth::Disabled,
@@ -3416,8 +3427,21 @@ impl LiveShell {
             None
         };
         #[cfg(not(test))]
-        nickel_core::plugins::PluginActivationSettings::update_default(id, enabled)
+        if self.external_plugin_packages.contains_key(id) {
+            nickel_core::plugins::PluginActivationSettings::update_manifest_default(
+                &entry.manifest,
+                &self
+                    .external_plugin_packages
+                    .get(id)
+                    .expect("installed plugin descriptor exists")
+                    .source_digest,
+                enabled,
+            )
             .map_err(|error| format!("could not save plugin activation: {error}"))?;
+        } else {
+            nickel_core::plugins::PluginActivationSettings::update_default(id, enabled)
+                .map_err(|error| format!("could not save plugin activation: {error}"))?;
+        }
         self.plugin_registry.set_enabled(id, enabled)?;
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);

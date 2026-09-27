@@ -2,6 +2,8 @@
   "api_version": 1,
   "id": "org.nickel.taskbar",
   "name": "Nickel Taskbar",
+  "author": "Nickel",
+  "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [
     {"id": "main", "kind": "panel", "width": 1920, "height": 56, "output": "all"}

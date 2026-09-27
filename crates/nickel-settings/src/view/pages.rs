@@ -91,6 +91,16 @@ impl SettingsApp {
                 };
                 content = content.child(
                     SettingsCard::titled(theme, &format!("Enable {}?", plugin.name), &plugin.id)
+                        .child(SettingsRow::new(
+                            theme,
+                            "Publisher",
+                            plugin.author.as_deref().unwrap_or("Unknown"),
+                        ))
+                        .child(SettingsRow::new(
+                            theme,
+                            "Version",
+                            plugin.version.as_deref().unwrap_or("Unspecified"),
+                        ))
                         .child(SettingsRow::new(theme, "Access requested", grants))
                         .child(SettingsRow::new(theme, "Surfaces affected", surfaces))
                         .child(SettingsRow::new(theme, "Composition changes", composition))
@@ -168,6 +178,16 @@ impl SettingsApp {
                     plugin.composition.join(", ")
                 };
                 let mut card = SettingsCard::titled(theme, &plugin.name, &plugin.id)
+                    .child(SettingsRow::new(
+                        theme,
+                        "Publisher",
+                        plugin.author.as_deref().unwrap_or("Unknown"),
+                    ))
+                    .child(SettingsRow::new(
+                        theme,
+                        "Version",
+                        plugin.version.as_deref().unwrap_or("Unspecified"),
+                    ))
                     .child(
                         SettingsRow::new(theme, "Enabled", health).trailing(
                             Switch::with_state_action(switch_state, action, theme)

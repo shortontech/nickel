@@ -1131,6 +1131,10 @@ pub struct PluginStatusSnapshot {
 pub struct PluginStatus {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
     pub desired_enabled: bool,
     pub health: PluginRuntimeHealth,
     pub capabilities: Vec<String>,
@@ -1953,6 +1957,8 @@ mod tests {
             plugins: vec![PluginStatus {
                 id: "org.nickel.launcher".into(),
                 name: "Nickel Launcher".into(),
+                author: Some("Nickel".into()),
+                version: Some("0.1.0".into()),
                 desired_enabled: true,
                 health: PluginRuntimeHealth::Running,
                 capabilities: vec!["applications-read".into()],

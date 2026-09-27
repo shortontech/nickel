@@ -2,6 +2,8 @@
   "api_version": 1,
   "id": "org.nickel.desktop",
   "name": "Nickel Desktop Background",
+  "author": "Nickel",
+  "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [{"id":"main","kind":"desktop","width":1920,"height":1080}],
   "capabilities": ["desktop-read"]

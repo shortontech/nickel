@@ -7,6 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const PLUGIN_API_VERSION: u16 = 1;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
@@ -14,6 +15,10 @@ pub const MAX_PLUGIN_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PLUGIN_DIRECTORIES: usize = 64;
 const MAX_ACTIVATION_SETTINGS_BYTES: usize = 16 * 1024;
 const MAX_PLUGIN_PREFERENCES_BYTES: usize = 16 * 1024;
+
+fn digest_source(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
+}
 
 /// Installed packages and package errors found immediately below one root.
 #[derive(Default)]
@@ -26,6 +31,7 @@ pub struct PluginCatalog {
 pub struct PluginPackageDescriptor {
     pub directory: std::path::PathBuf,
     pub manifest: PluginManifest,
+    pub source_digest: String,
 }
 
 impl PluginPackageDescriptor {
@@ -33,6 +39,9 @@ impl PluginPackageDescriptor {
         let package = PluginPackage::load(&self.directory)?;
         if package.manifest != self.manifest {
             return Err("plugin manifest changed after discovery".into());
+        }
+        if digest_source(&package.source) != self.source_digest {
+            return Err("plugin script changed after discovery".into());
         }
         Ok(package)
     }
@@ -91,6 +100,7 @@ impl PluginCatalog {
                 Ok(PluginPackageDescriptor {
                     directory: entry.path(),
                     manifest: package.manifest,
+                    source_digest: digest_source(&package.source),
                 })
             })();
             match loaded {
@@ -148,6 +158,42 @@ impl PluginPackage {
 pub struct PluginActivationSettings {
     version: u8,
     enabled: BTreeMap<String, bool>,
+    #[serde(default)]
+    approved: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct PluginApproval {
+    author: Option<String>,
+    version: Option<String>,
+    entry: String,
+    source_digest: String,
+    capabilities: Vec<PluginCapability>,
+    surfaces: Vec<PluginSurface>,
+    provides_slots: Vec<PluginProvidedSlot>,
+    contributes: Vec<PluginContribution>,
+}
+
+impl PluginApproval {
+    fn from_manifest(manifest: &PluginManifest, source_digest: &str) -> Self {
+        Self {
+            author: manifest.author.clone(),
+            version: manifest.version.clone(),
+            entry: manifest.entry.clone(),
+            source_digest: source_digest.to_owned(),
+            capabilities: manifest.capabilities.clone(),
+            surfaces: manifest.surfaces.clone(),
+            provides_slots: manifest.provides_slots.clone(),
+            contributes: manifest.contributes.clone(),
+        }
+    }
+
+    fn fingerprint(manifest: &PluginManifest, source_digest: &str) -> String {
+        let approval = Self::from_manifest(manifest, source_digest);
+        let bytes =
+            serde_json::to_vec(&approval).expect("validated plugin approval is serializable");
+        format!("{:x}", Sha256::digest(bytes))
+    }
 }
 
 impl Default for PluginActivationSettings {
@@ -155,6 +201,7 @@ impl Default for PluginActivationSettings {
         Self {
             version: 1,
             enabled: BTreeMap::new(),
+            approved: BTreeMap::new(),
         }
     }
 }
@@ -173,6 +220,11 @@ impl PluginActivationSettings {
         if settings.version != 1
             || settings.enabled.len() > 64
             || settings.enabled.keys().any(|id| !valid_identifier(id))
+            || settings.approved.len() > 64
+            || settings.approved.keys().any(|id| !valid_identifier(id))
+            || settings.approved.values().any(|fingerprint| {
+                fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -186,6 +238,11 @@ impl PluginActivationSettings {
         self.enabled.get(id).copied().unwrap_or(bundled_default)
     }
 
+    pub fn approval_current(&self, manifest: &PluginManifest, source_digest: &str) -> bool {
+        self.approved.get(&manifest.id)
+            == Some(&PluginApproval::fingerprint(manifest, source_digest))
+    }
+
     pub fn update_default(id: &str, enabled: bool) -> io::Result<()> {
         Self::update(
             nickel_storage::config_path("plugin-activation.json")?,
@@ -195,6 +252,37 @@ impl PluginActivationSettings {
     }
 
     pub fn update(path: impl AsRef<Path>, id: &str, enabled: bool) -> io::Result<()> {
+        Self::update_inner(path, id, enabled, None)
+    }
+
+    pub fn update_manifest_default(
+        manifest: &PluginManifest,
+        source_digest: &str,
+        enabled: bool,
+    ) -> io::Result<()> {
+        Self::update_inner(
+            nickel_storage::config_path("plugin-activation.json")?,
+            &manifest.id,
+            enabled,
+            Some((manifest, source_digest)),
+        )
+    }
+
+    pub fn update_manifest(
+        path: impl AsRef<Path>,
+        manifest: &PluginManifest,
+        source_digest: &str,
+        enabled: bool,
+    ) -> io::Result<()> {
+        Self::update_inner(path, &manifest.id, enabled, Some((manifest, source_digest)))
+    }
+
+    fn update_inner(
+        path: impl AsRef<Path>,
+        id: &str,
+        enabled: bool,
+        manifest: Option<(&PluginManifest, &str)>,
+    ) -> io::Result<()> {
         if !valid_identifier(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -209,6 +297,20 @@ impl PluginActivationSettings {
             Err(error) => return Err(error),
         };
         settings.enabled.insert(id.to_owned(), enabled);
+        if enabled && let Some((manifest, source_digest)) = manifest {
+            if source_digest.len() != 64
+                || !source_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid plugin digest",
+                ));
+            }
+            settings.approved.insert(
+                id.to_owned(),
+                PluginApproval::fingerprint(manifest, source_digest),
+            );
+        }
         if settings.enabled.len() > 64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -344,6 +446,10 @@ pub struct PluginManifest {
     pub api_version: u16,
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
     pub entry: String,
     #[serde(default)]
     pub surfaces: Vec<PluginSurface>,
@@ -415,7 +521,7 @@ impl PluginSettingKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginProvidedSlot {
     pub id: String,
@@ -424,7 +530,7 @@ pub struct PluginProvidedSlot {
     pub replaceable: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginContribution {
     pub target_plugin: String,
@@ -435,7 +541,7 @@ pub struct PluginContribution {
     pub priority: i16,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginSlotContract {
     Badge,
@@ -455,7 +561,7 @@ impl PluginSlotContract {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginContributionMode {
     Add,
@@ -471,7 +577,7 @@ impl PluginContributionMode {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginSurface {
     pub id: String,
@@ -484,7 +590,7 @@ pub struct PluginSurface {
     pub output: PluginOutputScope,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginSurfaceKind {
     Panel,
@@ -508,7 +614,7 @@ impl PluginSurfaceKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginOutputScope {
     #[default]
@@ -516,7 +622,7 @@ pub enum PluginOutputScope {
     All,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginCapability {
     LauncherShow,
@@ -621,6 +727,20 @@ impl PluginManifest {
         }
         if self.name.trim().is_empty() || self.name.len() > 120 {
             return Err("plugin name must contain 1 to 120 characters".into());
+        }
+        if self.author.as_ref().is_some_and(|author| {
+            author.trim().is_empty() || author.len() > 120 || author.chars().any(char::is_control)
+        }) {
+            return Err("plugin author must contain 1 to 120 printable characters".into());
+        }
+        if self.version.as_ref().is_some_and(|version| {
+            version.is_empty()
+                || version.len() > 64
+                || !version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+        }) {
+            return Err("plugin version must contain 1 to 64 version characters".into());
         }
         if !safe_relative_path(&self.entry) || !self.entry.ends_with(".js") {
             return Err(
@@ -914,6 +1034,14 @@ mod tests {
                 .unwrap_err()
                 .contains("changed after discovery")
         );
+        std::fs::write(valid.join("plugin.json"), VALID).unwrap();
+        std::fs::write(valid.join("main.js"), "function App() { return 1; }").unwrap();
+        assert!(
+            catalog.packages["org.nickel.hello-panel"]
+                .load()
+                .unwrap_err()
+                .contains("script changed after discovery")
+        );
     }
 
     #[cfg(unix)]
@@ -997,9 +1125,55 @@ mod tests {
                 .desired_enabled(id, true)
         );
 
+        std::fs::write(
+            &path,
+            format!(r#"{{"version":1,"enabled":{{"{id}":true}}}}"#),
+        )
+        .unwrap();
+        let legacy = PluginActivationSettings::load(&path).unwrap();
+        assert!(legacy.desired_enabled(id, false));
+        assert!(!legacy.approval_current(
+            &PluginManifest::from_json(VALID).unwrap(),
+            &digest_source("old")
+        ));
+
         std::fs::write(&path, b"{broken").unwrap();
         assert!(PluginActivationSettings::update(&path, id, true).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    }
+
+    #[test]
+    fn installed_plugin_approval_requires_review_after_grants_or_version_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plugin-activation.json");
+        let mut manifest = PluginManifest::from_json(VALID).unwrap();
+        let id = manifest.id.clone();
+        let source_digest = digest_source("function App() {}");
+        PluginActivationSettings::update(&path, &id, true).unwrap();
+        let settings = PluginActivationSettings::load(&path).unwrap();
+        assert!(settings.desired_enabled(&id, false));
+        assert!(!settings.approval_current(&manifest, &source_digest));
+
+        PluginActivationSettings::update_manifest(&path, &manifest, &source_digest, true).unwrap();
+        let settings = PluginActivationSettings::load(&path).unwrap();
+        assert!(settings.approval_current(&manifest, &source_digest));
+        assert!(
+            !settings.approval_current(&manifest, &digest_source("function App() { return 1; }"))
+        );
+        manifest.version = Some("2.0.0".into());
+        assert!(!settings.approval_current(&manifest, &source_digest));
+        manifest.version = None;
+        manifest.capabilities.push(PluginCapability::DesktopRead);
+        assert!(!settings.approval_current(&manifest, &source_digest));
+        manifest.capabilities.clear();
+        manifest.contributes.push(PluginContribution {
+            target_plugin: "org.nickel.taskbar".into(),
+            target_slot: "task-badge".into(),
+            contract: PluginSlotContract::Badge,
+            mode: PluginContributionMode::Add,
+            priority: 0,
+        });
+        assert!(!settings.approval_current(&manifest, &source_digest));
     }
 
     const VALID: &str = r#"{
@@ -1016,6 +1190,22 @@ mod tests {
         let manifest = PluginManifest::from_json(VALID).unwrap();
         assert_eq!(manifest.surfaces[0].bottom_offset, 24);
         assert_eq!(manifest.surfaces[0].output, PluginOutputScope::All);
+        assert!(manifest.author.is_none());
+        assert!(manifest.version.is_none());
+        let identified = PluginManifest::from_json(&VALID.replace(
+            "\"name\": \"Hello Panel\",",
+            "\"name\": \"Hello Panel\", \"author\": \"Example Org\", \"version\": \"1.2.3-beta\",",
+        ))
+        .unwrap();
+        assert_eq!(identified.author.as_deref(), Some("Example Org"));
+        assert_eq!(identified.version.as_deref(), Some("1.2.3-beta"));
+        assert!(
+            PluginManifest::from_json(&VALID.replace(
+                "\"name\": \"Hello Panel\",",
+                "\"name\": \"Hello Panel\", \"version\": \"1.0/forged\",",
+            ))
+            .is_err()
+        );
     }
 
     #[test]

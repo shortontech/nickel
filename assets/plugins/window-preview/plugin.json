@@ -2,6 +2,8 @@
   "api_version": 1,
   "id": "org.nickel.window-preview",
   "name": "Nickel Window Preview",
+  "author": "Nickel",
+  "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [{"id":"main","kind":"overlay","width":300,"height":214}],
   "capabilities": ["windows-read", "windows-focus", "windows-context"]

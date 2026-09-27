@@ -2,6 +2,8 @@
   "api_version": 1,
   "id": "org.nickel.example-task-badge",
   "name": "Example task badge",
+  "author": "Nickel",
+  "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [],
   "capabilities": [],

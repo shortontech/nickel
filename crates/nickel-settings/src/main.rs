@@ -2903,6 +2903,8 @@ mod tests {
             plugins: vec![nickel_session_protocol::PluginStatus {
                 id: "org.nickel.launcher".into(),
                 name: "Nickel Launcher".into(),
+                author: Some("Nickel".into()),
+                version: Some("0.1.0".into()),
                 desired_enabled: false,
                 health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
                 capabilities: vec!["applications-read".into(), "applications-launch".into()],
@@ -2940,6 +2942,8 @@ mod tests {
         assert!(labels.contains(&"8 KiB"));
         assert!(labels.contains(&"Unavailable"));
         assert!(labels.contains(&"Setting: Show count"));
+        assert!(labels.contains(&"Nickel"));
+        assert!(labels.contains(&"0.1.0"));
         assert_eq!(
             host.semantic_targets_for_message(&SettingsMessage::SetPluginSetting {
                 id: "org.nickel.launcher".into(),
@@ -2959,6 +2963,8 @@ mod tests {
             plugins: vec![nickel_session_protocol::PluginStatus {
                 id: "org.nickel.example".into(),
                 name: "Example".into(),
+                author: Some("Example Maintainer".into()),
+                version: Some("2.1.0".into()),
                 desired_enabled: false,
                 health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
                 capabilities: vec!["windows-read".into()],
@@ -2985,6 +2991,8 @@ mod tests {
             .filter_map(|node| node.label.as_deref())
             .collect::<Vec<_>>();
         assert!(labels.contains(&"windows-read"));
+        assert!(labels.contains(&"Example Maintainer"));
+        assert!(labels.contains(&"2.1.0"));
         assert!(labels.contains(&"main: panel"));
         assert!(labels.contains(&"add org.nickel.taskbar/task-badge (badge)"));
 
@@ -3021,6 +3029,8 @@ mod tests {
             plugins: vec![nickel_session_protocol::PluginStatus {
                 id: "org.nickel.launcher".into(),
                 name: "Nickel Launcher".into(),
+                author: None,
+                version: None,
                 desired_enabled: false,
                 health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
                 capabilities: Vec::new(),

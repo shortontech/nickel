@@ -2,6 +2,8 @@
   "api_version": 1,
   "id": "org.nickel.hello-panel",
   "name": "Hello Panel",
+  "author": "Nickel",
+  "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [
     {
