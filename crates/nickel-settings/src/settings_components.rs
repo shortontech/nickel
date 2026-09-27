@@ -2,8 +2,8 @@
 
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
-    AnyView, Button, ButtonPresentation, Column, Container, RadioGroup, RadioOption, Row,
-    SemanticTheme, SettingsCard, SettingsRow, Switch, SwitchState, TextField,
+    AnyView, Button, ButtonPresentation, Column, Container, Grid, RadioGroup, RadioOption, Row,
+    SemanticTheme, SettingsCard, SettingsRow, Switch, SwitchState, TextField, Track,
 };
 use serde_json::Value;
 
@@ -13,6 +13,7 @@ use crate::SettingsMessage;
 pub(super) enum Node {
     Stack(Vec<Node>),
     CompactList(Vec<Node>),
+    Grid(Vec<Node>),
     Fragment(Vec<Node>),
     Card {
         label: String,
@@ -75,6 +76,7 @@ impl Node {
         match self {
             Self::Stack(children)
             | Self::CompactList(children)
+            | Self::Grid(children)
             | Self::Fragment(children)
             | Self::Inline(children) => children_bytes(children),
             Self::Card {
@@ -165,6 +167,7 @@ impl Node {
         Ok(match kind {
             "settings-stack" | "settings-features" => Self::Stack(children()?),
             "settings-compact-list" => Self::CompactList(children()?),
+            "settings-grid" => Self::Grid(children()?),
             "settings-fragment" => Self::Fragment(children()?),
             "settings-card" => Self::Card {
                 label: text(value, "label", 256)?,
@@ -279,12 +282,34 @@ impl Node {
         input_placeholder: &str,
         action_message: fn(usize) -> SettingsMessage,
     ) -> AnyView<SettingsMessage> {
+        self.view_with_input(
+            theme,
+            input_placeholder,
+            action_message,
+            SettingsMessage::PluginJsxInput,
+        )
+    }
+
+    pub(super) fn view_with_input(
+        &self,
+        theme: SemanticTheme,
+        input_placeholder: &str,
+        action_message: fn(usize) -> SettingsMessage,
+        input_message: fn(usize, String) -> SettingsMessage,
+    ) -> AnyView<SettingsMessage> {
         match self {
             Self::Stack(children) => AnyView::new(
                 Column::new().fill_width().gap(16.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder, action_message))
+                        .map(|child| {
+                            child.view_with_input(
+                                theme,
+                                input_placeholder,
+                                action_message,
+                                input_message,
+                            )
+                        })
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -292,15 +317,46 @@ impl Node {
                 Column::new().fill_width().gap(0.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder, action_message))
+                        .map(|child| {
+                            child.view_with_input(
+                                theme,
+                                input_placeholder,
+                                action_message,
+                                input_message,
+                            )
+                        })
                         .collect::<Vec<_>>(),
                 ),
+            ),
+            Self::Grid(children) => AnyView::new(
+                Grid::auto_fit(Track::minmax(Track::px(110.0), Track::fr(1.0)))
+                    .gap(4.0)
+                    .children(
+                        children
+                            .iter()
+                            .map(|child| {
+                                child.view_with_input(
+                                    theme,
+                                    input_placeholder,
+                                    action_message,
+                                    input_message,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
             ),
             Self::Fragment(children) => AnyView::new(
                 Column::new().fill_width().gap(8.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder, action_message))
+                        .map(|child| {
+                            child.view_with_input(
+                                theme,
+                                input_placeholder,
+                                action_message,
+                                input_message,
+                            )
+                        })
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -312,7 +368,14 @@ impl Node {
                 SettingsCard::titled(theme, label, value).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder, action_message))
+                        .map(|child| {
+                            child.view_with_input(
+                                theme,
+                                input_placeholder,
+                                action_message,
+                                input_message,
+                            )
+                        })
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -325,7 +388,12 @@ impl Node {
                 let row = SettingsRow::new(theme, label, value);
                 let row = if *compact { row.compact() } else { row };
                 AnyView::new(if let Some(trailing) = trailing {
-                    row.trailing(trailing.view(theme, input_placeholder, action_message))
+                    row.trailing(trailing.view_with_input(
+                        theme,
+                        input_placeholder,
+                        action_message,
+                        input_message,
+                    ))
                 } else {
                     row
                 })
@@ -334,7 +402,14 @@ impl Node {
                 Row::new().gap(8.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder, action_message))
+                        .map(|child| {
+                            child.view_with_input(
+                                theme,
+                                input_placeholder,
+                                action_message,
+                                input_message,
+                            )
+                        })
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -414,7 +489,7 @@ impl Node {
                         TextField::on_change_with_placeholder_mapped(
                             value,
                             input_placeholder,
-                            move |value| SettingsMessage::PluginJsxInput(action, value),
+                            move |value| input_message(action, value),
                         )
                         .id(id.as_str()),
                     ),
@@ -428,6 +503,7 @@ impl Node {
             Self::Input { .. } => true,
             Self::Stack(children)
             | Self::CompactList(children)
+            | Self::Grid(children)
             | Self::Fragment(children)
             | Self::Inline(children)
             | Self::Card { children, .. } => children.iter().any(Self::contains_input),
@@ -444,6 +520,7 @@ impl Node {
             Self::Input { id, action, .. } if id == target => Some(*action),
             Self::Stack(children)
             | Self::CompactList(children)
+            | Self::Grid(children)
             | Self::Fragment(children)
             | Self::Inline(children) => children
                 .iter()

@@ -519,6 +519,7 @@ enum SettingsMessage {
     DefaultAppTargetChanged(String),
     DefaultAppTargetFamily(Option<nickel_platform::AssociationFamily>),
     DefaultAppsJsxAction(usize),
+    DefaultAppsJsxInput(usize, String),
     DefaultAppHandlerSearchChanged(String),
     DefaultAppHandlerScroll(u32),
     BrowseDefaultAppTarget(nickel_platform::AssociationTarget),
@@ -1991,7 +1992,10 @@ impl SettingsApp {
                 self.default_app_catalog_scroll_offset = 0.0;
             }
             SettingsMessage::DefaultAppsJsxAction(index) => {
-                self.handle_default_apps_jsx_action(index);
+                self.handle_default_apps_jsx_action(index, serde_json::Value::Null);
+            }
+            SettingsMessage::DefaultAppsJsxInput(index, value) => {
+                self.handle_default_apps_jsx_action(index, serde_json::Value::String(value));
             }
             SettingsMessage::DefaultAppHandlerSearchChanged(value) => {
                 self.default_app_handler_query = value;

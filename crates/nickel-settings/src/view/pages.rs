@@ -438,8 +438,10 @@ impl SettingsApp {
                 .ok()
         } else {
             None
-        }
-        .unwrap_or_else(|| AnyView::new(Column::new().gap(2.0).children(rows)));
+        };
+        let jsx_active = curated.is_some();
+        let curated =
+            curated.unwrap_or_else(|| AnyView::new(Column::new().gap(2.0).children(rows)));
         let target_query = self.default_app_target_query.trim().to_lowercase();
         let matching_targets = self
             .default_app_targets
@@ -570,10 +572,20 @@ impl SettingsApp {
             nickel_ui::Grid::auto_fit(Track::minmax(Track::px(110.0), Track::fr(1.0)))
                 .gap(4.0)
                 .children(family_buttons);
+        let content = if jsx_active {
+            Column::new().gap(10.0).child(curated).child(target_results)
+        } else {
+            Column::new()
+                .gap(10.0)
+                .child(curated)
+                .child(advanced)
+                .child(family_filters)
+                .child(target_results)
+        };
         ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
                 <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsPageScroll} offset={0.0} theme={theme}>
-                    <Column gap={10.0}>{curated}{advanced}{family_filters}{target_results}</Column>
+                    {content}
                 </VerticalScroll>
             </Column>
         }
