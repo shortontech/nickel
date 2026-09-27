@@ -1049,7 +1049,12 @@ impl SettingsApp {
     }
 
     fn request_plugin_activation(&mut self, id: String, enabled: bool) {
-        if id == settings_package::ID {
+        if id == settings_package::ID
+            && self
+                .plugin_status
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.activation_generation == 0)
+        {
             self.set_settings_jsx_enabled(enabled);
             return;
         }
@@ -1091,6 +1096,10 @@ impl SettingsApp {
     }
 
     fn set_settings_jsx_enabled(&mut self, enabled: bool) {
+        self.update_settings_jsx_enabled(enabled, true);
+    }
+
+    fn update_settings_jsx_enabled(&mut self, enabled: bool, persist: bool) {
         if self.settings_jsx_enabled == enabled {
             return;
         }
@@ -1106,7 +1115,8 @@ impl SettingsApp {
         } else {
             None
         };
-        if self.persistence_enabled
+        if persist
+            && self.persistence_enabled
             && let Err(error) = nickel_core::plugins::PluginActivationSettings::update_default(
                 settings_package::ID,
                 enabled,
@@ -1248,6 +1258,10 @@ impl SettingsApp {
         }
         if let Some(receiver) = &self.settings_memory_report_rx {
             match receiver.try_recv() {
+                Ok(Ok(ServerMessage::Plugins(snapshot))) => {
+                    self.settings_memory_report_rx = None;
+                    self.apply_plugin_status(snapshot);
+                }
                 Ok(_) | Err(mpsc::TryRecvError::Disconnected) => {
                     self.settings_memory_report_rx = None;
                 }
@@ -1371,12 +1385,13 @@ impl SettingsApp {
             self.request_redraw();
             return;
         }
-        let mut snapshot = snapshot;
-        snapshot
+        if let Some(settings) = snapshot
             .plugins
-            .retain(|plugin| plugin.id != settings_package::ID);
-        if let Ok(settings) = settings_package::status(self.settings_jsx_enabled) {
-            snapshot.plugins.push(settings);
+            .iter()
+            .find(|plugin| plugin.id == settings_package::ID)
+            && settings.desired_enabled != self.settings_jsx_enabled
+        {
+            self.update_settings_jsx_enabled(settings.desired_enabled, false);
         }
         if let Some((id, enabled)) = &self.plugin_pending
             && snapshot
@@ -3681,19 +3696,28 @@ mod tests {
     }
 
     #[test]
-    fn shell_status_refresh_preserves_process_owned_settings_plugin_entry() {
+    fn shell_status_refresh_applies_shell_owned_settings_activation() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
         app.persistence_enabled = false;
         app.set_settings_jsx_enabled(false);
+        let enabled = crate::settings_package::status(true).unwrap();
         app.apply_plugin_status(nickel_session_protocol::PluginStatusSnapshot {
             activation_generation: 19,
-            plugins: Vec::new(),
+            plugins: vec![enabled],
         });
+        assert!(app.settings_jsx_enabled);
         let snapshot = app.plugin_status.as_ref().unwrap();
         assert_eq!(snapshot.activation_generation, 19);
         assert_eq!(snapshot.plugins.len(), 1);
         assert_eq!(snapshot.plugins[0].id, crate::settings_package::ID);
-        assert!(!snapshot.plugins[0].desired_enabled);
+        assert!(snapshot.plugins[0].desired_enabled);
+        let disabled = crate::settings_package::status(false).unwrap();
+        app.apply_plugin_status(nickel_session_protocol::PluginStatusSnapshot {
+            activation_generation: 20,
+            plugins: vec![disabled],
+        });
+        assert!(!app.settings_jsx_enabled);
+        assert!(app.navigation_plugin.borrow().is_none());
     }
 
     #[test]

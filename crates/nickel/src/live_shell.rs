@@ -1616,6 +1616,7 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::control_center_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::window_preview_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::desktop_manifest().clone())?;
+        plugin_registry.register(crate::settings_plugin_report::manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
         #[cfg(not(test))]
@@ -1666,6 +1667,9 @@ impl LiveShell {
                 }
                 nickel_core::plugins::PluginActivationSettings::default()
             });
+        if plugin_activation.desired_enabled(crate::settings_plugin_report::ID, true) {
+            plugin_registry.set_enabled(crate::settings_plugin_report::ID, true)?;
+        }
         let plugin_panel_host = if plugin_activation.desired_enabled(
             &crate::plugin_panel::manifest().id,
             crate::plugin_panel::enabled(),
@@ -4002,6 +4006,10 @@ impl LiveShell {
         self.plugin_registry.set_enabled(id, enabled)?;
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
+        if id == crate::settings_plugin_report::ID {
+            self.maybe_publish_plugin_status();
+            return Ok(true);
+        }
         if !enabled {
             self.plugin_taskbar_badge_hosts.remove(id);
             if self.plugin_taskbar_action_hosts.remove(id).is_some() {

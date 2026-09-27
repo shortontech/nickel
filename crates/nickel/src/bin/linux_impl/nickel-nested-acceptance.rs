@@ -140,7 +140,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-            "PASS: nested compositor ran bundled UI and an installed panel, changed a live plugin setting, measured shell and Settings plugin UI memory, confirmed launcher fallback and restart through scoped test input, and shut down cleanly"
+            "PASS: nested compositor ran bundled UI and an installed panel, changed a live plugin setting, toggled Settings plugin activation and memory, confirmed launcher fallback and restart through scoped test input, and shut down cleanly"
     );
     Ok(())
 }
@@ -389,6 +389,25 @@ fn verify_settings_memory_report(
             }
             thread::sleep(POLL);
         }
+        let disabled = checked(
+            test_input,
+            environment,
+            &["plugin-set", "org.nickel.settings", "disabled"],
+        )?;
+        let disabled: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
+        if disabled.plugins.iter().all(|plugin| {
+            plugin.id != "org.nickel.settings" || plugin.desired_enabled
+        }) {
+            return Err("shell did not disable the Settings plugin".into());
+        }
+        wait_for_settings_memory(test_input, environment, false, Duration::from_secs(5))?;
+        checked(
+            test_input,
+            environment,
+            &["plugin-set", "org.nickel.settings", "enabled"],
+        )?;
+        wait_for_settings_memory(test_input, environment, true, Duration::from_secs(5))?;
         Ok(())
     })();
     let _ = process.kill();
@@ -399,15 +418,46 @@ fn verify_settings_memory_report(
         let output = checked(test_input, environment, &["plugins"])?;
         let snapshot: nickel_session_protocol::PluginStatusSnapshot =
             serde_json::from_str(&output).map_err(|error| error.to_string())?;
-        if snapshot
+        if snapshot.plugins.iter().any(|plugin| {
+            plugin.id == "org.nickel.settings"
+                && plugin.desired_enabled
+                && plugin.memory.native_ui_bytes.is_none()
+        }) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("Settings plugin memory did not expire after process exit".into());
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn wait_for_settings_memory(
+    test_input: &Path,
+    environment: &[(String, String)],
+    enabled: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = checked(test_input, environment, &["plugins"])?;
+        let snapshot: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&output).map_err(|error| error.to_string())?;
+        let plugin = snapshot
             .plugins
             .iter()
-            .all(|plugin| plugin.id != "org.nickel.settings")
+            .find(|plugin| plugin.id == "org.nickel.settings")
+            .ok_or("Settings disappeared from the shell registry")?;
+        if plugin.desired_enabled == enabled
+            && plugin.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0) == enabled
         {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err("stale Settings plugin memory remained in shell status".into());
+            return Err(format!(
+                "Settings did not follow shell activation: desired={}, memory={:?}",
+                plugin.desired_enabled, plugin.memory.native_ui_bytes
+            ));
         }
         thread::sleep(POLL);
     }

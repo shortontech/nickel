@@ -10,11 +10,18 @@ use nickel_session_protocol::{
     PluginMemorySnapshot, PluginRuntimeHealth, PluginStatus, PluginStatusSnapshot,
 };
 
-const ID: &str = "org.nickel.settings";
+pub(crate) const ID: &str = "org.nickel.settings";
 const MAX_REPORTED_BYTES: u64 = 1 << 40;
 const MAX_AGE: Duration = Duration::from_secs(5);
 const MANIFEST_SOURCE: &str = include_str!("../../../assets/plugins/settings/plugin.json");
 static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+
+pub(crate) fn manifest() -> &'static PluginManifest {
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(MANIFEST_SOURCE)
+            .expect("bundled Settings manifest is validated by the Settings package")
+    })
+}
 
 pub(crate) struct SettingsPluginReport {
     enabled: bool,
@@ -53,10 +60,18 @@ impl SettingsPluginReport {
         if now.duration_since(self.received_at) > MAX_AGE {
             return;
         }
-        let manifest = MANIFEST.get_or_init(|| {
-            PluginManifest::from_json(MANIFEST_SOURCE)
-                .expect("bundled Settings manifest is validated by the Settings package")
-        });
+        if let Some(plugin) = snapshot.plugins.iter_mut().find(|plugin| plugin.id == ID) {
+            if plugin.desired_enabled == self.enabled {
+                plugin.health = if self.enabled {
+                    PluginRuntimeHealth::Running
+                } else {
+                    PluginRuntimeHealth::Disabled
+                };
+                plugin.memory = self.memory.clone();
+            }
+            return;
+        }
+        let manifest = manifest();
         snapshot.plugins.retain(|plugin| plugin.id != ID);
         snapshot.plugins.push(PluginStatus {
             id: manifest.id.clone(),
@@ -109,6 +124,18 @@ mod tests {
         report.append_to(&mut snapshot, now);
         assert_eq!(snapshot.plugins[0].id, ID);
         assert_eq!(snapshot.plugins[0].memory.native_ui_bytes, Some(1234));
+        let mut disabled = PluginStatusSnapshot {
+            activation_generation: 2,
+            plugins: vec![PluginStatus {
+                id: ID.into(),
+                desired_enabled: false,
+                memory: PluginMemorySnapshot::default(),
+                ..snapshot.plugins[0].clone()
+            }],
+        };
+        report.append_to(&mut disabled, now);
+        assert!(!disabled.plugins[0].desired_enabled);
+        assert_eq!(disabled.plugins[0].memory.native_ui_bytes, None);
         let mut stale = PluginStatusSnapshot {
             activation_generation: 1,
             plugins: Vec::new(),

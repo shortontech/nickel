@@ -4,10 +4,10 @@
 separate `nickel-settings` process validates this manifest and loads these
 embedded JavaScript sources through the shared JSX runtime. Permission review
 and native recovery controls remain owned by Rust. Settings persists the bundled
-package's enabled state in Nickel's activation settings. Disabling it retires
-its JSX contexts and leaves the native Plugins recovery view available to
-review and re-enable it. The shell activation registry does not yet manage the
-separate Settings process.
+package's enabled state through the shell activation registry. Disabling it
+retires its JSX contexts and leaves the native Plugins recovery view available
+to review and re-enable it. The separate Settings process follows the shell's
+desired state through its periodic memory report response.
 The Plugins page reports a measured lower bound for the Settings package's
 retained Rust component trees and cached page projections, and the separate
 process publishes that lower bound to the shell while running. Boa heap, textures,

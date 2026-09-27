@@ -5205,7 +5205,16 @@ impl WindowsRemoteControl {
                             ) {
                                 Ok(report) => {
                                     self.settings_plugin_report = Some(report);
-                                    ServerMessage::Ack
+                                    shell.as_ref().map_or_else(
+                                        || error("Windows shell is unavailable"),
+                                        |(_, state)| {
+                                            let mut snapshot = state.plugin_status_snapshot();
+                                            if let Some(report) = &self.settings_plugin_report {
+                                                report.append_to(&mut snapshot, Instant::now());
+                                            }
+                                            ServerMessage::Plugins(snapshot)
+                                        },
+                                    )
                                 }
                                 Err(message) => error(message),
                             }

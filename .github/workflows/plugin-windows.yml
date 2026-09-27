@@ -65,6 +65,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib settings_plugin_report::tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib settings_activation_is_registered_without_an_in_process_window
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --bin nickel-plugin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

@@ -1247,6 +1247,19 @@ impl NickelSession {
                     Err(message) => return protocol_error(ErrorCode::ResourceLimit, message),
                 };
                 self.settings_plugin_report = Some(report);
+                let mut snapshot = self
+                    .internal_shell
+                    .as_ref()
+                    .map(|coordinator| coordinator.plugin_status_snapshot())
+                    .or_else(|| self.plugin_status.clone())
+                    .unwrap_or_else(|| nickel_session_protocol::PluginStatusSnapshot {
+                        activation_generation: 0,
+                        plugins: Vec::new(),
+                    });
+                if let Some(report) = &self.settings_plugin_report {
+                    report.append_to(&mut snapshot, Instant::now());
+                }
+                return ServerMessage::Plugins(snapshot);
             }
             SessionCommand::SetPluginEnabled {
                 id,
