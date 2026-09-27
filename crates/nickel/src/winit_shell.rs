@@ -176,6 +176,7 @@ fn desired_output_surfaces(
     bar_on_all_displays: bool,
     primary_output: Option<&str>,
     plugin_panel_enabled: bool,
+    plugin_panel_output: nickel_core::plugins::PluginOutputScope,
 ) -> HashSet<(String, SurfaceRole)> {
     let panel_outputs = panel_outputs(output_names, bar_on_all_displays, primary_output)
         .into_iter()
@@ -196,7 +197,7 @@ fn desired_output_surfaces(
                     && (*role != SurfaceRole::Panel
                         || (cfg!(target_os = "windows")
                             && plugin_panel_enabled
-                            && (crate::plugin_panel::surface().output
+                            && (plugin_panel_output
                                 == nickel_core::plugins::PluginOutputScope::All
                                 || output_names.first() == Some(output))))
             })
@@ -532,6 +533,7 @@ pub struct WinitShell {
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
     plugin_panel_enabled: bool,
+    plugin_panel_surface: nickel_core::plugins::PluginSurface,
     #[cfg(target_os = "windows")]
     launcher_surface_size: Option<(u32, u32)>,
     next_surface_diagnostic_generation: u64,
@@ -593,6 +595,7 @@ impl WinitShell {
             primary_output_name: None,
             active_output_name: None,
             plugin_panel_enabled: crate::plugin_panel::enabled(),
+            plugin_panel_surface: crate::plugin_panel::surface().clone(),
             #[cfg(target_os = "windows")]
             launcher_surface_size: None,
             next_surface_diagnostic_generation: 0,
@@ -697,6 +700,7 @@ impl WinitShell {
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
             self.plugin_panel_enabled,
+            self.plugin_panel_surface.output,
         );
         let mut output_creation_failed = false;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
@@ -776,6 +780,7 @@ impl WinitShell {
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
             self.plugin_panel_enabled,
+            self.plugin_panel_surface.output,
         );
         // A settings policy change is authoritative immediately. Missing outputs remain
         // dormant for the retirement grace period so a transient topology snapshot or a
@@ -827,8 +832,12 @@ impl WinitShell {
                 }) {
                     surface.display_index = display_index;
                     surface.display_connected = true;
-                    let (_, x, y, width, height, _) =
-                        surface_geometry(role, geometry, self.options.panel_edge);
+                    let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                        role,
+                        geometry,
+                        self.options.panel_edge,
+                        &self.plugin_panel_surface,
+                    );
                     surface
                         .window
                         .set_outer_position(LogicalPosition::new(x, y));
@@ -880,8 +889,12 @@ impl WinitShell {
             surface.display_index = 0;
             surface.output_name.clone_from(primary_name);
             surface.display_connected = true;
-            let (_, x, y, width, height, _) =
-                surface_geometry(surface.role, primary, self.options.panel_edge);
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                surface.role,
+                primary,
+                self.options.panel_edge,
+                &self.plugin_panel_surface,
+            );
             surface
                 .window
                 .set_outer_position(LogicalPosition::new(x, y));
@@ -922,8 +935,12 @@ impl WinitShell {
             let Some(display) = displays.get(display_index).copied() else {
                 continue;
             };
-            let (_, x, y, width, height, _) =
-                surface_geometry(surface.role, display, self.options.panel_edge);
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                surface.role,
+                display,
+                self.options.panel_edge,
+                &self.plugin_panel_surface,
+            );
             surface
                 .window
                 .set_outer_position(LogicalPosition::new(x, y));
@@ -948,6 +965,18 @@ impl WinitShell {
             return Ok(false);
         }
         self.plugin_panel_enabled = enabled;
+        self.sync_display_geometry()?;
+        Ok(true)
+    }
+
+    pub fn set_plugin_panel_surface(
+        &mut self,
+        surface: &nickel_core::plugins::PluginSurface,
+    ) -> Result<bool, String> {
+        if self.plugin_panel_surface == *surface {
+            return Ok(false);
+        }
+        self.plugin_panel_surface = surface.clone();
         self.sync_display_geometry()?;
         Ok(true)
     }
@@ -1060,7 +1089,12 @@ impl WinitShell {
         if !matches!(role, SurfaceRole::Launcher | SurfaceRole::OnScreenKeyboard) {
             return;
         }
-        let (_, x, y, width, height, _) = surface_geometry(role, geometry, self.options.panel_edge);
+        let (_, x, y, width, height, _) = surface_geometry_for_panel(
+            role,
+            geometry,
+            self.options.panel_edge,
+            &self.plugin_panel_surface,
+        );
         #[cfg(target_os = "windows")]
         let (x, y, width, height) = if role == SurfaceRole::Launcher
             && let Some((preferred_width, preferred_height)) = self.launcher_surface_size
@@ -1766,8 +1800,12 @@ impl WinitShell {
             .map(|(geometry, _)| *geometry)
             .or_else(|| self.displays.first().map(|(geometry, _)| *geometry))
             .ok_or_else(|| "cannot recreate a shell surface without an output".to_owned())?;
-        let (base_title, x, y, width, height, _) =
-            surface_geometry(surface.role, geometry, self.options.panel_edge);
+        let (base_title, x, y, width, height, _) = surface_geometry_for_panel(
+            surface.role,
+            geometry,
+            self.options.panel_edge,
+            &self.plugin_panel_surface,
+        );
         let title = base_title;
         let attributes = Window::default_attributes()
             .with_title(title)
@@ -2061,8 +2099,12 @@ impl WinitShell {
         geometry: DisplayGeometry,
         output_name: &str,
     ) -> Result<(), String> {
-        let (base_title, x, y, width, height, hidden) =
-            surface_geometry(role, geometry, self.options.panel_edge);
+        let (base_title, x, y, width, height, hidden) = surface_geometry_for_panel(
+            role,
+            geometry,
+            self.options.panel_edge,
+            &self.plugin_panel_surface,
+        );
         let title = base_title;
         let session_role = match role {
             SurfaceRole::Desktop => SessionShellRole::Desktop,
@@ -2332,6 +2374,31 @@ fn translate_window_event(
         }),
         _ => None,
     }
+}
+
+fn surface_geometry_for_panel(
+    role: SurfaceRole,
+    geometry: DisplayGeometry,
+    panel_edge: PanelEdge,
+    panel: &nickel_core::plugins::PluginSurface,
+) -> (&'static str, i32, i32, u32, u32, bool) {
+    if role == SurfaceRole::Panel {
+        let width = panel.width.min(geometry.width);
+        let height = panel.height.min(geometry.height);
+        return (
+            "Nickel Plugin Panel",
+            geometry.x + geometry.width.saturating_sub(width) as i32 / 2,
+            geometry.y
+                + geometry
+                    .height
+                    .saturating_sub(height.saturating_add(panel.bottom_offset))
+                    as i32,
+            width,
+            height,
+            true,
+        );
+    }
+    surface_geometry(role, geometry, panel_edge)
 }
 
 fn surface_geometry(
@@ -2807,7 +2874,14 @@ mod tests {
     #[test]
     fn every_enabled_output_requires_its_own_wallpaper_bar_and_lock() {
         let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
-        let desired = desired_output_surfaces(&outputs, true, true, None, false);
+        let desired = desired_output_surfaces(
+            &outputs,
+            true,
+            true,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
         assert_eq!(desired.len(), 6);
         for output in outputs {
             for role in [
@@ -2824,14 +2898,61 @@ mod tests {
     }
 
     #[test]
+    fn installed_panel_geometry_uses_its_manifest() {
+        let panel = nickel_core::plugins::PluginSurface {
+            id: "main".into(),
+            kind: nickel_core::plugins::PluginSurfaceKind::Panel,
+            width: 360,
+            height: 96,
+            bottom_offset: 12,
+            output: nickel_core::plugins::PluginOutputScope::Primary,
+        };
+        let geometry = DisplayGeometry {
+            x: 100,
+            y: 200,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+        };
+        let (_, x, y, width, height, _) = super::surface_geometry_for_panel(
+            SurfaceRole::Panel,
+            geometry,
+            PanelEdge::Bottom,
+            &panel,
+        );
+        assert_eq!((x, y, width, height), (880, 1172, 360, 96));
+        let desired = desired_output_surfaces(
+            &["DP-1".into(), "DP-2".into()],
+            true,
+            true,
+            None,
+            true,
+            panel.output,
+        );
+        assert_eq!(
+            desired.contains(&("DP-1".into(), SurfaceRole::Panel)),
+            cfg!(target_os = "windows")
+        );
+        assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
+    }
+
+    #[test]
     fn hotplug_requires_output_chrome_even_when_the_existing_panel_is_healthy() {
-        let before = desired_output_surfaces(&["DP-1".to_owned()], true, false, None, false);
+        let before = desired_output_surfaces(
+            &["DP-1".to_owned()],
+            true,
+            false,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
         let after = desired_output_surfaces(
             &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
             true,
             false,
             None,
             false,
+            nickel_core::plugins::PluginOutputScope::Primary,
         );
         let added = after.difference(&before).cloned().collect::<HashSet<_>>();
         assert_eq!(
@@ -2853,6 +2974,7 @@ mod tests {
             true,
             None,
             false,
+            nickel_core::plugins::PluginOutputScope::Primary,
         );
         let reversed = desired_output_surfaces(
             &["HDMI-A-1".to_owned(), "DP-1".to_owned()],
@@ -2860,6 +2982,7 @@ mod tests {
             true,
             None,
             false,
+            nickel_core::plugins::PluginOutputScope::Primary,
         );
         assert_eq!(forward, reversed);
     }
@@ -2872,6 +2995,7 @@ mod tests {
             true,
             None,
             false,
+            nickel_core::plugins::PluginOutputScope::Primary,
         );
         assert_eq!(desired.len(), 4);
         assert!(

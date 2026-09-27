@@ -2404,6 +2404,7 @@ pub fn run() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
     let mut state = LiveShell::new()?;
+    shell.set_plugin_panel_surface(state.plugin_panel_surface())?;
     shell.set_plugin_panel_enabled(state.surface_visible(SurfaceRole::Panel))?;
     let mut feature_settings = OptionalFeatureSettings::load_default();
     feature_settings.codex_enabled = feature_settings.effective_codex_enabled();
@@ -2803,6 +2804,7 @@ pub fn run() -> Result<(), String> {
                 let opening_notification_history =
                     shortcut == platform::GlobalShortcut::ShowNotifications;
                 if state.global_shortcut(shortcut) {
+                    shell.set_plugin_panel_surface(state.plugin_panel_surface())?;
                     shell.set_plugin_panel_enabled(state.surface_visible(SurfaceRole::Panel))?;
                     sync_visibility(&mut shell, &state);
                     #[cfg(target_os = "windows")]

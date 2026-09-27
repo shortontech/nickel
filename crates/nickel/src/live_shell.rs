@@ -676,6 +676,10 @@ pub struct LiveShell {
     panel_hover_output: Option<String>,
     panel_host: nickel_ui::UiHost<TaskbarUi>,
     plugin_registry: nickel_core::plugins::PluginRegistry,
+    external_plugin_packages:
+        std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageDescriptor>,
+    plugin_panel_owner: String,
+    plugin_panel_surface: nickel_core::plugins::PluginSurface,
     plugin_activation_generation: u64,
     #[cfg(target_os = "linux")]
     last_published_plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
@@ -1272,6 +1276,28 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::run_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::taskbar_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::notification_manifest().clone())?;
+        #[cfg(test)]
+        let catalog = nickel_core::plugins::PluginCatalog::default();
+        #[cfg(not(test))]
+        let catalog =
+            nickel_core::plugins::PluginCatalog::discover_default().unwrap_or_else(|error| {
+                tracing::warn!(%error, "could not discover installed plugins");
+                nickel_core::plugins::PluginCatalog::default()
+            });
+        for failure in &catalog.failures {
+            tracing::warn!(plugin = %failure.directory, reason = %failure.reason, "invalid installed plugin");
+        }
+        let mut external_plugin_packages = std::collections::BTreeMap::new();
+        for (id, descriptor) in catalog.packages {
+            match plugin_registry.register(descriptor.manifest.clone()) {
+                Ok(()) => {
+                    external_plugin_packages.insert(id, descriptor);
+                }
+                Err(error) => {
+                    tracing::warn!(plugin = %id, %error, "installed plugin was not registered")
+                }
+            }
+        }
         // Unit tests exercise activation in parallel; core storage tests cover
         // persistence without sharing the user's activation file.
         #[cfg(test)]
@@ -1480,6 +1506,9 @@ impl LiveShell {
             panel_hover_output: None,
             panel_host,
             plugin_registry,
+            external_plugin_packages,
+            plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
+            plugin_panel_surface: crate::plugin_panel::surface().clone(),
             plugin_activation_generation: 1,
             #[cfg(target_os = "linux")]
             last_published_plugin_status: None,
@@ -1572,6 +1601,19 @@ impl LiveShell {
             keyboard_override,
             keyboard_recipient: None,
         };
+        #[cfg(not(test))]
+        for id in shell
+            .external_plugin_packages
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if plugin_activation.desired_enabled(&id, false) {
+                if let Err(error) = shell.set_plugin_enabled(&id, true) {
+                    tracing::warn!(plugin = %id, %error, "installed plugin could not start");
+                }
+            }
+        }
         shell.maybe_publish_plugin_status();
         Ok(shell)
     }
@@ -2235,7 +2277,7 @@ impl LiveShell {
                 });
                 let commands = host.commands().to_vec();
                 let _ = self.plugin_registry.record_memory(
-                    &crate::plugin_panel::manifest().id,
+                    &self.plugin_panel_owner,
                     nickel_core::plugins::PluginMemory {
                         native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
                         ..nickel_core::plugins::PluginMemory::default()
@@ -2815,6 +2857,10 @@ impl LiveShell {
         &self.plugin_registry
     }
 
+    pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
+        &self.plugin_panel_surface
+    }
+
     #[cfg(test)]
     pub(crate) fn lock_password_len(&self) -> usize {
         self.lock_host.application().password.len()
@@ -2886,8 +2932,7 @@ impl LiveShell {
         }
     }
 
-    /// Starts or retires a bundled plugin instance. Settings can call this
-    /// after reviewing its manifest and grants.
+    /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
             return Err(format!("unknown plugin {id:?}"));
@@ -2895,6 +2940,39 @@ impl LiveShell {
         if entry.desired_enabled == enabled {
             return Ok(false);
         }
+        let external_panel = if enabled {
+            if let Some(descriptor) = self.external_plugin_packages.get(id) {
+                let surfaces = &descriptor.manifest.surfaces;
+                if surfaces.len() != 1
+                    || surfaces[0].kind != nickel_core::plugins::PluginSurfaceKind::Panel
+                {
+                    return Err(
+                        "installed plugin needs exactly one panel surface in this runtime".into(),
+                    );
+                }
+                if self.plugin_panel_host.is_some() {
+                    return Err(format!(
+                        "panel is already owned by {:?}",
+                        self.plugin_panel_owner
+                    ));
+                }
+                let package = descriptor.load()?;
+                Some((
+                    crate::plugin_panel::PluginPanelApplication::from_package(&package)?,
+                    surfaces[0].clone(),
+                ))
+            } else {
+                if id == crate::plugin_panel::manifest().id && self.plugin_panel_host.is_some() {
+                    return Err(format!(
+                        "panel is already owned by {:?}",
+                        self.plugin_panel_owner
+                    ));
+                }
+                None
+            }
+        } else {
+            None
+        };
         #[cfg(not(test))]
         nickel_core::plugins::PluginActivationSettings::update_default(id, enabled)
             .map_err(|error| format!("could not save plugin activation: {error}"))?;
@@ -2902,8 +2980,10 @@ impl LiveShell {
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
         if !enabled {
-            if id == crate::plugin_panel::manifest().id {
+            if id == self.plugin_panel_owner {
                 self.plugin_panel_host = None;
+                self.plugin_panel_owner = crate::plugin_panel::manifest().id.clone();
+                self.plugin_panel_surface = crate::plugin_panel::surface().clone();
             } else if id == crate::plugin_panel::launcher_manifest().id {
                 self.plugin_launcher_host = None;
                 self.launcher_plugin_result_page = 0;
@@ -2922,13 +3002,23 @@ impl LiveShell {
             self.maybe_publish_plugin_status();
             return Ok(true);
         }
-        let started = if id == crate::plugin_panel::manifest().id {
+        let started = if let Some((application, surface)) = external_panel {
+            self.plugin_panel_host = Some(nickel_ui::UiHost::new(
+                application,
+                surface.width,
+                surface.height,
+            ));
+            self.plugin_panel_owner = id.to_owned();
+            self.plugin_panel_surface = surface;
+            Ok(())
+        } else if id == crate::plugin_panel::manifest().id {
             crate::plugin_panel::PluginPanelApplication::bundled().map(|application| {
                 self.plugin_panel_host = Some(nickel_ui::UiHost::new(
                     application,
                     crate::plugin_panel::surface().width,
                     crate::plugin_panel::surface().height,
                 ));
+                self.plugin_panel_owner = id.to_owned();
             })
         } else if id == crate::plugin_panel::launcher_manifest().id {
             self.launcher_plugin_result_page = 0;

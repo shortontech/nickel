@@ -279,12 +279,16 @@ impl InternalShellCoordinator {
                 desired.push((role, Some(output.name.clone()), size));
             }
             if self.shell.surface_visible(SurfaceRole::Panel)
-                && (crate::plugin_panel::surface().output
+                && (self.shell.plugin_panel_surface().output
                     == nickel_core::plugins::PluginOutputScope::All
                     || index == 0)
             {
                 let role = SurfaceRole::Panel;
-                let size = role_size(role, output.width, output.height, self.panel_edge);
+                let surface = self.shell.plugin_panel_surface();
+                let size = (
+                    surface.width.min(output.width),
+                    surface.height.min(output.height),
+                );
                 desired.push((role, Some(output.name.clone()), size));
             }
         }
@@ -1230,6 +1234,10 @@ impl InternalShellCoordinator {
 
     pub(crate) fn plugin_status_snapshot(&self) -> nickel_session_protocol::PluginStatusSnapshot {
         self.shell.plugin_status_snapshot()
+    }
+
+    pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
+        self.shell.plugin_panel_surface()
     }
 
     pub(crate) fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {

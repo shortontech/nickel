@@ -33,6 +33,55 @@ use super::{
 
 include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
+
+#[test]
+fn installed_panel_can_be_enabled_measured_and_disabled() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("org.example.panel");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.panel","name":"External Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"primary"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(Panel, {}, h(Text, {}, 'External panel')); }",
+    )
+    .unwrap();
+    let mut shell = LiveShell::new().unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    assert!(catalog.failures.is_empty());
+    let descriptor = catalog.packages.remove("org.example.panel").unwrap();
+    shell
+        .plugin_registry
+        .register(descriptor.manifest.clone())
+        .unwrap();
+    shell
+        .external_plugin_packages
+        .insert(descriptor.manifest.id.clone(), descriptor);
+
+    assert!(shell.set_plugin_enabled("org.example.panel", true).unwrap());
+    assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+    assert_eq!(shell.plugin_panel_surface().width, 360);
+    let commands = shell.scene(crate::winit_shell::SurfaceRole::Panel, 360, 96);
+    assert!(!commands.is_empty());
+    let status = shell.plugin_status_snapshot();
+    let panel = status
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "org.example.panel")
+        .unwrap();
+    assert!(panel.desired_enabled);
+    assert!(panel.memory.native_ui_bytes.unwrap_or(0) > 0);
+
+    assert!(
+        shell
+            .set_plugin_enabled("org.example.panel", false)
+            .unwrap()
+    );
+    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+}
 include!("tests/panel_and_cache.rs");
 include!("tests/desktop_interactions.rs");
 

@@ -5391,13 +5391,17 @@ impl NickelSession {
             let Some(scene) = shell.scene(surface.id) else {
                 continue;
             };
-            let placement = internal_shell_surface_placement(
+            let mut placement = internal_shell_surface_placement(
                 surface.role,
                 surface.output.as_deref(),
                 surface.size,
                 &outputs,
                 self.launcher_output_name.as_deref(),
             );
+            if surface.role == crate::winit_shell::SurfaceRole::Panel {
+                let offset = shell.plugin_panel_surface().bottom_offset;
+                placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - offset as i32;
+            }
             let scale = surface
                 .output
                 .as_deref()
@@ -7179,6 +7183,10 @@ impl NickelSession {
                 &outputs,
                 self.launcher_output_name.as_deref(),
             );
+            if surface.role == crate::winit_shell::SurfaceRole::Panel {
+                let offset = shell.plugin_panel_surface().bottom_offset;
+                placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - offset as i32;
+            }
             let mut resized = false;
             if matches!(
                 surface.role,
