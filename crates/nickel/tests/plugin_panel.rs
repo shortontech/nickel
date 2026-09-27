@@ -1,5 +1,8 @@
 use nickel_shell::plugin_panel::{PluginEffect, PluginPanelApplication, surface};
-use nickel_ui::{ActionKind, SemanticAction, SemanticRole, SemanticSelector, UiEvent, UiHost};
+use nickel_ui::{
+    ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueSnapshot, UiEvent,
+    UiHost,
+};
 
 #[test]
 fn bundled_jsx_panel_click_updates_visible_state() {
@@ -89,4 +92,79 @@ fn ungranted_effect_prevents_the_entire_action_batch() {
     host.perform_semantic_action(button, SemanticAction::Invoke(ActionKind::Activate));
     assert!(host.application().last_error().is_some());
     assert!(host.application_mut().take_effects().is_empty());
+}
+
+#[test]
+fn javascript_text_field_updates_state_from_native_input() {
+    let script = r#"
+        function App() {
+            const [query, setQuery] = useState('');
+            return h(Panel, null,
+                h(TextField, {id: 'query', value: query, placeholder: 'Search', onChange: setQuery}),
+                h(Text, null, query));
+        }
+    "#;
+    let mut host = UiHost::new(
+        PluginPanelApplication::new(script).expect("script loads"),
+        surface().width,
+        surface().height,
+    );
+    let field = host
+        .query_unique(&SemanticSelector::Role(SemanticRole::TextField))
+        .expect("native text field")
+        .id;
+    assert!(host.request_focus(field).changed);
+    assert!(
+        host.handle_event(UiEvent::TextInput("nickel".into()))
+            .changed
+    );
+    assert!(host.application().last_error().is_none());
+    let field = host
+        .query_unique(&SemanticSelector::Role(SemanticRole::TextField))
+        .expect("updated text field");
+    assert_eq!(
+        field.value,
+        Some(SemanticValueSnapshot::Text("nickel".into()))
+    );
+}
+
+#[test]
+fn javascript_text_fields_route_to_their_own_handlers() {
+    let script = r#"
+        function App() {
+            const [first, setFirst] = useState('');
+            const [second, setSecond] = useState('');
+            return h(Column, null,
+                h(TextField, {id: 'first', value: first, onChange: setFirst}),
+                h(TextField, {id: 'second', value: second, onChange: setSecond}));
+        }
+    "#;
+    let mut host = UiHost::new(
+        PluginPanelApplication::new(script).expect("script loads"),
+        surface().width,
+        surface().height,
+    );
+    let fields = host
+        .semantic_nodes()
+        .into_iter()
+        .filter(|node| node.role == Some(SemanticRole::TextField))
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 2);
+    host.request_focus(fields[1].clone());
+    host.handle_event(UiEvent::TextInput("second".into()));
+    let fields = host
+        .semantic_nodes()
+        .into_iter()
+        .filter(|node| node.role == Some(SemanticRole::TextField))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fields[0].value,
+        Some(SemanticValueSnapshot::Text("".into()))
+    );
+    assert_eq!(
+        fields[1].value,
+        Some(SemanticValueSnapshot::Text("second".into()))
+    );
+    assert!(host.application().last_error().is_none());
 }

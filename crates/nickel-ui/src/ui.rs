@@ -19,6 +19,39 @@ use crate::{
 
 pub type Color = u32;
 
+pub(crate) enum TextMessageMapper<Message> {
+    Function(fn(String) -> Message),
+    Closure(Arc<dyn Fn(String) -> Message>),
+}
+
+impl<Message> Clone for TextMessageMapper<Message> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Function(map) => Self::Function(*map),
+            Self::Closure(map) => Self::Closure(Arc::clone(map)),
+        }
+    }
+}
+
+impl<Message> std::fmt::Debug for TextMessageMapper<Message> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TextMessageMapper")
+    }
+}
+
+impl<Message> TextMessageMapper<Message> {
+    fn new(map: impl Fn(String) -> Message + 'static) -> Self {
+        Self::Closure(Arc::new(map))
+    }
+
+    fn call(&self, value: String) -> Message {
+        match self {
+            Self::Function(map) => map(value),
+            Self::Closure(map) => map(value),
+        }
+    }
+}
+
 /// How image pixels are mapped into their allocated viewport.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ImageFit {
@@ -1134,7 +1167,7 @@ pub struct Element<Message = String> {
     message_mapper: Option<fn(f32) -> Message>,
     scroll_extent_mapper: Option<fn(ScrollExtent) -> Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
-    text_mapper: Option<fn(String) -> Message>,
+    text_mapper: Option<TextMessageMapper<Message>>,
     option_messages: Vec<Option<Message>>,
     inline_messages: Vec<(Range<usize>, Message)>,
     children: Vec<Element<Message>>,

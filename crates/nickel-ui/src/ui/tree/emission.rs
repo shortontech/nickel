@@ -193,7 +193,7 @@ pub(super) fn emit_element<Message: Clone>(
             });
         }
     }
-    if let Some(map) = element.text_mapper
+    if let Some(map) = &element.text_mapper
         && let Kind::Text {
             value, input_value, ..
         } = &element.kind
@@ -220,7 +220,7 @@ pub(super) fn emit_element<Message: Clone>(
             bold,
             line_height,
             initial: input_value.clone().unwrap_or_else(|| value.clone()),
-            map,
+            map: map.clone(),
             secure,
             context_menu_style: crate::OverlayStyle {
                 background: match element.style.background {

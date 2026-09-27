@@ -1,8 +1,10 @@
 # Development panel
 
 This small JSX panel is the first plugin-host prototype. Nickel renders its
-`Panel`, `Row`, `Text`, `Button`, and `Dialog` tags as native `nickel-ui`
-components. The JavaScript runtime provides `h`, `useState`, and `useRef`;
+`Panel`, `Row`, `Column`, `Text`, `TextField`, `Button`, and `Dialog` tags as
+native `nickel-ui` components. Each text field routes `onChange(value)` to
+its own JavaScript handler. The JavaScript runtime provides `h`, `useState`,
+and `useRef`;
 React is not loaded. `plugin.json` declares the entry, surface geometry,
 output scope, and granted shell actions.
 

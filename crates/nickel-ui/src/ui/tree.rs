@@ -73,7 +73,7 @@ struct TextInputRegion<Message> {
     bold: bool,
     line_height: f32,
     initial: String,
-    map: fn(String) -> Message,
+    map: TextMessageMapper<Message>,
     secure: bool,
     context_menu_style: crate::OverlayStyle,
 }
@@ -2106,7 +2106,7 @@ impl<Message: Clone> UiFrame<Message> {
                 .iter()
                 .rev()
                 .find(|region| &region.id == id)
-                .map(|region| (region.map)(value)),
+                .map(|region| region.map.call(value)),
             _ => None,
         }
         .ok_or(SemanticActionError::ActionUnavailable)?;
@@ -3524,7 +3524,9 @@ impl<Message: Clone> UiFrame<Message> {
                     if let Some(input) = self.text_inputs.iter().find(|input| input.id == id) {
                         let editor = state.editor(id, &input.initial);
                         editor.insert(&text);
-                        outcome.messages.push((input.map)(editor.text().to_owned()));
+                        outcome
+                            .messages
+                            .push(input.map.call(editor.text().to_owned()));
                         state.show_caret();
                     }
                     Invalidation::Layout
@@ -3749,7 +3751,7 @@ impl<Message: Clone> UiFrame<Message> {
         let input = self.text_inputs.iter().find(|input| input.id == id)?;
         let editor = state.editor(id, &input.initial);
         edit(editor);
-        let message = (input.map)(editor.text().to_owned());
+        let message = input.map.call(editor.text().to_owned());
         state.show_caret();
         Some(message)
     }
@@ -3882,7 +3884,9 @@ impl<Message: Clone> UiFrame<Message> {
             clipboard_limit,
         );
         if effect.changed {
-            outcome.messages.push((input.map)(editor.text().to_owned()));
+            outcome
+                .messages
+                .push(input.map.call(editor.text().to_owned()));
         }
         outcome.clipboard_text = effect.clipboard_text;
         state.clipboard_rejected |= effect.clipboard_rejected;
@@ -3917,7 +3921,9 @@ impl<Message: Clone> UiFrame<Message> {
             clipboard_limit,
         );
         if effect.changed {
-            outcome.messages.push((input.map)(editor.text().to_owned()));
+            outcome
+                .messages
+                .push(input.map.call(editor.text().to_owned()));
         }
         outcome.clipboard_text = effect.clipboard_text;
         state.clipboard_rejected |= effect.clipboard_rejected;

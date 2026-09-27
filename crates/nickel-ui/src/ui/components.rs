@@ -1424,7 +1424,7 @@ impl<Message> TextField<Message> {
         if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
             *input_value = Some(value.to_owned());
         }
-        field.text.0.text_mapper = Some(map);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
         field
     }
 
@@ -1432,6 +1432,29 @@ impl<Message> TextField<Message> {
         value: &str,
         placeholder: impl Into<String>,
         map: fn(String) -> Message,
+    ) -> Self {
+        let mut field = Self::on_change_with_placeholder_mapped_internal(value, placeholder);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    /// Map edits with a field-specific callback, useful for dynamic component trees.
+    pub fn on_change_with_placeholder_mapped(
+        value: &str,
+        placeholder: impl Into<String>,
+        map: impl Fn(String) -> Message + 'static,
+    ) -> Self
+    where
+        Message: 'static,
+    {
+        let mut field = Self::on_change_with_placeholder_mapped_internal(value, placeholder);
+        field.text.0.text_mapper = Some(TextMessageMapper::new(map));
+        field
+    }
+
+    fn on_change_with_placeholder_mapped_internal(
+        value: &str,
+        placeholder: impl Into<String>,
     ) -> Self {
         let displayed = if value.is_empty() {
             placeholder.into()
@@ -1446,7 +1469,6 @@ impl<Message> TextField<Message> {
         if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
             *input_value = Some(value.to_owned());
         }
-        field.text.0.text_mapper = Some(map);
         field
     }
 
@@ -1468,7 +1490,7 @@ impl<Message> TextField<Message> {
             *input_value = Some(value.to_owned());
             *input_mask = Some(mask);
         }
-        field.text.0.text_mapper = Some(map);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
         field
     }
 
@@ -1497,7 +1519,7 @@ impl<Message> TextField<Message> {
             *input_value = Some(value.to_owned());
             *input_mask = Some(mask);
         }
-        field.text.0.text_mapper = Some(map);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
         field
     }
 

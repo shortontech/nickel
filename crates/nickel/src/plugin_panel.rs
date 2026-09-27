@@ -6,8 +6,9 @@ use std::sync::OnceLock;
 use boa_engine::{Context, Source};
 use nickel_core::plugins::{PluginCapability, PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_ui::{
-    AnyView, Column, Container, FrameOverlay, Insets, OverlayAnchor, OverlayId, OverlayStyle, Row,
-    SemanticRole, Size, Spacer, Text, TransientSurface, UiId, ViewContext,
+    AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Insets, OverlayAnchor,
+    OverlayId, OverlayStyle, Row, SemanticRole, Size, Spacer, Text, TextField as UiTextField,
+    TransientSurface, UiId, ViewContext,
 };
 use serde_json::Value;
 
@@ -44,7 +45,9 @@ pub fn enabled() -> bool {
 const BOOTSTRAP: &str = r#"
 const Panel = 'panel';
 const Row = 'row';
+const Column = 'column';
 const Text = 'text';
+const TextField = 'text-field';
 const Button = 'button';
 const Dialog = 'dialog';
 let __hooks = [];
@@ -77,9 +80,11 @@ function useRef(initial) {
 
 function h(kind, props, ...children) {
     if (typeof kind === 'function') return kind({...props, children});
-    const action = typeof props?.onClick === 'function' ? __handlers.push(props.onClick) - 1 : null;
+    const handler = typeof props?.onClick === 'function' ? props.onClick : props?.onChange;
+    const action = typeof handler === 'function' ? __handlers.push(handler) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         width: props?.width, height: props?.height, background: props?.background,
+        value: props?.value, placeholder: props?.placeholder,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
 }
 
@@ -89,9 +94,9 @@ function __nickelRender() {
     return JSON.stringify(App());
 }
 
-function __nickelDispatch(action) {
+function __nickelDispatch(action, value) {
     const handler = __handlers[action];
-    if (handler) handler();
+    if (handler) handler(value);
     return __nickelRender();
 }
 "#;
@@ -103,7 +108,14 @@ enum PanelNode {
         background: u32,
     },
     Row(Vec<Self>),
+    Column(Vec<Self>),
     Text(String),
+    TextField {
+        id: String,
+        value: String,
+        placeholder: String,
+        action: usize,
+    },
     Button {
         id: String,
         label: String,
@@ -130,7 +142,7 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
-            "panel" | "row" => {
+            "panel" | "row" | "column" => {
                 let children = children
                     .iter()
                     .filter(|value| !value.is_null())
@@ -145,11 +157,35 @@ impl PanelNode {
                         children,
                         background,
                     })
-                } else {
+                } else if kind == "row" {
                     Ok(Self::Row(children))
+                } else {
+                    Ok(Self::Column(children))
                 }
             }
             "text" => Ok(Self::Text(child_text(children)?)),
+            "text-field" => Ok(Self::TextField {
+                id: value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or("text field needs an id")?
+                    .to_owned(),
+                value: value
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                placeholder: value
+                    .get("placeholder")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                action: value
+                    .get("action")
+                    .and_then(Value::as_u64)
+                    .ok_or("text field needs an onChange handler")?
+                    as usize,
+            }),
             "button" => Ok(Self::Button {
                 id: value
                     .get("id")
@@ -190,7 +226,7 @@ impl PanelNode {
         }
     }
 
-    fn view(&self) -> AnyView<usize> {
+    fn view(&self) -> AnyView<PluginMessage> {
         match self {
             Self::Panel {
                 children,
@@ -218,18 +254,39 @@ impl PanelNode {
                 }
                 AnyView::new(row)
             }
+            Self::Column(children) => {
+                let mut column = Column::new().fill_width();
+                for child in children {
+                    column = column.child(child.view());
+                }
+                AnyView::new(column)
+            }
             Self::Text(text) => AnyView::new(
                 Container::new()
                     .height(48.0)
                     .padding(Insets::all(10.0))
                     .child(Text::new(text).color(0xf4f6fa).scale(1.0)),
             ),
+            Self::TextField {
+                id,
+                value,
+                placeholder,
+                action,
+            } => AnyView::new(
+                UiTextField::on_change_with_placeholder_mapped(value, placeholder, {
+                    let action = *action;
+                    move |value| PluginMessage::Text(action, value)
+                })
+                .id(id.clone())
+                .accessibility_label(placeholder)
+                .height(44.0),
+            ),
             Self::Button { id, label, action } => AnyView::new(
                 Container::new()
                     .id(id.clone())
                     .accessibility_label(label)
                     .semantic_role(SemanticRole::Button)
-                    .message(*action)
+                    .message(PluginMessage::Click(*action))
                     .height(42.0)
                     .padding(Insets::all(10.0))
                     .background(0x6645_5675)
@@ -243,7 +300,7 @@ impl PanelNode {
     fn dialog(&self) -> Option<&Self> {
         match self {
             Self::Dialog { .. } => Some(self),
-            Self::Panel { children, .. } | Self::Row(children) => {
+            Self::Panel { children, .. } | Self::Row(children) | Self::Column(children) => {
                 children.iter().find_map(Self::dialog)
             }
             _ => None,
@@ -274,6 +331,12 @@ pub struct PluginPanelApplication {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PluginMessage {
+    Click(usize),
+    Text(usize, String),
 }
 
 impl PluginPanelApplication {
@@ -335,10 +398,17 @@ fn evaluate_tree(context: &mut Context, expression: &str) -> Result<PanelNode, S
 }
 
 impl nickel_ui::Application for PluginPanelApplication {
-    type Message = usize;
+    type Message = PluginMessage;
 
     fn update(&mut self, message: Self::Message) {
-        let rendered = evaluate_tree(&mut self.context, &format!("__nickelDispatch({message})"));
+        let expression = match message {
+            PluginMessage::Click(action) => format!("__nickelDispatch({action})"),
+            PluginMessage::Text(action, value) => {
+                let encoded = serde_json::to_string(&value).expect("string serialization");
+                format!("__nickelDispatch({action}, {encoded})")
+            }
+        };
+        let rendered = evaluate_tree(&mut self.context, &expression);
         let effects = self
             .context
             .eval(Source::from_bytes("__nickelTakeEffects()"))
@@ -467,7 +537,7 @@ mod tests {
     fn bundled_panel_updates_from_javascript_click() {
         let mut panel = PluginPanelApplication::bundled().expect("bundled plugin loads");
         assert!(format!("{:?}", panel.node).contains("Count: 0"));
-        panel.update(0);
+        panel.update(PluginMessage::Click(0));
         assert!(format!("{:?}", panel.node).contains("Count: 1"));
         assert!(panel.last_error().is_none());
     }
