@@ -83,7 +83,7 @@ pub fn notification_enabled() -> bool {
 }
 
 pub fn taskbar_enabled() -> bool {
-    std::env::var_os("NICKEL_DEV_PLUGIN_TASKBAR").is_some()
+    true
 }
 
 pub fn launcher_enabled() -> bool {

@@ -1011,8 +1011,48 @@
     }
 
     #[test]
+    fn plugin_taskbar_context_menu_uses_the_jsx_item_anchor() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::taskbar_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        shell.set_plugin_enabled(id, true).unwrap();
+        shell.windows = vec![OpenWindow {
+            id: WindowId(41),
+            application_id: Some(ApplicationId::new("org.kde.dolphin")),
+            active: true,
+            title: "Files".into(),
+            state: crate::model::WindowState::default(),
+        }];
+        shell.panel_origin_x = 1_920;
+        shell.scene(SurfaceRole::Taskbar, 1_280, 56);
+        let index = shell
+            .panel_groups()
+            .iter()
+            .position(|group| group.windows.iter().any(|window| window.id == WindowId(41)))
+            .unwrap();
+        let item = super::taskbar_plugin_control_bounds(
+            shell.plugin_taskbar_host.as_ref().unwrap(),
+            &format!("taskbar-item-{index}"),
+        )
+        .unwrap();
+        let expected_x = shell.panel_origin_x + item.origin.x.round() as i32;
+        let center = item.origin.x + item.size.width / 2.0;
+        assert!(shell.panel_pointer_moved(center, 1_280));
+        assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Task(index)));
+        assert!(shell.panel_click(center, 1_280, true));
+        assert_eq!(shell.window_menu_anchor_x, Some(expected_x));
+        assert_eq!(
+            shell.application_menu_target.as_ref().map(|target| target.windows.clone()),
+            Some(vec![WindowId(41)])
+        );
+    }
+
+    #[test]
     fn taskbar_secondary_click_opens_application_menu_for_captured_group_at_item_anchor() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+            .unwrap();
         shell
             .launcher
             .set_preferences(LauncherPreferences::default());
@@ -1116,6 +1156,9 @@
             crate::session_host::default_session_host(),
         ));
         let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+            .unwrap();
         shell
             .launcher
             .set_preferences(LauncherPreferences::default());
@@ -1244,6 +1287,7 @@
     #[test]
     fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
         let mut shell = LiveShell::new().unwrap();
+        shell.set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false).unwrap();
         let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
         shell.set_panel_output("left");
         let target = shell

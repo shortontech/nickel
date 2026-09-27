@@ -926,6 +926,18 @@ fn taskbar_plugin_data(
     (projection, images)
 }
 
+fn taskbar_plugin_control_bounds(
+    host: &nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    control: &str,
+) -> Option<nickel_ui::Rect> {
+    let mut matches = host
+        .accessibility_nodes()
+        .iter()
+        .filter(|node| node.interactive && node.id.as_str().rsplit('/').next() == Some(control));
+    let bounds = matches.next()?.rect;
+    matches.next().is_none().then_some(bounds)
+}
+
 fn launcher_plugin_images(
     launcher: &Launcher,
     icons: &mut LauncherIconCache,
@@ -4283,13 +4295,9 @@ impl LiveShell {
         }
         let anchor_bounds =
             if self.plugin_taskbar_host.is_some() && matches!(action, TaskbarAction::Control) {
-                self.plugin_taskbar_host.as_ref().and_then(|host| {
-                    host.query_unique(&nickel_ui::SemanticSelector::Id(nickel_ui::UiId::new(
-                        "taskbar-control",
-                    )))
-                    .ok()
-                    .map(|target| target.bounds)
-                })
+                self.plugin_taskbar_host
+                    .as_ref()
+                    .and_then(|host| taskbar_plugin_control_bounds(host, "taskbar-control"))
             } else {
                 self.panel_host
                     .semantic_targets_for_message(&action)
@@ -4355,11 +4363,19 @@ impl LiveShell {
                 self.application_menu_target = Some(target);
                 self.application_menu_host = None;
                 let x = self
-                    .panel_host
-                    .semantic_targets_for_message(&TaskbarAction::Task(index))
-                    .into_iter()
-                    .next()
-                    .map(|target| target.bounds.origin.x.round() as i32)
+                    .plugin_taskbar_host
+                    .as_ref()
+                    .and_then(|host| {
+                        taskbar_plugin_control_bounds(host, &format!("taskbar-item-{index}"))
+                            .map(|bounds| bounds.origin.x.round() as i32)
+                    })
+                    .or_else(|| {
+                        self.panel_host
+                            .semantic_targets_for_message(&TaskbarAction::Task(index))
+                            .into_iter()
+                            .next()
+                            .map(|target| target.bounds.origin.x.round() as i32)
+                    })
                     .unwrap_or((PANEL_ITEM_WIDTH * (index + 1) as f32).round() as i32);
                 self.window_menu_anchor_x = Some(self.panel_origin_x + x);
                 self.window_menu_anchor_y = Some(self.panel_origin_y);
@@ -4514,12 +4530,7 @@ impl LiveShell {
                     self.plugin_taskbar_hosts.get(output)
                 };
                 let bounds = if let Some(plugin_host) = plugin_host {
-                    plugin_host
-                        .query_unique(&nickel_ui::SemanticSelector::Id(nickel_ui::UiId::new(
-                            format!("taskbar-item-{index}"),
-                        )))
-                        .ok()?
-                        .bounds
+                    taskbar_plugin_control_bounds(plugin_host, &format!("taskbar-item-{index}"))?
                 } else {
                     host.semantic_targets_for_message(&TaskbarAction::Task(index))
                         .into_iter()
@@ -4540,12 +4551,7 @@ impl LiveShell {
                 } else {
                     self.plugin_taskbar_hosts.get(output)
                 } {
-                    let bounds = plugin_host
-                        .query_unique(&nickel_ui::SemanticSelector::Id(nickel_ui::UiId::new(
-                            "taskbar-control",
-                        )))
-                        .ok()?
-                        .bounds;
+                    let bounds = taskbar_plugin_control_bounds(plugin_host, "taskbar-control")?;
                     return Some(ResolvedShellTarget {
                         role: ShellRole::Panel,
                         output: output.clone(),
@@ -4671,7 +4677,7 @@ impl LiveShell {
                 .as_ref()
                 .and_then(|host| host.inspect().pointer_hover)
                 .and_then(|id| {
-                    let id = id.as_str();
+                    let id = id.as_str().rsplit('/').next()?;
                     if id == "taskbar-launcher" {
                         Some(TaskbarHover::Launcher)
                     } else if id == "taskbar-control" {

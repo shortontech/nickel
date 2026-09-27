@@ -162,6 +162,17 @@ impl LiveShell {
                 }
             }
             SurfaceRole::Taskbar => {
+                if self.plugin_taskbar_host.is_some() {
+                    let host = if output == self.panel_output.as_deref() {
+                        self.plugin_taskbar_host.as_ref()
+                    } else {
+                        self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
+                    }
+                    .ok_or("panel plugin viewport is unavailable")?;
+                    return Ok(observe_only(project(host, |_| {
+                        RemoteActionDisposition::Unavailable
+                    })?));
+                }
                 if output == self.panel_output.as_deref() {
                     project(&self.panel_host, panel_activate)
                 } else {

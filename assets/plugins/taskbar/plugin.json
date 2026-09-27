@@ -1,7 +1,7 @@
 {
   "api_version": 1,
   "id": "org.nickel.taskbar",
-  "name": "Nickel Taskbar Preview",
+  "name": "Nickel Taskbar",
   "entry": "main.js",
   "surfaces": [
     {"id": "main", "kind": "panel", "width": 1920, "height": 56, "output": "all"}

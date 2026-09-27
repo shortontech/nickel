@@ -263,6 +263,7 @@
     #[test]
     fn panel_host_owns_pointer_and_accessibility_targets() {
         let mut shell = LiveShell::new().unwrap();
+        shell.set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false).unwrap();
         let commands = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         assert!(!commands.is_empty());
 
@@ -293,6 +294,7 @@
     #[test]
     fn panel_scene_rebuilds_when_persisted_appearance_changes() {
         let mut shell = LiveShell::new().unwrap();
+        shell.set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false).unwrap();
         let before_commands = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let before = shell.panel_change_token;
         let light = ThemePalette::from_appearance(Appearance {
@@ -611,6 +613,7 @@
     #[test]
     fn panel_hover_treats_semantic_ids_as_opaque() {
         let mut shell = LiveShell::new().unwrap();
+        shell.set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false).unwrap();
         shell.tray = vec![TrayItem {
             id: "opaque/panel-task-999".into(),
             title: "Opaque tray target".into(),

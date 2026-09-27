@@ -352,6 +352,7 @@ fn javascript_text_fields_route_to_their_own_handlers() {
 fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
     let projection = LauncherPluginProjection {
         query: String::new(),
+        status: None,
         dashboard_visible: true,
         view: LauncherView::Favorites,
         result_page: 0,
@@ -525,6 +526,7 @@ fn launcher_dashboard_scrolls_without_dispatching_a_plugin_handler() {
         .collect();
     let application = PluginPanelApplication::launcher_with_projection(&LauncherPluginProjection {
         query: String::new(),
+        status: None,
         dashboard_visible: true,
         view: LauncherView::Favorites,
         result_page: 0,
@@ -557,6 +559,7 @@ fn launcher_dashboard_scrolls_without_dispatching_a_plugin_handler() {
 fn launcher_dashboard_requests_projects_settings_account_and_logout() {
     let application = PluginPanelApplication::launcher_with_projection(&LauncherPluginProjection {
         query: String::new(),
+        status: None,
         dashboard_visible: true,
         view: LauncherView::Favorites,
         result_page: 0,
@@ -640,6 +643,7 @@ fn launcher_dashboard_requests_projects_settings_account_and_logout() {
 fn launcher_plugin_switches_dashboard_views_from_host_projection() {
     let mut projection = LauncherPluginProjection {
         query: String::new(),
+        status: None,
         dashboard_visible: true,
         view: LauncherView::Favorites,
         result_page: 0,
@@ -711,6 +715,7 @@ fn launcher_plugin_switches_dashboard_views_from_host_projection() {
 fn launcher_plugin_pages_search_results_through_typed_requests() {
     let mut projection = LauncherPluginProjection {
         query: "app".into(),
+        status: None,
         dashboard_visible: false,
         view: LauncherView::Applications,
         result_page: 0,
@@ -787,6 +792,7 @@ fn launcher_plugin_pages_search_results_through_typed_requests() {
 fn launcher_plugin_pages_dashboard_applications() {
     let projection = LauncherPluginProjection {
         query: String::new(),
+        status: None,
         dashboard_visible: true,
         view: LauncherView::Applications,
         result_page: 0,
