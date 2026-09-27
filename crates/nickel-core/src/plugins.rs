@@ -594,6 +594,14 @@ pub struct PluginSurface {
     pub output: PluginOutputScope,
 }
 
+/// Stable manifest identity for a plugin-owned surface. The host pairs this
+/// with an output instance when it creates a native presentation slot.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PluginSurfaceKey {
+    pub plugin_id: String,
+    pub surface_id: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginSurfaceKind {

@@ -450,6 +450,7 @@ fn queue_shell_input(pending: &mut VecDeque<ShellEvent>, surface: SurfaceId, eve
 pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
+    plugin: Option<nickel_core::plugins::PluginSurfaceKey>,
     application_id: String,
     display_index: usize,
     output_name: String,
@@ -979,6 +980,17 @@ impl WinitShell {
         if self.plugin_panel_owner == owner && self.plugin_panel_surface == *surface {
             return Ok(false);
         }
+        let next_key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: owner.to_owned(),
+            surface_id: surface.id.clone(),
+        };
+        if self.surfaces.iter().any(|existing| {
+            existing.role == SurfaceRole::Panel && existing.plugin.as_ref() != Some(&next_key)
+        }) {
+            self.surfaces
+                .retain(|existing| existing.role != SurfaceRole::Panel);
+            self.rebuild_surface_indices();
+        }
         #[cfg(target_os = "linux")]
         for existing in self
             .surfaces
@@ -1343,6 +1355,7 @@ impl WinitShell {
         self.surfaces.push(ShellSurface {
             id,
             role: SurfaceRole::CodexChat,
+            plugin: None,
             application_id: application_id.to_owned(),
             display_index: 0,
             output_name: String::new(),
@@ -1414,6 +1427,7 @@ impl WinitShell {
         self.surfaces.push(ShellSurface {
             id,
             role: SurfaceRole::TrustedControl,
+            plugin: None,
             application_id: "nickel.trusted-remote-control".to_owned(),
             display_index,
             output_name: output_name.to_owned(),
@@ -2285,6 +2299,10 @@ impl WinitShell {
         self.surfaces.push(ShellSurface {
             id,
             role,
+            plugin: (role == SurfaceRole::Panel).then(|| nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: self.plugin_panel_owner.clone(),
+                surface_id: self.plugin_panel_surface.id.clone(),
+            }),
             application_id,
             display_index,
             output_name: output_name.to_owned(),

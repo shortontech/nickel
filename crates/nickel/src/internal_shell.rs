@@ -62,6 +62,7 @@ pub(crate) struct InternalOutput {
 pub(crate) struct InternalShellSurface {
     pub id: InternalSurfaceId,
     pub role: SurfaceRole,
+    pub plugin: Option<nickel_core::plugins::PluginSurfaceKey>,
     pub output: Option<String>,
     pub size: (u32, u32),
     pub scene_generation: u64,
@@ -101,7 +102,14 @@ pub(crate) struct InternalShellCoordinator {
     shell: Box<LiveShell>,
     surfaces: InternalSurfaceSet,
     entries: Vec<InternalShellSurface>,
-    indices: HashMap<(SurfaceRole, Option<String>), usize>,
+    indices: HashMap<
+        (
+            SurfaceRole,
+            Option<nickel_core::plugins::PluginSurfaceKey>,
+            Option<String>,
+        ),
+        usize,
+    >,
     panel_edge: PanelEdge,
     bar_on_all_displays: bool,
     file_windows: nickel_file::FileWindowCoordinator,
@@ -271,12 +279,12 @@ impl InternalShellCoordinator {
         for (index, output) in outputs.iter().enumerate() {
             for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
                 let size = role_size(role, output.width, output.height, self.panel_edge);
-                desired.push((role, Some(output.name.clone()), size));
+                desired.push((role, None, Some(output.name.clone()), size));
             }
             if self.bar_on_all_displays || index == 0 {
                 let role = SurfaceRole::Taskbar;
                 let size = role_size(role, output.width, output.height, self.panel_edge);
-                desired.push((role, Some(output.name.clone()), size));
+                desired.push((role, None, Some(output.name.clone()), size));
             }
             if self.shell.surface_visible(SurfaceRole::Panel)
                 && (self.shell.plugin_panel_surface().output
@@ -289,7 +297,15 @@ impl InternalShellCoordinator {
                     surface.width.min(output.width),
                     surface.height.min(output.height),
                 );
-                desired.push((role, Some(output.name.clone()), size));
+                desired.push((
+                    role,
+                    Some(nickel_core::plugins::PluginSurfaceKey {
+                        plugin_id: self.shell.plugin_panel_owner().to_owned(),
+                        surface_id: surface.id.clone(),
+                    }),
+                    Some(output.name.clone()),
+                    size,
+                ));
             }
         }
         if let Some(primary) = outputs.first() {
@@ -310,23 +326,28 @@ impl InternalShellCoordinator {
                 } else {
                     maximum
                 };
-                desired.push((role, None, size));
+                desired.push((role, None, None, size));
             }
         }
 
         let mut existing = std::mem::take(&mut self.entries)
             .into_iter()
-            .map(|surface| ((surface.role, surface.output.clone()), surface))
+            .map(|surface| {
+                (
+                    (surface.role, surface.plugin.clone(), surface.output.clone()),
+                    surface,
+                )
+            })
             .collect::<HashMap<_, _>>();
         self.indices.clear();
-        for (role, output, size) in desired {
-            let key = (role, output.clone());
+        for (role, plugin, output, size) in desired {
+            let key = (role, plugin.clone(), output.clone());
             if let Some(mut surface) = existing.remove(&key) {
                 surface.size = size;
                 self.indices.insert(key, self.entries.len());
                 self.entries.push(surface);
             } else {
-                self.insert(role, output, size);
+                self.insert(role, plugin, output, size);
             }
         }
         for surface in existing.into_values() {
@@ -343,19 +364,30 @@ impl InternalShellCoordinator {
         changed
     }
 
-    fn insert(&mut self, role: SurfaceRole, output: Option<String>, size: (u32, u32)) {
+    fn insert(
+        &mut self,
+        role: SurfaceRole,
+        plugin: Option<nickel_core::plugins::PluginSurfaceKey>,
+        output: Option<String>,
+        size: (u32, u32),
+    ) {
         let id = self.surfaces.insert(
             ShellSurfaceSlot {
-                title: format!("Nickel {role:?}"),
+                title: plugin.as_ref().map_or_else(
+                    || format!("Nickel {role:?}"),
+                    |plugin| format!("Nickel {}:{}", plugin.plugin_id, plugin.surface_id),
+                ),
             },
             size.0,
             size.1,
         );
         let index = self.entries.len();
-        self.indices.insert((role, output.clone()), index);
+        self.indices
+            .insert((role, plugin.clone(), output.clone()), index);
         self.entries.push(InternalShellSurface {
             id,
             role,
+            plugin,
             output,
             size,
             scene_generation: 0,
@@ -460,9 +492,22 @@ impl InternalShellCoordinator {
         role: SurfaceRole,
         output: Option<&str>,
     ) -> Option<&InternalShellSurface> {
-        let key = (role, output.map(str::to_owned));
+        self.entries
+            .iter()
+            .find(|entry| entry.role == role && entry.output.as_deref() == output)
+    }
+
+    pub fn plugin_surface(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: &str,
+    ) -> Option<&InternalShellSurface> {
         self.indices
-            .get(&key)
+            .get(&(
+                SurfaceRole::Panel,
+                Some(key.clone()),
+                Some(output.to_owned()),
+            ))
             .and_then(|index| self.entries.get(*index))
     }
 
@@ -1451,6 +1496,35 @@ mod tests {
     fn coordinator() -> InternalShellCoordinator {
         InternalShellCoordinator::new(Arc::new(TestHost), PanelEdge::Bottom)
             .expect("headless shell coordinator")
+    }
+
+    #[test]
+    fn plugin_slots_on_the_same_output_keep_distinct_identities() {
+        let mut shell = coordinator();
+        let first = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: "org.example.clock".into(),
+            surface_id: "main".into(),
+        };
+        let second = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: "org.example.mail".into(),
+            surface_id: "main".into(),
+        };
+        shell.insert(
+            SurfaceRole::Panel,
+            Some(first.clone()),
+            Some("test".into()),
+            (300, 48),
+        );
+        shell.insert(
+            SurfaceRole::Panel,
+            Some(second.clone()),
+            Some("test".into()),
+            (360, 64),
+        );
+        let clock = shell.plugin_surface(&first, "test").unwrap();
+        let mail = shell.plugin_surface(&second, "test").unwrap();
+        assert_ne!(clock.id, mail.id);
+        assert_eq!((clock.size, mail.size), ((300, 48), (360, 64)));
     }
 
     #[test]
