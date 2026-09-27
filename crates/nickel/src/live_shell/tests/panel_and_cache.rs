@@ -494,9 +494,9 @@
         );
         let _ = shell.window_menu_scene();
         let host = shell
-            .application_menu_host
+            .application_menu_plugin_host
             .as_ref()
-            .expect("application-only task menu host");
+            .expect("JSX application-only task menu host");
         assert!(!host.accessibility_nodes().iter().any(|node| {
             node.label.as_deref() == Some("New Window")
         }));

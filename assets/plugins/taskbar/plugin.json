@@ -15,6 +15,7 @@
     "windows-focus",
     "windows-context",
     "applications-launch",
+    "applications-pin",
     "tray-read",
     "tray-activate",
     "tray-context"

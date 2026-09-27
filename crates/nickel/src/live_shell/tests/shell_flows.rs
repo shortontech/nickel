@@ -1048,6 +1048,128 @@
     }
 
     #[test]
+    fn plugin_taskbar_menu_pins_the_captured_application_and_retires() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        preferences_fixture(&mut shell, directory.path().join("launcher.json"));
+        let application_id = ApplicationId::new("org.nickel.menu-test");
+        shell.windows = vec![OpenWindow {
+            id: WindowId(41),
+            application_id: Some(application_id.clone()),
+            active: true,
+            title: "Menu test".into(),
+            state: crate::model::WindowState::default(),
+        }];
+        shell.scene(SurfaceRole::Taskbar, 1_280, 56);
+        let index = shell
+            .panel_groups()
+            .iter()
+            .position(|group| group.windows.iter().any(|window| window.id == WindowId(41)))
+            .unwrap();
+        let bounds = super::taskbar_plugin_control_bounds(
+            shell.plugin_taskbar_host.as_ref().unwrap(),
+            &format!("taskbar-item-{index}"),
+        )
+        .unwrap();
+        assert!(shell.panel_click(bounds.origin.x + bounds.size.width / 2.0, 1_280, true));
+        let menu_height = shell.window_context_menu_height() as u32;
+        assert!(!shell
+            .scene(SurfaceRole::WindowContextMenu, super::MENU_WIDTH as u32, menu_height)
+            .is_empty());
+        assert!(shell.application_menu_host.is_none());
+        let taskbar_only = shell.plugin_taskbar_memory.values().copied().sum::<u64>();
+        assert!(
+            shell
+                .plugin_registry
+                .get(&crate::plugin_panel::taskbar_manifest().id)
+                .unwrap()
+                .memory
+                .native_ui_bytes
+                .unwrap()
+                > taskbar_only
+        );
+        let menu = shell.application_menu_plugin_host.as_ref().unwrap();
+        let pin = menu
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Pin to Nickel Bar".into(),
+            })
+            .unwrap();
+        assert!(shell.window_menu_host_event(
+            HostEvent::Ui(UiEvent::AccessibilityActivate(pin.id)),
+            super::MENU_WIDTH as u32,
+            menu_height,
+        ));
+        assert!(shell.launcher.is_pinned(application_id.as_str()));
+        assert!(shell.application_menu_target.is_none());
+        assert!(shell.application_menu_plugin_host.is_none());
+        assert_eq!(
+            shell
+                .plugin_registry
+                .get(&crate::plugin_panel::taskbar_manifest().id)
+                .unwrap()
+                .memory
+                .native_ui_bytes,
+            Some(taskbar_only)
+        );
+    }
+
+    #[test]
+    fn plugin_taskbar_menu_close_all_uses_captured_window_authority() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.windows = vec![OpenWindow {
+            id: WindowId(41),
+            application_id: Some(ApplicationId::new("org.nickel.menu-close")),
+            active: true,
+            title: "Close test".into(),
+            state: crate::model::WindowState::default(),
+        }];
+        shell.scene(SurfaceRole::Taskbar, 1_280, 56);
+        let index = shell
+            .panel_groups()
+            .iter()
+            .position(|group| group.windows.iter().any(|window| window.id == WindowId(41)))
+            .unwrap();
+        let bounds = super::taskbar_plugin_control_bounds(
+            shell.plugin_taskbar_host.as_ref().unwrap(),
+            &format!("taskbar-item-{index}"),
+        )
+        .unwrap();
+        shell.panel_click(bounds.origin.x + bounds.size.width / 2.0, 1_280, true);
+        let menu_height = shell.window_context_menu_height() as u32;
+        shell.scene(
+            SurfaceRole::WindowContextMenu,
+            super::MENU_WIDTH as u32,
+            menu_height,
+        );
+        let close = shell
+            .application_menu_plugin_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Close all windows".into(),
+            })
+            .unwrap();
+        assert!(close.bounds.origin.y + close.bounds.size.height <= menu_height as f32);
+        shell.window_menu_host_event(
+            HostEvent::Ui(UiEvent::AccessibilityActivate(close.id)),
+            super::MENU_WIDTH as u32,
+            menu_height,
+        );
+        assert!(host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::WindowAction {
+                window: WindowId(41),
+                action: crate::platform::WindowAction::Close,
+            }
+        )));
+    }
+
+    #[test]
     fn taskbar_secondary_click_opens_application_menu_for_captured_group_at_item_anchor() {
         let mut shell = LiveShell::new().unwrap();
         shell

@@ -2,8 +2,8 @@ use nickel_core::plugins::PluginPackage;
 use nickel_shell::plugin_panel::{
     LauncherPluginProject, LauncherPluginProjection, LauncherPluginResult, LauncherView,
     NotificationPluginAction, NotificationPluginItem, NotificationPluginProjection, PluginEffect,
-    PluginMessage, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
-    TaskbarPluginTrayItem, surface,
+    PluginMessage, PluginPanelApplication, TaskbarMenuPluginProjection, TaskbarPluginItem,
+    TaskbarPluginProjection, TaskbarPluginTrayItem, surface,
 };
 
 #[test]
@@ -1022,6 +1022,36 @@ fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
         host.application_mut().take_effects(),
         vec![PluginEffect::ContextTrayItem { id: "mail".into() }]
     );
+}
+
+#[test]
+fn bundled_taskbar_menu_requests_validated_pin_and_close_actions() {
+    let application =
+        PluginPanelApplication::taskbar_menu_with_projection(&TaskbarMenuPluginProjection {
+            application_id: Some("org.example.editor".into()),
+            pinned: false,
+            close_all: true,
+        })
+        .unwrap();
+    let mut host = UiHost::new(application, 248, 112);
+    for (label, expected) in [
+        (
+            "Pin to Nickel Bar",
+            PluginEffect::ToggleTaskbarMenuPin {
+                id: "org.example.editor".into(),
+            },
+        ),
+        ("Close all windows", PluginEffect::CloseTaskbarMenuWindows),
+    ] {
+        let button = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: label.into(),
+            })
+            .unwrap();
+        host.perform_semantic_action(button.id, SemanticAction::Invoke(ActionKind::Activate));
+        assert_eq!(host.application_mut().take_effects(), vec![expected]);
+    }
 }
 
 #[test]

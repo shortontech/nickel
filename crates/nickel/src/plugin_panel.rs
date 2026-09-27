@@ -754,6 +754,8 @@ pub enum PluginEffect {
     LauncherRequestLogout,
     ActivateTaskbarItem { index: usize, id: String },
     ContextTaskbarItem { index: usize, id: String },
+    ToggleTaskbarMenuPin { id: String },
+    CloseTaskbarMenuWindows,
     ActivateTrayItem { id: String },
     ContextTrayItem { id: String },
     ToggleControlCenter,
@@ -827,6 +829,24 @@ pub struct TaskbarPluginProjection {
     pub clock: String,
     pub keyboard_enabled: bool,
     pub codex_available: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarMenuPluginProjection {
+    pub application_id: Option<String>,
+    pub pinned: bool,
+    pub close_all: bool,
+}
+
+impl TaskbarMenuPluginProjection {
+    fn to_json(&self) -> String {
+        serde_json::json!({
+            "applicationId": self.application_id,
+            "pinned": self.pinned,
+            "closeAll": self.close_all,
+        })
+        .to_string()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1132,6 +1152,13 @@ impl PluginPanelApplication {
 
     pub fn taskbar_with_projection(projection: &TaskbarPluginProjection) -> Result<Self, String> {
         let source = include_str!("../../../assets/plugins/taskbar/main.js");
+        Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
+    }
+
+    pub fn taskbar_menu_with_projection(
+        projection: &TaskbarMenuPluginProjection,
+    ) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/taskbar/menu.js");
         Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
     }
 
@@ -1594,6 +1621,36 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::ContextTrayItem { id: id.to_owned() });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-menu-toggle-pin")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsPin) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error =
+                                    Some("taskbar menu application ID is missing".into());
+                                return;
+                            };
+                            if id.is_empty() || id.len() > 256 {
+                                self.last_error =
+                                    Some("taskbar menu application ID is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ToggleTaskbarMenuPin { id: id.to_owned() });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-menu-close-all")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::WindowsContext) =>
+                        {
+                            approved.push(PluginEffect::CloseTaskbarMenuWindows);
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
