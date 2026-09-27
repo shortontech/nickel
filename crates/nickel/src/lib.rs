@@ -1215,6 +1215,21 @@ impl DomainSubscriptionSchedule {
     }
 }
 
+fn scene_for_native_surface(
+    shell: &WinitShell,
+    state: &mut LiveShell,
+    id: SurfaceId,
+    width: u32,
+    height: u32,
+) -> Option<Vec<nickel_ui::backend::PaintCommand>> {
+    let surface = shell.surface(id)?;
+    if surface.role() == SurfaceRole::Panel {
+        state.plugin_panel_scene(surface.plugin_key()?, width, height)
+    } else {
+        Some(state.scene(surface.role(), width, height))
+    }
+}
+
 fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), String> {
     sync_desktop_outputs(shell, state);
     let surfaces = shell
@@ -1244,7 +1259,11 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         {
             state.set_desktop_output(output, origin.x, origin.y, scale);
         }
-        let commands = state.scene(role, logical_width, logical_height);
+        let Some(commands) =
+            scene_for_native_surface(shell, state, id, logical_width, logical_height)
+        else {
+            continue;
+        };
         if let Some(token) = state.scene_change_token(role) {
             shell.present_host_frame(id, token, &commands)?;
         } else {
@@ -1287,7 +1306,11 @@ fn render_role(
         {
             state.set_desktop_output(output, origin.x, origin.y, scale);
         }
-        let commands = state.scene(role, logical_width, logical_height);
+        let Some(commands) =
+            scene_for_native_surface(shell, state, id, logical_width, logical_height)
+        else {
+            continue;
+        };
         if let Some(token) = state.scene_change_token(role) {
             shell.present_host_frame(id, token, &commands)?;
         } else {
@@ -1429,7 +1452,11 @@ fn prewarm_role(
         })
         .collect::<Vec<_>>();
     for (id, logical_width, logical_height) in surfaces {
-        let commands = state.scene(wanted, logical_width, logical_height);
+        let Some(commands) =
+            scene_for_native_surface(shell, state, id, logical_width, logical_height)
+        else {
+            continue;
+        };
         if let Some(token) = state.scene_change_token(wanted) {
             shell.present_host_frame(id, token, &commands)?;
         } else {
@@ -1451,9 +1478,9 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
     shell.configure_launcher_surface(state.launcher_surface_size());
     let surfaces = shell
         .surfaces()
-        .map(|surface| (surface.id(), surface.role()))
+        .map(|surface| (surface.id(), surface.role(), surface.plugin_key().cloned()))
         .collect::<Vec<_>>();
-    for (id, role) in surfaces {
+    for (id, role, plugin) in surfaces {
         #[cfg(target_os = "windows")]
         if role == SurfaceRole::TrustedControl {
             continue;
@@ -1462,7 +1489,15 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
         if role == SurfaceRole::Launcher {
             continue;
         }
-        set_surface_visibility(shell, id, role, state.surface_visible(role));
+        set_surface_visibility(
+            shell,
+            id,
+            role,
+            state.surface_visible(role)
+                && plugin
+                    .as_ref()
+                    .is_none_or(|key| state.plugin_panel_matches(key)),
+        );
     }
 }
 
@@ -1816,10 +1851,16 @@ fn handle_shell_input(
         return Ok(());
     }
     if role == SurfaceRole::Panel {
-        let (width, height) = shell
-            .surface(surface)
-            .map(|entry| entry.window().size())
-            .unwrap_or_default();
+        let Some(entry) = shell.surface(surface) else {
+            return Ok(());
+        };
+        if !entry
+            .plugin_key()
+            .is_some_and(|key| state.plugin_panel_matches(key))
+        {
+            return Ok(());
+        }
+        let (width, height) = entry.window().size();
         if state.plugin_panel_host_input(event, width, height) {
             sync_visibility(shell, state);
             render_role(shell, state, role)?;
@@ -2973,7 +3014,15 @@ pub fn run() -> Result<(), String> {
                     .surface(surface)
                     .map(|entry| entry.window().size())
                     .unwrap_or_default();
-                shell.present(surface, &state.scene(role, logical_width, logical_height))?;
+                if let Some(commands) = scene_for_native_surface(
+                    &shell,
+                    &mut state,
+                    surface,
+                    logical_width,
+                    logical_height,
+                ) {
+                    shell.present(surface, &commands)?;
+                }
             }
             Some(ShellEvent::Shown(surface)) => {
                 let role = shell.surface(surface).map(|entry| entry.role());
@@ -3001,7 +3050,15 @@ pub fn run() -> Result<(), String> {
                 let (logical_width, logical_height) = entry.window().size();
                 let role = entry.role();
                 if state.surface_visible(role) {
-                    shell.present(surface, &state.scene(role, logical_width, logical_height))?;
+                    if let Some(commands) = scene_for_native_surface(
+                        &shell,
+                        &mut state,
+                        surface,
+                        logical_width,
+                        logical_height,
+                    ) {
+                        shell.present(surface, &commands)?;
+                    }
                 }
             }
             Some(ShellEvent::Redraw(_)) => {}

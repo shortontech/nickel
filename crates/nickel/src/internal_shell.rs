@@ -400,7 +400,11 @@ impl InternalShellCoordinator {
             .iter()
             .find(|entry| entry.id == id)
             .is_none_or(|entry| {
-                !self.shell.surface_visible(entry.role)
+                entry
+                    .plugin
+                    .as_ref()
+                    .is_some_and(|key| !self.shell.plugin_panel_matches(key))
+                    || !self.shell.surface_visible(entry.role)
                     || self.shell.surface_remote_access_protected(entry.role)
             })
     }
@@ -414,6 +418,13 @@ impl InternalShellCoordinator {
             .iter()
             .find(|entry| entry.id == id)
             .ok_or("shell surface has retired")?;
+        if entry
+            .plugin
+            .as_ref()
+            .is_some_and(|key| !self.shell.plugin_panel_matches(key))
+        {
+            return Err("plugin surface has retired".into());
+        }
         self.shell
             .bounded_shell_semantics(entry.role, entry.output.as_deref())
     }
@@ -431,6 +442,13 @@ impl InternalShellCoordinator {
             .iter()
             .find(|entry| entry.id == id)
             .ok_or("shell surface has retired")?;
+        if entry
+            .plugin
+            .as_ref()
+            .is_some_and(|key| !self.shell.plugin_panel_matches(key))
+        {
+            return Err("plugin surface has retired".into());
+        }
         let outcome = self.shell.perform_bounded_shell_action(
             entry.role,
             entry.output.as_deref(),
@@ -515,7 +533,13 @@ impl InternalShellCoordinator {
         self.entries
             .iter()
             .find(|surface| surface.id == id)
-            .is_some_and(|surface| self.shell.surface_visible(surface.role))
+            .is_some_and(|surface| {
+                surface
+                    .plugin
+                    .as_ref()
+                    .is_none_or(|key| self.shell.plugin_panel_matches(key))
+                    && self.shell.surface_visible(surface.role)
+            })
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -558,7 +582,10 @@ impl InternalShellCoordinator {
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
-        let commands = if surface.role == SurfaceRole::Taskbar {
+        let commands = if let Some(key) = surface.plugin.as_ref() {
+            self.shell
+                .plugin_panel_scene(key, surface.size.0, surface.size.1)?
+        } else if surface.role == SurfaceRole::Taskbar {
             self.shell.panel_scene_for_output(
                 surface.output.as_deref(),
                 surface.size.0,
@@ -591,7 +618,7 @@ impl InternalShellCoordinator {
         let visibility = self
             .entries
             .iter()
-            .map(|surface| self.shell.surface_visible(surface.role))
+            .map(|surface| self.visible(surface.id))
             .collect::<Vec<_>>();
         let mut outcome = self.shell.poll_deadlines(now);
         if outcome.capture_screenshot && self.shell.capture_screenshot() {
@@ -610,7 +637,7 @@ impl InternalShellCoordinator {
             .iter()
             .zip(visibility.iter().copied())
             .filter(|(surface, was_visible)| {
-                self.shell.surface_visible(surface.role) != *was_visible
+                self.visible(surface.id) != *was_visible
                     || outcome.redraw.contains(&surface.role)
                     || (outcome.visibility_changed && surface.role == SurfaceRole::Taskbar)
             })
@@ -816,6 +843,13 @@ impl InternalShellCoordinator {
         let Some(entry) = self.entries.iter().find(|surface| surface.id == id) else {
             return Vec::new();
         };
+        if entry
+            .plugin
+            .as_ref()
+            .is_some_and(|key| !self.shell.plugin_panel_matches(key))
+        {
+            return Vec::new();
+        }
         // The routed slot is independent authority. Never repair an envelope
         // and then authorize the repaired value.
         let lifetime = id.snapshot_token();
@@ -825,7 +859,7 @@ impl InternalShellCoordinator {
         let visibility = self
             .entries
             .iter()
-            .map(|surface| self.shell.surface_visible(surface.role))
+            .map(|surface| self.visible(surface.id))
             .collect::<Vec<_>>();
         let mut changed = false;
         if let Some(focused) = batch.window_focused
@@ -1135,9 +1169,9 @@ impl InternalShellCoordinator {
             .entries
             .iter()
             .zip(&visibility)
-            .any(|(surface, was_visible)| self.shell.surface_visible(surface.role) != *was_visible);
+            .any(|(surface, was_visible)| self.visible(surface.id) != *was_visible);
         for (surface, was_visible) in self.entries.iter().zip(visibility) {
-            if self.shell.surface_visible(surface.role) != was_visible
+            if self.visible(surface.id) != was_visible
                 || (visibility_changed && surface.role == SurfaceRole::Taskbar)
                 || (changed && dependent_roles.contains(&surface.role))
             {
@@ -1525,6 +1559,56 @@ mod tests {
         let mail = shell.plugin_surface(&second, "test").unwrap();
         assert_ne!(clock.id, mail.id);
         assert_eq!((clock.size, mail.size), ((300, 48), (360, 64)));
+    }
+
+    #[test]
+    fn retired_plugin_slot_cannot_render_or_receive_input_for_new_owner() {
+        let mut shell = coordinator();
+        let owner = crate::plugin_panel::manifest().id.clone();
+        if !shell
+            .shell
+            .plugin_registry()
+            .get(&owner)
+            .unwrap()
+            .desired_enabled
+        {
+            shell.shell.set_plugin_enabled(&owner, true).unwrap();
+        }
+        let active = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: owner,
+            surface_id: shell.shell.plugin_panel_surface().id.clone(),
+        };
+        let stale = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: "org.example.retired".into(),
+            surface_id: active.surface_id.clone(),
+        };
+        shell.insert(
+            SurfaceRole::Panel,
+            Some(active),
+            Some("test".into()),
+            (360, 64),
+        );
+        shell.insert(
+            SurfaceRole::Panel,
+            Some(stale),
+            Some("test".into()),
+            (360, 64),
+        );
+        let active_id = shell.entries[0].id;
+        let stale_id = shell.entries[1].id;
+        assert!(shell.visible(active_id));
+        assert!(!shell.visible(stale_id));
+        assert!(shell.scene(active_id).is_some());
+        assert!(shell.scene(stale_id).is_none());
+        assert!(!shell.step_slot(
+            stale_id,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::KeyboardActivate
+                )],
+                ..HostBatch::default()
+            },
+        ));
     }
 
     #[test]

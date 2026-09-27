@@ -3114,6 +3114,25 @@ impl LiveShell {
         &self.plugin_panel_owner
     }
 
+    pub(crate) fn plugin_panel_matches(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> bool {
+        self.plugin_panel_host.is_some()
+            && self.plugin_panel_owner == key.plugin_id
+            && self.plugin_panel_surface.id == key.surface_id
+    }
+
+    pub(crate) fn plugin_panel_scene(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<PaintCommand>> {
+        self.plugin_panel_matches(key)
+            .then(|| self.scene(SurfaceRole::Panel, width, height))
+    }
+
     #[cfg(test)]
     pub(crate) fn lock_password_len(&self) -> usize {
         self.lock_host.application().password.len()

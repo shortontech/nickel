@@ -480,6 +480,10 @@ impl ShellSurface {
         self.role
     }
 
+    pub fn plugin_key(&self) -> Option<&nickel_core::plugins::PluginSurfaceKey> {
+        self.plugin.as_ref()
+    }
+
     pub fn display_index(&self) -> usize {
         self.display_index
     }
