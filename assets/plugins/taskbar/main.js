@@ -14,7 +14,13 @@ function App() {
     return h(Panel, { height: 56, background: 0xf1222730 },
         h(Row, null,
             h(Button, { id: "taskbar-launcher", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.request({ type: "taskbar-toggle-launcher" }) }, "Nickel"),
-            data.items.map(item => h(Task, { key: item.id, item: item })),
+            data.items.flatMap(item => [
+                h(Task, { key: item.id, item: item }),
+                ...(item.badges || []).map((badge, index) => h(Badge, {
+                    key: item.id + ":badge:" + index,
+                    label: badge.label, count: badge.count, color: badge.color
+                }))
+            ]),
             h(Spacer, null),
             data.keyboardEnabled ? h(Button, { id: "taskbar-keyboard", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.request({ type: "taskbar-toggle-keyboard" }) }, "\u2328") : null,
             data.codexAvailable ? h(Button, { id: "taskbar-codex", icon: "codex", accessibilityLabel: "Codex projects", onClick: () => nickel.request({ type: "taskbar-toggle-codex" }) }, "Codex") : null,

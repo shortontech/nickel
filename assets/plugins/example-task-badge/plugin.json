@@ -1,0 +1,14 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.example-task-badge",
+  "name": "Example task badge",
+  "entry": "main.js",
+  "surfaces": [],
+  "capabilities": [],
+  "contributes": [{
+    "target_plugin": "org.nickel.taskbar",
+    "target_slot": "task-badge",
+    "contract": "badge",
+    "mode": "add"
+  }]
+}

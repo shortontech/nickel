@@ -20,6 +20,10 @@ The JSX taskbar also includes Codex projects and on-screen keyboard buttons
 when the host reports those features as available. Their requests require
 declared capabilities, and the host checks availability again before acting.
 The application and per-window action menus render from the bundled JSX plugin.
+The taskbar provides a `task-badge` slot. Independent, surface-free plugins can
+return `Badge` components for task IDs; Nickel composes up to three badges per
+task in declared priority and plugin ID order. Disabling a badge plugin removes
+its contribution without restarting the taskbar.
 The host projects their available actions and validates every selected action
 against the captured application or window before dispatching it.
 

@@ -19,5 +19,8 @@
     "tray-read",
     "tray-activate",
     "tray-context"
+  ],
+  "provides_slots": [
+    {"id":"task-badge","contract":"badge","replaceable":false}
   ]
 }

@@ -35,7 +35,7 @@ include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
 
 #[test]
-fn declared_extension_is_reviewable_but_cannot_run_before_composition_exists() {
+fn unsupported_extension_is_reviewable_and_rejected() {
     let mut shell = LiveShell::new().unwrap();
     let manifest = nickel_core::plugins::PluginManifest::from_json(
         r#"{
@@ -48,7 +48,7 @@ fn declared_extension_is_reviewable_but_cannot_run_before_composition_exists() {
             "target_plugin": "org.nickel.taskbar",
             "target_slot": "task-badge",
             "contract": "badge",
-            "mode": "add"
+            "mode": "replace"
         }]
     }"#,
     )
@@ -63,15 +63,149 @@ fn declared_extension_is_reviewable_but_cannot_run_before_composition_exists() {
         .unwrap();
     assert_eq!(
         extension.composition,
-        ["add org.nickel.taskbar/task-badge (badge)"]
+        ["replace org.nickel.taskbar/task-badge (badge)"]
     );
     assert!(
         shell
             .set_plugin_enabled(&id, true)
             .unwrap_err()
-            .contains("cannot compose")
+            .contains("only additive taskbar badges")
     );
     assert!(!shell.plugin_registry.get(&id).unwrap().desired_enabled);
+}
+
+#[test]
+fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("org.example.mail-badge");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{
+        "api_version":1,"id":"org.example.mail-badge","name":"Mail badge",
+        "entry":"main.js","contributes":[{
+            "target_plugin":"org.nickel.taskbar","target_slot":"task-badge",
+            "contract":"badge","mode":"add","priority":5
+        }]
+    }"#,
+    )
+    .unwrap();
+    std::fs::write(directory.join("main.js"),
+        "function App() { return h(Badge, {item: 'org.example.mail', label: 'Unread mail', count: 7}); }"
+    ).unwrap();
+    let earlier = root.path().join("org.example.priority-badge");
+    std::fs::create_dir(&earlier).unwrap();
+    std::fs::write(
+        earlier.join("plugin.json"),
+        r#"{
+        "api_version":1,"id":"org.example.priority-badge","name":"Priority badge",
+        "entry":"main.js","contributes":[{
+            "target_plugin":"org.nickel.taskbar","target_slot":"task-badge",
+            "contract":"badge","mode":"add","priority":-2
+        }]
+    }"#,
+    )
+    .unwrap();
+    std::fs::write(earlier.join("main.js"),
+        "function App() { return h(Badge, {item: 'org.example.mail', label: 'Urgent mail', count: 2}); }"
+    ).unwrap();
+    let mut shell = LiveShell::new().unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    for (_, descriptor) in std::mem::take(&mut catalog.packages) {
+        shell
+            .plugin_registry
+            .register(descriptor.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(descriptor.manifest.id.clone(), descriptor);
+    }
+    assert!(
+        shell
+            .set_plugin_enabled("org.example.mail-badge", true)
+            .unwrap()
+    );
+    assert!(
+        shell
+            .set_plugin_enabled("org.example.priority-badge", true)
+            .unwrap()
+    );
+    assert_eq!(shell.plugin_taskbar_badge_hosts.len(), 2);
+
+    let mut projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(&[], "12:00");
+    projection
+        .items
+        .push(crate::plugin_panel::TaskbarPluginItem {
+            index: 0,
+            id: "org.example.mail".into(),
+            name: "Mail".into(),
+            active: false,
+            pinned: true,
+            icon: false,
+            badges: Vec::new(),
+        });
+    super::compose_taskbar_badges(&mut projection, &shell.plugin_taskbar_badge_hosts);
+    assert_eq!(
+        projection.items[0]
+            .badges
+            .iter()
+            .map(|badge| badge.count)
+            .collect::<Vec<_>>(),
+        [2, 7]
+    );
+    let host = UiHost::new(
+        crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection).unwrap(),
+        800,
+        56,
+    );
+    assert!(
+        host.accessibility_nodes()
+            .iter()
+            .any(|node| node.label.as_deref() == Some("Unread mail: 7"))
+    );
+    assert!(
+        host.accessibility_nodes()
+            .iter()
+            .any(|node| node.label.as_deref() == Some("Urgent mail: 2"))
+    );
+
+    shell
+        .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+        .unwrap();
+    let inactive = shell.plugin_status_snapshot();
+    assert!(
+        inactive
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == "org.example.mail-badge")
+            .unwrap()
+            .composition[0]
+            .contains("target inactive")
+    );
+    shell
+        .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, true)
+        .unwrap();
+
+    assert!(
+        shell
+            .set_plugin_enabled("org.example.mail-badge", false)
+            .unwrap()
+    );
+    assert_eq!(shell.plugin_taskbar_badge_hosts.len(), 1);
+    assert!(
+        shell
+            .set_plugin_enabled("org.example.priority-badge", false)
+            .unwrap()
+    );
+    assert!(shell.plugin_taskbar_badge_hosts.is_empty());
+    assert_eq!(
+        shell
+            .plugin_registry
+            .get("org.example.mail-badge")
+            .unwrap()
+            .memory,
+        nickel_core::plugins::PluginMemory::default()
+    );
 }
 
 #[test]

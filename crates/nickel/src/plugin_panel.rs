@@ -150,6 +150,7 @@ const Panel = 'panel';
 const Surface = 'surface';
 const Box = 'box';
 const FileTile = 'file-tile';
+const Badge = 'badge';
 const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
@@ -252,6 +253,7 @@ function h(kind, props, ...children) {
         hoverBackground: props?.hoverBackground,
         selectedBackground: props?.selectedBackground, accent: props?.accent,
         complement: props?.complement,
+        item: props?.item, count: props?.count,
         asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
         showLabel: props?.showLabel, contextAction,
@@ -313,6 +315,12 @@ function __nickelDispatch(action, value) {
 
 #[derive(Clone, Debug, PartialEq)]
 enum PanelNode {
+    Badge {
+        item: Option<String>,
+        label: String,
+        count: u16,
+        color: u32,
+    },
     FileTile {
         asset: String,
         label: String,
@@ -424,6 +432,37 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
+            "badge" => {
+                if !children.is_empty() {
+                    return Err("badge cannot have children".into());
+                }
+                let count = value
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .filter(|count| *count <= 999)
+                    .ok_or("badge count must be 0 to 999")? as u16;
+                let item = value
+                    .get("item")
+                    .and_then(Value::as_str)
+                    .filter(|item| !item.is_empty() && item.len() <= 256)
+                    .map(str::to_owned);
+                let label = value
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .filter(|label| !label.is_empty() && label.len() <= 64)
+                    .unwrap_or("Badge")
+                    .to_owned();
+                Ok(Self::Badge {
+                    item,
+                    label,
+                    count,
+                    color: value
+                        .get("color")
+                        .and_then(Value::as_u64)
+                        .filter(|color| *color <= u32::MAX as u64)
+                        .map_or(0xffc9354c, |color| color as u32),
+                })
+            }
             "file-tile" => {
                 if !children.is_empty() {
                     return Err("file tile cannot have children".into());
@@ -831,6 +870,28 @@ impl PanelNode {
 
     fn view(&self, images: &PluginImages) -> AnyView<PluginMessage> {
         match self {
+            Self::Badge {
+                label,
+                count,
+                color,
+                ..
+            } => AnyView::new(
+                Container::new()
+                    .width(30.0)
+                    .height(24.0)
+                    .background(*color)
+                    .radius(12.0)
+                    .semantic_role(SemanticRole::Status)
+                    .accessibility_label(format!("{label}: {count}"))
+                    .child(
+                        Text::new(count.to_string())
+                            .width(30.0)
+                            .height(24.0)
+                            .align(nickel_ui::TextAlign::Center)
+                            .color(0xffffffff)
+                            .scale(0.72),
+                    ),
+            ),
             Self::FileTile {
                 asset,
                 label,
@@ -1197,6 +1258,33 @@ impl PanelNode {
             _ => None,
         }
     }
+
+    fn collect_taskbar_badges(
+        &self,
+        badges: &mut Vec<(String, String, u16, u32)>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Badge {
+                item: Some(item),
+                label,
+                count,
+                color,
+            } => {
+                if badges.len() >= 32 {
+                    return Err("extension has too many badges".into());
+                }
+                badges.push((item.clone(), label.clone(), *count, *color));
+                Ok(())
+            }
+            Self::Row(children) | Self::Column(children) => {
+                for child in children {
+                    child.collect_taskbar_badges(badges)?;
+                }
+                Ok(())
+            }
+            _ => Err("taskbar badge extension must return badges or a row/column of badges".into()),
+        }
+    }
 }
 
 fn child_text(children: &[Value]) -> Result<String, String> {
@@ -1494,6 +1582,7 @@ pub struct TaskbarPluginItem {
     pub active: bool,
     pub pinned: bool,
     pub icon: bool,
+    pub badges: Vec<TaskbarPluginBadge>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1501,6 +1590,13 @@ pub struct TaskbarPluginTrayItem {
     pub id: String,
     pub title: String,
     pub icon: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarPluginBadge {
+    pub label: String,
+    pub count: u16,
+    pub color: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1667,6 +1763,7 @@ impl TaskbarPluginProjection {
                         active: group.active(),
                         pinned: group.pinned,
                         icon: false,
+                        badges: Vec::new(),
                     })
                 })
                 .collect(),
@@ -1681,6 +1778,9 @@ impl TaskbarPluginProjection {
         serde_json::json!({"items": self.items.iter().map(|item| serde_json::json!({
             "index": item.index, "id": item.id, "name": item.name,
             "active": item.active, "pinned": item.pinned, "icon": item.icon,
+            "badges": item.badges.iter().map(|badge| serde_json::json!({
+                "label": badge.label, "count": badge.count, "color": badge.color,
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "tray": self.tray.iter().map(|item| serde_json::json!({
             "id": item.id, "title": item.title, "icon": item.icon,
@@ -1867,6 +1967,15 @@ impl PluginPanelApplication {
 
     pub fn from_package(package: &PluginPackage) -> Result<Self, String> {
         Self::new_with_manifest(&package.source, &package.manifest, None)
+    }
+
+    pub fn taskbar_badges(&self) -> Result<Vec<(String, String, u16, u32)>, String> {
+        let mut badges = Vec::new();
+        self.node.collect_taskbar_badges(&mut badges)?;
+        if badges.is_empty() {
+            return Err("taskbar badge extension did not return a badge".into());
+        }
+        Ok(badges)
     }
 
     pub fn launcher(launcher: &Launcher) -> Result<Self, String> {

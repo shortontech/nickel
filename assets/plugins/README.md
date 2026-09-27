@@ -21,10 +21,12 @@ cargo run -p nickel --no-default-features --features backend-winit \
 
 Each immediate child directory must match its manifest ID. Discovery reports
 invalid packages without hiding valid siblings. Settings can enable one
-installed panel package at a time; other external surface kinds still need
-dynamic native surface registration.
+installed panel package and multiple surface-free taskbar badge extensions;
+other external surface kinds still need dynamic native surface registration.
 
 The component vocabulary includes `Panel`, `Row`, `Column`, `Text`, `Image`,
-`ImageButton`, `Button`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. A
+`ImageButton`, `Button`, `Badge`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. A
 full-viewport `Surface` component is used by the bundled desktop background
 plugin. The host owns image bytes and exposes them by asset name to JSX.
+The [task badge example](example-task-badge/) shows a surface-free extension
+that contributes UI to the bundled taskbar's declared slot.

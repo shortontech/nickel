@@ -45,5 +45,13 @@ Manifests may declare typed composition relationships. A target declares a
 contract, and whether replacement is allowed. An extension declares a
 `contributes` entry with `target_plugin`, `target_slot`, matching `contract`,
 and `mode` (`add` or `replace`). Nickel validates these declarations and shows
-them in Settings' enable review. Runtime composition is still in development;
-the shell rejects activation of a contribution until it can apply it.
+them in Settings' enable review. The first executable slot is the taskbar's
+`task-badge` slot: a package with no surface can declare one additive `badge`
+contribution targeting `org.nickel.taskbar/task-badge`. Its `App` returns
+`h(Badge, { item: "application-id", label: "Unread mail", count: 3 })`; Nickel
+places the badge beside the matching task. Multiple badge plugins compose in
+priority and plugin ID order, with a limit of three visible badges per task.
+Other contribution kinds and replacement remain unavailable in this runtime.
+The taskbar's retained UI measurement currently includes contributed badge
+nodes; Nickel cannot yet split those bytes by extension. Each extension's
+JavaScript heap measurement remains unavailable in Settings.
