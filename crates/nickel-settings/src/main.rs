@@ -596,6 +596,7 @@ enum SettingsMessage {
     DisplayScroll,
     DisplayIdentify,
     DisplayJsxAction(usize),
+    DisplayJsxSlider(&'static str, u16),
     SelectDisplay(usize),
     DisplayDrag {
         index: usize,
@@ -1882,6 +1883,9 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::DisplayJsxAction(index) => self.handle_display_jsx_action(index),
+            SettingsMessage::DisplayJsxSlider(id, position) => {
+                self.handle_display_jsx_slider(id, position)
+            }
             SettingsMessage::SelectDisplay(index) => {
                 if index < self.displays.len() {
                     self.selected = index;

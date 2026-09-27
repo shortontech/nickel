@@ -26,6 +26,9 @@ function App() {
                 selected={rate.label === data.refreshValue}
                 onClick={() => request('refresh', {refresh: rate.refresh})} />)}
         </settings-select>
+        <settings-slider id="display-scale" label={data.scaleLabel} placeholder=""
+            value={data.scaleValue} percent={data.scalePercent}
+            onChange={fraction => request('scale', {fraction})} />
         <settings-grid>
             <settings-button id="display-identify" label={data.identifyLabel} value="secondary" maxLines={3}
                 onClick={() => request('identify')} />
@@ -51,5 +54,8 @@ function App() {
                 selected={data.applicationScalePolicy === 'custom'}
                 onClick={() => request('application-scale', {policy: 'custom'})} />
         </settings-radio-group>
+        <settings-slider id="application-custom-scale" label={data.customScaleLabel} placeholder=""
+            value={data.customScaleValue} percent={data.customScalePercent}
+            onChange={fraction => request('application-scale-value', {fraction})} />
     </settings-stack>;
 }

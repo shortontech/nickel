@@ -36,17 +36,31 @@ impl DisplayPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<[AnyView<SettingsMessage>; 6], String> {
+    ) -> Result<[AnyView<SettingsMessage>; 8], String> {
         let Node::Stack(children) = self.context.render(data)? else {
             return Err("Display actions have an invalid root".into());
         };
-        Ok(std::array::from_fn(|index| {
-            children[index].view(theme, "", SettingsMessage::DisplayJsxAction)
-        }))
+        let view =
+            |index: usize| children[index].view(theme, "", SettingsMessage::DisplayJsxAction);
+        Ok([
+            view(0),
+            view(1),
+            view(2),
+            children[3].slider_view(theme, display_slider_message)?,
+            view(4),
+            view(5),
+            view(6),
+            children[7].slider_view(theme, application_slider_message)?,
+        ])
     }
 
-    fn dispatch(&mut self, index: usize, data: &Value) -> Result<SettingsMessage, String> {
-        self.context.dispatch(index, &Value::Null, data, |effect| {
+    fn dispatch(
+        &mut self,
+        index: usize,
+        value: Value,
+        data: &Value,
+    ) -> Result<SettingsMessage, String> {
+        self.context.dispatch(index, &value, data, |effect| {
             let request: DisplayRequest =
                 serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
             validate_request(request, data)
@@ -57,6 +71,25 @@ impl DisplayPage {
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
         self.context.action_for_id(id)
     }
+
+    fn slider_action(&self, id: &str) -> Option<usize> {
+        match id {
+            "display-scale" | "application-custom-scale" => self.context.action_for_id(id),
+            _ => None,
+        }
+    }
+}
+
+fn slider_position(fraction: f32) -> u16 {
+    (fraction.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
+}
+
+fn display_slider_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::DisplayJsxSlider("display-scale", slider_position(fraction))
+}
+
+fn application_slider_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::DisplayJsxSlider("application-custom-scale", slider_position(fraction))
 }
 
 fn parse_tree(value: &Value) -> Result<Node, String> {
@@ -65,13 +98,17 @@ fn parse_tree(value: &Value) -> Result<Node, String> {
         .and_then(Value::as_array)
         .ok_or("Display actions have no children")?;
     if value["kind"] != "settings-stack"
-        || children.len() != 6
+        || children.len() != 8
         || children[0]["kind"] != "settings-row"
         || children[1]["kind"] != "settings-select"
         || children[2]["kind"] != "settings-select"
-        || children[3]["kind"] != "settings-grid"
-        || children[4]["kind"] != "settings-inline"
-        || children[5]["kind"] != "settings-radio-group"
+        || children[3]["kind"] != "settings-slider"
+        || children[4]["kind"] != "settings-grid"
+        || children[5]["kind"] != "settings-inline"
+        || children[6]["kind"] != "settings-radio-group"
+        || children[7]["kind"] != "settings-slider"
+        || children[3]["id"] != "display-scale"
+        || children[7]["id"] != "application-custom-scale"
     {
         return Err("Display actions have an invalid structure".into());
     }
@@ -103,6 +140,14 @@ enum DisplayRequest {
     Refresh {
         connector: String,
         refresh: i32,
+    },
+    Scale {
+        connector: String,
+        fraction: f32,
+    },
+    ApplicationScaleValue {
+        connector: String,
+        fraction: f32,
     },
     ApplicationScale {
         connector: String,
@@ -168,6 +213,24 @@ fn validate_request(request: DisplayRequest, data: &Value) -> Result<SettingsMes
                 return Err(STALE_STATUS.into());
             }
             (connector, SettingsMessage::SetDisplayRefresh(refresh))
+        }
+        DisplayRequest::Scale {
+            connector,
+            fraction,
+        } => {
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err(STALE_STATUS.into());
+            }
+            (connector, crate::display_scale_message(fraction))
+        }
+        DisplayRequest::ApplicationScaleValue {
+            connector,
+            fraction,
+        } => {
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err(STALE_STATUS.into());
+            }
+            (connector, crate::application_scale_message(fraction))
         }
         DisplayRequest::ApplicationScale { connector, policy } => {
             let message = match policy.as_str() {
@@ -249,6 +312,12 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         "applicationScaleFollowLabel": "Follow Nickel",
         "applicationScaleUnchangedLabel": "Leave unchanged",
         "applicationScaleCustomLabel": "Custom",
+        "scaleLabel": "Scale",
+        "scaleValue": format!("{}%", selected.scale.units() * 100 / 120),
+        "scalePercent": (selected.scale.units().saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
+        "customScaleLabel": "Custom application scale",
+        "customScaleValue": format!("{}%", custom_scale_units * 100 / 120),
+        "customScalePercent": (custom_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
         "enabledLabel": "Display enabled",
         "identifyLabel": app.localizer.text("settings-display-identify"),
         "primaryLabel": app.localizer.text("settings-display-make-primary"),
@@ -260,6 +329,25 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
 
 impl SettingsApp {
     pub(super) fn handle_display_jsx_action(&mut self, index: usize) {
+        self.handle_display_jsx_event(index, Value::Null);
+    }
+
+    pub(super) fn handle_display_jsx_slider(&mut self, id: &str, position: u16) {
+        let action = self
+            .display_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.slider_action(id));
+        if let Some(action) = action {
+            self.handle_display_jsx_event(
+                action,
+                Value::from(f32::from(position) / f32::from(u16::MAX)),
+            );
+        }
+    }
+
+    fn handle_display_jsx_event(&mut self, index: usize, value: Value) {
         if self.page != SettingsPage::Display || !self.settings_jsx_enabled {
             return;
         }
@@ -270,7 +358,7 @@ impl SettingsApp {
             .as_mut()
             .and_then(|page| page.as_mut().ok())
             .ok_or_else(|| STALE_STATUS.to_owned())
-            .and_then(|page| page.dispatch(index, &data));
+            .and_then(|page| page.dispatch(index, value, &data));
         match message {
             Ok(message) => self.handle_settings_message(message),
             Err(error) => {
@@ -295,12 +383,12 @@ mod tests {
         let _ = page.render(&data, app.ui_theme()).unwrap();
         let enabled = page.action_for_id("display-enabled").unwrap();
         assert!(matches!(
-            page.dispatch(enabled, &data),
+            page.dispatch(enabled, Value::Null, &data),
             Ok(SettingsMessage::DisplayEnabled(false))
         ));
         let mut stale = data.clone();
         stale["connector"] = json!("another-output");
-        assert!(page.dispatch(enabled, &stale).is_err());
+        assert!(page.dispatch(enabled, Value::Null, &stale).is_err());
         assert!(
             validate_request(
                 DisplayRequest::Keep {
@@ -340,7 +428,7 @@ mod tests {
         let _ = page.render(&data, app.ui_theme()).unwrap();
         let resolution = page.action_for_id("display-resolution-1920x1080").unwrap();
         assert!(matches!(
-            page.dispatch(resolution, &data),
+            page.dispatch(resolution, Value::Null, &data),
             Ok(SettingsMessage::SetDisplayResolution {
                 width: 1920,
                 height: 1080
@@ -348,9 +436,29 @@ mod tests {
         ));
         let custom = page.action_for_id("application-scale-custom").unwrap();
         assert!(matches!(
-            page.dispatch(custom, &data),
+            page.dispatch(custom, Value::Null, &data),
             Ok(SettingsMessage::SetApplicationScale(2))
         ));
+        let display_scale = page.action_for_id("display-scale").unwrap();
+        assert!(matches!(
+            page.dispatch(display_scale, json!(1.0), &data),
+            Ok(SettingsMessage::SetDisplayScale(14))
+        ));
+        let application_scale = page.action_for_id("application-custom-scale").unwrap();
+        assert!(matches!(
+            page.dispatch(application_scale, json!(0.5), &data),
+            Ok(SettingsMessage::SetApplicationScale(7))
+        ));
+        assert!(
+            validate_request(
+                DisplayRequest::Scale {
+                    connector: app.displays[0].connector.clone(),
+                    fraction: 1.25,
+                },
+                &data
+            )
+            .is_err()
+        );
         assert!(
             validate_request(
                 DisplayRequest::Refresh {
@@ -362,6 +470,9 @@ mod tests {
             .is_err()
         );
         app.selected = 1;
-        assert!(page.dispatch(custom, &projection(&app)).is_err());
+        assert!(
+            page.dispatch(custom, Value::Null, &projection(&app))
+                .is_err()
+        );
     }
 }

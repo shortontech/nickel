@@ -3,7 +3,8 @@
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Button, ButtonPresentation, Column, Container, Grid, RadioGroup, RadioOption, Row,
-    SelectField, SemanticTheme, SettingsCard, SettingsRow, Switch, SwitchState, TextField, Track,
+    SelectField, SemanticTheme, SettingsCard, SettingsRow, SliderField, Switch, SwitchState,
+    TextField, Track,
 };
 use serde_json::Value;
 
@@ -54,6 +55,14 @@ pub(super) enum Node {
         expanded: bool,
         action: usize,
         options: Vec<SelectOption>,
+    },
+    Slider {
+        id: String,
+        label: String,
+        description: String,
+        value: String,
+        percent: f32,
+        action: usize,
     },
     Input {
         id: String,
@@ -158,6 +167,13 @@ impl Node {
                         .map(|option| option.id.capacity() + option.label.capacity())
                         .sum::<usize>()
             }
+            Self::Slider {
+                id,
+                label,
+                description,
+                value,
+                ..
+            } => id.capacity() + label.capacity() + description.capacity() + value.capacity(),
             Self::Input { id, value, .. } => id.capacity() + value.capacity(),
         }
     }
@@ -347,6 +363,20 @@ impl Node {
                     options,
                 }
             }
+            "settings-slider" => {
+                let percent = value["percent"]
+                    .as_f64()
+                    .filter(|percent| percent.is_finite() && (0.0..=1.0).contains(percent))
+                    .ok_or("Settings slider position is invalid")?;
+                Self::Slider {
+                    id: text(value, "id", 256)?,
+                    label: text(value, "label", 256)?,
+                    description: text(value, "placeholder", 256)?,
+                    value: text(value, "value", 256)?,
+                    percent: percent as f32,
+                    action: action()?.ok_or("Settings slider requires onChange")?,
+                }
+            }
             _ => return Err(format!("Unknown Settings component {kind:?}")),
         })
     }
@@ -363,6 +393,29 @@ impl Node {
             action_message,
             SettingsMessage::PluginJsxInput,
         )
+    }
+
+    pub(super) fn slider_view(
+        &self,
+        theme: SemanticTheme,
+        on_change: fn(f32) -> SettingsMessage,
+    ) -> Result<AnyView<SettingsMessage>, String> {
+        let Self::Slider {
+            id,
+            label,
+            description,
+            value,
+            percent,
+            ..
+        } = self
+        else {
+            return Err("Settings slider component is invalid".into());
+        };
+        Ok(AnyView::new(
+            SliderField::new(theme, label, description, value, *percent, on_change)
+                .id(id.as_str())
+                .compact(),
+        ))
     }
 
     pub(super) fn view_with_input(
@@ -586,6 +639,9 @@ impl Node {
                 .id(id.as_str())
                 .compact(),
             ),
+            Self::Slider { label, value, .. } => {
+                AnyView::new(SettingsRow::new(theme, label, value).compact())
+            }
             Self::Input { id, value, action } => {
                 let action = *action;
                 AnyView::new(
@@ -616,7 +672,6 @@ impl Node {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn action_for_id(&self, target: &str) -> Option<usize> {
         match self {
             Self::Switch { id, action, .. } if id == target => *action,
@@ -650,6 +705,7 @@ impl Node {
                     .find(|option| option.id == target)
                     .map(|option| option.action)
             }),
+            Self::Slider { id, action, .. } if id == target => Some(*action),
             _ => None,
         }
     }
@@ -744,7 +800,6 @@ impl SettingsJsxContext {
         Ok(message)
     }
 
-    #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
         self.node.as_ref()?.action_for_id(id)
     }

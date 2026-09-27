@@ -985,36 +985,61 @@ impl SettingsApp {
         } else {
             None
         };
-        let (enabled, resolution, refresh_rate, actions, confirmation, application_policy) =
-            if let Some(
-                [
-                    enabled,
-                    resolution,
-                    refresh_rate,
-                    actions,
-                    confirmation,
-                    application_policy,
-                ],
-            ) = plugin_actions
-            {
-                (
-                    enabled,
-                    resolution,
-                    refresh_rate,
-                    actions,
-                    confirmation,
-                    application_policy,
-                )
-            } else {
-                (
-                    AnyView::new(enabled),
-                    AnyView::new(resolution),
-                    AnyView::new(refresh_rate),
-                    native_actions,
-                    confirmation,
-                    AnyView::new(application_scale_policy_choices),
-                )
-            };
+        let (
+            enabled,
+            resolution,
+            refresh_rate,
+            scale,
+            actions,
+            confirmation,
+            application_policy,
+            application_scale_slider,
+        ) = if let Some(
+            [
+                enabled,
+                resolution,
+                refresh_rate,
+                scale,
+                actions,
+                confirmation,
+                application_policy,
+                application_scale_slider,
+            ],
+        ) = plugin_actions
+        {
+            (
+                enabled,
+                resolution,
+                refresh_rate,
+                scale,
+                actions,
+                confirmation,
+                application_policy,
+                application_scale_slider,
+            )
+        } else {
+            (
+                AnyView::new(enabled),
+                AnyView::new(resolution),
+                AnyView::new(refresh_rate),
+                AnyView::new(scale),
+                native_actions,
+                confirmation,
+                AnyView::new(application_scale_policy_choices),
+                AnyView::new(
+                    SliderField::new(
+                        theme,
+                        "Custom application scale",
+                        "",
+                        format!("{}%", app_scale_units * 100 / 120),
+                        (app_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
+                        application_scale_message,
+                    )
+                    .id("application-custom-scale")
+                    .compact(),
+                ),
+            )
+        };
         let app_scale = SettingsCard::titled(
             theme,
             self.localizer.text("ui-pages-application-compatibility-scale"),
@@ -1022,18 +1047,7 @@ impl SettingsApp {
         )
         .id("application-scale")
         .child(application_policy)
-        .child(
-            SliderField::new(
-                theme,
-                "Custom application scale",
-                "",
-                format!("{}%", app_scale_units * 100 / 120),
-                (app_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
-                application_scale_message,
-            )
-            .id("application-custom-scale")
-            .compact(),
-        )
+        .child(application_scale_slider)
         .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
         let compact_cards = content_width < 520.0;
         let mut display_order = (0..self.displays.len()).collect::<Vec<_>>();
