@@ -17,6 +17,10 @@ use nickel_ui::{
 };
 use serde_json::Value;
 
+use crate::control_view::ControlAction;
+use crate::platform::SessionAction;
+use nickel_core::display_projection::ProjectionMode;
+
 pub use crate::launcher::LauncherView;
 use crate::launcher::{Application, DashboardSection, Launcher, LauncherMode, TaskbarApplication};
 use crate::notification::DesktopNotification;
@@ -73,6 +77,16 @@ pub fn volume_osd_manifest() -> &'static PluginManifest {
             "../../../assets/plugins/volume-osd/plugin.json"
         ))
         .expect("bundled volume OSD plugin manifest must be valid")
+    })
+}
+
+pub fn control_center_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/control-center/plugin.json"
+        ))
+        .expect("bundled control center plugin manifest must be valid")
     })
 }
 
@@ -795,7 +809,7 @@ impl From<&LauncherPluginProjection> for LauncherShortcutState {
 
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
     RunSubmit(String),
@@ -826,6 +840,143 @@ pub enum PluginEffect {
     InvokeNotification { id: u32, key: String },
     DismissNotification { id: u32 },
     CloseNotificationHistory,
+    Control(ControlAction),
+}
+
+fn control_request(effect: &Value) -> Result<(ControlAction, PluginCapability), String> {
+    let action = effect
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or("control action is missing")?;
+    let boolean = || {
+        effect
+            .get("value")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "control value must be a boolean".to_owned())
+    };
+    let id = || {
+        effect
+            .get("value")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .map(str::to_owned)
+            .ok_or_else(|| "control item ID is invalid".to_owned())
+    };
+    let workspace = || {
+        effect
+            .get("value")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "workspace ID is invalid".to_owned())
+    };
+    match action {
+        "wifi-power" => Ok((
+            ControlAction::SetWifiEnabled(boolean()?),
+            PluginCapability::NetworkControl,
+        )),
+        "wifi-activate" => Ok((
+            ControlAction::ActivateWifi { id: id()? },
+            PluginCapability::NetworkControl,
+        )),
+        "bluetooth-power" => Ok((
+            ControlAction::SetBluetoothPowered(boolean()?),
+            PluginCapability::BluetoothControl,
+        )),
+        "bluetooth-scan" => Ok((
+            ControlAction::SetBluetoothDiscovery(boolean()?),
+            PluginCapability::BluetoothControl,
+        )),
+        "bluetooth-device" => Ok((
+            ControlAction::ToggleBluetoothDevice { id: id()? },
+            PluginCapability::BluetoothControl,
+        )),
+        "audio-mute" => Ok((
+            ControlAction::SetAudioMuted(boolean()?),
+            PluginCapability::AudioControl,
+        )),
+        "audio-volume" => {
+            let percent = effect
+                .get("value")
+                .and_then(Value::as_u64)
+                .filter(|value| *value <= 100)
+                .ok_or("audio volume must be 0 to 100")? as u8;
+            Ok((
+                ControlAction::SetAudioVolume(percent),
+                PluginCapability::AudioControl,
+            ))
+        }
+        "audio-device" => Ok((
+            ControlAction::SelectAudioDevice { id: id()? },
+            PluginCapability::AudioControl,
+        )),
+        "workspace-switch" => Ok((
+            ControlAction::SwitchWorkspace(workspace()?),
+            PluginCapability::WorkspacesSwitch,
+        )),
+        "workspace-create" => Ok((
+            ControlAction::CreateWorkspace,
+            PluginCapability::WorkspacesSwitch,
+        )),
+        "workspace-remove" => Ok((
+            ControlAction::RemoveWorkspace(workspace()?),
+            PluginCapability::WorkspacesSwitch,
+        )),
+        "show-desktop" => Ok((
+            ControlAction::ToggleShowDesktop,
+            PluginCapability::DesktopControl,
+        )),
+        "show-notifications" => Ok((
+            ControlAction::ShowNotifications,
+            PluginCapability::NotificationsRead,
+        )),
+        "projection-preview" => {
+            let mode = match effect.get("value").and_then(Value::as_str) {
+                Some("internal") => ProjectionMode::InternalOnly,
+                Some("duplicate") => ProjectionMode::Duplicate,
+                Some("extend") => ProjectionMode::Extend,
+                Some("external") => ProjectionMode::ExternalOnly,
+                _ => return Err("display mode is invalid".into()),
+            };
+            Ok((
+                ControlAction::PreviewProjection(mode),
+                PluginCapability::DisplayControl,
+            ))
+        }
+        "projection-confirm" => Ok((
+            ControlAction::ConfirmProjection,
+            PluginCapability::DisplayControl,
+        )),
+        "projection-cancel" => Ok((
+            ControlAction::CancelProjection,
+            PluginCapability::DisplayControl,
+        )),
+        "session-lock" => Ok((
+            ControlAction::SessionAction(SessionAction::Lock),
+            PluginCapability::SessionControl,
+        )),
+        "session-prepare" => {
+            let action = match effect.get("value").and_then(Value::as_str) {
+                Some("suspend") => SessionAction::Suspend,
+                Some("restart-shell") => SessionAction::RestartShell,
+                Some("logout") => SessionAction::LogOut,
+                Some("reboot") => SessionAction::Reboot,
+                Some("poweroff") => SessionAction::PowerOff,
+                _ => return Err("session action is invalid".into()),
+            };
+            Ok((
+                ControlAction::RequestSessionAction(action),
+                PluginCapability::SessionControl,
+            ))
+        }
+        "session-confirm" => Ok((
+            ControlAction::ConfirmSessionAction,
+            PluginCapability::SessionControl,
+        )),
+        "session-cancel" => Ok((
+            ControlAction::CancelSessionAction,
+            PluginCapability::SessionControl,
+        )),
+        _ => Err("unknown control action".into()),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1299,6 +1450,11 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, volume_osd_manifest(), Some(projection.to_json()))
     }
 
+    pub fn control_center_with_data(data: &Value) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/control-center/main.js");
+        Self::new_with_manifest(source, control_center_manifest(), Some(data.to_string()))
+    }
+
     pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
         let source = include_str!("../../../assets/plugins/run/main.js");
         let data = serde_json::json!({ "status": status }).to_string();
@@ -1477,6 +1633,24 @@ impl PluginPanelApplication {
             .map_err(|error| error.to_string())?;
         self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
         self.projection_data = Some(data);
+        Ok(true)
+    }
+
+    pub fn sync_control_center_data(&mut self, data: &Value) -> Result<bool, String> {
+        if self.manifest.id != control_center_manifest().id {
+            return Err("this plugin is not the control center".into());
+        }
+        let serialized = data.to_string();
+        if self.projection_data.as_deref() == Some(serialized.as_str()) {
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!(
+                "__nickelSetData({serialized})"
+            )))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.projection_data = Some(serialized);
         Ok(true)
     }
 
@@ -1842,6 +2016,26 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 page: page.to_owned(),
                                 index,
                             });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("control-action")
+                            && self.manifest.id == control_center_manifest().id =>
+                        {
+                            match control_request(&effect) {
+                                Ok((action, capability))
+                                    if self.manifest.capabilities.contains(&capability) =>
+                                {
+                                    approved.push(PluginEffect::Control(action));
+                                }
+                                Ok(_) => {
+                                    self.last_error = Some("control action is not granted".into());
+                                    return;
+                                }
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];

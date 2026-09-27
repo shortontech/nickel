@@ -225,7 +225,16 @@ impl LiveShell {
                     project(&self.launcher_host, launcher_activate)
                 }
             }
-            SurfaceRole::ControlCenter => project(&self.control_host, control_activate),
+            SurfaceRole::ControlCenter => {
+                if self.control_plugin_active() {
+                    Ok(observe_only(plugin_projection(
+                        self.plugin_control_host.as_ref().unwrap(),
+                        |_, _| false,
+                    )?))
+                } else {
+                    project(&self.control_host, control_activate)
+                }
+            }
             SurfaceRole::Notification => {
                 if let Some(host) = self.plugin_notification_host.as_ref() {
                     Ok(observe_only(plugin_projection(host, |_, _| false)?))
@@ -433,6 +442,9 @@ impl LiveShell {
                 outcome
             }
             SurfaceRole::ControlCenter => {
+                if self.control_plugin_active() {
+                    return Err("control center plugin actions require shell input".into());
+                }
                 let outcome = mutate(
                     &mut self.control_host,
                     generation,

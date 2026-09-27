@@ -75,6 +75,145 @@
     }
 
     #[test]
+    fn control_center_plugin_renders_and_dispatches_typed_desktop_action() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.control_visible = true;
+        assert!(
+            shell.plugin_control_host.is_some(),
+            "{:?}",
+            shell.plugin_registry()
+                .get(&crate::plugin_panel::control_center_manifest().id)
+        );
+        assert!(!shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
+        assert!(shell
+            .plugin_registry()
+            .get(&crate::plugin_panel::control_center_manifest().id)
+            .unwrap()
+            .memory
+            .native_ui_bytes
+            .is_some());
+        let button = shell
+            .plugin_control_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Show desktop".into(),
+            })
+            .unwrap();
+        assert!(shell
+            .control_host_event(
+                HostEvent::Ui(UiEvent::AccessibilityActivate(button.id)),
+                (420, 720),
+                None,
+            )
+            .changed);
+        assert!(host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::ToggleShowDesktop
+        )));
+    }
+
+    #[test]
+    fn control_center_plugin_rejects_stale_workspace_id() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.control_visible = true;
+        shell.workspaces = vec![crate::platform::WorkspaceSummary { id: 12, active: true }];
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::Control(
+            ControlAction::SwitchWorkspace(99),
+        )]);
+        assert!(!host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::SwitchWorkspace(99)
+        )));
+    }
+
+    #[test]
+    fn control_center_plugin_can_be_disabled_and_reenabled() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::control_center_manifest().id;
+        assert!(shell.plugin_control_host.is_some());
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.plugin_control_host.is_none());
+        assert_eq!(
+            shell.plugin_registry().get(id).unwrap().memory,
+            nickel_core::plugins::PluginMemory::default()
+        );
+        assert!(!shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
+        assert!(!shell.control_host.commands().is_empty());
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.plugin_control_host.is_some());
+    }
+
+    #[test]
+    fn control_center_plugin_confirms_session_action_in_component_dialog() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.control_visible = true;
+        shell.scene(SurfaceRole::ControlCenter, 420, 720);
+        let suspend = shell
+            .plugin_control_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Suspend".into(),
+            })
+            .unwrap();
+        assert!(shell
+            .control_host_event(
+                HostEvent::Ui(UiEvent::AccessibilityActivate(suspend.id)),
+                (420, 720),
+                None,
+            )
+            .changed);
+        assert!(!host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::SessionAction(
+                crate::platform::SessionAction::Suspend
+            )
+        )));
+        assert_eq!(
+            shell.control_host.application().view_state().pending_session_action,
+            Some(crate::platform::SessionAction::Suspend)
+        );
+        shell.scene(SurfaceRole::ControlCenter, 420, 720);
+        let confirm = shell
+            .plugin_control_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Confirm".into(),
+            })
+            .unwrap();
+        assert!(shell
+            .control_host_event(
+                HostEvent::Ui(UiEvent::AccessibilityActivate(confirm.id)),
+                (420, 720),
+                None,
+            )
+            .changed);
+        let commands = host.take_commands();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::SessionAction(
+                crate::platform::SessionAction::Suspend
+            )
+        )), "command count: {}; pending: {:?}; plugin error: {:?}", commands.len(),
+            shell.control_host.application().view_state().pending_session_action,
+            shell.plugin_control_host.as_ref().unwrap().application().last_error());
+    }
+
+    #[test]
     fn notification_plugin_action_uses_the_host_reducer() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::notification_manifest().id;
@@ -1678,9 +1817,10 @@
         shell.control_visible = true;
 
         assert!(shell.control_key(Some(KeyCode::ArrowDown), 420, 600));
-        assert!(shell.control_host.inspect().controller_target.is_some());
+        assert!(shell.plugin_control_host.as_ref().unwrap().inspect().controller_target.is_some());
+        assert!(shell.control_key(Some(KeyCode::ArrowDown), 420, 600));
         assert!(shell.control_key(Some(KeyCode::ArrowUp), 420, 600));
-        assert!(shell.control_host.inspect().controller_target.is_some());
+        assert!(shell.plugin_control_host.as_ref().unwrap().inspect().controller_target.is_some());
         assert!(shell.control_key(Some(KeyCode::Escape), 420, 600));
         assert!(!shell.control_visible);
     }
@@ -1695,7 +1835,9 @@
         assert!(controller.control_controller(nickel_ui::ControllerAction::Down, 420, 600));
         assert!(
             controller
-                .control_host
+                .plugin_control_host
+                .as_ref()
+                .unwrap()
                 .inspect()
                 .controller_target
                 .is_some()
@@ -1929,13 +2071,15 @@
         shell.control_visible = true;
         let _ = shell.scene(SurfaceRole::ControlCenter, 420, 600);
         let target = shell
-            .control_host
+            .plugin_control_host
+            .as_ref()
+            .unwrap()
             .query(&nickel_ui::SemanticSelector::Role(
                 nickel_ui::SemanticRole::Button,
             ))
             .into_iter()
-            .next()
-            .expect("control center button");
+            .find(|target| target.name.as_deref() == Some("More"))
+            .expect("visible control center section button");
         let point = Point {
             x: target.bounds.origin.x + target.bounds.size.width / 2.0,
             y: target.bounds.origin.y + target.bounds.size.height / 2.0,

@@ -729,6 +729,7 @@ pub struct LiveShell {
     panel_origin_x: i32,
     panel_origin_y: i32,
     control_host: ControlCenterHost,
+    plugin_control_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     control_change_token: HostChangeToken,
     control_deadline: Option<Instant>,
     projection_chooser: nickel_core::display_projection::ProjectionChooser,
@@ -1281,6 +1282,7 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::taskbar_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::notification_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::volume_osd_manifest().clone())?;
+        plugin_registry.register(crate::plugin_panel::control_center_manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
         #[cfg(not(test))]
@@ -1591,6 +1593,7 @@ impl LiveShell {
             panel_origin_x: 0,
             panel_origin_y: 0,
             control_host,
+            plugin_control_host: None,
             control_change_token: HostChangeToken::default(),
             control_deadline: Some(Instant::now()),
             projection_chooser: Default::default(),
@@ -1637,6 +1640,23 @@ impl LiveShell {
             keyboard_override,
             keyboard_recipient: None,
         };
+        if plugin_activation
+            .desired_enabled(&crate::plugin_panel::control_center_manifest().id, true)
+        {
+            let id = &crate::plugin_panel::control_center_manifest().id;
+            shell.plugin_registry.set_enabled(id, true)?;
+            let data = shell.control_plugin_data(720);
+            match crate::plugin_panel::PluginPanelApplication::control_center_with_data(&data) {
+                Ok(application) => {
+                    shell.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+                    shell.plugin_registry.mark_running(id)?;
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    shell.plugin_registry.mark_failed(id, error)?;
+                }
+            }
+        }
         #[cfg(not(test))]
         for id in shell
             .external_plugin_packages
@@ -2263,7 +2283,15 @@ impl LiveShell {
                 || self.launcher_host.remote_access_protected(),
                 |host| host.remote_access_protected(),
             ),
-            SurfaceRole::ControlCenter => self.control_host.remote_access_protected(),
+            SurfaceRole::ControlCenter => self
+                .control_plugin_active()
+                .then(|| {
+                    self.plugin_control_host
+                        .as_ref()
+                        .unwrap()
+                        .remote_access_protected()
+                })
+                .unwrap_or_else(|| self.control_host.remote_access_protected()),
             SurfaceRole::Notification => {
                 self.notification_host.remote_access_protected()
                     || self.notification.as_ref().is_some_and(|notification| {
@@ -2329,8 +2357,12 @@ impl LiveShell {
             SurfaceRole::Launcher if self.run_visible => self.run_scene(width, height),
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => {
-                self.sync_control_host(width, height);
-                self.control_host.commands().to_vec()
+                if self.control_plugin_active() {
+                    self.control_plugin_scene(width, height)
+                } else {
+                    self.sync_control_host(width, height);
+                    self.control_host.commands().to_vec()
+                }
             }
             SurfaceRole::Notification => {
                 if self.plugin_notification_host.is_some() {
@@ -3048,6 +3080,8 @@ impl LiveShell {
                 self.plugin_notification_host = None;
             } else if id == crate::plugin_panel::volume_osd_manifest().id {
                 self.plugin_volume_osd_host = None;
+            } else if id == crate::plugin_panel::control_center_manifest().id {
+                self.plugin_control_host = None;
             }
             self.maybe_publish_plugin_status();
             return Ok(true);
@@ -3115,6 +3149,13 @@ impl LiveShell {
                     self.plugin_volume_osd_host =
                         Some(nickel_ui::UiHost::new(application, 420, 96));
                 })
+        } else if id == crate::plugin_panel::control_center_manifest().id {
+            let data = self.control_plugin_data(720);
+            crate::plugin_panel::PluginPanelApplication::control_center_with_data(&data).map(
+                |application| {
+                    self.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+                },
+            )
         } else {
             Err(format!("plugin {id:?} has no runtime host"))
         };
@@ -3182,7 +3223,14 @@ impl LiveShell {
                 .min(),
         );
         push("lock", self.lock_deadline);
-        push("control", self.control_deadline);
+        push(
+            "control",
+            self.control_deadline.or_else(|| {
+                self.plugin_control_host
+                    .as_ref()
+                    .and_then(|host| host.next_deadline())
+            }),
+        );
         push("screenshot", self.screenshot.next_deadline());
         push(
             "window-preview-host",
@@ -3223,7 +3271,10 @@ impl LiveShell {
                     .as_ref()
                     .map_or_else(|| self.launcher_host.inspect(), |host| host.inspect()),
             )),
-            SurfaceRole::ControlCenter => Some(self.control_change_token),
+            SurfaceRole::ControlCenter => self
+                .control_plugin_active()
+                .then(|| host_token(self.plugin_control_host.as_ref().unwrap().inspect()))
+                .or(Some(self.control_change_token)),
             SurfaceRole::Notification => Some(host_token(
                 self.plugin_notification_host
                     .as_ref()
@@ -4174,6 +4225,13 @@ impl LiveShell {
                         changed |= self.apply_notification_effects();
                     }
                 }
+                crate::plugin_panel::PluginEffect::Control(action) => {
+                    if self.control_plugin_action_allowed(&action) {
+                        self.control_host.application_mut().update(action);
+                        self.apply_control_effects();
+                        changed = true;
+                    }
+                }
             }
         }
         changed
@@ -4236,6 +4294,9 @@ impl LiveShell {
         if !self.control_visible {
             return Default::default();
         }
+        if self.control_plugin_active() {
+            return self.control_plugin_event(event, size, limit, authority);
+        }
         self.sync_control_host(size.0, size.1);
         let mut outcome = self.control_host.step(HostBatch {
             surface_size: Some(size),
@@ -4263,7 +4324,10 @@ impl LiveShell {
                 .plugin_launcher_host
                 .as_ref()
                 .map_or_else(|| self.launcher_host.inspect(), |host| host.inspect()),
-            SurfaceRole::ControlCenter => self.control_host.inspect(),
+            SurfaceRole::ControlCenter => self
+                .control_plugin_active()
+                .then(|| self.plugin_control_host.as_ref().unwrap().inspect())
+                .unwrap_or_else(|| self.control_host.inspect()),
             _ => return None,
         };
         Some((
@@ -4302,6 +4366,11 @@ impl LiveShell {
             SurfaceRole::ControlCenter => {
                 if !self.control_visible {
                     return false;
+                }
+                if self.control_plugin_active() {
+                    return self
+                        .control_plugin_event(HostEvent::Ui(event), (width, height), None, None)
+                        .changed;
                 }
                 self.sync_control_host(width, height);
                 let changed = self.step_control_host(HostBatch {
@@ -4806,14 +4875,20 @@ impl LiveShell {
                 if !self.control_visible {
                     return None;
                 }
-                let bounds = self
-                    .control_host
-                    .semantic_targets_for_message(&ControlAction::SessionAction(
-                        crate::platform::SessionAction::Lock,
-                    ))
-                    .into_iter()
-                    .next()?
-                    .bounds;
+                let bounds = if self.control_plugin_active() {
+                    taskbar_plugin_control_bounds(
+                        self.plugin_control_host.as_ref()?,
+                        "session-lock",
+                    )?
+                } else {
+                    self.control_host
+                        .semantic_targets_for_message(&ControlAction::SessionAction(
+                            crate::platform::SessionAction::Lock,
+                        ))
+                        .into_iter()
+                        .next()?
+                        .bounds
+                };
                 Some(ResolvedShellTarget {
                     role: ShellRole::ControlCenter,
                     output: None,
@@ -6448,6 +6523,10 @@ impl LiveShell {
                 .as_ref()
                 .is_some_and(|host| host.pointer_interaction_active())
             || self.control_host.pointer_interaction_active()
+            || self
+                .plugin_control_host
+                .as_ref()
+                .is_some_and(|host| host.pointer_interaction_active())
             || self.launcher_host.pointer_interaction_active()
             || self.keyboard_host.pointer_interaction_active()
             || self.keyboard_resize.is_some()
@@ -6796,6 +6875,22 @@ impl LiveShell {
     }
 
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        if self.control_plugin_active() {
+            let point = Point { x, y };
+            let pressed = self.control_plugin_event(
+                HostEvent::Ui(UiEvent::PointerPressed(point)),
+                (width, height),
+                None,
+                None,
+            );
+            let released = self.control_plugin_event(
+                HostEvent::Ui(UiEvent::PointerReleased(point)),
+                (width, height),
+                None,
+                None,
+            );
+            return pressed.changed || released.changed;
+        }
         self.sync_control_host(width, height);
         let point = Point { x, y };
         self.step_control_host(HostBatch {
@@ -6826,6 +6921,11 @@ impl LiveShell {
             Some(KeyCode::Enter | KeyCode::NumpadEnter) => ControllerAction::Confirm,
             _ => return false,
         };
+        if self.control_plugin_active() {
+            return self
+                .control_plugin_event(HostEvent::Controller(action), (width, height), None, None)
+                .changed;
+        }
         self.step_control_host(HostBatch {
             events: vec![HostEvent::Controller(action)],
             ..HostBatch::default()
@@ -6842,6 +6942,16 @@ impl LiveShell {
     ) -> bool {
         if !self.control_visible {
             return false;
+        }
+        if self.control_plugin_active() {
+            let changed = self
+                .control_plugin_event(HostEvent::Controller(action), (width, height), None, None)
+                .changed;
+            let dismissed = action == ControllerAction::Cancel && self.control_visible;
+            if dismissed {
+                self.set_control_visible(false);
+            }
+            return changed || dismissed;
         }
         self.sync_control_host(width, height);
         let changed = self.step_control_host(HostBatch {
@@ -8582,6 +8692,211 @@ impl LiveShell {
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+    }
+
+    fn control_plugin_action_allowed(&self, action: &ControlAction) -> bool {
+        if !self.control_visible || self.plugin_control_host.is_none() {
+            return false;
+        }
+        match action {
+            ControlAction::SetWifiEnabled(enabled) => {
+                self.network.available && *enabled != self.network.enabled
+            }
+            ControlAction::ActivateWifi { id } => self
+                .network
+                .networks
+                .iter()
+                .take(8)
+                .any(|item| item.id == *id && item.saved && !item.connected),
+            ControlAction::SetBluetoothPowered(powered) => {
+                self.bluetooth.available && *powered != self.bluetooth.powered
+            }
+            ControlAction::SetBluetoothDiscovery(discovering) => {
+                self.bluetooth.available
+                    && self.bluetooth.powered
+                    && *discovering != self.bluetooth.discovering
+            }
+            ControlAction::ToggleBluetoothDevice { id } => {
+                self.bluetooth.devices.iter().take(8).any(|item| {
+                    item.id == *id
+                        && if cfg!(target_os = "windows") {
+                            !item.paired
+                        } else {
+                            item.paired
+                        }
+                })
+            }
+            ControlAction::SetAudioMuted(muted) => {
+                self.audio.available && *muted != self.audio.muted
+            }
+            ControlAction::SetAudioVolume(percent) => self.audio.available && *percent <= 100,
+            ControlAction::SelectAudioDevice { id } => {
+                self.audio.devices.iter().take(8).any(|item| item.id == *id)
+            }
+            ControlAction::SwitchWorkspace(id) => {
+                self.workspaces.iter().take(10).any(|item| item.id == *id)
+            }
+            ControlAction::CreateWorkspace => true,
+            ControlAction::RemoveWorkspace(id) => {
+                self.workspaces.len() > 1
+                    && self
+                        .workspaces
+                        .iter()
+                        .any(|item| item.id == *id && item.active)
+            }
+            ControlAction::ToggleShowDesktop | ControlAction::ShowNotifications => true,
+            ControlAction::PreviewProjection(mode) => {
+                self.control_host
+                    .application()
+                    .view_state()
+                    .pending_projection
+                    .is_none()
+                    && supported_projection_modes(self.session_host.as_ref()).contains(mode)
+            }
+            ControlAction::ConfirmProjection | ControlAction::CancelProjection => self
+                .control_host
+                .application()
+                .view_state()
+                .pending_projection
+                .is_some(),
+            ControlAction::SessionAction(platform::SessionAction::Lock) => true,
+            ControlAction::RequestSessionAction(_) => self
+                .control_host
+                .application()
+                .view_state()
+                .pending_session_action
+                .is_none(),
+            ControlAction::ConfirmSessionAction | ControlAction::CancelSessionAction => self
+                .control_host
+                .application()
+                .view_state()
+                .pending_session_action
+                .is_some(),
+            _ => false,
+        }
+    }
+
+    fn control_plugin_data(&self, height: u32) -> serde_json::Value {
+        use nickel_core::display_projection::ProjectionMode;
+        let bounded = |value: &str| value.chars().take(120).collect::<String>();
+        let modes = supported_projection_modes(self.session_host.as_ref())
+            .into_iter()
+            .map(|mode| match mode {
+                ProjectionMode::InternalOnly => {
+                    serde_json::json!({"id":"internal","label":"Internal"})
+                }
+                ProjectionMode::Duplicate => {
+                    serde_json::json!({"id":"duplicate","label":"Duplicate"})
+                }
+                ProjectionMode::Extend => serde_json::json!({"id":"extend","label":"Extend"}),
+                ProjectionMode::ExternalOnly => {
+                    serde_json::json!({"id":"external","label":"External"})
+                }
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "height": height.clamp(1, 8192),
+            "scrollHeight": height.saturating_sub(64).clamp(1, 8192),
+            "network": {
+                "available": self.network.available,
+                "enabled": self.network.enabled,
+                "networks": self.network.networks.iter().take(8).filter(|item| !item.id.is_empty() && item.id.len() <= 256).map(|item| serde_json::json!({
+                    "id": item.id, "name": bounded(&item.name),
+                    "saved": item.saved, "connected": item.connected,
+                })).collect::<Vec<_>>(),
+            },
+            "bluetooth": {
+                "available": self.bluetooth.available,
+                "powered": self.bluetooth.powered,
+                "discovering": self.bluetooth.discovering,
+                "devices": self.bluetooth.devices.iter().take(8).filter(|item| !item.id.is_empty() && item.id.len() <= 256).map(|item| serde_json::json!({
+                    "id": item.id, "name": bounded(&item.name),
+                    "paired": item.paired, "connected": item.connected,
+                })).collect::<Vec<_>>(),
+            },
+            "audio": {
+                "available": self.audio.available,
+                "percent": self.audio.volume_percent.min(100),
+                "muted": self.audio.muted,
+                "devices": self.audio.devices.iter().take(8).filter(|item| !item.id.is_empty() && item.id.len() <= 256).map(|item| serde_json::json!({
+                    "id": item.id, "name": bounded(&item.name),
+                    "isDefault": item.is_default,
+                })).collect::<Vec<_>>(),
+            },
+            "workspaces": self.workspaces.iter().take(10).map(|item| serde_json::json!({
+                "id": item.id, "active": item.active,
+            })).collect::<Vec<_>>(),
+            "activeWorkspace": self.workspaces.iter().find(|item| item.active).map(|item| item.id),
+            "projectionModes": modes,
+            "pendingProjection": self.control_host.application().view_state().pending_projection.is_some(),
+        })
+    }
+
+    fn control_plugin_active(&self) -> bool {
+        self.plugin_control_host.is_some()
+            && !self.control_host.application().view_state().projection_only
+    }
+
+    fn control_plugin_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        let data = self.control_plugin_data(height);
+        let host = self
+            .plugin_control_host
+            .as_mut()
+            .expect("active control plugin host");
+        let changed = host
+            .application_mut()
+            .sync_control_center_data(&data)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "control center plugin projection failed");
+                false
+            });
+        let outcome = host.step(HostBatch {
+            application_changed: changed,
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        let commands = host.commands().to_vec();
+        let _ = self.plugin_registry.record_memory(
+            &crate::plugin_panel::control_center_manifest().id,
+            nickel_core::plugins::PluginMemory {
+                native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                ..nickel_core::plugins::PluginMemory::default()
+            },
+        );
+        commands
+    }
+
+    fn control_plugin_event(
+        &mut self,
+        event: HostEvent,
+        size: (u32, u32),
+        limit: Option<usize>,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> nickel_ui::HostEventOutcome {
+        let data = self.control_plugin_data(size.1);
+        let host = self
+            .plugin_control_host
+            .as_mut()
+            .expect("active control plugin host");
+        let changed = host
+            .application_mut()
+            .sync_control_center_data(&data)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "control center plugin projection failed");
+                false
+            });
+        let mut outcome = host.step(HostBatch {
+            application_changed: changed,
+            surface_size: Some(size),
+            clipboard_text_limit: limit,
+            events: vec![event],
+            normalized_authorities: authority.into_iter().collect(),
+            ..HostBatch::default()
+        });
+        let effects = host.application_mut().take_effects();
+        outcome.changed |= self.apply_plugin_effects(effects);
+        outcome
     }
 
     fn step_control_host(&mut self, batch: HostBatch) -> bool {

@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.control-center",
+  "name": "Nickel Control Center",
+  "entry": "main.js",
+  "surfaces": [{"id":"main","kind":"window","width":420,"height":720}],
+  "capabilities": [
+    "network-read", "network-control", "bluetooth-read", "bluetooth-control",
+    "audio-read", "audio-control", "workspaces-read", "workspaces-switch",
+    "desktop-control", "display-control", "notifications-read", "session-control"
+  ]
+}

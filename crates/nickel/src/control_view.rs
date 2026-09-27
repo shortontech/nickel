@@ -185,6 +185,10 @@ impl ControlCenterApp {
         }
     }
 
+    pub fn view_state(&self) -> ControlViewState {
+        self.state
+    }
+
     pub fn projection_preview_failed(&mut self) {
         if self.state.pending_projection.take().is_some() {
             self.dirty = true;
