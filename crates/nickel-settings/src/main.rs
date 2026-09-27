@@ -5,6 +5,7 @@ mod cli;
 mod effects;
 mod model;
 mod navigation_plugin;
+mod optional_features_plugin;
 mod persistence;
 mod platform;
 mod plugin_list;
@@ -543,6 +544,7 @@ enum SettingsMessage {
     ConfirmDisableCodex,
     CancelDisableCodex,
     RetryCodexProbe,
+    OptionalFeaturesJsxAction(usize),
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
@@ -1283,6 +1285,9 @@ impl SettingsApp {
         if page != SettingsPage::Bar {
             self.bar_page.get_mut().take();
         }
+        if page != SettingsPage::OptionalFeatures {
+            self.optional_features_page.get_mut().take();
+        }
         if !matches!(page, SettingsPage::KeyboardShortcuts | SettingsPage::About) {
             self.ordinary_pages.get_mut().take();
         }
@@ -1464,6 +1469,9 @@ impl SettingsApp {
             SettingsMessage::ConfirmDisableCodex => self.request_codex_enabled(false, true),
             SettingsMessage::CancelDisableCodex => self.codex_disable_confirmation = false,
             SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
+            SettingsMessage::OptionalFeaturesJsxAction(index) => {
+                self.handle_optional_features_jsx_action(index);
+            }
             SettingsMessage::BluetoothDevice(index) => {
                 let Some(device) = self.bluetooth.devices.get(index).cloned() else {
                     return;
@@ -2929,6 +2937,15 @@ mod tests {
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
 
+    fn optional_features_action(app: &SettingsApp, id: &str) -> usize {
+        app.optional_features_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id(id))
+            .expect("optional feature control has a JSX action")
+    }
+
     #[test]
     fn plugins_page_shows_grants_memory_and_activation_control() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
@@ -3146,11 +3163,13 @@ mod tests {
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
         assert!(app.bar_page.borrow().is_none());
+        assert!(app.optional_features_page.borrow().is_none());
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.navigation_plugin.borrow().is_some());
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
         assert!(app.bar_page.borrow().is_none());
+        assert!(app.optional_features_page.borrow().is_none());
 
         app.page = SettingsPage::Plugins;
         let _ = app.build_ui(1100.0, 800.0);
@@ -3169,9 +3188,31 @@ mod tests {
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.bar_page.borrow().is_some());
 
-        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::OptionalFeatures));
         assert!(app.bar_page.borrow().is_none());
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.optional_features_page.borrow().is_some());
+
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
+        assert!(app.optional_features_page.borrow().is_none());
         assert!(app.navigation_plugin.borrow().is_some());
+    }
+
+    #[test]
+    fn failed_optional_features_jsx_keeps_native_codex_switch_available() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.codex_feature.requested_enabled = false;
+        app.codex_feature.effective = FeatureEffectiveState::Disabled;
+        app.codex_feature.capability.installation = FeatureInstallation::Installed;
+        app.codex_feature.capability.support = FeatureSupport::Supported;
+        app.codex_feature.capability.policy = FeaturePolicy::Editable;
+        *app.optional_features_page.borrow_mut() = Some(Err("JSX failed".into()));
+        let host = UiHost::new(app, 850, 580);
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::SetCodexEnabled(true))
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -5069,9 +5110,15 @@ mod tests {
             KeyboardPreference::Disabled,
             KeyboardPreference::Automatic,
         ] {
+            let id = match preference {
+                KeyboardPreference::Enabled => "keyboard-mode-enabled",
+                KeyboardPreference::Disabled => "keyboard-mode-disabled",
+                KeyboardPreference::Automatic => "keyboard-mode-automatic",
+            };
+            let action = optional_features_action(host.application(), id);
             let target = host
-                .unique_semantic_target_for_message(&SettingsMessage::SetOnScreenKeyboard(
-                    preference,
+                .unique_semantic_target_for_message(&SettingsMessage::OptionalFeaturesJsxAction(
+                    action,
                 ))
                 .expect("visible keyboard mode");
             assert!(
@@ -5235,11 +5282,10 @@ mod tests {
         app.codex_feature.capability.support = FeatureSupport::Supported;
         app.codex_feature.capability.policy = FeaturePolicy::Editable;
         let frame = app.build_ui(1100.0, 720.0);
+        let action = optional_features_action(&app, "optional-feature-codex-enabled");
         assert!(
             frame
-                .semantic_targets_for_message(&SettingsMessage::SetCodexEnabled(
-                    !app.optional_features.codex_enabled,
-                ))
+                .semantic_targets_for_message(&SettingsMessage::OptionalFeaturesJsxAction(action))
                 .len()
                 == 1
         );
@@ -5301,17 +5347,17 @@ mod tests {
         app.codex_feature.effective = FeatureEffectiveState::Rejected;
         assert_eq!(codex_switch_state(&app.codex_feature), SwitchState::Mixed);
         let frame = app.build_ui(1100.0, 720.0);
+        let action = optional_features_action(&app, "optional-feature-codex-enabled");
         assert_eq!(
             frame
-                .semantic_targets_for_message(&SettingsMessage::SetCodexEnabled(false))
+                .semantic_targets_for_message(&SettingsMessage::OptionalFeaturesJsxAction(action))
                 .len(),
             1,
             "the mixed switch remains an explicit way to resolve the failed request"
         );
-        assert!(
-            frame
-                .semantic_targets_for_message(&SettingsMessage::SetCodexEnabled(true))
-                .is_empty()
+        assert_eq!(
+            crate::optional_features_plugin::projection(&app)["codex"]["nextEnabled"],
+            false
         );
 
         app.codex_feature.effective = FeatureEffectiveState::Stale;

@@ -6,8 +6,8 @@ use nickel_session_protocol::{
     PluginMemorySnapshot, PluginRuntimeHealth, PluginSettingKind, PluginStatusSnapshot,
 };
 use nickel_ui::{
-    AnyView, Button, ButtonPresentation, Column, Container, Row, SemanticTheme, SettingsCard,
-    SettingsRow, Switch, SwitchState, TextField,
+    AnyView, Button, ButtonPresentation, Column, Container, RadioGroup, RadioOption, Row,
+    SemanticTheme, SettingsCard, SettingsRow, Switch, SwitchState, TextField,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::{SettingsApp, SettingsMessage};
 
 #[derive(Clone, Debug)]
-enum Node {
+pub(super) enum Node {
     Stack(Vec<Node>),
     Fragment(Vec<Node>),
     Card {
@@ -30,6 +30,7 @@ enum Node {
     },
     Inline(Vec<Node>),
     Button {
+        id: Option<String>,
         label: String,
         style: String,
         action: Option<usize>,
@@ -40,6 +41,10 @@ enum Node {
         state: SwitchState,
         action: Option<usize>,
     },
+    RadioGroup {
+        id: String,
+        options: Vec<Radio>,
+    },
     Input {
         id: String,
         value: String,
@@ -47,8 +52,17 @@ enum Node {
     },
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct Radio {
+    id: String,
+    label: String,
+    description: String,
+    selected: bool,
+    action: Option<usize>,
+}
+
 impl Node {
-    fn parse(value: &Value) -> Result<Self, String> {
+    pub(super) fn parse(value: &Value) -> Result<Self, String> {
         Self::parse_bounded(value, 0)
     }
 
@@ -86,7 +100,7 @@ impl Node {
                 .transpose()
         };
         Ok(match kind {
-            "settings-stack" => Self::Stack(children()?),
+            "settings-stack" | "settings-features" => Self::Stack(children()?),
             "settings-fragment" => Self::Fragment(children()?),
             "settings-card" => Self::Card {
                 label: text(value, "label", 256)?,
@@ -106,6 +120,10 @@ impl Node {
             }
             "settings-inline" => Self::Inline(children()?),
             "settings-button" => Self::Button {
+                id: value
+                    .get("id")
+                    .map(|_| text(value, "id", 256))
+                    .transpose()?,
                 label: text(value, "label", 256)?,
                 style: text(value, "value", 24)?,
                 action: action()?,
@@ -117,6 +135,7 @@ impl Node {
                     "disabled-on" => SwitchState::DisabledOn,
                     "disabled-off" => SwitchState::DisabledOff,
                     "mixed" => SwitchState::Mixed,
+                    "mixed-unavailable" => SwitchState::MixedUnavailable,
                     _ => return Err("Settings switch state is invalid".into()),
                 };
                 Self::Switch {
@@ -131,17 +150,65 @@ impl Node {
                 value: text(value, "value", 65_535)?,
                 action: action()?.ok_or("Settings input requires onChange")?,
             },
+            "settings-radio-group" => {
+                let options = value
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .ok_or("Settings radio group has no options")?;
+                if options.is_empty() || options.len() > 8 {
+                    return Err("Settings radio group size is invalid".into());
+                }
+                let options = options
+                    .iter()
+                    .map(|option| {
+                        if option.get("kind").and_then(Value::as_str) != Some("settings-radio") {
+                            return Err("Settings radio option is invalid".into());
+                        }
+                        Ok(Radio {
+                            id: text(option, "id", 256)?,
+                            label: text(option, "label", 256)?,
+                            description: text(option, "value", 256)?,
+                            selected: option
+                                .get("selected")
+                                .and_then(Value::as_bool)
+                                .ok_or("Settings radio selection is invalid")?,
+                            action: option
+                                .get("action")
+                                .filter(|value| !value.is_null())
+                                .map(|value| {
+                                    value
+                                        .as_u64()
+                                        .and_then(|number| usize::try_from(number).ok())
+                                        .ok_or("Settings radio action is invalid".to_owned())
+                                })
+                                .transpose()?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                if options.iter().filter(|option| option.selected).count() != 1 {
+                    return Err("Settings radio group needs one selected option".into());
+                }
+                Self::RadioGroup {
+                    id: text(value, "id", 256)?,
+                    options,
+                }
+            }
             _ => return Err(format!("Unknown Settings component {kind:?}")),
         })
     }
 
-    fn view(&self, theme: SemanticTheme, input_placeholder: &str) -> AnyView<SettingsMessage> {
+    pub(super) fn view(
+        &self,
+        theme: SemanticTheme,
+        input_placeholder: &str,
+        action_message: fn(usize) -> SettingsMessage,
+    ) -> AnyView<SettingsMessage> {
         match self {
             Self::Stack(children) => AnyView::new(
                 Column::new().fill_width().gap(16.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder))
+                        .map(|child| child.view(theme, input_placeholder, action_message))
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -149,7 +216,7 @@ impl Node {
                 Column::new().fill_width().gap(8.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder))
+                        .map(|child| child.view(theme, input_placeholder, action_message))
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -161,7 +228,7 @@ impl Node {
                 SettingsCard::titled(theme, label, value).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder))
+                        .map(|child| child.view(theme, input_placeholder, action_message))
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -172,7 +239,7 @@ impl Node {
             } => {
                 let row = SettingsRow::new(theme, label, value);
                 AnyView::new(if let Some(trailing) = trailing {
-                    row.trailing(trailing.view(theme, input_placeholder))
+                    row.trailing(trailing.view(theme, input_placeholder, action_message))
                 } else {
                     row
                 })
@@ -181,11 +248,12 @@ impl Node {
                 Row::new().gap(8.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme, input_placeholder))
+                        .map(|child| child.view(theme, input_placeholder, action_message))
                         .collect::<Vec<_>>(),
                 ),
             ),
             Self::Button {
+                id,
                 label,
                 style,
                 action,
@@ -196,16 +264,21 @@ impl Node {
                     "quiet" => ButtonPresentation::Quiet,
                     _ => ButtonPresentation::Disabled,
                 };
-                AnyView::new(Button::semantic(
+                let button = Button::semantic(
                     theme,
-                    SettingsMessage::PluginJsxAction(action.unwrap_or(usize::MAX)),
+                    action_message(action.unwrap_or(usize::MAX)),
                     label,
                     if action.is_some() {
                         presentation
                     } else {
                         ButtonPresentation::Disabled
                     },
-                ))
+                );
+                AnyView::new(if let Some(id) = id {
+                    button.id(id.as_str())
+                } else {
+                    button
+                })
             }
             Self::Switch {
                 id,
@@ -213,13 +286,28 @@ impl Node {
                 state,
                 action,
             } => AnyView::new(
-                Switch::with_state_action(
-                    *state,
-                    action.map(SettingsMessage::PluginJsxAction),
-                    theme,
+                Switch::with_state_action(*state, action.map(action_message), theme)
+                    .id(id.as_str())
+                    .accessibility_label(label),
+            ),
+            Self::RadioGroup { id, options } => AnyView::new(
+                RadioGroup::new(
+                    options
+                        .iter()
+                        .map(|option| {
+                            RadioOption::new(
+                                theme,
+                                action_message(option.action.unwrap_or(usize::MAX)),
+                                &option.label,
+                                option.selected,
+                            )
+                            .id(option.id.as_str())
+                            .description(&option.description)
+                            .enabled(option.action.is_some())
+                        })
+                        .collect::<Vec<_>>(),
                 )
-                .id(id.as_str())
-                .accessibility_label(label),
+                .id(id.as_str()),
             ),
             Self::Input { id, value, action } => {
                 let action = *action;
@@ -237,10 +325,23 @@ impl Node {
         }
     }
 
+    pub(super) fn contains_input(&self) -> bool {
+        match self {
+            Self::Input { .. } => true,
+            Self::Stack(children)
+            | Self::Fragment(children)
+            | Self::Inline(children)
+            | Self::Card { children, .. } => children.iter().any(Self::contains_input),
+            Self::Row { trailing, .. } => trailing.as_deref().is_some_and(Self::contains_input),
+            _ => false,
+        }
+    }
+
     #[cfg(test)]
-    fn action_for_id(&self, target: &str) -> Option<usize> {
+    pub(super) fn action_for_id(&self, target: &str) -> Option<usize> {
         match self {
             Self::Switch { id, action, .. } if id == target => *action,
+            Self::Button { id, action, .. } if id.as_deref() == Some(target) => *action,
             Self::Input { id, action, .. } if id == target => Some(*action),
             Self::Stack(children) | Self::Fragment(children) | Self::Inline(children) => children
                 .iter()
@@ -251,6 +352,10 @@ impl Node {
             Self::Row { trailing, .. } => trailing
                 .as_deref()
                 .and_then(|child| child.action_for_id(target)),
+            Self::RadioGroup { options, .. } => options
+                .iter()
+                .find(|option| option.id == target)
+                .and_then(|option| option.action),
             _ => None,
         }
     }
@@ -332,7 +437,7 @@ impl PluginList {
             .node
             .as_ref()
             .ok_or("Settings plugin list is unavailable")?
-            .view(theme, input_placeholder))
+            .view(theme, input_placeholder, SettingsMessage::PluginJsxAction))
     }
 
     pub(super) fn dispatch(

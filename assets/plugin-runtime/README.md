@@ -39,3 +39,10 @@ radio and slider callbacks request typed changes that the Settings host checks
 against the current topology projection before using the existing reducers.
 The native Bar view remains available if JSX fails. It uses the same build
 command with `settings-bar.jsx` as the source.
+
+`settings-optional-features.jsx` owns the ordinary Codex and on-screen keyboard
+cards. Its callbacks request typed changes, retry, and disable confirmation;
+the Settings host checks current policy, runtime state, and environment
+overrides before applying them. Its Boa context starts only while this page is
+open, and the native view remains available if JSX fails. Build it with the
+same command and its source filename.

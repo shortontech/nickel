@@ -195,10 +195,22 @@ impl SettingsApp {
             .child(content)
     }
 
-    pub(super) fn optional_features_components(
-        &self,
-    ) -> impl nickel_ui::Component<SettingsMessage> {
+    pub(super) fn optional_features_components(&self) -> AnyView<SettingsMessage> {
+        if self.page != SettingsPage::OptionalFeatures {
+            return AnyView::new(Container::new());
+        }
         let theme = self.ui_theme();
+        let data = crate::optional_features_plugin::projection(self);
+        let plugin_view = self
+            .optional_features_page
+            .borrow_mut()
+            .get_or_insert_with(crate::optional_features_plugin::OptionalFeaturesPage::new)
+            .as_mut()
+            .map_err(|error| error.clone())
+            .and_then(|page| page.render(&data, theme));
+        if let Ok(view) = plugin_view {
+            return view;
+        }
         let state = &self.codex_feature;
         let switch_state = codex_switch_state(state);
         let switch_action = match switch_state {
@@ -330,22 +342,24 @@ impl SettingsApp {
         )
         .child(mode)
         .child(SettingsRow::new(theme, "Current state", status));
-        nickel_ui::VerticalScroll::new(SettingsMessage::OptionalFeaturesScroll, 0.0)
-            .grow(1.0)
-            .theme(theme)
-            .child(
-                Column::new()
-                    .fill_width()
-                    .gap(16.0)
-                    .padding(Insets {
-                        top: 0.0,
-                        right: 12.0,
-                        bottom: 24.0,
-                        left: 0.0,
-                    })
-                    .child(keyboard.shrink(0.0))
-                    .child(codex.shrink(0.0)),
-            )
+        AnyView::new(
+            nickel_ui::VerticalScroll::new(SettingsMessage::OptionalFeaturesScroll, 0.0)
+                .grow(1.0)
+                .theme(theme)
+                .child(
+                    Column::new()
+                        .fill_width()
+                        .gap(16.0)
+                        .padding(Insets {
+                            top: 0.0,
+                            right: 12.0,
+                            bottom: 24.0,
+                            left: 0.0,
+                        })
+                        .child(keyboard.shrink(0.0))
+                        .child(codex.shrink(0.0)),
+                ),
+        )
     }
 
     pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
