@@ -618,11 +618,7 @@ impl DesktopApplication {
             last == id && now.duration_since(at) <= Duration::from_millis(500)
         }) {
             self.last_click = None;
-            if self.plugin_background {
-                self.pending_plugin_open = Some(id);
-            } else {
-                self.activate(id);
-            }
+            self.request_activate(id);
         } else {
             self.last_click = Some((id, now));
         }
@@ -665,6 +661,14 @@ impl DesktopApplication {
                     .unwrap_or_else(|| std::path::Path::new("Desktop item"));
                 self.error = Some(format!("Could not open {}: {error}", path.display()));
             }
+        }
+    }
+
+    pub(super) fn request_activate(&mut self, id: DesktopEntryId) {
+        if self.plugin_background {
+            self.pending_plugin_open = Some(id);
+        } else {
+            self.activate(id);
         }
     }
 
@@ -943,7 +947,7 @@ impl DesktopApplication {
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {
                 if let Some(id) = self.layout.active() {
-                    self.activate(id);
+                    self.request_activate(id);
                 }
             }
             KeyCode::Escape => {
@@ -1147,7 +1151,7 @@ impl nickel_ui::Application for DesktopApplication {
 
     fn update(&mut self, message: Self::Message) {
         match message {
-            DesktopMessage::Activate(id) => self.activate(id),
+            DesktopMessage::Activate(id) => self.request_activate(id),
             DesktopMessage::Context(id) => {
                 if let Some(position) = self
                     .layout

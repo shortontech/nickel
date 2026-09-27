@@ -123,6 +123,43 @@
         );
         assert!(requests.try_recv().is_err());
 
+        assert!(shell.desktop_controller(ControllerAction::Confirm));
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            nickel_file::FileWindowRequest::OpenOrFocus(
+                nickel_file::FileLaunch::Browse(path.clone()),
+            )
+        );
+        assert!(shell.desktop_input(nickel_input::InputEvent::Key(nickel_input::KeyEvent {
+            device: nickel_input::DeviceId(1),
+            order: nickel_input::EventOrder(90),
+            physical: nickel_input::PhysicalKey::Code(KeyCode::Enter),
+            logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::Enter),
+            location: nickel_input::KeyLocation::Standard,
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+            modifiers: nickel_input::ModifierState::default(),
+        })));
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            nickel_file::FileWindowRequest::OpenOrFocus(
+                nickel_file::FileLaunch::Browse(path.clone()),
+            )
+        );
+        let accessible = shell.desktop_host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: SemanticRole::GridCell,
+            name: "projected-folder".into(),
+        }).unwrap();
+        shell.desktop_host.handle_event(UiEvent::AccessibilityActivate(accessible.id));
+        assert!(shell.dispatch_desktop_plugin_open());
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            nickel_file::FileWindowRequest::OpenOrFocus(
+                nickel_file::FileLaunch::Browse(path.clone()),
+            )
+        );
+        assert!(requests.try_recv().is_err());
+
         shell.desktop_host.application_mut().layout.reconcile(Vec::new());
         assert!(!shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::DesktopOpen { id: "7:9".into() },
@@ -150,6 +187,14 @@
                 nickel_file::FileLaunch::Browse(path),
             )
         );
+        assert!(shell.desktop_host.application().pending_plugin_open.is_none());
+        assert!(shell.desktop_controller(ControllerAction::Confirm));
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(nickel_file::FileWindowRequest::OpenOrFocus(
+                nickel_file::FileLaunch::Browse(_)
+            ))
+        ));
         assert!(shell.desktop_host.application().pending_plugin_open.is_none());
     }
 

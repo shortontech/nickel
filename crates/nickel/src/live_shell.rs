@@ -2732,6 +2732,7 @@ impl LiveShell {
     pub fn finish_desktop_native_context_menu(&mut self, action: Option<desktop::DesktopMessage>) {
         if let Some(action) = action {
             self.desktop_host.application_mut().update(action);
+            self.dispatch_desktop_plugin_open();
         } else {
             self.desktop_host
                 .application_mut()
@@ -2922,10 +2923,11 @@ impl LiveShell {
             });
             self.desktop_change_token = outcome.change_token;
             self.desktop_deadline = outcome.next_deadline;
+            let plugin_changed = self.dispatch_desktop_plugin_open();
             if captured_release {
                 self.desktop_overlay_pointer_capture = None;
             }
-            return outcome.changed;
+            return outcome.changed | plugin_changed;
         }
         let coalesce_motion = matches!(
             &event,
@@ -3057,7 +3059,7 @@ impl LiveShell {
             }
             ControllerAction::Confirm => {
                 if let Some(id) = application.layout.active() {
-                    application.activate(id);
+                    application.request_activate(id);
                 }
                 true
             }
@@ -3075,6 +3077,7 @@ impl LiveShell {
             | ControllerAction::NextPane => false,
         };
         let changed = changed | application.reveal_active();
+        let changed = changed | self.dispatch_desktop_plugin_open();
         if !changed {
             return false;
         }

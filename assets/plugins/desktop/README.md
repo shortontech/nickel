@@ -17,7 +17,8 @@ The plugin places `FileTile` components at host-projected positions and can
 place `Box` components at bounded `x` and `y` coordinates. It draws the
 wallpaper, file tiles, and desktop error banner in JSX. The Rust host keeps
 transparent hit targets for accessibility and context-menu anchors. A tile's
-`onClick` handler requests `desktop-open` with its projected file ID; Nickel
+`onClick` handler requests `desktop-open` with its projected file ID for
+double-click, Enter, controller Confirm, and semantic tile activation; Nickel
 checks that ID against the current desktop before opening it. Selection,
 dragging, and menus remain Rust-owned. Settings can disable the
 plugin to restore native painting and shows its measured retained UI memory.
