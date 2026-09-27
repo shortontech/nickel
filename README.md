@@ -37,7 +37,8 @@ Removing the feature or uninstalling Nickel restores the normal Windows shell fa
 
 #### Known issues in v0.1.1
 
-- On a single 2560 × 1440 display, Nickel Bar and the launcher can be positioned off screen
+- On Windows with display scaling above 100%, Nickel Bar and the launcher can be positioned off
+  screen. Setting display scaling to 100% is a temporary workaround
   ([#13](https://github.com/shortontech/nickel/issues/13)).
 - Newly installed applications do not appear in launcher search until its application index is
   refreshed ([#11](https://github.com/shortontech/nickel/issues/11)).
