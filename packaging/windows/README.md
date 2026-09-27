@@ -5,10 +5,15 @@ Nickel under `%LOCALAPPDATA%\Nickel`, creates Start menu shortcuts, and offers *
 default shell** as an optional feature. The feature is off by default.
 
 When selected, `nickel-shell-setup.exe` writes the fully qualified Nickel executable to
-`HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Shell`. The next sign-in starts Nickel
-instead of Explorer. Removing the feature or uninstalling Nickel deletes that value only when it
-still names the installed Nickel executable, allowing Windows to fall back to its normal Explorer
-shell. A shell value changed after installation is left untouched.
+`HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Shell`, stops Explorer, and starts
+Nickel after the installation commits. Later sign-ins start Nickel instead of Explorer. Removing
+the feature or uninstalling Nickel deletes that value only when it still names the installed Nickel
+executable, allowing Windows to fall back to its normal Explorer shell. A shell value changed after
+installation is left untouched.
+
+Before installing, upgrading, repairing, or removing files, the MSI asks running Nickel processes
+to close and terminates any that remain after five seconds. This prevents executable replacement
+from failing because Nickel, Nickel Settings, or Nickel Terminal still has an installed file open.
 
 ## Build locally on Windows
 
@@ -32,12 +37,16 @@ The release workflow performs an administrative MSI extraction and checks the pa
 Before calling a release installer fully accepted, test these steps on Windows:
 
 1. Install without selecting the shell feature and confirm Explorer remains the sign-in shell.
-2. Modify the installation, select the feature, sign out, and confirm Nickel owns the desktop.
+2. Modify the installation, select the feature, and confirm Explorer exits and Nickel owns the
+   desktop without signing out.
 3. Remove the feature and confirm the next sign-in starts Explorer.
 4. Select the feature again, change the per-user `Shell` value manually, then uninstall and confirm
    the installer preserves that newer value.
 5. Reinstall with the feature selected, uninstall normally, and confirm the per-user override is
    absent and Explorer starts at the next sign-in.
+6. With Nickel, Nickel Settings, and Nickel Terminal running, upgrade to a newer MSI and confirm
+   setup closes them, replaces their executables, and restarts Nickel when the shell feature remains
+   selected.
 
 Release MSIs are unsigned until a code-signing identity is configured for the workflow. Windows may
 therefore show an unknown-publisher warning.

@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "windows")]
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, process::Command};
 
 fn main() -> ExitCode {
     match run() {
@@ -28,9 +28,32 @@ fn run() -> Result<(), String> {
     }
     match operation.as_str() {
         "enable" => nickel_windows_shell_setup::enable(&executable),
+        "activate" => activate(&executable),
         "disable" => nickel_windows_shell_setup::disable(&executable),
         _ => Err(usage()),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn activate(executable: &std::path::Path) -> Result<(), String> {
+    nickel_windows_shell_setup::enable(executable)?;
+
+    let stopped = Command::new("taskkill.exe")
+        .args(["/F", "/IM", "explorer.exe"])
+        .status()
+        .map_err(|error| format!("could not stop Explorer: {error}"))?;
+    // taskkill uses 128 when no matching process exists. That is already the desired state.
+    if !stopped.success() && stopped.code() != Some(128) {
+        return Err(format!(
+            "could not stop Explorer: taskkill exited with {stopped}"
+        ));
+    }
+
+    if let Err(error) = Command::new(executable).spawn() {
+        let _ = Command::new("explorer.exe").spawn();
+        return Err(format!("could not start Nickel: {error}"));
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -40,5 +63,5 @@ fn run() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn usage() -> String {
-    "usage: nickel-shell-setup <enable|disable> <absolute-path-to-nickel.exe>".into()
+    "usage: nickel-shell-setup <activate|enable|disable> <absolute-path-to-nickel.exe>".into()
 }
