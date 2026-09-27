@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - feature/plugins
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/nickel/**"
+      - "crates/nickel-core/**"
+      - "crates/nickel-ui/**"
+      - "assets/plugins/**"
   pull_request:
     paths:
       - ".github/workflows/plugin-windows.yml"
