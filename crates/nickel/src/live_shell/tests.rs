@@ -579,9 +579,11 @@ fn successful_launcher_retry_clears_transient_update_error() {
     impl crate::session_host::SessionHost for RecoveringHost {
         fn dispatch(
             &self,
-            _: crate::platform::ShellCommand,
+            command: crate::platform::ShellCommand,
         ) -> Result<(), crate::platform::SessionRequestError> {
-            if self.reject.swap(false, Ordering::AcqRel) {
+            if matches!(command, crate::platform::ShellCommand::ShowFromController)
+                && self.reject.swap(false, Ordering::AcqRel)
+            {
                 Err(crate::platform::SessionRequestError::Send)
             } else {
                 Ok(())

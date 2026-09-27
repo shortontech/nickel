@@ -8111,6 +8111,12 @@ fn native_launcher_all_applications_tile_accepts_pointer_activation() {
     use nickel_ui::backend::PaintCommand;
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (mut event_loop, mut session) = internal_shell_test_session();
+    session
+        .internal_shell
+        .as_mut()
+        .unwrap()
+        .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
+        .unwrap();
     assert!(session.toggle_internal_launcher());
     let shell = session.internal_shell.as_mut().unwrap();
     let launcher = shell

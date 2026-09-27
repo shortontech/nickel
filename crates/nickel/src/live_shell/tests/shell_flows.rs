@@ -240,6 +240,9 @@
     #[test]
     fn launcher_open_focuses_search_and_sequential_input_survives_mode_change() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
+            .unwrap();
         shell.apply_session_launcher_visibility(true);
         shell.launcher_host.step(HostBatch {
             surface_size: Some((920, 680)),
@@ -272,6 +275,9 @@
     #[test]
     fn first_launcher_open_accepts_typing_after_native_scene_layout() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
+            .unwrap();
         shell.launcher.set_codex_available(true);
         shell.apply_session_launcher_visibility(true);
         shell.scene(SurfaceRole::Launcher, 960, 720);
@@ -282,6 +288,9 @@
     #[test]
     fn reopening_launcher_replaces_retained_child_focus_with_search() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
+            .unwrap();
         shell.apply_session_launcher_visibility(true);
         shell.scene(SurfaceRole::Launcher, 920, 680);
         let non_search = shell
@@ -310,6 +319,9 @@
     #[test]
     fn launcher_submit_opens_the_keyboard_focused_dashboard_project() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
+            .unwrap();
         shell.launcher.set_codex_available(true);
         shell.set_dashboard_projects(crate::launcher::DashboardSection::Ready(vec![
             crate::launcher::DashboardProject {
@@ -343,6 +355,9 @@
     #[test]
     fn launcher_submit_dispatches_the_keyboard_focused_dashboard_application() {
         let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
+            .unwrap();
         shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
             "org.kde.konsole".into(),
             "Konsole".into(),
@@ -408,6 +423,69 @@
             })
             .unwrap();
         host.request_focus(target.id.clone());
+        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
+        assert!(
+            shell
+                .launcher_status
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("Could not launch Demo Two: "),
+            "launcher status: {:?}",
+            shell.launcher_status
+        );
+    }
+
+    #[test]
+    fn plugin_launcher_focuses_search_and_accepts_first_input() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::launcher_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        shell.set_plugin_enabled(id, true).unwrap();
+        shell.apply_session_launcher_visibility(true);
+        shell.scene(SurfaceRole::Launcher, 920, 680);
+        let host = shell.plugin_launcher_host.as_ref().unwrap();
+        let search = host
+            .query_unique(&nickel_ui::SemanticSelector::Role(
+                nickel_ui::SemanticRole::TextField,
+            ))
+            .unwrap();
+        assert_eq!(host.inspect().keyboard_focus, Some(search.id));
+        shell.launcher_host_ui(UiEvent::TextInput("konsole".into()), 920, 680);
+        assert_eq!(shell.launcher.query(), "konsole");
+    }
+
+    #[test]
+    fn plugin_launcher_submit_activates_the_focused_dashboard_application() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(vec![
+            crate::model::Application::new(
+                "org.nickel.demo-one".into(),
+                "Demo One".into(),
+                None,
+                None,
+                Some(vec!["nickel-test-command-one-does-not-exist".into()]),
+            ),
+            crate::model::Application::new(
+                "org.nickel.demo-two".into(),
+                "Demo Two".into(),
+                None,
+                None,
+                Some(vec!["nickel-test-command-two-does-not-exist".into()]),
+            ),
+        ]);
+        let id = &crate::plugin_panel::launcher_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        shell.set_plugin_enabled(id, true).unwrap();
+        shell.apply_session_launcher_visibility(true);
+        shell.scene(SurfaceRole::Launcher, 920, 680);
+        let host = shell.plugin_launcher_host.as_mut().unwrap();
+        let target = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Demo Two".into(),
+            })
+            .unwrap();
+        host.request_focus(target.id);
         shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
         assert!(
             shell

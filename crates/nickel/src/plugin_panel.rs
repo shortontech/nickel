@@ -87,7 +87,7 @@ pub fn taskbar_enabled() -> bool {
 }
 
 pub fn launcher_enabled() -> bool {
-    std::env::var_os("NICKEL_DEV_PLUGIN_LAUNCHER").is_some()
+    true
 }
 
 pub fn bottom_offset() -> u32 {
