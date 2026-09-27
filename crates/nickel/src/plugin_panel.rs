@@ -174,6 +174,7 @@ let __hookIndex = 0;
 let __handlers = [];
 let __effects = [];
 let __pendingRender = null;
+let __pendingEvent = null;
 let __nickelData = Object.freeze({query: '', results: []});
 
 const nickel = Object.freeze({
@@ -263,9 +264,16 @@ function h(kind, props, ...children) {
 }
 
 function __nickelRollbackRender() {
-    if (__pendingRender === null) return;
-    const {handlers, hooks, values, effectsLength} = __pendingRender;
-    __handlers = handlers;
+    if (__pendingRender !== null) {
+        const {handlers, hooks, values, effectsLength} = __pendingRender;
+        __handlers = handlers;
+        __nickelRestoreHooks(hooks, values, effectsLength);
+        __pendingRender = null;
+    }
+    __nickelRollbackEvent();
+}
+
+function __nickelRestoreHooks(hooks, values, effectsLength) {
     let componentIndex = 0;
     for (const slots of hooks.values()) {
         const oldValues = values[componentIndex++];
@@ -276,10 +284,19 @@ function __nickelRollbackRender() {
     }
     __componentHooks = hooks;
     __effects.length = effectsLength;
-    __pendingRender = null;
 }
 
-function __nickelCommitRender() { __pendingRender = null; }
+function __nickelRollbackEvent() {
+    if (__pendingEvent === null) return;
+    const {hooks, values, effectsLength} = __pendingEvent;
+    __nickelRestoreHooks(hooks, values, effectsLength);
+    __pendingEvent = null;
+}
+
+function __nickelCommitRender() {
+    __pendingRender = null;
+    __pendingEvent = null;
+}
 
 function __nickelRender() {
     if (__pendingRender !== null) throw Error('previous render was not finalized');
@@ -308,8 +325,19 @@ function __nickelRender() {
 
 function __nickelDispatch(action, value) {
     const handler = __handlers[action];
-    if (handler) handler(value);
-    return __nickelRender();
+    if (!handler) return __nickelRender();
+    const hooks = new Map(Array.from(__componentHooks, ([path, slots]) => [path, slots.slice()]));
+    const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
+        entry.kind === 'ref' ? entry.value.current : entry.value));
+    const effectsLength = __effects.length;
+    __pendingEvent = {hooks, values, effectsLength};
+    try {
+        handler(value);
+        return __nickelRender();
+    } catch (error) {
+        __nickelRollbackEvent();
+        throw error;
+    }
 }
 "#;
 
@@ -3205,6 +3233,58 @@ mod tests {
         panel.update(PluginMessage::Click(0));
         assert!(format!("{:?}", panel.node).contains("Count: 1"));
         assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn failed_native_render_restores_hook_state_before_next_click() {
+        let source = r#"
+            function App() {
+                const [count, setCount] = useState(0);
+                return h(Panel, {},
+                    h(Text, {}, `Count: ${count}`),
+                    h(Button, {id: 'invalid', onClick: () => setCount(1)}, 'Invalid'),
+                    h(Button, {id: 'valid', onClick: () => setCount(value => value + 2)}, 'Valid'),
+                    count === 1 ? h('unsupported-component', {}) : null);
+            }
+        "#;
+        let mut panel = PluginPanelApplication::new(source).unwrap();
+        let invalid = panel.button_message("invalid").unwrap();
+        panel.update(invalid);
+        assert!(panel.last_error().is_some());
+        assert!(format!("{:?}", panel.node).contains("Count: 0"));
+
+        let valid = panel.button_message("valid").unwrap();
+        panel.update(valid);
+        assert!(panel.last_error().is_none());
+        assert!(format!("{:?}", panel.node).contains("Count: 2"));
+    }
+
+    #[test]
+    fn failed_handler_discards_effects_and_restores_hook_state() {
+        let source = r#"
+            function App() {
+                const [count, setCount] = useState(0);
+                return h(Panel, {},
+                    h(Text, {}, `Count: ${count}`),
+                    h(Button, {id: 'invalid', onClick: () => {
+                        setCount(1);
+                        nickel.request('show-launcher');
+                        throw Error('handler failed');
+                    }}, 'Invalid'),
+                    h(Button, {id: 'valid', onClick: () => setCount(value => value + 2)}, 'Valid'));
+            }
+        "#;
+        let mut panel = PluginPanelApplication::new(source).unwrap();
+        let invalid = panel.button_message("invalid").unwrap();
+        panel.update(invalid);
+        assert!(panel.last_error().is_some());
+        assert!(panel.take_effects().is_empty());
+        assert!(format!("{:?}", panel.node).contains("Count: 0"));
+
+        let valid = panel.button_message("valid").unwrap();
+        panel.update(valid);
+        assert!(panel.last_error().is_none());
+        assert!(format!("{:?}", panel.node).contains("Count: 2"));
     }
 
     #[test]
