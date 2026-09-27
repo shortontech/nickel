@@ -5398,8 +5398,9 @@ impl NickelSession {
                 &outputs,
                 self.launcher_output_name.as_deref(),
             );
-            if surface.role == crate::winit_shell::SurfaceRole::Panel {
-                let offset = shell.plugin_panel_surface().bottom_offset;
+            if let Some(key) = surface.plugin.as_ref()
+                && let Some(offset) = shell.plugin_panel_bottom_offset(key)
+            {
                 placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - offset as i32;
             }
             let scale = surface
@@ -7183,8 +7184,9 @@ impl NickelSession {
                 &outputs,
                 self.launcher_output_name.as_deref(),
             );
-            if surface.role == crate::winit_shell::SurfaceRole::Panel {
-                let offset = shell.plugin_panel_surface().bottom_offset;
+            if let Some(key) = surface.plugin.as_ref()
+                && let Some(offset) = shell.plugin_panel_bottom_offset(key)
+            {
                 placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - offset as i32;
             }
             let mut resized = false;

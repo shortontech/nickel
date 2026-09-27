@@ -286,23 +286,17 @@ impl InternalShellCoordinator {
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, None, Some(output.name.clone()), size));
             }
-            if self.shell.surface_visible(SurfaceRole::Panel)
-                && (self.shell.plugin_panel_surface().output
-                    == nickel_core::plugins::PluginOutputScope::All
-                    || index == 0)
-            {
-                let role = SurfaceRole::Panel;
-                let surface = self.shell.plugin_panel_surface();
+            for (key, surface) in self.shell.plugin_panels() {
+                if surface.output != nickel_core::plugins::PluginOutputScope::All && index != 0 {
+                    continue;
+                }
                 let size = (
                     surface.width.min(output.width),
                     surface.height.min(output.height),
                 );
                 desired.push((
-                    role,
-                    Some(nickel_core::plugins::PluginSurfaceKey {
-                        plugin_id: self.shell.plugin_panel_owner().to_owned(),
-                        surface_id: surface.id.clone(),
-                    }),
+                    SurfaceRole::Panel,
+                    Some(key),
                     Some(output.name.clone()),
                     size,
                 ));
@@ -868,16 +862,18 @@ impl InternalShellCoordinator {
                 SurfaceRole::Desktop | SurfaceRole::OnScreenKeyboard
             )
         {
-            changed |= self.shell.shell_role_host_ui(
-                entry.role,
-                if focused {
-                    nickel_ui::UiEvent::FocusGained
-                } else {
-                    nickel_ui::UiEvent::FocusLost
-                },
-                entry.size.0,
-                entry.size.1,
-            );
+            let event = if focused {
+                nickel_ui::UiEvent::FocusGained
+            } else {
+                nickel_ui::UiEvent::FocusLost
+            };
+            changed |= if let Some(key) = entry.plugin.as_ref() {
+                self.shell
+                    .plugin_panel_host_ui_for(key, event, entry.size.0, entry.size.1)
+            } else {
+                self.shell
+                    .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
+            };
         }
         if entry.role == SurfaceRole::Desktop && batch.window_focused == Some(false) {
             // Host focus changes are lifecycle notifications, not device events;
@@ -1040,6 +1036,21 @@ impl InternalShellCoordinator {
                     | nickel_ui::HostEvent::NormalizedIngress(_)
             ) {
                 match entry.role {
+                    SurfaceRole::Panel => {
+                        let input = match event {
+                            nickel_ui::HostEvent::Normalized { input, .. } => input,
+                            nickel_ui::HostEvent::NormalizedIngress(envelope) => envelope.input,
+                            _ => unreachable!(),
+                        };
+                        if let Some(key) = entry.plugin.as_ref() {
+                            changed |= self.shell.plugin_panel_host_input_for(
+                                key,
+                                input,
+                                entry.size.0,
+                                entry.size.1,
+                            );
+                        }
+                    }
                     SurfaceRole::Lock => {
                         let input = match event {
                             nickel_ui::HostEvent::Normalized { input, .. } => input,
@@ -1144,12 +1155,13 @@ impl InternalShellCoordinator {
                     batch.clipboard_text_limit,
                 )),
                 _ => {
-                    changed |= self.shell.shell_role_host_ui(
-                        entry.role,
-                        event,
-                        entry.size.0,
-                        entry.size.1,
-                    );
+                    changed |= if let Some(key) = entry.plugin.as_ref() {
+                        self.shell
+                            .plugin_panel_host_ui_for(key, event, entry.size.0, entry.size.1)
+                    } else {
+                        self.shell
+                            .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
+                    };
                     None
                 }
             };
@@ -1317,6 +1329,13 @@ impl InternalShellCoordinator {
 
     pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
         self.shell.plugin_panel_surface()
+    }
+
+    pub(crate) fn plugin_panel_bottom_offset(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<u32> {
+        self.shell.plugin_panel_bottom_offset(key)
     }
 
     pub(crate) fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {

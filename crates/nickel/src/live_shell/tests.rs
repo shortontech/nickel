@@ -427,6 +427,173 @@ fn installed_dock_uses_declared_offset_and_translucent_panel() {
     assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
 }
 
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn two_installed_panels_render_and_retire_independently() {
+    let root = tempfile::tempdir().unwrap();
+    for (id, label, offset) in [
+        ("org.example.clock", "Clock", 12),
+        ("org.example.mail", "Mail", 36),
+    ] {
+        let directory = root.path().join(id);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("plugin.json"),
+            format!(
+                r#"{{"api_version":1,"id":"{id}","name":"{label}","entry":"main.js","surfaces":[{{"id":"main","kind":"panel","width":360,"height":64,"bottom_offset":{offset}}}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("main.js"),
+            format!("function App() {{ return h(Panel, {{}}, h(Text, {{}}, '{label}')); }}"),
+        )
+        .unwrap();
+    }
+    let mut shell = LiveShell::new().unwrap();
+    let catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    assert!(catalog.failures.is_empty());
+    for (id, descriptor) in catalog.packages {
+        shell
+            .plugin_registry
+            .register(descriptor.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(id.clone(), descriptor);
+        assert!(shell.set_plugin_enabled(&id, true).unwrap());
+    }
+    let panels = shell.plugin_panels();
+    assert_eq!(panels.len(), 2);
+    assert_eq!(shell.plugin_panel_bottom_offset(&panels[0].0), Some(12));
+    assert_eq!(shell.plugin_panel_bottom_offset(&panels[1].0), Some(36));
+    for (key, surface) in &panels {
+        assert!(shell.plugin_panel_matches(key));
+        let commands = shell
+            .plugin_panel_scene(key, surface.width, surface.height)
+            .unwrap();
+        let label = if key.plugin_id.ends_with("clock") {
+            "Clock"
+        } else {
+            "Mail"
+        };
+        assert!(commands.iter().any(|command| matches!(command,
+            nickel_ui::backend::PaintCommand::Text { text, .. } if text == label
+        )));
+        assert!(
+            shell
+                .plugin_status_snapshot()
+                .plugins
+                .iter()
+                .find(|plugin| plugin.id == key.plugin_id)
+                .unwrap()
+                .memory
+                .native_ui_bytes
+                .is_some_and(|bytes| bytes > 0)
+        );
+    }
+    assert!(
+        shell
+            .set_plugin_enabled("org.example.clock", false)
+            .unwrap()
+    );
+    assert_eq!(shell.plugin_panels().len(), 1);
+    assert!(!shell.plugin_panel_matches(&panels[0].0));
+    assert!(shell.plugin_panel_matches(&panels[1].0));
+    assert!(shell.plugin_panel_scene(&panels[0].0, 360, 64).is_none());
+    assert!(shell.plugin_panel_scene(&panels[1].0, 360, 64).is_some());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn internal_shell_presents_two_installed_panels_on_one_output() {
+    struct Host;
+    impl crate::session_host::SessionHost for Host {
+        fn dispatch(
+            &self,
+            _command: crate::platform::ShellCommand,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            Ok(())
+        }
+
+        fn secure_storage_state(
+            &self,
+        ) -> Result<crate::platform::SecureStorageState, crate::platform::SessionRequestError>
+        {
+            Ok(crate::platform::SecureStorageState::Ready)
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    for (id, label) in [("org.example.clock", "Clock"), ("org.example.mail", "Mail")] {
+        let directory = root.path().join(id);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("plugin.json"),
+            format!(r#"{{"api_version":1,"id":"{id}","name":"{label}","entry":"main.js","surfaces":[{{"id":"main","kind":"panel","width":300,"height":64}}]}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("main.js"),
+            format!("function App() {{ return h(Panel, {{}}, h(Text, {{}}, '{label}')); }}"),
+        )
+        .unwrap();
+    }
+    let mut coordinator = crate::internal_shell::InternalShellCoordinator::new(
+        Arc::new(Host),
+        crate::winit_shell::PanelEdge::Bottom,
+    )
+    .unwrap();
+    let catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    for (id, descriptor) in catalog.packages {
+        let shell = coordinator.shell_mut();
+        shell
+            .plugin_registry
+            .register(descriptor.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(id.clone(), descriptor);
+        shell.set_plugin_enabled(&id, true).unwrap();
+    }
+    coordinator.set_outputs(&[crate::internal_shell::InternalOutput {
+        x: 0,
+        y: 0,
+        name: "test".into(),
+        width: 1280,
+        height: 720,
+        scale: 1.0,
+    }]);
+    let panels = coordinator
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.role == crate::winit_shell::SurfaceRole::Panel)
+        .map(|surface| {
+            (
+                surface.id,
+                surface.plugin.as_ref().unwrap().plugin_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(panels.len(), 2);
+    for (id, owner) in panels {
+        assert!(coordinator.visible(id));
+        let label = if owner.ends_with("clock") {
+            "Clock"
+        } else {
+            "Mail"
+        };
+        assert!(
+            coordinator
+                .scene(id)
+                .unwrap()
+                .iter()
+                .any(|command| matches!(command,
+                    nickel_ui::backend::PaintCommand::Text { text, .. } if text == label
+                ))
+        );
+    }
+}
+
 #[test]
 fn installed_panel_start_failure_is_visible_until_disabled() {
     let root = tempfile::tempdir().unwrap();
