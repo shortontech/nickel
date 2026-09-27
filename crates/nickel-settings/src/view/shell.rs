@@ -22,7 +22,9 @@ impl SettingsApp {
         modality: InputModality,
     ) -> AnyView<SettingsMessage> {
         if self.page == SettingsPage::BluetoothPair {
-            return self.bluetooth_pairing_view();
+            let view = self.bluetooth_pairing_view();
+            let _ = self.settings_plugin_memory();
+            return view;
         }
         let theme = self.ui_theme();
         let declared_destinations = self.navigation_destinations();
@@ -257,6 +259,7 @@ impl SettingsApp {
         .navigation_header(navigation)
         .navigation_width(SIDEBAR_WIDTH as f32)
         .id("settings-navigation");
+        let _ = self.settings_plugin_memory();
         let show_controller_legend = modality == InputModality::Controller;
         if show_controller_legend {
             let legend_height = theme.sizing.control_height + theme.spacing.control * 2.0;

@@ -9,6 +9,9 @@ its JSX contexts and leaves the native Plugins recovery view available to
 review and re-enable it. The shell activation registry does not yet manage the
 separate Settings process, and its process-owned memory account is a remaining
 migration step.
+The Plugins page reports a measured lower bound for the Settings package's
+retained Rust component trees and cached page projections. Boa heap, textures,
+the shared native Settings frame, and process RSS remain unattributed.
 
 `settings-pages.jsx` starts the bundled Settings process view migration. It
 currently renders the Keyboard Shortcuts and About cards through the shared

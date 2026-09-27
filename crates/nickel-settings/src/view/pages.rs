@@ -130,9 +130,20 @@ impl SettingsApp {
                 ),
             );
         }
+        let mut status_with_local_memory = self.plugin_status.clone();
+        let local_memory = self.settings_plugin_memory();
+        *self.settings_jsx_displayed_memory.borrow_mut() = Some(local_memory.clone());
+        if let Some(snapshot) = &mut status_with_local_memory
+            && let Some(settings) = snapshot
+                .plugins
+                .iter_mut()
+                .find(|plugin| plugin.id == crate::settings_package::ID)
+        {
+            settings.memory = local_memory;
+        }
         let projection = crate::plugin_list::projection(
             &self.localizer,
-            self.plugin_status.as_ref(),
+            status_with_local_memory.as_ref(),
             self.plugin_notice.as_deref(),
             self.plugin_pending.as_ref(),
             self.plugin_setting_pending.as_ref(),

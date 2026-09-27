@@ -58,6 +58,28 @@ struct BarTree {
 }
 
 impl BarTree {
+    fn retained_bytes(&self) -> usize {
+        let radio_bytes = |group: &RadioGroupModel| {
+            group.id.capacity()
+                + group.options.capacity() * std::mem::size_of::<Radio>()
+                + group
+                    .options
+                    .iter()
+                    .map(|option| option.id.capacity() + option.label.capacity())
+                    .sum::<usize>()
+        };
+        std::mem::size_of::<Self>()
+            + self.show_on.capacity()
+            + radio_bytes(&self.display_scope)
+            + self.window_scope_label.capacity()
+            + radio_bytes(&self.window_scope)
+            + self.slider.id.capacity()
+            + self.slider.label.capacity()
+            + self.slider.description.capacity()
+            + self.slider.value_label.capacity()
+            + self.desktops.capacity() * std::mem::size_of::<Desktop>()
+    }
+
     fn parse(value: &Value) -> Result<Self, String> {
         if kind(value) != Some("settings-bar") {
             return Err("Bar page root is invalid".into());
@@ -344,6 +366,11 @@ pub(super) struct BarPage {
 }
 
 impl BarPage {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.last_data.as_ref().map_or(0, String::capacity)
+            + self.tree.as_ref().map_or(0, BarTree::retained_bytes)
+    }
+
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             runtime: JsxRuntime::new(

@@ -7,6 +7,9 @@ pub(super) struct SettingsApp {
     pub(super) controller_family: nickel_ui::ControllerFamily,
     pub(super) localizer: Localizer,
     pub(super) settings_jsx_enabled: bool,
+    pub(super) settings_jsx_peak_bytes: Cell<u64>,
+    pub(super) settings_jsx_displayed_memory:
+        std::cell::RefCell<Option<nickel_session_protocol::PluginMemorySnapshot>>,
     pub(super) ordinary_pages:
         std::cell::RefCell<Option<Result<crate::settings_plugin::OrdinaryPages, String>>>,
     pub(super) plugin_list:
@@ -213,6 +216,8 @@ impl Default for SettingsApp {
             controller_family: nickel_ui::ControllerFamily::Generic,
             localizer,
             settings_jsx_enabled,
+            settings_jsx_peak_bytes: Cell::new(0),
+            settings_jsx_displayed_memory: std::cell::RefCell::new(None),
             ordinary_pages: std::cell::RefCell::new(None),
             plugin_list: std::cell::RefCell::new(None),
             navigation_plugin: std::cell::RefCell::new(None),

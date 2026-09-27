@@ -1098,6 +1098,8 @@ impl SettingsApp {
             return;
         }
         self.settings_jsx_enabled = enabled;
+        self.settings_jsx_peak_bytes.set(0);
+        self.settings_jsx_displayed_memory.get_mut().take();
         self.ordinary_pages.get_mut().take();
         self.plugin_list.get_mut().take();
         self.navigation_plugin.get_mut().take();
@@ -1121,6 +1123,65 @@ impl SettingsApp {
         self.plugin_enable_review = None;
         self.plugin_notice = None;
         self.request_redraw();
+    }
+
+    fn settings_plugin_memory(&self) -> nickel_session_protocol::PluginMemorySnapshot {
+        if !self.settings_jsx_enabled {
+            return Default::default();
+        }
+        let total = self
+            .navigation_plugin
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .map_or(0, navigation_plugin::NavigationPlugin::retained_bytes)
+            + self
+                .ordinary_pages
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(0, settings_plugin::OrdinaryPages::retained_bytes)
+            + self
+                .plugin_list
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(0, plugin_list::PluginList::retained_bytes)
+            + self
+                .bar_page
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(0, bar_plugin::BarPage::retained_bytes)
+            + self
+                .optional_features_page
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(
+                    0,
+                    optional_features_plugin::OptionalFeaturesPage::retained_bytes,
+                )
+            + self
+                .network_page
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(0, network_plugin::NetworkPage::retained_bytes)
+            + self
+                .bluetooth_page
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(0, bluetooth_plugin::BluetoothPage::retained_bytes);
+        let total = u64::try_from(total).unwrap_or(u64::MAX);
+        self.settings_jsx_peak_bytes
+            .set(self.settings_jsx_peak_bytes.get().max(total));
+        nickel_session_protocol::PluginMemorySnapshot {
+            native_ui_bytes: Some(total),
+            tracked_peak_bytes: Some(self.settings_jsx_peak_bytes.get()),
+            ..Default::default()
+        }
     }
 
     fn request_plugin_setting(&mut self, id: String, key: String, value: serde_json::Value) {
@@ -3358,6 +3419,35 @@ mod tests {
         assert_eq!(snapshot.plugins.len(), 1);
         assert_eq!(snapshot.plugins[0].id, crate::settings_package::ID);
         assert!(!snapshot.plugins[0].desired_enabled);
+    }
+
+    #[test]
+    fn settings_plugin_memory_tracks_live_pages_and_resets_on_disable() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
+        app.persistence_enabled = false;
+        app.bluetooth.available = true;
+        let _ = app.build_ui(850.0, 900.0);
+        let active = app.settings_plugin_memory();
+        assert!(active.native_ui_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(active.tracked_peak_bytes >= active.native_ui_bytes);
+        assert!(active.js_heap_bytes.is_none());
+        assert!(active.texture_bytes.is_none());
+
+        app.set_settings_jsx_enabled(false);
+        assert!(app.bluetooth_page.borrow().is_none());
+        assert!(app.navigation_plugin.borrow().is_none());
+        let disabled = app.settings_plugin_memory();
+        assert!(disabled.native_ui_bytes.is_none());
+        assert!(disabled.tracked_peak_bytes.is_none());
+
+        app.set_settings_jsx_enabled(true);
+        assert_eq!(app.settings_jsx_peak_bytes.get(), 0);
+        let _ = app.build_ui(850.0, 900.0);
+        assert!(
+            app.settings_plugin_memory()
+                .native_ui_bytes
+                .is_some_and(|bytes| bytes > 0)
+        );
     }
 
     #[test]

@@ -81,6 +81,21 @@ pub(super) struct OrdinaryPages {
 }
 
 impl OrdinaryPages {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.last_data.as_ref().map_or(0, String::capacity)
+            + self.page.as_ref().map_or(0, |page| {
+                std::mem::size_of::<Page>()
+                    + page.title.capacity()
+                    + page.description.capacity()
+                    + page.rows.capacity() * std::mem::size_of::<Row>()
+                    + page
+                        .rows
+                        .iter()
+                        .map(|row| row.label.capacity() + row.value.capacity())
+                        .sum::<usize>()
+            })
+    }
+
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             runtime: JsxRuntime::new(

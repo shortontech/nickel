@@ -99,6 +99,21 @@ pub(super) struct NavigationPlugin {
 }
 
 impl NavigationPlugin {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.last_data.as_ref().map_or(0, String::capacity)
+            + self.destinations.capacity() * std::mem::size_of::<Destination>()
+            + self
+                .destinations
+                .iter()
+                .map(|destination| {
+                    destination.label.capacity()
+                        + destination.title.capacity()
+                        + destination.subtitle.capacity()
+                        + destination.section.capacity()
+                })
+                .sum::<usize>()
+    }
+
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             runtime: JsxRuntime::new(

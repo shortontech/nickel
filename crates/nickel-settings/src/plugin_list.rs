@@ -48,6 +48,10 @@ pub(super) struct PluginList {
 }
 
 impl PluginList {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.context.retained_bytes()
+    }
+
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             context: SettingsJsxContext::new(
@@ -358,9 +362,20 @@ fn valid_next_setting_value(kind: &PluginSettingKind, current: &Value, next: &Va
 
 impl SettingsApp {
     pub(super) fn handle_plugin_jsx_action(&mut self, index: usize, value: Value) {
+        let mut current_status = self.plugin_status.clone();
+        if let (Some(snapshot), Some(memory)) = (
+            current_status.as_mut(),
+            self.settings_jsx_displayed_memory.borrow().as_ref(),
+        ) && let Some(settings) = snapshot
+            .plugins
+            .iter_mut()
+            .find(|plugin| plugin.id == crate::settings_package::ID)
+        {
+            settings.memory = memory.clone();
+        }
         let data = projection(
             &self.localizer,
-            self.plugin_status.as_ref(),
+            current_status.as_ref(),
             self.plugin_notice.as_deref(),
             self.plugin_pending.as_ref(),
             self.plugin_setting_pending.as_ref(),

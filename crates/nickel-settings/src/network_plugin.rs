@@ -16,6 +16,10 @@ pub(super) struct NetworkPage {
 }
 
 impl NetworkPage {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.context.retained_bytes()
+    }
+
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             context: SettingsJsxContext::new(

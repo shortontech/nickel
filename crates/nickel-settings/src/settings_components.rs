@@ -59,6 +59,68 @@ pub(super) struct Radio {
 }
 
 impl Node {
+    /// Lower bound for this parsed component tree's owned Rust allocations.
+    /// Boa's heap and the shared resolved UI frame are deliberately excluded.
+    pub(super) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.heap_bytes()
+    }
+
+    fn heap_bytes(&self) -> usize {
+        let children_bytes = |children: &Vec<Self>| {
+            children.capacity() * std::mem::size_of::<Self>()
+                + children.iter().map(Self::heap_bytes).sum::<usize>()
+        };
+        match self {
+            Self::Stack(children) | Self::Fragment(children) | Self::Inline(children) => {
+                children_bytes(children)
+            }
+            Self::Card {
+                label,
+                value,
+                children,
+            } => label.capacity() + value.capacity() + children_bytes(children),
+            Self::Row {
+                label,
+                value,
+                trailing,
+            } => {
+                label.capacity()
+                    + value.capacity()
+                    + trailing
+                        .as_ref()
+                        .map_or(0, |node| std::mem::size_of::<Self>() + node.heap_bytes())
+            }
+            Self::Button {
+                id,
+                label,
+                accessibility_label,
+                state,
+                style,
+                ..
+            } => {
+                id.as_ref().map_or(0, String::capacity)
+                    + label.capacity()
+                    + accessibility_label.as_ref().map_or(0, String::capacity)
+                    + state.as_ref().map_or(0, String::capacity)
+                    + style.capacity()
+            }
+            Self::Switch { id, label, .. } => id.capacity() + label.capacity(),
+            Self::RadioGroup { id, options } => {
+                id.capacity()
+                    + options.capacity() * std::mem::size_of::<Radio>()
+                    + options
+                        .iter()
+                        .map(|option| {
+                            option.id.capacity()
+                                + option.label.capacity()
+                                + option.description.capacity()
+                        })
+                        .sum::<usize>()
+            }
+            Self::Input { id, value, .. } => id.capacity() + value.capacity(),
+        }
+    }
+
     pub(super) fn parse(value: &Value) -> Result<Self, String> {
         Self::parse_bounded(value, 0)
     }
@@ -401,6 +463,11 @@ pub(super) struct SettingsJsxContext {
 }
 
 impl SettingsJsxContext {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.last_data.as_ref().map_or(0, String::capacity)
+            + self.node.as_ref().map_or(0, Node::retained_bytes)
+    }
+
     pub(super) fn new(
         source: &str,
         parse: fn(&Value) -> Result<Node, String>,
