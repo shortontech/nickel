@@ -3424,6 +3424,7 @@ dependencies = [
  "bitflags 2.13.1",
  "boa_engine",
  "bytemuck",
+ "ctrlc",
  "dirs",
  "evdev",
  "freedesktop-desktop-entry",

@@ -6,7 +6,7 @@ use nickel_core::plugins::{PluginCatalog, PluginPackage};
 use nickel_shell::plugin_panel::PluginPanelApplication;
 
 fn usage() -> &'static str {
-    "usage: nickel-plugin list [plugin-root] | validate <plugin-directory>"
+    "usage: nickel-plugin list [plugin-root] | validate <plugin-directory> | dev <plugin-directory>"
 }
 
 fn main() -> Result<(), String> {
@@ -59,6 +59,13 @@ fn main() -> Result<(), String> {
             }
             Ok(())
         }
+        Some(command) if command == "dev" => {
+            let directory: OsString = args.next().ok_or_else(|| usage().to_owned())?;
+            if args.next().is_some() {
+                return Err(usage().into());
+            }
+            dev::run(PathBuf::from(directory))
+        }
         Some(command) if command == "--help" || command == "-h" => {
             println!("{}", usage());
             Ok(())
@@ -66,3 +73,6 @@ fn main() -> Result<(), String> {
         _ => Err(usage().into()),
     }
 }
+
+#[path = "nickel_plugin_dev.rs"]
+mod dev;

@@ -56,6 +56,8 @@ zeroize.workspace = true
 nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
 boa_engine = { version = "0.22", default-features = false }
 serde_json.workspace = true
+tempfile = "3.25.0"
+ctrlc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit = "0.24.1"
