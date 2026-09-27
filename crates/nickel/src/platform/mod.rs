@@ -447,7 +447,11 @@ pub fn system_status_receiver() -> status_mailbox::StatusReceiver {
     {
         linux::system_status_receiver()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::system_status_receiver()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let (_sender, receiver) = status_mailbox::channel();
         receiver

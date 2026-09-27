@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use notify::EventKind;
+
 use crate::model::{
     Application, MAX_APPLICATION_SCAN_ENTRIES, MAX_DISCOVERED_APPLICATION_METADATA_BYTES,
     MAX_DISCOVERED_APPLICATIONS,
@@ -23,15 +25,7 @@ pub fn load_applications() -> Vec<Application> {
 }
 
 pub fn load_application_discovery() -> (Vec<Application>, bool) {
-    let mut roots = [env::var_os("APPDATA"), env::var_os("PROGRAMDATA")]
-        .into_iter()
-        .flatten()
-        .map(PathBuf::from)
-        .map(|root| root.join(START_MENU_RELATIVE))
-        .collect::<Vec<_>>();
-    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
-        roots.push(PathBuf::from(home).join("Desktop"));
-    }
+    let roots = application_roots();
     let (mut applications, mut truncated) = load_from_roots(&roots);
     let mut retained_metadata_bytes = applications
         .iter()
@@ -59,6 +53,32 @@ pub fn load_application_discovery() -> (Vec<Application>, bool) {
     }
     sort_applications(&mut applications);
     (applications, truncated)
+}
+
+pub(super) fn application_roots() -> Vec<PathBuf> {
+    let mut roots = [env::var_os("APPDATA"), env::var_os("PROGRAMDATA")]
+        .into_iter()
+        .flatten()
+        .map(PathBuf::from)
+        .map(|root| root.join(START_MENU_RELATIVE))
+        .collect::<Vec<_>>();
+    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
+        roots.push(PathBuf::from(home).join("Desktop"));
+    }
+    roots
+}
+
+pub(super) fn application_inventory_event_changed(event: &notify::Event) -> bool {
+    matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    ) && event.paths.iter().any(|path| {
+        path.extension().is_some_and(|extension| {
+            ["lnk", "url", "appref-ms"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+    })
 }
 
 fn load_from_roots(roots: &[PathBuf]) -> (Vec<Application>, bool) {
@@ -248,7 +268,23 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{load_from_roots, load_packaged_applications};
+    use notify::{
+        Event, EventKind,
+        event::{CreateKind, ModifyKind},
+    };
+
+    use super::{application_inventory_event_changed, load_from_roots, load_packaged_applications};
+
+    #[test]
+    fn shortcut_mutations_refresh_the_application_inventory() {
+        for path in ["New App.lnk", "Website.url", "ClickOnce.appref-ms"] {
+            let event = Event::new(EventKind::Create(CreateKind::File)).add_path(path.into());
+            assert!(application_inventory_event_changed(&event), "{path}");
+        }
+        let unrelated =
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path("desktop.ini".into());
+        assert!(!application_inventory_event_changed(&unrelated));
+    }
 
     #[test]
     fn recursively_indexes_and_sorts_start_menu_shortcuts() {

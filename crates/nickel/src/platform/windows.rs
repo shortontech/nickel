@@ -677,6 +677,58 @@ pub(crate) fn prepare_application_discovery() -> ApplicationDiscovery {
 
 pub(crate) fn publish_application_discovery(_: &ApplicationDiscovery) {}
 
+pub fn system_status_receiver() -> super::status_mailbox::StatusReceiver {
+    use notify::{RecursiveMode, Watcher};
+
+    let (_, mut receiver) = super::status_mailbox::channel();
+    let sender = receiver.sender();
+    let (changed_tx, changed_rx) = std::sync::mpsc::sync_channel(1);
+    let Ok(mut watcher) =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event
+                .as_ref()
+                .is_ok_and(start_menu::application_inventory_event_changed)
+            {
+                let _ = changed_tx.try_send(());
+            }
+        })
+    else {
+        return receiver;
+    };
+    let mut watching = false;
+    for root in start_menu::application_roots()
+        .into_iter()
+        .filter(|root| root.is_dir())
+    {
+        watching |= watcher.watch(&root, RecursiveMode::Recursive).is_ok();
+    }
+    if !watching {
+        return receiver;
+    }
+    std::thread::Builder::new()
+        .name("nickel-app-catalog".into())
+        .spawn(move || {
+            while changed_rx.recv().is_ok() {
+                while changed_rx
+                    .recv_timeout(std::time::Duration::from_millis(150))
+                    .is_ok()
+                {}
+                let discovery = prepare_application_discovery();
+                if sender
+                    .send(std::sync::Arc::new(
+                        super::SystemStatusUpdate::ApplicationInventory(discovery),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .ok();
+    receiver.keep_alive(watcher);
+    receiver
+}
+
 pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
     nickel_platform::path_icon_with_theme_at_size(PathBuf::from(reference).as_path(), None, 96)
 }
