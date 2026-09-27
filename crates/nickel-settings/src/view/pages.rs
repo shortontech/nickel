@@ -1763,136 +1763,141 @@ impl SettingsApp {
             position_options,
             self.wallpaper_position_select_expanded,
         ));
-        let transparency_row = SettingsRow::new(
-            theme,
-            self.localizer.text("settings-reduce-transparency"),
-            self.localizer
-                .text("settings-reduce-transparency-description"),
-        )
-        .trailing(
-            Switch::new(
-                self.shell_settings.reduce_transparency,
-                reduce_transparency_message,
+        let native_interface_card = || {
+            let transparency_row = SettingsRow::new(
                 theme,
+                self.localizer.text("settings-reduce-transparency"),
+                self.localizer
+                    .text("settings-reduce-transparency-description"),
             )
-            .id("appearance-transparency"),
-        );
-        let transparency_row = self
+            .trailing(
+                Switch::new(
+                    self.shell_settings.reduce_transparency,
+                    reduce_transparency_message,
+                    theme,
+                )
+                .id("appearance-transparency"),
+            );
+            let animation_label = self.localizer.text(match self.shell_settings.animations {
+                AnimationLevel::Off => "settings-animations-off",
+                AnimationLevel::Reduced => "settings-animations-reduced",
+                AnimationLevel::Normal => "settings-animations-normal",
+            });
+            let animation_row = SelectField::new(
+                theme,
+                self.localizer.text("settings-animations"),
+                self.localizer.text("settings-animations-description"),
+                SettingsMessage::ToggleAnimationSelect,
+                animation_label,
+                [
+                    (
+                        self.localizer.text("settings-animations-off"),
+                        SettingsMessage::SetAnimationLevel(AnimationLevel::Off),
+                    ),
+                    (
+                        self.localizer.text("settings-animations-reduced"),
+                        SettingsMessage::SetAnimationLevel(AnimationLevel::Reduced),
+                    ),
+                    (
+                        self.localizer.text("settings-animations-normal"),
+                        SettingsMessage::SetAnimationLevel(AnimationLevel::Normal),
+                    ),
+                ],
+                self.animation_select_expanded,
+            )
+            .id("appearance-animations");
+            let file_icon_provider = self.shell_settings.file_icon_provider;
+            let configured_icon_theme = self.shell_settings.file_icon_theme.as_deref();
+            let installed_icon_themes = nickel_platform::installed_icon_themes();
+            let configured_theme_available = configured_icon_theme.is_none_or(|configured| {
+                installed_icon_themes
+                    .iter()
+                    .any(|theme| theme == configured)
+            });
+            let selected_file_artwork = match (file_icon_provider, configured_icon_theme) {
+                (FileIconPreference::Nickel, _) => "Nickel".to_owned(),
+                (FileIconPreference::System, None) => "System".to_owned(),
+                (FileIconPreference::System, Some(theme)) if configured_theme_available => {
+                    format!("System — {theme}")
+                }
+                (FileIconPreference::System, Some(theme)) => {
+                    format!("System — {theme} (unavailable)")
+                }
+            };
+            let mut file_artwork_options = vec![
+                (
+                    "Nickel".to_owned(),
+                    SettingsMessage::SetFileIconProvider(FileIconPreference::Nickel),
+                ),
+                (
+                    "System".to_owned(),
+                    SettingsMessage::SetFileIconProvider(FileIconPreference::System),
+                ),
+            ];
+            file_artwork_options.extend(installed_icon_themes.into_iter().map(|theme| {
+                (
+                    format!("System — {theme}"),
+                    SettingsMessage::SetFileIconTheme(theme),
+                )
+            }));
+            let file_icon_provider_row = SelectField::new(
+                theme,
+                "File artwork",
+                "Choose Nickel artwork or icons supplied by the operating system.",
+                SettingsMessage::ToggleFileIconProviderSelect,
+                selected_file_artwork,
+                file_artwork_options,
+                self.file_icon_provider_select_expanded,
+            )
+            .id("appearance-file-artwork");
+            SettingsCard::titled(
+                theme,
+                self.localizer.text("settings-interface-settings"),
+                "",
+            )
+            .id("appearance-interface-card")
+            .child(
+                SliderField::new(
+                    theme,
+                    self.localizer.text("settings-appearance-starting-hue"),
+                    self.localizer.text("settings-appearance-hue-description"),
+                    self.localizer.number(
+                        "settings-appearance-hue-value",
+                        "degrees",
+                        i64::from(hue),
+                    ),
+                    f32::from(hue) / 359.0,
+                    appearance_hue_message,
+                )
+                .id("appearance-hue"),
+            )
+            .child(
+                SliderField::new(
+                    theme,
+                    self.localizer.text("settings-appearance-color-intensity"),
+                    self.localizer
+                        .text("settings-appearance-intensity-description"),
+                    self.localizer.number(
+                        "settings-appearance-intensity-value",
+                        "percent",
+                        i64::from(intensity),
+                    ),
+                    f32::from(intensity) / 100.0,
+                    appearance_intensity_message,
+                )
+                .id("appearance-intensity"),
+            )
+            .child(transparency_row)
+            .child(animation_row)
+            .child(file_icon_provider_row)
+        };
+        let interface_card = self
             .appearance_choices_page
             .borrow()
             .as_ref()
             .and_then(|page| page.as_ref().ok())
-            .and_then(|page| page.transparency_view(theme))
-            .unwrap_or_else(|| AnyView::new(transparency_row));
-        let animation_label = self.localizer.text(match self.shell_settings.animations {
-            AnimationLevel::Off => "settings-animations-off",
-            AnimationLevel::Reduced => "settings-animations-reduced",
-            AnimationLevel::Normal => "settings-animations-normal",
-        });
-        let animation_row = SelectField::new(
-            theme,
-            self.localizer.text("settings-animations"),
-            self.localizer.text("settings-animations-description"),
-            SettingsMessage::ToggleAnimationSelect,
-            animation_label,
-            [
-                (
-                    self.localizer.text("settings-animations-off"),
-                    SettingsMessage::SetAnimationLevel(AnimationLevel::Off),
-                ),
-                (
-                    self.localizer.text("settings-animations-reduced"),
-                    SettingsMessage::SetAnimationLevel(AnimationLevel::Reduced),
-                ),
-                (
-                    self.localizer.text("settings-animations-normal"),
-                    SettingsMessage::SetAnimationLevel(AnimationLevel::Normal),
-                ),
-            ],
-            self.animation_select_expanded,
-        )
-        .id("appearance-animations");
-        let file_icon_provider = self.shell_settings.file_icon_provider;
-        let configured_icon_theme = self.shell_settings.file_icon_theme.as_deref();
-        let installed_icon_themes = nickel_platform::installed_icon_themes();
-        let configured_theme_available = configured_icon_theme.is_none_or(|configured| {
-            installed_icon_themes
-                .iter()
-                .any(|theme| theme == configured)
-        });
-        let selected_file_artwork = match (file_icon_provider, configured_icon_theme) {
-            (FileIconPreference::Nickel, _) => "Nickel".to_owned(),
-            (FileIconPreference::System, None) => "System".to_owned(),
-            (FileIconPreference::System, Some(theme)) if configured_theme_available => {
-                format!("System — {theme}")
-            }
-            (FileIconPreference::System, Some(theme)) => {
-                format!("System — {theme} (unavailable)")
-            }
-        };
-        let mut file_artwork_options = vec![
-            (
-                "Nickel".to_owned(),
-                SettingsMessage::SetFileIconProvider(FileIconPreference::Nickel),
-            ),
-            (
-                "System".to_owned(),
-                SettingsMessage::SetFileIconProvider(FileIconPreference::System),
-            ),
-        ];
-        file_artwork_options.extend(installed_icon_themes.into_iter().map(|theme| {
-            (
-                format!("System — {theme}"),
-                SettingsMessage::SetFileIconTheme(theme),
-            )
-        }));
-        let file_icon_provider_row = SelectField::new(
-            theme,
-            "File artwork",
-            "Choose Nickel artwork or icons supplied by the operating system.",
-            SettingsMessage::ToggleFileIconProviderSelect,
-            selected_file_artwork,
-            file_artwork_options,
-            self.file_icon_provider_select_expanded,
-        )
-        .id("appearance-file-artwork");
-        let interface_card = SettingsCard::titled(
-            theme,
-            self.localizer.text("settings-interface-settings"),
-            "",
-        )
-        .id("appearance-interface-card")
-        .child(
-            SliderField::new(
-                theme,
-                self.localizer.text("settings-appearance-starting-hue"),
-                self.localizer.text("settings-appearance-hue-description"),
-                self.localizer
-                    .number("settings-appearance-hue-value", "degrees", i64::from(hue)),
-                f32::from(hue) / 359.0,
-                appearance_hue_message,
-            )
-            .id("appearance-hue"),
-        )
-        .child(
-            SliderField::new(
-                theme,
-                self.localizer.text("settings-appearance-color-intensity"),
-                self.localizer
-                    .text("settings-appearance-intensity-description"),
-                self.localizer.number(
-                    "settings-appearance-intensity-value",
-                    "percent",
-                    i64::from(intensity),
-                ),
-                f32::from(intensity) / 100.0,
-                appearance_intensity_message,
-            )
-            .id("appearance-intensity"),
-        )
-        .child(transparency_row)
-        .child(animation_row)
-        .child(file_icon_provider_row);
+            .and_then(|page| page.interface_view(theme))
+            .unwrap_or_else(|| AnyView::new(native_interface_card()));
         let reset = Button::semantic(
             theme,
             SettingsMessage::AppearanceReset,

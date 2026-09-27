@@ -1,14 +1,15 @@
-//! JSX-owned appearance choices with native previews and color controls.
+//! JSX-owned appearance controls with native previews and widgets.
 
 use nickel_core::{
-    shell_settings::ThemePreference,
+    shell_settings::{AnimationLevel, FileIconPreference, ThemePreference},
     theme::{Appearance, ThemeMode, ThemePalette, accent_from_hue},
 };
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, Column,
-    FrameOverlay, Insets, OverlayAnchor, OverlayStyle, Popover, Row, SemanticTheme, SettingsCard,
-    SettingsRow, Size, Surface, SurfaceRole, Switch, TextField, UiId, ui,
+    FrameOverlay, Insets, OverlayAnchor, OverlayStyle, Popover, Row, SelectField, SemanticTheme,
+    SettingsCard, SettingsRow, Size, SliderField, Surface, SurfaceRole, Switch, TextField, UiId,
+    ui,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -53,8 +54,320 @@ struct AppearanceTree {
     mode: ModeTree,
     accent: AccentTree,
     dialog: DialogTree,
-    transparency: TransparencyTree,
+    interface: InterfaceTree,
     accent_first: bool,
+}
+
+#[derive(Clone)]
+struct InterfaceTree {
+    title: String,
+    controls: Vec<InterfaceControl>,
+}
+
+#[derive(Clone)]
+enum InterfaceControl {
+    Slider(SliderTree),
+    Transparency(TransparencyTree),
+    Select(SelectTree),
+}
+
+#[derive(Clone)]
+struct SliderTree {
+    id: String,
+    label: String,
+    description: String,
+    value_label: String,
+    percent: f32,
+    action: usize,
+}
+
+#[derive(Clone)]
+struct SelectTree {
+    id: String,
+    label: String,
+    description: String,
+    value_label: String,
+    expanded: bool,
+    toggle_action: usize,
+    options: Vec<SelectOption>,
+}
+
+#[derive(Clone)]
+struct SelectOption {
+    id: String,
+    label: String,
+    selected: bool,
+    action: usize,
+}
+
+impl InterfaceTree {
+    fn parse(value: &Value) -> Result<Self, String> {
+        if value.get("kind").and_then(Value::as_str) != Some("settings-interface")
+            || value.get("id").and_then(Value::as_str) != Some("appearance-interface-card")
+        {
+            return Err("Appearance interface card is invalid".into());
+        }
+        let children = value
+            .get("children")
+            .and_then(Value::as_array)
+            .ok_or("Appearance interface controls are missing")?;
+        if children.len() != 5 {
+            return Err("Appearance interface needs five controls".into());
+        }
+        let controls = children
+            .iter()
+            .map(InterfaceControl::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        let ids = [
+            "appearance-hue",
+            "appearance-intensity",
+            "appearance-transparency",
+            "appearance-animations",
+            "appearance-file-artwork",
+        ];
+        if ids.iter().any(|id| {
+            controls
+                .iter()
+                .filter(|control| control.id() == *id)
+                .count()
+                != 1
+        }) {
+            return Err("Appearance interface controls are incomplete".into());
+        }
+        Ok(Self {
+            title: text(value, "label")?,
+            controls,
+        })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.title.capacity()
+            + self.controls.capacity() * std::mem::size_of::<InterfaceControl>()
+            + self
+                .controls
+                .iter()
+                .map(InterfaceControl::heap_bytes)
+                .sum::<usize>()
+    }
+
+    fn view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
+        AnyView::new(
+            SettingsCard::titled(theme, &self.title, "")
+                .id("appearance-interface-card")
+                .children(self.controls.iter().map(|control| control.view(theme))),
+        )
+    }
+
+    fn action_for_id(&self, id: &str) -> Option<usize> {
+        self.controls
+            .iter()
+            .find_map(|control| control.action_for_id(id))
+    }
+}
+
+impl InterfaceControl {
+    fn parse(value: &Value) -> Result<Self, String> {
+        match value.get("kind").and_then(Value::as_str) {
+            Some("settings-slider") => Ok(Self::Slider(SliderTree::parse(value)?)),
+            Some("settings-transparency") => {
+                Ok(Self::Transparency(TransparencyTree::parse(value)?))
+            }
+            Some("settings-select") => Ok(Self::Select(SelectTree::parse(value)?)),
+            _ => Err("Appearance interface control is invalid".into()),
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Slider(control) => &control.id,
+            Self::Transparency(_) => "appearance-transparency",
+            Self::Select(control) => &control.id,
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Slider(control) => {
+                control.id.capacity()
+                    + control.label.capacity()
+                    + control.description.capacity()
+                    + control.value_label.capacity()
+            }
+            Self::Transparency(control) => {
+                control.label.capacity() + control.description.capacity()
+            }
+            Self::Select(control) => {
+                control.id.capacity()
+                    + control.label.capacity()
+                    + control.description.capacity()
+                    + control.value_label.capacity()
+                    + control.options.capacity() * std::mem::size_of::<SelectOption>()
+                    + control
+                        .options
+                        .iter()
+                        .map(|option| option.id.capacity() + option.label.capacity())
+                        .sum::<usize>()
+            }
+        }
+    }
+
+    fn view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
+        match self {
+            Self::Slider(control) => AnyView::new(
+                SliderField::new(
+                    theme,
+                    &control.label,
+                    &control.description,
+                    &control.value_label,
+                    control.percent,
+                    if control.id == "appearance-hue" {
+                        appearance_jsx_hue_message
+                    } else {
+                        appearance_jsx_intensity_message
+                    },
+                )
+                .id(control.id.as_str()),
+            ),
+            Self::Transparency(control) => control.view(theme),
+            Self::Select(control) => AnyView::new(
+                SelectField::new(
+                    theme,
+                    &control.label,
+                    &control.description,
+                    SettingsMessage::AppearanceChoicesJsxAction(control.toggle_action),
+                    &control.value_label,
+                    control.options.iter().map(|option| {
+                        (
+                            option.label.as_str(),
+                            SettingsMessage::AppearanceChoicesJsxAction(option.action),
+                        )
+                    }),
+                    control.expanded,
+                )
+                .id(control.id.as_str()),
+            ),
+        }
+    }
+
+    fn action_for_id(&self, id: &str) -> Option<usize> {
+        match self {
+            Self::Slider(control) => (id == control.id).then_some(control.action),
+            Self::Transparency(control) => {
+                (id == "appearance-transparency").then_some(control.action)
+            }
+            Self::Select(control) => {
+                (id == control.id)
+                    .then_some(control.toggle_action)
+                    .or_else(|| {
+                        control
+                            .options
+                            .iter()
+                            .find(|option| option.id == id)
+                            .map(|option| option.action)
+                    })
+            }
+        }
+    }
+}
+
+impl SliderTree {
+    fn parse(value: &Value) -> Result<Self, String> {
+        let id = text(value, "id")?;
+        if id != "appearance-hue" && id != "appearance-intensity" {
+            return Err("Appearance slider ID is invalid".into());
+        }
+        let percent = value
+            .get("percent")
+            .and_then(Value::as_f64)
+            .ok_or("Appearance slider value is invalid")?;
+        if !(0.0..=1.0).contains(&percent) {
+            return Err("Appearance slider value is out of range".into());
+        }
+        Ok(Self {
+            id,
+            label: text(value, "label")?,
+            description: text(value, "placeholder")?,
+            value_label: text(value, "value")?,
+            percent: percent as f32,
+            action: action(value)?,
+        })
+    }
+}
+
+impl SelectTree {
+    fn parse(value: &Value) -> Result<Self, String> {
+        let id = text(value, "id")?;
+        if id != "appearance-animations" && id != "appearance-file-artwork" {
+            return Err("Appearance select ID is invalid".into());
+        }
+        let children = value
+            .get("children")
+            .and_then(Value::as_array)
+            .ok_or("Appearance select options are missing")?;
+        if !(2..=66).contains(&children.len()) {
+            return Err("Appearance select option count is invalid".into());
+        }
+        let options = children
+            .iter()
+            .map(|child| {
+                if child.get("kind").and_then(Value::as_str) != Some("settings-option") {
+                    return Err("Appearance select option is invalid".into());
+                }
+                Ok(SelectOption {
+                    id: text(child, "id")?,
+                    label: text(child, "label")?,
+                    selected: child
+                        .get("selected")
+                        .and_then(Value::as_bool)
+                        .ok_or("Appearance select option state is invalid")?,
+                    action: action(child)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if options.iter().filter(|option| option.selected).count() > 1
+            || options
+                .iter()
+                .map(|option| &option.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != options.len()
+        {
+            return Err("Appearance select options are inconsistent".into());
+        }
+        Ok(Self {
+            id,
+            label: text(value, "label")?,
+            description: text(value, "placeholder")?,
+            value_label: text(value, "value")?,
+            expanded: value
+                .get("open")
+                .and_then(Value::as_bool)
+                .ok_or("Appearance select expansion is invalid")?,
+            toggle_action: action(value)?,
+            options,
+        })
+    }
+}
+
+fn appearance_jsx_hue_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::AppearanceChoicesJsxHue(
+        (fraction.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16,
+    )
+}
+
+fn appearance_jsx_intensity_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::AppearanceChoicesJsxIntensity(
+        (fraction.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16,
+    )
+}
+
+fn action(value: &Value) -> Result<usize, String> {
+    value
+        .get("action")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or("Appearance action is invalid".into())
 }
 
 #[derive(Clone)]
@@ -85,10 +398,6 @@ impl TransparencyTree {
                 .and_then(|value| usize::try_from(value).ok())
                 .ok_or("Appearance transparency action is invalid")?,
         })
-    }
-
-    fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + self.label.capacity() + self.description.capacity()
     }
 
     fn view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
@@ -239,9 +548,7 @@ impl AppearanceTree {
             .and_then(Value::as_array)
             .ok_or("Appearance choice cards are missing")?;
         if children.len() != 4 {
-            return Err(
-                "Appearance needs mode, accent, dialog, and transparency components".into(),
-            );
+            return Err("Appearance needs mode, accent, dialog, and interface components".into());
         }
         let accent_first =
             children[0].get("kind").and_then(Value::as_str) == Some("settings-accent-choices");
@@ -260,7 +567,7 @@ impl AppearanceTree {
             mode,
             accent,
             dialog: DialogTree::parse(&children[2])?,
-            transparency: TransparencyTree::parse(&children[3])?,
+            interface: InterfaceTree::parse(&children[3])?,
             accent_first,
         })
     }
@@ -269,7 +576,7 @@ impl AppearanceTree {
         self.mode.retained_bytes()
             + self.accent.retained_bytes()
             + self.dialog.retained_bytes()
-            + self.transparency.retained_bytes()
+            + self.interface.retained_bytes()
     }
 
     fn view(&self, theme: SemanticTheme, appearance: Appearance) -> AnyView<SettingsMessage> {
@@ -285,8 +592,8 @@ impl AppearanceTree {
         self.dialog.open.then(|| self.dialog.view(theme))
     }
 
-    fn transparency_view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
-        self.transparency.view(theme)
+    fn interface_view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
+        self.interface.view(theme)
     }
 
     #[cfg(test)]
@@ -294,7 +601,7 @@ impl AppearanceTree {
         self.mode
             .action_for_id(id)
             .or_else(|| self.dialog.action_for_id(id))
-            .or_else(|| (id == "appearance-transparency").then_some(self.transparency.action))
+            .or_else(|| self.interface.action_for_id(id))
             .or_else(|| {
                 self.accent
                     .swatches
@@ -612,11 +919,12 @@ impl AppearanceChoicesPage {
         self.tree.as_ref()?.dialog_view(theme)
     }
 
-    pub(super) fn transparency_view(
-        &self,
-        theme: SemanticTheme,
-    ) -> Option<AnyView<SettingsMessage>> {
-        Some(self.tree.as_ref()?.transparency_view(theme))
+    pub(super) fn interface_view(&self, theme: SemanticTheme) -> Option<AnyView<SettingsMessage>> {
+        Some(self.tree.as_ref()?.interface_view(theme))
+    }
+
+    fn action_for_control(&self, id: &str) -> Option<usize> {
+        self.tree.as_ref()?.interface.action_for_id(id)
     }
 
     fn dispatch(
@@ -669,7 +977,13 @@ enum AppearanceRequest {
     CustomHueDraft { value: String },
     ApplyCustomHue { value: String },
     CancelCustomHue,
+    AppearanceHue { fraction: f32 },
+    AppearanceIntensity { fraction: f32 },
     ReduceTransparency { value: bool },
+    ToggleAnimationSelect,
+    Animation { value: String },
+    ToggleFileArtworkSelect,
+    FileArtwork { value: String },
 }
 
 fn validate_request(request: AppearanceRequest, data: &Value) -> Result<SettingsMessage, String> {
@@ -729,6 +1043,54 @@ fn validate_request(request: AppearanceRequest, data: &Value) -> Result<Settings
             }
             Ok(SettingsMessage::SetReduceTransparency(value))
         }
+        AppearanceRequest::AppearanceHue { fraction } => {
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err("Appearance hue is invalid".into());
+            }
+            Ok(SettingsMessage::SetAppearanceHue(
+                (fraction * 359.0).round() as u16,
+            ))
+        }
+        AppearanceRequest::AppearanceIntensity { fraction } => {
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err("Appearance intensity is invalid".into());
+            }
+            Ok(SettingsMessage::SetAppearanceIntensity(
+                (fraction * 100.0).round() as u8,
+            ))
+        }
+        AppearanceRequest::ToggleAnimationSelect => Ok(SettingsMessage::ToggleAnimationSelect),
+        AppearanceRequest::Animation { value } => match value.as_str() {
+            "off" => Ok(SettingsMessage::SetAnimationLevel(AnimationLevel::Off)),
+            "reduced" => Ok(SettingsMessage::SetAnimationLevel(AnimationLevel::Reduced)),
+            "normal" => Ok(SettingsMessage::SetAnimationLevel(AnimationLevel::Normal)),
+            _ => Err("Appearance animation level is invalid".into()),
+        },
+        AppearanceRequest::ToggleFileArtworkSelect => {
+            Ok(SettingsMessage::ToggleFileIconProviderSelect)
+        }
+        AppearanceRequest::FileArtwork { value } => match value.as_str() {
+            "nickel" => Ok(SettingsMessage::SetFileIconProvider(
+                FileIconPreference::Nickel,
+            )),
+            "system" => Ok(SettingsMessage::SetFileIconProvider(
+                FileIconPreference::System,
+            )),
+            _ => {
+                let Some(theme) = value.strip_prefix("theme:") else {
+                    return Err("File artwork choice is invalid".into());
+                };
+                if theme.is_empty()
+                    || !data
+                        .get("fileArtworkOptions")
+                        .and_then(Value::as_array)
+                        .is_some_and(|options| options.iter().any(|option| option["id"] == value))
+                {
+                    return Err("File artwork theme is unavailable".into());
+                }
+                Ok(SettingsMessage::SetFileIconTheme(theme.to_owned()))
+            }
+        },
     }
 }
 
@@ -740,6 +1102,50 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         .into_iter()
         .map(|preset| json!({"hue":preset,"selected":hue.abs_diff(preset) < 3}))
         .collect::<Vec<_>>();
+    let intensity = app
+        .shell_settings
+        .displayed_intensity(nickel_platform::appearance());
+    let animation_id = match app.shell_settings.animations {
+        AnimationLevel::Off => "off",
+        AnimationLevel::Reduced => "reduced",
+        AnimationLevel::Normal => "normal",
+    };
+    let animations = [
+        ("off", "settings-animations-off"),
+        ("reduced", "settings-animations-reduced"),
+        ("normal", "settings-animations-normal"),
+    ]
+    .into_iter()
+    .map(|(id, key)| json!({"id":id,"label":app.localizer.text(key)}))
+    .collect::<Vec<_>>();
+    let installed_themes = nickel_platform::installed_icon_themes();
+    let configured_theme = app.shell_settings.file_icon_theme.as_deref();
+    let configured_theme_available = configured_theme
+        .is_none_or(|configured| installed_themes.iter().any(|theme| theme == configured));
+    let file_artwork_id = match (app.shell_settings.file_icon_provider, configured_theme) {
+        (FileIconPreference::Nickel, _) => "nickel".to_owned(),
+        (FileIconPreference::System, None) => "system".to_owned(),
+        (FileIconPreference::System, Some(theme)) => format!("theme:{theme}"),
+    };
+    let file_artwork_value = match (app.shell_settings.file_icon_provider, configured_theme) {
+        (FileIconPreference::Nickel, _) => "Nickel".to_owned(),
+        (FileIconPreference::System, None) => "System".to_owned(),
+        (FileIconPreference::System, Some(theme)) if configured_theme_available => {
+            format!("System — {theme}")
+        }
+        (FileIconPreference::System, Some(theme)) => {
+            format!("System — {theme} (unavailable)")
+        }
+    };
+    let mut file_artwork_options = vec![
+        json!({"id":"nickel","label":"Nickel"}),
+        json!({"id":"system","label":"System"}),
+    ];
+    file_artwork_options.extend(
+        installed_themes.into_iter().take(64).map(
+            |theme| json!({"id":format!("theme:{theme}"),"label":format!("System — {theme}")}),
+        ),
+    );
     json!({
         "title":app.localizer.text("settings-appearance-mode"),
         "description":app.localizer.text("settings-appearance-mode-description"),
@@ -765,10 +1171,49 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         "transparencyTitle":app.localizer.text("settings-reduce-transparency"),
         "transparencyDescription":app.localizer.text("settings-reduce-transparency-description"),
         "reduceTransparency":app.shell_settings.reduce_transparency,
+        "interfaceTitle":app.localizer.text("settings-interface-settings"),
+        "hueTitle":app.localizer.text("settings-appearance-starting-hue"),
+        "hueDescription":app.localizer.text("settings-appearance-hue-description"),
+        "hueValue":app.localizer.number("settings-appearance-hue-value", "degrees", i64::from(hue)),
+        "intensity":intensity,
+        "intensityTitle":app.localizer.text("settings-appearance-color-intensity"),
+        "intensityDescription":app.localizer.text("settings-appearance-intensity-description"),
+        "intensityValue":app.localizer.number("settings-appearance-intensity-value", "percent", i64::from(intensity)),
+        "animationTitle":app.localizer.text("settings-animations"),
+        "animationDescription":app.localizer.text("settings-animations-description"),
+        "animationValue":app.localizer.text(match app.shell_settings.animations {
+            AnimationLevel::Off => "settings-animations-off",
+            AnimationLevel::Reduced => "settings-animations-reduced",
+            AnimationLevel::Normal => "settings-animations-normal",
+        }),
+        "animationId":animation_id,
+        "animationExpanded":app.animation_select_expanded,
+        "animations":animations,
+        "fileArtworkTitle":"File artwork",
+        "fileArtworkDescription":"Choose Nickel artwork or icons supplied by the operating system.",
+        "fileArtworkValue":file_artwork_value,
+        "fileArtworkId":file_artwork_id,
+        "fileArtworkExpanded":app.file_icon_provider_select_expanded,
+        "fileArtworkOptions":file_artwork_options,
     })
 }
 
 impl SettingsApp {
+    pub(super) fn handle_appearance_jsx_slider(&mut self, id: &str, position: u16) {
+        let action = self
+            .appearance_choices_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_control(id));
+        if let Some(action) = action {
+            self.handle_appearance_choices_jsx_action(
+                action,
+                Value::from(f32::from(position) / f32::from(u16::MAX)),
+            );
+        }
+    }
+
     pub(super) fn handle_appearance_choices_jsx_action(&mut self, index: usize, value: Value) {
         if self.page != SettingsPage::Appearance {
             return;
@@ -921,14 +1366,29 @@ mod tests {
             {"kind":"settings-button","id":"appearance-custom-hue-apply","label":"Apply","action":6},
             {"kind":"settings-button","id":"appearance-custom-hue-cancel","label":"Cancel","action":7},
         ]});
-        let transparency = json!({"kind":"settings-transparency","id":"appearance-transparency",
-            "label":"Transparency","value":"Description","selected":false,"action":8});
+        let interface = json!({"kind":"settings-interface","id":"appearance-interface-card",
+        "label":"Interface","children":[
+            {"kind":"settings-slider","id":"appearance-hue","label":"Hue","value":"224°","placeholder":"Hue description","percent":0.5,"action":8},
+            {"kind":"settings-slider","id":"appearance-intensity","label":"Intensity","value":"100%","placeholder":"Intensity description","percent":1.0,"action":9},
+            {"kind":"settings-transparency","id":"appearance-transparency","label":"Transparency","value":"Description","selected":false,"action":10},
+            {"kind":"settings-select","id":"appearance-animations","label":"Animations","placeholder":"Description","value":"Normal","open":false,"action":11,
+                "children":[
+                    {"kind":"settings-option","id":"appearance-animation-off","label":"Off","selected":false,"action":12},
+                    {"kind":"settings-option","id":"appearance-animation-reduced","label":"Reduced","selected":false,"action":13},
+                    {"kind":"settings-option","id":"appearance-animation-normal","label":"Normal","selected":true,"action":14}
+                ]},
+            {"kind":"settings-select","id":"appearance-file-artwork","label":"Artwork","placeholder":"Description","value":"Nickel","open":false,"action":15,
+                "children":[
+                    {"kind":"settings-option","id":"appearance-file-artwork-option-0","label":"Nickel","selected":true,"action":16},
+                    {"kind":"settings-option","id":"appearance-file-artwork-option-1","label":"System","selected":false,"action":17}
+                ]}
+        ]});
         let root = json!({"kind":"settings-appearance-choices",
-            "children":[accents, modes, dialog, transparency]});
+            "children":[accents, modes, dialog, interface]});
         let tree = AppearanceTree::parse(&root).unwrap();
         assert!(tree.accent_first);
         assert_eq!(tree.action_for_id("appearance-accent-224"), Some(3));
-        assert_eq!(tree.action_for_id("appearance-transparency"), Some(8));
+        assert_eq!(tree.action_for_id("appearance-transparency"), Some(10));
     }
 
     #[test]
@@ -993,6 +1453,44 @@ mod tests {
                 &data,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn interface_effects_reject_out_of_range_and_unknown_choices() {
+        let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let data = projection(&app);
+        assert!(
+            validate_request(AppearanceRequest::AppearanceHue { fraction: 1.1 }, &data).is_err()
+        );
+        assert!(
+            validate_request(
+                AppearanceRequest::AppearanceIntensity { fraction: -0.1 },
+                &data
+            )
+            .is_err()
+        );
+        assert!(
+            validate_request(
+                AppearanceRequest::Animation {
+                    value: "slow".into()
+                },
+                &data
+            )
+            .is_err()
+        );
+        assert!(
+            validate_request(
+                AppearanceRequest::FileArtwork {
+                    value: "theme:missing-theme".into()
+                },
+                &data
+            )
+            .is_err()
+        );
+        assert_eq!(
+            validate_request(AppearanceRequest::AppearanceHue { fraction: 0.5 }, &data).unwrap(),
+            SettingsMessage::SetAppearanceHue(180)
         );
     }
 }

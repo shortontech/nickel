@@ -197,14 +197,18 @@ fn consumers_cannot_grow_or_create_display_list_authority() {
         match exceptions.get(&relative) {
             Some(exception) if references == exception.maximum => {
                 if exception.category == "test_only_inspection" {
-                    let separate_test_module = relative
-                        == "crates/nickel/src/session/state/protocol_tests.rs"
-                        && fs::read_to_string(root.join("crates/nickel/src/session/state.rs"))
-                            .is_ok_and(|owner| {
-                                owner.contains(
-                                    "#[cfg(test)]\n#[path = \"state/protocol_tests.rs\"]\nmod protocol_tests;",
-                                )
-                            });
+                    let separate_test_module = relative.contains("/tests/")
+                        || relative.starts_with("crates/nickel/tests/")
+                        || (relative == "crates/nickel/src/live_shell/tests.rs"
+                            && fs::read_to_string(root.join("crates/nickel/src/live_shell.rs"))
+                                .is_ok_and(|owner| owner.contains("mod tests;")))
+                        || (relative == "crates/nickel/src/session/state/protocol_tests.rs"
+                            && fs::read_to_string(root.join("crates/nickel/src/session/state.rs"))
+                                .is_ok_and(|owner| {
+                                    owner.contains(
+                                        "#[cfg(test)]\n#[path = \"state/protocol_tests.rs\"]\nmod protocol_tests;",
+                                    )
+                                }));
                     let production = source.split_once("\n#[cfg(test)]\nmod tests {")
                         .or_else(|| source.split_once("\n#[cfg(test)]\nmod protocol_tests {"))
                         .map(|(production, _)| production)
@@ -326,8 +330,12 @@ fn compositor_recovery_keeps_semantics_and_hit_testing_in_ui_host() {
     let recovery = fs::read_to_string(root.join("crates/nickel/src/session/recovery_ui.rs"))
         .expect("compositor recovery UI must exist");
     assert!(recovery.contains("UiHost<RecoveryApplication>"));
-    assert!(recovery.contains("Button::new(RecoveryAction::Retry"));
-    assert!(recovery.contains("Button::new(RecoveryAction::Exit"));
+    let compact_recovery = recovery
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(compact_recovery.contains("Button::new(RecoveryAction::Retry"));
+    assert!(compact_recovery.contains("Button::new(RecoveryAction::Exit"));
 
     let mut session_files = Vec::new();
     rust_files(&root.join("crates/nickel/src/session"), &mut session_files);

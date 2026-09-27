@@ -1777,6 +1777,34 @@ impl<Message: Clone> UiFrame<Message> {
                         invalidation,
                         ..EventOutcome::default()
                     }
+                } else if action == SemanticAction::Invoke(ActionKind::Activate)
+                    && self.is_dropdown(&target)
+                {
+                    let mut outcome = self.perform_semantic_action(&target, action)?;
+                    let open = !state
+                        .state(&target)
+                        .is_some_and(|entry| entry.dropdown_open);
+                    outcome.invalidation = outcome
+                        .invalidation
+                        .merge(state.set_focus(Some(target.clone())))
+                        .merge(state.set_dropdown_open(target, open));
+                    outcome
+                } else if action == SemanticAction::Invoke(ActionKind::Activate)
+                    && let Some((owner, message)) = self.messages.iter().find_map(|region| {
+                        let owner = region.navigation_owner.as_ref()?;
+                        (region.id == target
+                            && self.is_dropdown(owner)
+                            && state.state(owner).is_some_and(|entry| entry.dropdown_open))
+                        .then(|| (owner.clone(), region.message.clone()))
+                    })
+                {
+                    EventOutcome {
+                        messages: vec![message],
+                        invalidation: state
+                            .set_dropdown_open(owner.clone(), false)
+                            .merge(state.set_focus(Some(owner))),
+                        ..EventOutcome::default()
+                    }
                 } else if action == SemanticAction::Invoke(ActionKind::ContextMenu)
                     && let Some((invocation_target, overlay)) = self
                         .overlay_invokers

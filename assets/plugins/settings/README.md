@@ -65,10 +65,10 @@ adapter state and device identity before using the existing Bluetooth handlers.
 The native Bluetooth view remains available if JSX fails. Build it with the
 same command and its source filename.
 
-`settings-appearance-choices.jsx` owns the Light, Dark, and Automatic mode
-choices, preset accent swatches, the custom hue dialog, and the transparency
-switch. The Settings host
-renders their native preview, color, text input, and popover components. It
+`settings-appearance-choices.jsx` owns the mode choices, accent swatches,
+custom hue dialog, and Interface card layout, including sliders, transparency,
+animations, and file artwork selection. The Settings host renders their native
+preview, color, text input, slider, select, switch, and popover components. It
 checks typed requests and validates the custom hue before persisting it; an
 invalid value leaves the dialog open for correction. Native controls remain
 available if JSX fails. Build it with the same command and its source filename.

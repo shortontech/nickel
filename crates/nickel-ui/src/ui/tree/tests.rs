@@ -1577,6 +1577,61 @@ fn expanded_dropdown_exposes_option_actions() {
 }
 
 #[test]
+fn semantic_dropdown_activation_opens_and_selects_an_option() {
+    let mut state = UiStateStore::default();
+    let choice = UiId::from("root/choice");
+    let view = |expanded| {
+        Dropdown::new(
+            TestMessage::Named("toggle"),
+            "First",
+            [
+                ("First", TestMessage::Option(0)),
+                ("Second", TestMessage::Option(1)),
+            ],
+        )
+        .id("choice")
+        .overlay(true)
+        .expanded(expanded)
+    };
+    let bounds = Rect::new(0.0, 0.0, 240.0, 180.0);
+    let tree = UiFrame::layout_with_state(view(false), bounds, &mut state);
+    let opened = tree
+        .transition(
+            &mut state,
+            InputSource::Accessibility,
+            InteractionIntent::Invoke {
+                target: choice.clone(),
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            },
+        )
+        .unwrap();
+    assert_eq!(opened.messages, vec![TestMessage::Named("toggle")]);
+    assert!(
+        state
+            .state(&choice)
+            .is_some_and(|entry| entry.dropdown_open)
+    );
+
+    let tree = UiFrame::layout_with_state(view(true), bounds, &mut state);
+    let selected = tree
+        .transition(
+            &mut state,
+            InputSource::Accessibility,
+            InteractionIntent::Invoke {
+                target: choice.scoped("option-1"),
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            },
+        )
+        .unwrap();
+    assert_eq!(selected.messages, vec![TestMessage::Option(1)]);
+    assert!(
+        !state
+            .state(&choice)
+            .is_some_and(|entry| entry.dropdown_open)
+    );
+}
+
+#[test]
 fn overlay_dropdown_flips_its_complete_option_list_inside_the_viewport() {
     let mut state = UiStateStore::default();
     state.set_dropdown_open(UiId::from("root/policy"), true);

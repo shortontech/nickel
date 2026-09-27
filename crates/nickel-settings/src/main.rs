@@ -557,6 +557,8 @@ enum SettingsMessage {
     AppearanceSystem,
     AppearanceChoicesJsxAction(usize),
     AppearanceChoicesJsxInput(usize, String),
+    AppearanceChoicesJsxHue(u16),
+    AppearanceChoicesJsxIntensity(u16),
     OpenCustomHue,
     CustomHueDraftChanged(String),
     ApplyCustomHue(String),
@@ -1673,6 +1675,12 @@ impl SettingsApp {
             }
             SettingsMessage::AppearanceChoicesJsxInput(index, value) => {
                 self.handle_appearance_choices_jsx_action(index, serde_json::Value::String(value));
+            }
+            SettingsMessage::AppearanceChoicesJsxHue(position) => {
+                self.handle_appearance_jsx_slider("appearance-hue", position);
+            }
+            SettingsMessage::AppearanceChoicesJsxIntensity(position) => {
+                self.handle_appearance_jsx_slider("appearance-intensity", position);
             }
             SettingsMessage::OpenCustomHue => {
                 if self.page != SettingsPage::Appearance || self.custom_hue_open {
@@ -3167,13 +3175,14 @@ mod tests {
 
     use super::view::codex_switch_state;
     use super::{
-        ApplicationScalePolicy, BluetoothDevice, BluetoothOperation, ControllerAction,
-        DefaultAppsDiscovery, FeatureEffectiveState, FeatureHealth, FeatureInstallation,
-        FeatureSupport, FileIconPreference, NetworkAdapter, OptionalFeatureRuntime,
-        OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp, SettingsHostAdapter,
-        SettingsMessage, SettingsPage, ThemePreference, UiHost, WallpaperSettings, WifiNetwork,
-        codex_feature_state, constrain_center, resolve_codex_feature_state,
-        separate_overlapping_display_cards, shell_behavior_transaction, snap_rect,
+        AnimationLevel, ApplicationScalePolicy, BluetoothDevice, BluetoothOperation,
+        ControllerAction, DefaultAppsDiscovery, FeatureEffectiveState, FeatureHealth,
+        FeatureInstallation, FeatureSupport, FileIconPreference, NetworkAdapter,
+        OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
+        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
+        WallpaperSettings, WifiNetwork, codex_feature_state, constrain_center,
+        resolve_codex_feature_state, separate_overlapping_display_cards,
+        shell_behavior_transaction, snap_rect,
     };
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
@@ -3606,9 +3615,89 @@ mod tests {
             SettingsMessage::AppearanceSystem,
             SettingsMessage::SetAccentHue(224),
             SettingsMessage::SetReduceTransparency(true),
+            SettingsMessage::ToggleAnimationSelect,
+            SettingsMessage::ToggleFileIconProviderSelect,
         ] {
             assert_eq!(tree.semantic_targets_for_message(&message).len(), 1);
         }
+        assert_eq!(
+            tree.query(&nickel_ui::SemanticSelector::Role(
+                nickel_ui::SemanticRole::Slider
+            ))
+            .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn jsx_appearance_selects_apply_host_validated_choices() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.persistence_enabled = false;
+        let mut host = UiHost::new(app, 1424, 1800);
+        for (toggle_id, option_id) in [
+            ("appearance-animations", "appearance-animation-off"),
+            (
+                "appearance-file-artwork",
+                "appearance-file-artwork-option-1",
+            ),
+        ] {
+            let toggle = appearance_choice_action(host.application(), toggle_id);
+            let target = host
+                .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(toggle))
+                .into_iter()
+                .next()
+                .expect("JSX select toggle");
+            let selected = host.perform_semantic_action(
+                target.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert!(selected.changed, "{option_id}: {selected:?}");
+            assert!(
+                host.application()
+                    .appearance_choices_page
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(Result::is_ok),
+                "Appearance JSX failed after {option_id}: {:?}",
+                host.application()
+                    .appearance_choices_page
+                    .borrow()
+                    .as_ref()
+                    .and_then(|page| page.as_ref().err())
+            );
+            let option = appearance_choice_action(host.application(), option_id);
+            let target = host
+                .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(option))
+                .into_iter()
+                .next()
+                .expect("JSX select option");
+            let selected = host.perform_semantic_action(
+                target.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert!(selected.changed, "{option_id}: {selected:?}");
+            assert!(
+                host.application()
+                    .appearance_choices_page
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(Result::is_ok),
+                "Appearance JSX failed after selecting {option_id}: {:?}",
+                host.application()
+                    .appearance_choices_page
+                    .borrow()
+                    .as_ref()
+                    .and_then(|page| page.as_ref().err())
+            );
+        }
+        assert_eq!(
+            host.application().shell_settings.animations,
+            AnimationLevel::Off
+        );
+        assert_eq!(
+            host.application().shell_settings.file_icon_provider,
+            FileIconPreference::System
+        );
     }
 
     #[test]
