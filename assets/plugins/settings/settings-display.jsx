@@ -10,6 +10,22 @@ function App() {
                 value={data.enabled ? 'on' : 'off'}
                 onClick={() => request('enabled', {enabled: !data.enabled})} />
         </settings-row>
+        <settings-select id="display-resolution" label={data.resolutionLabel} placeholder=""
+            value={data.resolutionValue} open={data.resolutionOpen}
+            onClick={() => request('toggle-resolution')}>
+            {data.resolutions.map(mode => <settings-option key={`${mode.width}x${mode.height}`}
+                id={`display-resolution-${mode.width}x${mode.height}`} label={mode.label}
+                selected={mode.label === data.resolutionValue}
+                onClick={() => request('resolution', {width: mode.width, height: mode.height})} />)}
+        </settings-select>
+        <settings-select id="display-refresh-rate" label={data.refreshLabel} placeholder=""
+            value={data.refreshValue} open={data.refreshOpen}
+            onClick={() => request('toggle-refresh')}>
+            {data.refreshRates.map(rate => <settings-option key={rate.refresh}
+                id={`display-refresh-${rate.refresh}`} label={rate.label}
+                selected={rate.label === data.refreshValue}
+                onClick={() => request('refresh', {refresh: rate.refresh})} />)}
+        </settings-select>
         <settings-grid>
             <settings-button id="display-identify" label={data.identifyLabel} value="secondary" maxLines={3}
                 onClick={() => request('identify')} />
@@ -24,5 +40,16 @@ function App() {
             {data.pendingRevert ? <settings-button id="display-revert" label={data.revertLabel}
                 value="secondary" onClick={() => request('revert')} /> : null}
         </settings-inline>
+        <settings-radio-group id="application-scale-policy">
+            <settings-radio id="application-scale-follow" label={data.applicationScaleFollowLabel} value=""
+                selected={data.applicationScalePolicy === 'follow'}
+                onClick={() => request('application-scale', {policy: 'follow'})} />
+            <settings-radio id="application-scale-unchanged" label={data.applicationScaleUnchangedLabel} value=""
+                selected={data.applicationScalePolicy === 'unchanged'}
+                onClick={() => request('application-scale', {policy: 'unchanged'})} />
+            <settings-radio id="application-scale-custom" label={data.applicationScaleCustomLabel} value=""
+                selected={data.applicationScalePolicy === 'custom'}
+                onClick={() => request('application-scale', {policy: 'custom'})} />
+        </settings-radio-group>
     </settings-stack>;
 }

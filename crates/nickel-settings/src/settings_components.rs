@@ -3,7 +3,7 @@
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Button, ButtonPresentation, Column, Container, Grid, RadioGroup, RadioOption, Row,
-    SemanticTheme, SettingsCard, SettingsRow, Switch, SwitchState, TextField, Track,
+    SelectField, SemanticTheme, SettingsCard, SettingsRow, Switch, SwitchState, TextField, Track,
 };
 use serde_json::Value;
 
@@ -46,6 +46,15 @@ pub(super) enum Node {
         id: String,
         options: Vec<Radio>,
     },
+    Select {
+        id: String,
+        label: String,
+        description: String,
+        value: String,
+        expanded: bool,
+        action: usize,
+        options: Vec<SelectOption>,
+    },
     Input {
         id: String,
         value: String,
@@ -60,6 +69,13 @@ pub(super) struct Radio {
     description: String,
     selected: bool,
     action: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct SelectOption {
+    id: String,
+    label: String,
+    action: usize,
 }
 
 impl Node {
@@ -122,6 +138,24 @@ impl Node {
                                 + option.label.capacity()
                                 + option.description.capacity()
                         })
+                        .sum::<usize>()
+            }
+            Self::Select {
+                id,
+                label,
+                description,
+                value,
+                options,
+                ..
+            } => {
+                id.capacity()
+                    + label.capacity()
+                    + description.capacity()
+                    + value.capacity()
+                    + options.capacity() * std::mem::size_of::<SelectOption>()
+                    + options
+                        .iter()
+                        .map(|option| option.id.capacity() + option.label.capacity())
                         .sum::<usize>()
             }
             Self::Input { id, value, .. } => id.capacity() + value.capacity(),
@@ -274,6 +308,42 @@ impl Node {
                 }
                 Self::RadioGroup {
                     id: text(value, "id", 256)?,
+                    options,
+                }
+            }
+            "settings-select" => {
+                let options = value
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .ok_or("Settings select has no options")?;
+                if options.is_empty() || options.len() > 128 {
+                    return Err("Settings select size is invalid".into());
+                }
+                let options = options
+                    .iter()
+                    .map(|option| {
+                        if option["kind"] != "settings-option" {
+                            return Err("Settings select option is invalid".into());
+                        }
+                        Ok(SelectOption {
+                            id: text(option, "id", 256)?,
+                            label: text(option, "label", 256)?,
+                            action: option["action"]
+                                .as_u64()
+                                .and_then(|number| usize::try_from(number).ok())
+                                .ok_or("Settings select option action is invalid")?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Self::Select {
+                    id: text(value, "id", 256)?,
+                    label: text(value, "label", 256)?,
+                    description: text(value, "placeholder", 256)?,
+                    value: text(value, "value", 256)?,
+                    expanded: value["open"]
+                        .as_bool()
+                        .ok_or("Settings select expansion is invalid")?,
+                    action: action()?.ok_or("Settings select requires onClick")?,
                     options,
                 }
             }
@@ -493,6 +563,29 @@ impl Node {
                 )
                 .id(id.as_str()),
             ),
+            Self::Select {
+                id,
+                label,
+                description,
+                value,
+                expanded,
+                action,
+                options,
+            } => AnyView::new(
+                SelectField::new(
+                    theme,
+                    label,
+                    description,
+                    action_message(*action),
+                    value,
+                    options
+                        .iter()
+                        .map(|option| (option.label.as_str(), action_message(option.action))),
+                    *expanded,
+                )
+                .id(id.as_str())
+                .compact(),
+            ),
             Self::Input { id, value, action } => {
                 let action = *action;
                 AnyView::new(
@@ -546,6 +639,17 @@ impl Node {
                 .iter()
                 .find(|option| option.id == target)
                 .and_then(|option| option.action),
+            Self::Select {
+                id,
+                action,
+                options,
+                ..
+            } => (id == target).then_some(*action).or_else(|| {
+                options
+                    .iter()
+                    .find(|option| option.id == target)
+                    .map(|option| option.action)
+            }),
             _ => None,
         }
     }

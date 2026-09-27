@@ -4315,14 +4315,18 @@ mod tests {
         assert_eq!(app.displays[0].mode, app.displays[0].modes[2]);
 
         let tree = app.build_ui(900.0, 900.0);
+        let display_page = app.display_page.borrow();
+        let display_page = display_page.as_ref().unwrap().as_ref().unwrap();
+        let supported = display_page.action_for_id("display-refresh-75000").unwrap();
         assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::SetDisplayRefresh(75_000))
+            tree.semantic_targets_for_message(&SettingsMessage::DisplayJsxAction(supported))
                 .len(),
             1
         );
         assert!(
-            tree.semantic_targets_for_message(&SettingsMessage::SetDisplayRefresh(120_000))
-                .is_empty()
+            display_page
+                .action_for_id("display-refresh-120000")
+                .is_none()
         );
     }
 

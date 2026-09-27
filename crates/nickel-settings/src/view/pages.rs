@@ -939,26 +939,6 @@ impl SettingsApp {
             .compact(),
         ])
         .id("application-scale-policy");
-        let app_scale = SettingsCard::titled(
-            theme,
-            self.localizer.text("ui-pages-application-compatibility-scale"),
-            self.localizer.text("ui-pages-toolkit-scale-can-differ-from-display-scale-applications-may-need-a-restart"),
-        )
-        .id("application-scale")
-        .child(application_scale_policy_choices)
-        .child(
-            SliderField::new(
-                theme,
-                "Custom application scale",
-                "",
-                format!("{}%", app_scale_units * 100 / 120),
-                (app_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
-                application_scale_message,
-            )
-            .id("application-custom-scale")
-            .compact(),
-        )
-        .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
         let apply = Button::semantic(
             theme,
             SettingsMessage::DisplayApply,
@@ -1005,12 +985,56 @@ impl SettingsApp {
         } else {
             None
         };
-        let (enabled, actions, confirmation) =
-            if let Some([enabled, actions, confirmation]) = plugin_actions {
-                (enabled, actions, confirmation)
+        let (enabled, resolution, refresh_rate, actions, confirmation, application_policy) =
+            if let Some(
+                [
+                    enabled,
+                    resolution,
+                    refresh_rate,
+                    actions,
+                    confirmation,
+                    application_policy,
+                ],
+            ) = plugin_actions
+            {
+                (
+                    enabled,
+                    resolution,
+                    refresh_rate,
+                    actions,
+                    confirmation,
+                    application_policy,
+                )
             } else {
-                (AnyView::new(enabled), native_actions, confirmation)
+                (
+                    AnyView::new(enabled),
+                    AnyView::new(resolution),
+                    AnyView::new(refresh_rate),
+                    native_actions,
+                    confirmation,
+                    AnyView::new(application_scale_policy_choices),
+                )
             };
+        let app_scale = SettingsCard::titled(
+            theme,
+            self.localizer.text("ui-pages-application-compatibility-scale"),
+            self.localizer.text("ui-pages-toolkit-scale-can-differ-from-display-scale-applications-may-need-a-restart"),
+        )
+        .id("application-scale")
+        .child(application_policy)
+        .child(
+            SliderField::new(
+                theme,
+                "Custom application scale",
+                "",
+                format!("{}%", app_scale_units * 100 / 120),
+                (app_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
+                application_scale_message,
+            )
+            .id("application-custom-scale")
+            .compact(),
+        )
+        .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
         let compact_cards = content_width < 520.0;
         let mut display_order = (0..self.displays.len()).collect::<Vec<_>>();
         display_order.sort_by_key(|index| (*index == self.selected) as u8);
