@@ -82,6 +82,54 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
     );
     assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
 }
+
+#[test]
+fn installed_panel_start_failure_is_visible_until_disabled() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("org.example.broken");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.broken","name":"Broken Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96}]}"#,
+    )
+    .unwrap();
+    std::fs::write(directory.join("main.js"), "function App() {}").unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    let descriptor = catalog.packages.remove("org.example.broken").unwrap();
+    // Discovery records the declaration, while activation loads its entry again.
+    std::fs::write(directory.join("main.js"), "function App( {").unwrap();
+    let mut shell = LiveShell::new().unwrap();
+    shell
+        .plugin_registry
+        .register(descriptor.manifest.clone())
+        .unwrap();
+    shell
+        .external_plugin_packages
+        .insert(descriptor.manifest.id.clone(), descriptor);
+
+    assert!(
+        shell
+            .set_plugin_enabled("org.example.broken", true)
+            .is_err()
+    );
+    let status = shell.plugin_status_snapshot();
+    let panel = status
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "org.example.broken")
+        .unwrap();
+    assert!(panel.desired_enabled);
+    assert!(matches!(
+        panel.health,
+        nickel_session_protocol::PluginRuntimeHealth::Failed(_)
+    ));
+    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+    assert!(
+        shell
+            .set_plugin_enabled("org.example.broken", false)
+            .unwrap()
+    );
+}
 include!("tests/panel_and_cache.rs");
 include!("tests/desktop_interactions.rs");
 

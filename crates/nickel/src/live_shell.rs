@@ -2943,24 +2943,30 @@ impl LiveShell {
         let external_panel = if enabled {
             if let Some(descriptor) = self.external_plugin_packages.get(id) {
                 let surfaces = &descriptor.manifest.surfaces;
-                if surfaces.len() != 1
-                    || surfaces[0].kind != nickel_core::plugins::PluginSurfaceKind::Panel
+                if surfaces.len() == 1
+                    && surfaces[0].kind == nickel_core::plugins::PluginSurfaceKind::Panel
+                    && self.plugin_panel_host.is_some()
                 {
-                    return Err(
-                        "installed plugin needs exactly one panel surface in this runtime".into(),
-                    );
-                }
-                if self.plugin_panel_host.is_some() {
                     return Err(format!(
                         "panel is already owned by {:?}",
                         self.plugin_panel_owner
                     ));
                 }
-                let package = descriptor.load()?;
-                Some((
-                    crate::plugin_panel::PluginPanelApplication::from_package(&package)?,
-                    surfaces[0].clone(),
-                ))
+                Some(
+                    if surfaces.len() == 1
+                        && surfaces[0].kind == nickel_core::plugins::PluginSurfaceKind::Panel
+                    {
+                        descriptor.load().and_then(|package| {
+                            crate::plugin_panel::PluginPanelApplication::from_package(&package)
+                                .map(|application| (application, surfaces[0].clone()))
+                        })
+                    } else {
+                        Err(
+                            "installed plugin needs exactly one panel surface in this runtime"
+                                .into(),
+                        )
+                    },
+                )
             } else {
                 if id == crate::plugin_panel::manifest().id && self.plugin_panel_host.is_some() {
                     return Err(format!(
@@ -3002,15 +3008,16 @@ impl LiveShell {
             self.maybe_publish_plugin_status();
             return Ok(true);
         }
-        let started = if let Some((application, surface)) = external_panel {
-            self.plugin_panel_host = Some(nickel_ui::UiHost::new(
-                application,
-                surface.width,
-                surface.height,
-            ));
-            self.plugin_panel_owner = id.to_owned();
-            self.plugin_panel_surface = surface;
-            Ok(())
+        let started = if let Some(external_panel) = external_panel {
+            external_panel.map(|(application, surface)| {
+                self.plugin_panel_host = Some(nickel_ui::UiHost::new(
+                    application,
+                    surface.width,
+                    surface.height,
+                ));
+                self.plugin_panel_owner = id.to_owned();
+                self.plugin_panel_surface = surface;
+            })
         } else if id == crate::plugin_panel::manifest().id {
             crate::plugin_panel::PluginPanelApplication::bundled().map(|application| {
                 self.plugin_panel_host = Some(nickel_ui::UiHost::new(
