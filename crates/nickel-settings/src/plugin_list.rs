@@ -134,13 +134,13 @@ impl Node {
         })
     }
 
-    fn view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
+    fn view(&self, theme: SemanticTheme, input_placeholder: &str) -> AnyView<SettingsMessage> {
         match self {
             Self::Stack(children) => AnyView::new(
                 Column::new().fill_width().gap(16.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme))
+                        .map(|child| child.view(theme, input_placeholder))
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -148,7 +148,7 @@ impl Node {
                 Column::new().fill_width().gap(8.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme))
+                        .map(|child| child.view(theme, input_placeholder))
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -160,7 +160,7 @@ impl Node {
                 SettingsCard::titled(theme, label, value).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme))
+                        .map(|child| child.view(theme, input_placeholder))
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -171,7 +171,7 @@ impl Node {
             } => {
                 let row = SettingsRow::new(theme, label, value);
                 AnyView::new(if let Some(trailing) = trailing {
-                    row.trailing(trailing.view(theme))
+                    row.trailing(trailing.view(theme, input_placeholder))
                 } else {
                     row
                 })
@@ -180,7 +180,7 @@ impl Node {
                 Row::new().gap(8.0).children(
                     children
                         .iter()
-                        .map(|child| child.view(theme))
+                        .map(|child| child.view(theme, input_placeholder))
                         .collect::<Vec<_>>(),
                 ),
             ),
@@ -226,7 +226,7 @@ impl Node {
                     Container::new().width(260.0).child(
                         TextField::on_change_with_placeholder_mapped(
                             value,
-                            "Value",
+                            input_placeholder,
                             move |value| SettingsMessage::PluginJsxInput(action, value),
                         )
                         .id(id.as_str()),
@@ -319,6 +319,7 @@ impl PluginList {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
+        input_placeholder: &str,
     ) -> Result<AnyView<SettingsMessage>, String> {
         let data = serde_json::to_string(data).map_err(|error| error.to_string())?;
         if self.last_data.as_deref() != Some(&data) {
@@ -330,7 +331,7 @@ impl PluginList {
             .node
             .as_ref()
             .ok_or("Settings plugin list is unavailable")?
-            .view(theme))
+            .view(theme, input_placeholder))
     }
 
     pub(super) fn dispatch(
@@ -673,7 +674,7 @@ mod tests {
         let theme = crate::semantic_theme(nickel_core::theme::ThemePalette::from_appearance(
             nickel_core::theme::Appearance::default(),
         ));
-        list.render(&data, theme).unwrap();
+        list.render(&data, theme, "Value").unwrap();
         let action = list.action_for_id("plugin-enable-example.plugin").unwrap();
         let message = list
             .dispatch(action, Value::Null, &data, |request| {

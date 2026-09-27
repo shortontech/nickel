@@ -93,36 +93,41 @@ impl SettingsApp {
                 plugin.composition.join(", ")
             };
             content = content.child(
-                SettingsCard::titled(theme, &format!("Enable {}?", plugin.name), &plugin.id)
-                    .child(SettingsRow::new(
-                        theme,
-                        "Publisher",
-                        plugin.author.as_deref().unwrap_or("Unknown"),
-                    ))
-                    .child(SettingsRow::new(
-                        theme,
-                        "Version",
-                        plugin.version.as_deref().unwrap_or("Unspecified"),
-                    ))
-                    .child(SettingsRow::new(theme, "Access requested", grants))
-                    .child(SettingsRow::new(theme, "Surfaces affected", surfaces))
-                    .child(SettingsRow::new(theme, "Composition changes", composition))
-                    .child(
-                        Row::new()
-                            .gap(12.0)
-                            .child(Button::semantic(
-                                theme,
-                                SettingsMessage::CancelPluginEnable,
-                                "Cancel",
-                                ButtonPresentation::Quiet,
-                            ))
-                            .child(Button::semantic(
-                                theme,
-                                SettingsMessage::ConfirmPluginEnable,
-                                "Enable plugin",
-                                ButtonPresentation::Primary,
-                            )),
-                    ),
+                SettingsCard::titled(
+                    theme,
+                    self.localizer
+                        .value("settings-plugin-enable-review", "name", &plugin.name),
+                    &plugin.id,
+                )
+                .child(SettingsRow::new(
+                    theme,
+                    "Publisher",
+                    plugin.author.as_deref().unwrap_or("Unknown"),
+                ))
+                .child(SettingsRow::new(
+                    theme,
+                    "Version",
+                    plugin.version.as_deref().unwrap_or("Unspecified"),
+                ))
+                .child(SettingsRow::new(theme, "Access requested", grants))
+                .child(SettingsRow::new(theme, "Surfaces affected", surfaces))
+                .child(SettingsRow::new(theme, "Composition changes", composition))
+                .child(
+                    Row::new()
+                        .gap(12.0)
+                        .child(Button::semantic(
+                            theme,
+                            SettingsMessage::CancelPluginEnable,
+                            "Cancel",
+                            ButtonPresentation::Quiet,
+                        ))
+                        .child(Button::semantic(
+                            theme,
+                            SettingsMessage::ConfirmPluginEnable,
+                            "Enable plugin",
+                            ButtonPresentation::Primary,
+                        )),
+                ),
             );
         }
         let projection = crate::plugin_list::projection(
@@ -138,17 +143,27 @@ impl SettingsApp {
             .get_or_insert_with(crate::plugin_list::PluginList::new)
             .as_mut()
             .map_err(|error| error.clone())
-            .and_then(|list| list.render(&projection, theme));
+            .and_then(|list| {
+                list.render(
+                    &projection,
+                    theme,
+                    &self.localizer.text("settings-plugin-input-placeholder"),
+                )
+            });
         content = content.child(match list {
             Ok(list) => list,
             Err(error) => {
-                let mut recovery = SettingsCard::titled(theme, "Plugin list unavailable", error)
-                    .child(Button::semantic(
-                        theme,
-                        SettingsMessage::RefreshPlugins,
-                        "Refresh",
-                        ButtonPresentation::Secondary,
-                    ));
+                let mut recovery = SettingsCard::titled(
+                    theme,
+                    self.localizer.text("settings-plugin-list-unavailable"),
+                    error,
+                )
+                .child(Button::semantic(
+                    theme,
+                    SettingsMessage::RefreshPlugins,
+                    "Refresh",
+                    ButtonPresentation::Secondary,
+                ));
                 if let Some(snapshot) = &self.plugin_status {
                     for plugin in snapshot
                         .plugins
@@ -1815,7 +1830,7 @@ impl SettingsApp {
         page.unwrap_or_else(|error| {
             AnyView::new(SettingsCard::titled(
                 self.ui_theme(),
-                "Keyboard page unavailable",
+                self.localizer.text("settings-keyboard-page-unavailable"),
                 error,
             ))
         })
@@ -1835,7 +1850,7 @@ impl SettingsApp {
         page.unwrap_or_else(|error| {
             AnyView::new(SettingsCard::titled(
                 self.ui_theme(),
-                "About page unavailable",
+                self.localizer.text("settings-about-page-unavailable"),
                 error,
             ))
         })

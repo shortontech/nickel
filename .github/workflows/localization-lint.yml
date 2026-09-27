@@ -6,6 +6,9 @@ on:
 
 env:
   RUSTC_WRAPPER: ""
+  # The repository defaults to mold for local Linux builds; this runner does
+  # not install mold, and this small lint tool needs no custom linker.
+  RUSTFLAGS: ""
 
 jobs:
   localization-lint:
