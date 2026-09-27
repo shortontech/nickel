@@ -84,7 +84,7 @@ impl OrdinaryPages {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             runtime: JsxRuntime::new(
-                include_str!("../../../assets/plugin-runtime/settings-pages.js"),
+                crate::settings_package::source(crate::settings_package::Script::OrdinaryPages)?,
                 None,
             )?,
             last_data: None,

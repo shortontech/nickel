@@ -51,7 +51,7 @@ impl PluginList {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             context: SettingsJsxContext::new(
-                include_str!("../../../assets/plugin-runtime/settings-plugins.js"),
+                crate::settings_package::source(crate::settings_package::Script::Plugins)?,
                 Node::parse,
                 "Plugin status changed; refresh the page",
                 "Plugin action must request exactly one operation",

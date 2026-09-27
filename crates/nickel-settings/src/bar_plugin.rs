@@ -347,7 +347,7 @@ impl BarPage {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             runtime: JsxRuntime::new(
-                include_str!("../../../assets/plugin-runtime/settings-bar.js"),
+                crate::settings_package::source(crate::settings_package::Script::Bar)?,
                 None,
             )?,
             last_data: None,

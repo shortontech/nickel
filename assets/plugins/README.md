@@ -11,6 +11,11 @@ cargo run -p nickel --no-default-features --features backend-winit \
   --bin nickel-plugin -- validate /path/to/plugin
 ```
 
+The [first-party Settings package](settings/) uses the same manifest format
+but has a separate native Settings component adapter. Its package and page
+scripts are validated by the `nickel-settings` test suite; the shell plugin
+CLI currently validates shell components.
+
 Inspect installed packages beneath Nickel's per-user `plugins/` configuration
 directory:
 

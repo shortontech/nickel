@@ -23,7 +23,7 @@ impl OptionalFeaturesPage {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             context: SettingsJsxContext::new(
-                include_str!("../../../assets/plugin-runtime/settings-optional-features.js"),
+                crate::settings_package::source(crate::settings_package::Script::OptionalFeatures)?,
                 parse_tree,
                 STALE_STATUS,
                 "Optional feature action must request one operation",
