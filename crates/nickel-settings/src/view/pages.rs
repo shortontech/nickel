@@ -1681,7 +1681,7 @@ impl SettingsApp {
         let mode_group = ChoiceCardGroup::new(mode_choices);
         let swatch_row = ui! {
             <Row height={44.0} gap={10.0} children={swatches}>
-                {ColorSwatch::custom(theme, SettingsMessage::SetAccentHue(hue))}
+                {ColorSwatch::custom(theme, SettingsMessage::OpenCustomHue).id("appearance-accent-custom")}
             </Row>
         };
         let native_mode_card = SettingsCard::titled(

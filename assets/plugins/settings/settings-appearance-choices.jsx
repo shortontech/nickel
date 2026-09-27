@@ -20,7 +20,17 @@ function App() {
                 selected={swatch.selected}
                 onClick={() => nickel.request({type: 'accent-hue', hue: swatch.hue})} />)}
             <settings-swatch id="appearance-accent-custom" hue={data.hue} custom={true}
-                onClick={() => nickel.request({type: 'accent-hue', hue: data.hue})} />
+                onClick={() => nickel.request({type: 'open-custom-hue'})} />
         </settings-accent-choices>
+        <settings-hue-dialog id="appearance-custom-hue-dialog" label={data.customHueTitle}
+            value={data.customHueDescription} open={data.customHueOpen}>
+            <settings-input id="appearance-custom-hue-input" label={data.customHueField}
+                placeholder={data.customHuePlaceholder} value={data.customHueDraft}
+                onChange={value => nickel.request({type: 'custom-hue-draft', value})} />
+            <settings-button id="appearance-custom-hue-apply" label={data.customHueApply}
+                value="primary" onClick={() => nickel.request({type: 'apply-custom-hue', value: data.customHueDraft})} />
+            <settings-button id="appearance-custom-hue-cancel" label={data.customHueCancel}
+                value="secondary" onClick={() => nickel.request({type: 'cancel-custom-hue'})} />
+        </settings-hue-dialog>
     </settings-appearance-choices>;
 }

@@ -6,8 +6,9 @@ use nickel_core::{
 };
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
-    AnyView, ChoiceCard, ChoiceCardGroup, ColorSwatch, Column, Insets, Row, SemanticTheme,
-    SettingsCard, Surface, SurfaceRole, ui,
+    AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, Column,
+    FrameOverlay, Insets, OverlayAnchor, OverlayStyle, Popover, Row, SemanticTheme, SettingsCard,
+    SettingsRow, Size, Surface, SurfaceRole, TextField, UiId, ui,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -51,7 +52,127 @@ struct AccentTree {
 struct AppearanceTree {
     mode: ModeTree,
     accent: AccentTree,
+    dialog: DialogTree,
     accent_first: bool,
+}
+
+#[derive(Clone)]
+struct DialogTree {
+    title: String,
+    description: String,
+    open: bool,
+    draft: String,
+    input_label: String,
+    input_placeholder: String,
+    input_action: usize,
+    apply_label: String,
+    apply_action: usize,
+    cancel_label: String,
+    cancel_action: usize,
+}
+
+impl DialogTree {
+    fn parse(value: &Value) -> Result<Self, String> {
+        if value.get("kind").and_then(Value::as_str) != Some("settings-hue-dialog")
+            || value.get("id").and_then(Value::as_str) != Some("appearance-custom-hue-dialog")
+        {
+            return Err("Custom hue dialog is invalid".into());
+        }
+        let children = value
+            .get("children")
+            .and_then(Value::as_array)
+            .ok_or("Custom hue dialog has no controls")?;
+        if children.len() != 3
+            || children[0].get("kind").and_then(Value::as_str) != Some("settings-input")
+            || children[0].get("id").and_then(Value::as_str) != Some("appearance-custom-hue-input")
+            || children[1].get("kind").and_then(Value::as_str) != Some("settings-button")
+            || children[1].get("id").and_then(Value::as_str) != Some("appearance-custom-hue-apply")
+            || children[2].get("kind").and_then(Value::as_str) != Some("settings-button")
+            || children[2].get("id").and_then(Value::as_str) != Some("appearance-custom-hue-cancel")
+        {
+            return Err("Custom hue dialog controls are invalid".into());
+        }
+        let action = |child: &Value| {
+            child
+                .get("action")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .ok_or("Custom hue dialog action is invalid".to_owned())
+        };
+        Ok(Self {
+            title: text(value, "label")?,
+            description: text(value, "value")?,
+            open: value.get("open").and_then(Value::as_bool).unwrap_or(false),
+            draft: text(&children[0], "value")?,
+            input_label: text(&children[0], "label")?,
+            input_placeholder: text(&children[0], "placeholder")?,
+            input_action: action(&children[0])?,
+            apply_label: text(&children[1], "label")?,
+            apply_action: action(&children[1])?,
+            cancel_label: text(&children[2], "label")?,
+            cancel_action: action(&children[2])?,
+        })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.title.capacity()
+            + self.description.capacity()
+            + self.draft.capacity()
+            + self.input_label.capacity()
+            + self.input_placeholder.capacity()
+            + self.apply_label.capacity()
+            + self.cancel_label.capacity()
+    }
+
+    fn view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
+        let action = self.input_action;
+        AnyView::new(
+            SettingsCard::titled(theme, &self.title, &self.description)
+                .child(
+                    SettingsRow::new(theme, &self.input_label, "").trailing(
+                        TextField::on_change_with_placeholder_mapped(
+                            &self.draft,
+                            &self.input_placeholder,
+                            move |value| SettingsMessage::AppearanceChoicesJsxInput(action, value),
+                        )
+                        .id("appearance-custom-hue-input"),
+                    ),
+                )
+                .child(
+                    Row::new()
+                        .gap(8.0)
+                        .child(
+                            Button::semantic(
+                                theme,
+                                SettingsMessage::AppearanceChoicesJsxAction(self.apply_action),
+                                &self.apply_label,
+                                ButtonPresentation::Primary,
+                            )
+                            .id("appearance-custom-hue-apply"),
+                        )
+                        .child(
+                            Button::semantic(
+                                theme,
+                                SettingsMessage::AppearanceChoicesJsxAction(self.cancel_action),
+                                &self.cancel_label,
+                                ButtonPresentation::Secondary,
+                            )
+                            .id("appearance-custom-hue-cancel"),
+                        ),
+                ),
+        )
+    }
+
+    #[cfg(test)]
+    fn action_for_id(&self, id: &str) -> Option<usize> {
+        match id {
+            "appearance-custom-hue-input" => Some(self.input_action),
+            "appearance-custom-hue-apply" => Some(self.apply_action),
+            "appearance-custom-hue-cancel" => Some(self.cancel_action),
+            _ => None,
+        }
+    }
 }
 
 impl AppearanceTree {
@@ -63,8 +184,8 @@ impl AppearanceTree {
             .get("children")
             .and_then(Value::as_array)
             .ok_or("Appearance choice cards are missing")?;
-        if children.len() != 2 {
-            return Err("Appearance needs mode and accent cards".into());
+        if children.len() != 3 {
+            return Err("Appearance needs mode, accent, and dialog components".into());
         }
         let accent_first =
             children[0].get("kind").and_then(Value::as_str) == Some("settings-accent-choices");
@@ -82,12 +203,13 @@ impl AppearanceTree {
         Ok(Self {
             mode,
             accent,
+            dialog: DialogTree::parse(&children[2])?,
             accent_first,
         })
     }
 
     fn retained_bytes(&self) -> usize {
-        self.mode.retained_bytes() + self.accent.retained_bytes()
+        self.mode.retained_bytes() + self.accent.retained_bytes() + self.dialog.retained_bytes()
     }
 
     fn view(&self, theme: SemanticTheme, appearance: Appearance) -> AnyView<SettingsMessage> {
@@ -99,15 +221,22 @@ impl AppearanceTree {
         AnyView::new(Column::new().gap(10.0).child(first).child(second))
     }
 
+    fn dialog_view(&self, theme: SemanticTheme) -> Option<AnyView<SettingsMessage>> {
+        self.dialog.open.then(|| self.dialog.view(theme))
+    }
+
     #[cfg(test)]
     fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.mode.action_for_id(id).or_else(|| {
-            self.accent
-                .swatches
-                .iter()
-                .find(|swatch| swatch.id == id)
-                .map(|swatch| swatch.action)
-        })
+        self.mode
+            .action_for_id(id)
+            .or_else(|| self.dialog.action_for_id(id))
+            .or_else(|| {
+                self.accent
+                    .swatches
+                    .iter()
+                    .find(|swatch| swatch.id == id)
+                    .map(|swatch| swatch.action)
+            })
     }
 }
 
@@ -414,14 +543,24 @@ impl AppearanceChoicesPage {
             .view(theme, appearance))
     }
 
-    fn dispatch(&mut self, index: usize, current_data: &Value) -> Result<SettingsMessage, String> {
+    pub(super) fn dialog_view(&self, theme: SemanticTheme) -> Option<AnyView<SettingsMessage>> {
+        self.tree.as_ref()?.dialog_view(theme)
+    }
+
+    fn dispatch(
+        &mut self,
+        index: usize,
+        value: Value,
+        current_data: &Value,
+    ) -> Result<SettingsMessage, String> {
         let serialized = serde_json::to_string(current_data).map_err(|error| error.to_string())?;
         if self.last_data.as_deref() != Some(&serialized) {
             return Err(STALE_STATUS.into());
         }
-        let rendered = self
-            .runtime
-            .render(&format!("__nickelDispatch({index})"), AppearanceTree::parse);
+        let rendered = self.runtime.render(
+            &format!("__nickelDispatch({index},{value})"),
+            AppearanceTree::parse,
+        );
         let effects = if rendered.is_ok() {
             self.runtime.take_effects()
         } else {
@@ -454,6 +593,10 @@ impl AppearanceChoicesPage {
 enum AppearanceRequest {
     Mode { value: String },
     AccentHue { hue: u16 },
+    OpenCustomHue,
+    CustomHueDraft { value: String },
+    ApplyCustomHue { value: String },
+    CancelCustomHue,
 }
 
 fn validate_request(request: AppearanceRequest, data: &Value) -> Result<SettingsMessage, String> {
@@ -478,6 +621,34 @@ fn validate_request(request: AppearanceRequest, data: &Value) -> Result<Settings
                 return Err("Accent hue is unavailable".into());
             }
             Ok(SettingsMessage::SetAccentHue(hue))
+        }
+        AppearanceRequest::OpenCustomHue => {
+            if data.get("customHueOpen").and_then(Value::as_bool) != Some(false) {
+                return Err("Custom hue dialog is already open".into());
+            }
+            Ok(SettingsMessage::OpenCustomHue)
+        }
+        AppearanceRequest::CustomHueDraft { value } => {
+            if data.get("customHueOpen").and_then(Value::as_bool) != Some(true)
+                || value.chars().count() > 16
+            {
+                return Err("Custom hue input is unavailable".into());
+            }
+            Ok(SettingsMessage::CustomHueDraftChanged(value))
+        }
+        AppearanceRequest::ApplyCustomHue { value } => {
+            if data.get("customHueOpen").and_then(Value::as_bool) != Some(true)
+                || data.get("customHueDraft").and_then(Value::as_str) != Some(value.as_str())
+            {
+                return Err("Custom hue draft changed".into());
+            }
+            Ok(SettingsMessage::ApplyCustomHue(value))
+        }
+        AppearanceRequest::CancelCustomHue => {
+            if data.get("customHueOpen").and_then(Value::as_bool) != Some(true) {
+                return Err("Custom hue dialog is unavailable".into());
+            }
+            Ok(SettingsMessage::CancelCustomHue)
         }
     }
 }
@@ -504,11 +675,19 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         "accentDescription":app.localizer.text("settings-appearance-accent-description"),
         "hue":hue,
         "swatches":swatches,
+        "customHueOpen":app.custom_hue_open,
+        "customHueDraft":app.custom_hue_draft,
+        "customHueTitle":app.localizer.text("settings-appearance-custom-hue-title"),
+        "customHueDescription":app.custom_hue_error.clone().unwrap_or_else(|| app.localizer.text("settings-appearance-custom-hue-description")),
+        "customHueApply":app.localizer.text("settings-appearance-custom-hue-apply"),
+        "customHueCancel":app.localizer.text("settings-appearance-custom-hue-cancel"),
+        "customHueField":app.localizer.text("settings-appearance-custom-hue-field"),
+        "customHuePlaceholder":app.localizer.text("settings-appearance-custom-hue-placeholder"),
     })
 }
 
 impl SettingsApp {
-    pub(super) fn handle_appearance_choices_jsx_action(&mut self, index: usize) {
+    pub(super) fn handle_appearance_choices_jsx_action(&mut self, index: usize, value: Value) {
         if self.page != SettingsPage::Appearance {
             return;
         }
@@ -519,7 +698,7 @@ impl SettingsApp {
             .as_mut()
             .ok_or_else(|| "Appearance choices are not loaded".to_owned())
             .and_then(|page| page.as_mut().map_err(|error| error.clone()))
-            .and_then(|page| page.dispatch(index, &data));
+            .and_then(|page| page.dispatch(index, value, &data));
         match result {
             Ok(message) => self.handle_settings_message(message),
             Err(error) => {
@@ -529,6 +708,88 @@ impl SettingsApp {
                 self.request_redraw();
             }
         }
+    }
+
+    pub(super) fn appearance_hue_overlay(&self) -> Vec<FrameOverlay<SettingsMessage>> {
+        if !self.custom_hue_open {
+            return Vec::new();
+        }
+        let theme = self.ui_theme();
+        let content = self
+            .appearance_choices_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.dialog_view(theme))
+            .unwrap_or_else(|| {
+                AnyView::new(
+                    SettingsCard::titled(
+                        theme,
+                        self.localizer.text("settings-appearance-custom-hue-title"),
+                        self.custom_hue_error.clone().unwrap_or_else(|| {
+                            self.localizer
+                                .text("settings-appearance-custom-hue-description")
+                        }),
+                    )
+                    .child(
+                        SettingsRow::new(
+                            theme,
+                            self.localizer.text("settings-appearance-custom-hue-field"),
+                            "",
+                        )
+                        .trailing(
+                            TextField::on_change_with_placeholder_mapped(
+                                &self.custom_hue_draft,
+                                &self
+                                    .localizer
+                                    .text("settings-appearance-custom-hue-placeholder"),
+                                SettingsMessage::CustomHueDraftChanged,
+                            )
+                            .id("appearance-custom-hue-input"),
+                        ),
+                    )
+                    .child(
+                        Row::new()
+                            .gap(8.0)
+                            .child(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::ApplyCustomHue(self.custom_hue_draft.clone()),
+                                    self.localizer.text("settings-appearance-custom-hue-apply"),
+                                    ButtonPresentation::Primary,
+                                )
+                                .id("appearance-custom-hue-apply"),
+                            )
+                            .child(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::CancelCustomHue,
+                                    self.localizer.text("settings-appearance-custom-hue-cancel"),
+                                    ButtonPresentation::Secondary,
+                                )
+                                .id("appearance-custom-hue-cancel"),
+                            ),
+                    ),
+                )
+            });
+        vec![
+            Popover::new(
+                "appearance-custom-hue-dialog",
+                OverlayAnchor::Node(UiId::from("appearance-accent-custom")),
+                self.localizer.text("settings-appearance-custom-hue-title"),
+                Size::new(360.0, 216.0),
+                OverlayStyle::from_theme(&theme),
+                content,
+            )
+            .focus(nickel_ui::OverlayFocusPolicy::FirstItem)
+            .dismiss(nickel_ui::DismissPolicy {
+                cancel: true,
+                outside_pointer: true,
+                action: false,
+            })
+            .focus_return("appearance-accent-custom")
+            .into(),
+        ]
     }
 }
 
@@ -572,7 +833,14 @@ mod tests {
             {"kind":"settings-swatch","id":"appearance-accent-224","hue":224,"selected":true,"action":3},
             {"kind":"settings-swatch","id":"appearance-accent-custom","hue":224,"custom":true,"action":4},
         ]});
-        let root = json!({"kind":"settings-appearance-choices","children":[accents, modes]});
+        let dialog = json!({"kind":"settings-hue-dialog","id":"appearance-custom-hue-dialog",
+        "label":"Custom","value":"","open":false,"children":[
+                {"kind":"settings-input","id":"appearance-custom-hue-input","label":"Hue","placeholder":"0–359","value":"224","action":5},
+            {"kind":"settings-button","id":"appearance-custom-hue-apply","label":"Apply","action":6},
+            {"kind":"settings-button","id":"appearance-custom-hue-cancel","label":"Cancel","action":7},
+        ]});
+        let root =
+            json!({"kind":"settings-appearance-choices","children":[accents, modes, dialog]});
         let tree = AppearanceTree::parse(&root).unwrap();
         assert!(tree.accent_first);
         assert_eq!(tree.action_for_id("appearance-accent-224"), Some(3));
@@ -588,12 +856,13 @@ mod tests {
             .unwrap();
         let action = page.action_for_id("appearance-mode-dark").unwrap();
         assert_eq!(
-            page.dispatch(action, &data).unwrap(),
+            page.dispatch(action, Value::Null, &data).unwrap(),
             SettingsMessage::AppearanceDark
         );
         app.shell_settings.theme = ThemePreference::Dark;
         assert_eq!(
-            page.dispatch(action, &projection(&app)).unwrap_err(),
+            page.dispatch(action, Value::Null, &projection(&app))
+                .unwrap_err(),
             STALE_STATUS
         );
     }
@@ -608,13 +877,14 @@ mod tests {
             .unwrap();
         let action = page.action_for_id("appearance-accent-188").unwrap();
         assert_eq!(
-            page.dispatch(action, &data).unwrap(),
+            page.dispatch(action, Value::Null, &data).unwrap(),
             SettingsMessage::SetAccentHue(188)
         );
         assert!(validate_request(AppearanceRequest::AccentHue { hue: 101 }, &data).is_err());
         app.shell_settings.accent_hue = Some(305);
         assert_eq!(
-            page.dispatch(action, &projection(&app)).unwrap_err(),
+            page.dispatch(action, Value::Null, &projection(&app))
+                .unwrap_err(),
             STALE_STATUS
         );
     }

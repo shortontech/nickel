@@ -66,7 +66,7 @@ use nickel_ui::{
     ActionLegend, ActionLegendEntry, AdapterOutcome, AnyView, Application, Button,
     ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, DragGesture, DragPhase,
     FrameOverlay, GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality, Insets,
-    NavigationItem, OverlayAnchor, OverlayStyle, PageHeader, Popover, PreviewTile,
+    NavigationItem, OverlayAnchor, OverlayId, OverlayStyle, PageHeader, Popover, PreviewTile,
     ReadingDirection, ResponsiveNavigation, ResponsiveNavigationDestination, SelectField,
     SemanticControllerAction, SemanticRole, SemanticSelector, SemanticTheme, SettingsCard,
     SettingsNavigation, SettingsRow, SettingsSearchEntry, SettingsSearchField, SettingsStatus,
@@ -556,6 +556,11 @@ enum SettingsMessage {
     AppearanceDark,
     AppearanceSystem,
     AppearanceChoicesJsxAction(usize),
+    AppearanceChoicesJsxInput(usize, String),
+    OpenCustomHue,
+    CustomHueDraftChanged(String),
+    ApplyCustomHue(String),
+    CancelCustomHue,
     AppearanceReset,
     SetAccentHue(u16),
     SetAppearanceHue(u16),
@@ -1110,6 +1115,11 @@ impl SettingsApp {
         self.network_page.get_mut().take();
         self.bluetooth_page.get_mut().take();
         self.appearance_choices_page.get_mut().take();
+        if self.custom_hue_open {
+            self.pending_transient_dismissal = Some(OverlayId::new("appearance-custom-hue-dialog"));
+        }
+        self.custom_hue_open = false;
+        self.pending_transient_request = None;
         if let Some(navigation) = navigation {
             *self.navigation_plugin.get_mut() = Some(Ok(navigation));
         }
@@ -1439,6 +1449,12 @@ impl SettingsApp {
         }
         if page != SettingsPage::Appearance {
             self.appearance_choices_page.get_mut().take();
+            if self.custom_hue_open {
+                self.pending_transient_dismissal =
+                    Some(OverlayId::new("appearance-custom-hue-dialog"));
+            }
+            self.custom_hue_open = false;
+            self.pending_transient_request = None;
         }
         if !matches!(page, SettingsPage::KeyboardShortcuts | SettingsPage::About) {
             self.ordinary_pages.get_mut().take();
@@ -1653,7 +1669,60 @@ impl SettingsApp {
                 self.persist_appearance();
             }
             SettingsMessage::AppearanceChoicesJsxAction(index) => {
-                self.handle_appearance_choices_jsx_action(index);
+                self.handle_appearance_choices_jsx_action(index, serde_json::Value::Null);
+            }
+            SettingsMessage::AppearanceChoicesJsxInput(index, value) => {
+                self.handle_appearance_choices_jsx_action(index, serde_json::Value::String(value));
+            }
+            SettingsMessage::OpenCustomHue => {
+                if self.page != SettingsPage::Appearance || self.custom_hue_open {
+                    return;
+                }
+                self.custom_hue_draft = self
+                    .shell_settings
+                    .displayed_hue(nickel_platform::appearance())
+                    .to_string();
+                self.custom_hue_error = None;
+                self.custom_hue_open = true;
+                self.pending_transient_request = Some((
+                    OverlayId::new("appearance-custom-hue-dialog"),
+                    UiId::from("appearance-accent-custom"),
+                ));
+            }
+            SettingsMessage::CustomHueDraftChanged(value) => {
+                if self.custom_hue_open && value.chars().count() <= 16 {
+                    self.custom_hue_draft = value;
+                    self.custom_hue_error = None;
+                }
+            }
+            SettingsMessage::ApplyCustomHue(value) => {
+                if !self.custom_hue_open || value != self.custom_hue_draft {
+                    return;
+                }
+                match value.parse::<u16>().ok().filter(|hue| *hue <= 359) {
+                    Some(hue) => {
+                        self.custom_hue_open = false;
+                        self.custom_hue_error = None;
+                        self.pending_transient_dismissal =
+                            Some(OverlayId::new("appearance-custom-hue-dialog"));
+                        self.shell_settings.accent_hue = Some(hue);
+                        self.persist_appearance();
+                    }
+                    None => {
+                        self.custom_hue_error = Some(
+                            self.localizer
+                                .text("settings-appearance-custom-hue-invalid"),
+                        )
+                    }
+                }
+            }
+            SettingsMessage::CancelCustomHue => {
+                if self.custom_hue_open {
+                    self.pending_transient_dismissal =
+                        Some(OverlayId::new("appearance-custom-hue-dialog"));
+                }
+                self.custom_hue_open = false;
+                self.custom_hue_error = None;
             }
             SettingsMessage::SetAccentHue(hue) => {
                 self.shell_settings.accent_hue = Some(hue.min(359));
@@ -2756,6 +2825,19 @@ impl Application for SettingsApp {
         })
     }
 
+    fn take_transient_request(&mut self) -> Option<(OverlayId, UiId)> {
+        self.pending_transient_request.take()
+    }
+
+    fn take_transient_dismissal(&mut self) -> Option<OverlayId> {
+        self.pending_transient_dismissal.take()
+    }
+
+    fn transient_dismissed(&self, id: &OverlayId) -> Option<Self::Message> {
+        (id == &OverlayId::new("appearance-custom-hue-dialog"))
+            .then_some(SettingsMessage::CancelCustomHue)
+    }
+
     fn take_clipboard_write(&mut self) -> Option<String> {
         None
     }
@@ -2771,6 +2853,8 @@ impl Application for SettingsApp {
     fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
         if self.page == SettingsPage::DefaultApps {
             self.default_app_overlays(context)
+        } else if self.page == SettingsPage::Appearance {
+            self.appearance_hue_overlay()
         } else {
             Vec::new()
         }
@@ -3524,6 +3608,94 @@ mod tests {
         ] {
             assert_eq!(tree.semantic_targets_for_message(&message).len(), 1);
         }
+    }
+
+    #[test]
+    fn custom_hue_dialog_opens_from_jsx_and_applies_validated_input() {
+        let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let mut host = UiHost::new(app, 850, 900);
+        let action = appearance_choice_action(host.application(), "appearance-accent-custom");
+        let opener = host
+            .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(action))
+            .into_iter()
+            .next()
+            .expect("custom accent swatch");
+        host.perform_semantic_action(
+            opener.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(
+            host.inspect().open_overlay,
+            Some(nickel_ui::OverlayId::new("appearance-custom-hue-dialog"))
+        );
+
+        let input = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("appearance-custom-hue-input"))
+            .expect("plugin dialog input");
+        host.perform_semantic_action(
+            input.id,
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text("123".into())),
+        );
+        assert_eq!(host.application().custom_hue_draft, "123");
+        let apply = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("appearance-custom-hue-apply"))
+            .expect("plugin dialog apply button");
+        host.perform_semantic_action(
+            apply.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(host.application().shell_settings.accent_hue, Some(123));
+        assert!(host.inspect().open_overlay.is_none());
+    }
+
+    #[test]
+    fn custom_hue_native_recovery_rejects_invalid_value_and_dismisses() {
+        let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        *app.appearance_choices_page.borrow_mut() = Some(Err("JSX failed".into()));
+        let mut host = UiHost::new(app, 850, 900);
+        let opener = host
+            .semantic_targets_for_message(&SettingsMessage::OpenCustomHue)
+            .into_iter()
+            .next()
+            .expect("native custom accent swatch");
+        host.perform_semantic_action(
+            opener.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(host.inspect().open_overlay.is_some());
+        let input = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("appearance-custom-hue-input"))
+            .expect("native recovery input");
+        host.perform_semantic_action(
+            input.id,
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text("500".into())),
+        );
+        assert_eq!(host.application().custom_hue_draft, "500");
+        let apply = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("appearance-custom-hue-apply"))
+            .expect("native recovery apply button");
+        host.perform_semantic_action(
+            apply.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(
+            host.application().custom_hue_error.is_some(),
+            "invalid draft after apply: {:?}, overlay: {:?}",
+            host.application().custom_hue_draft,
+            host.inspect().open_overlay
+        );
+        assert!(host.inspect().open_overlay.is_some());
+        host.handle_event(nickel_ui::UiEvent::ControllerBack);
+        assert!(!host.application().custom_hue_open);
+        assert!(host.inspect().open_overlay.is_none());
     }
 
     #[test]

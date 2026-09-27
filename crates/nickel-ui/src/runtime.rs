@@ -1232,6 +1232,12 @@ pub trait Application: Sized {
         None
     }
 
+    /// Drains an application-requested dismissal of its currently open transient.
+    /// The host ignores a stale request for a different overlay.
+    fn take_transient_dismissal(&mut self) -> Option<OverlayId> {
+        None
+    }
+
     /// Returns an application message when the host dismisses an open transient
     /// through input or focus loss. Applications can synchronize component state
     /// before the next declarative frame is built.
@@ -3414,6 +3420,18 @@ impl<A: Application> UiHost<A> {
         }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {
+            let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
+            combined.merge(rebuild_outcome);
+            combined.telemetry.paint_list_us = paint_list_us;
+            combined.telemetry.layout_us = layout_us;
+            combined.telemetry.rebuilt = true;
+        }
+        if let Some(id) = self.application.take_transient_dismissal()
+            && self.state.open_overlay_id() == Some(&id)
+        {
+            let invalidation = self.state.dismiss_overlay(crate::DismissReason::Action);
+            combined.changed = true;
+            combined.invalidation = combined.invalidation.merge(invalidation);
             let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
             combined.merge(rebuild_outcome);
             combined.telemetry.paint_list_us = paint_list_us;
