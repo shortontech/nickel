@@ -35,6 +35,15 @@ feature is disabled by default; selecting it starts Nickel instead of Explorer a
 Removing the feature or uninstalling Nickel restores the normal Windows shell fallback. See the
 [Windows installer notes](packaging/windows/README.md) for packaging and native acceptance details.
 
+#### Known issues in v0.1.1
+
+- On a single 2560 × 1440 display, Nickel Bar and the launcher can be positioned off screen
+  ([#13](https://github.com/shortontech/nickel/issues/13)).
+- Newly installed applications do not appear in launcher search until its application index is
+  refreshed ([#11](https://github.com/shortontech/nickel/issues/11)).
+- The installer does not clearly explain how to enable Nickel as the Windows shell or that a new
+  sign-in is required after setup ([#12](https://github.com/shortontech/nickel/issues/12)).
+
 ### Linux nested session
 
 Run Nickel inside an existing Linux desktop, like a desktop-shaped ship in a
