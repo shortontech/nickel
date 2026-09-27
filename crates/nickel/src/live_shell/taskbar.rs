@@ -343,7 +343,7 @@ pub(super) fn panel_clock_text() -> (String, String) {
     )
 }
 
-fn duration_until_next_minute() -> Duration {
+pub(super) fn duration_until_next_minute() -> Duration {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();

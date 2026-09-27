@@ -5218,6 +5218,15 @@ impl WindowsRemoteControl {
                                         {
                                             return error(reason);
                                         }
+                                        if changed
+                                            && let Err(reason) = crate::render_role(
+                                                shell,
+                                                state,
+                                                crate::winit_shell::SurfaceRole::Taskbar,
+                                            )
+                                        {
+                                            return error(reason);
+                                        }
                                         ServerMessage::Plugins(state.plugin_status_snapshot())
                                     }
                                     Err(reason) => error(reason),

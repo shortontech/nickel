@@ -681,6 +681,10 @@ pub struct LiveShell {
     last_published_plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
     plugin_panel_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_launcher_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
+    plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
+    plugin_taskbar_hosts:
+        HashMap<Option<String>, nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
+    plugin_taskbar_memory: HashMap<Option<String>, u64>,
     panel_hosts: HashMap<Option<String>, nickel_ui::UiHost<TaskbarUi>>,
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
     panel_change_token: HostChangeToken,
@@ -1169,6 +1173,7 @@ impl LiveShell {
         let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
         plugin_registry.register(crate::plugin_panel::manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::launcher_manifest().clone())?;
+        plugin_registry.register(crate::plugin_panel::taskbar_manifest().clone())?;
         let plugin_activation = nickel_core::plugins::PluginActivationSettings::load_default()
             .unwrap_or_else(|error| {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -1210,6 +1215,31 @@ impl LiveShell {
                 Ok(application) => {
                     plugin_registry.mark_running(id)?;
                     Some(nickel_ui::UiHost::new(application, 920, 680))
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    plugin_registry.mark_failed(id, error)?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let plugin_taskbar_host = if plugin_activation.desired_enabled(
+            &crate::plugin_panel::taskbar_manifest().id,
+            crate::plugin_panel::taskbar_enabled(),
+        ) {
+            let id = &crate::plugin_panel::taskbar_manifest().id;
+            plugin_registry.set_enabled(id, true)?;
+            let projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(
+                panel_host.application().groups.as_ref(),
+                &panel_host.application().clock,
+            );
+            match crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection)
+            {
+                Ok(application) => {
+                    plugin_registry.mark_running(id)?;
+                    Some(nickel_ui::UiHost::new(application, 1920, 56))
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1302,6 +1332,9 @@ impl LiveShell {
             last_published_plugin_status: None,
             plugin_panel_host,
             plugin_launcher_host,
+            plugin_taskbar_host,
+            plugin_taskbar_hosts: HashMap::new(),
+            plugin_taskbar_memory: HashMap::new(),
             panel_hosts: HashMap::new(),
             panel_projections: HashMap::new(),
             panel_change_token: HostChangeToken::default(),
@@ -2674,6 +2707,10 @@ impl LiveShell {
                 self.plugin_panel_host = None;
             } else if id == crate::plugin_panel::launcher_manifest().id {
                 self.plugin_launcher_host = None;
+            } else if id == crate::plugin_panel::taskbar_manifest().id {
+                self.plugin_taskbar_host = None;
+                self.plugin_taskbar_hosts.clear();
+                self.plugin_taskbar_memory.clear();
             }
             self.maybe_publish_plugin_status();
             return Ok(true);
@@ -2690,6 +2727,19 @@ impl LiveShell {
             crate::plugin_panel::PluginPanelApplication::launcher(&self.launcher).map(
                 |application| {
                     self.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+                },
+            )
+        } else if id == crate::plugin_panel::taskbar_manifest().id {
+            self.sync_panel_host();
+            self.plugin_taskbar_hosts.clear();
+            self.plugin_taskbar_memory.clear();
+            let projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(
+                self.panel_host.application().groups.as_ref(),
+                &self.panel_host.application().clock,
+            );
+            crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection).map(
+                |application| {
+                    self.plugin_taskbar_host = Some(nickel_ui::UiHost::new(application, 1920, 56));
                 },
             )
         } else {
@@ -2745,6 +2795,16 @@ impl LiveShell {
                 .values()
                 .filter_map(|host| host.next_deadline())
                 .chain(self.panel_host.next_deadline())
+                .chain(
+                    self.plugin_taskbar_hosts
+                        .values()
+                        .filter_map(|host| host.next_deadline()),
+                )
+                .chain(
+                    self.plugin_taskbar_host
+                        .as_ref()
+                        .and_then(|host| host.next_deadline()),
+                )
                 .chain(self.panel_deadline)
                 .min(),
         );
@@ -3267,7 +3327,6 @@ impl LiveShell {
     }
 
     pub fn panel_click(&mut self, x: f32, width: u32, secondary: bool) -> bool {
-        let application_changed = self.sync_panel_host();
         let events = if secondary {
             vec![HostEvent::Ui(UiEvent::PointerContext(Point { x, y: 28.0 }))]
         } else {
@@ -3276,6 +3335,12 @@ impl LiveShell {
                 HostEvent::Ui(UiEvent::PointerReleased(Point { x, y: 28.0 })),
             ]
         };
+        if self.plugin_taskbar_host.is_some() {
+            return self
+                .step_taskbar_plugin(events, width)
+                .is_some_and(|outcome| outcome.changed);
+        }
+        let application_changed = self.sync_panel_host();
         let outcome = self.panel_host.step(HostBatch {
             application_changed,
             surface_size: Some((width, 56)),
@@ -3288,6 +3353,11 @@ impl LiveShell {
     }
 
     pub fn panel_controller(&mut self, action: ControllerAction, width: u32) -> bool {
+        if self.plugin_taskbar_host.is_some() {
+            return self
+                .step_taskbar_plugin(vec![HostEvent::Controller(action)], width)
+                .is_some_and(|outcome| outcome.changed);
+        }
         let application_changed = self.sync_panel_host();
         let outcome = self.panel_host.step(HostBatch {
             application_changed,
@@ -3302,6 +3372,11 @@ impl LiveShell {
     }
 
     pub(crate) fn panel_host_ui(&mut self, event: UiEvent, width: u32) -> bool {
+        if self.plugin_taskbar_host.is_some() {
+            return self
+                .step_taskbar_plugin(vec![HostEvent::Ui(event)], width)
+                .is_some_and(|outcome| outcome.changed);
+        }
         let application_changed = self.sync_panel_host();
         let outcome = self.panel_host.step(HostBatch {
             application_changed,
@@ -3345,6 +3420,20 @@ impl LiveShell {
             match effect {
                 crate::plugin_panel::PluginEffect::ShowLauncher => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
+                }
+                crate::plugin_panel::PluginEffect::ToggleLauncher => {
+                    self.apply_panel_action(TaskbarAction::Launcher);
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ToggleControlCenter => {
+                    self.apply_panel_action(TaskbarAction::Control);
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ActivateTaskbarItem { index, id } => {
+                    if crate::plugin_panel::taskbar_item_matches(&self.panel_groups(), index, &id) {
+                        self.apply_panel_action(TaskbarAction::Task(index));
+                        changed = true;
+                    }
                 }
                 crate::plugin_panel::PluginEffect::SetLauncherQuery(query) => {
                     self.apply_launcher_action(LauncherAction::SetQuery(query));
@@ -3640,20 +3729,36 @@ impl LiveShell {
         if anchored_role.is_some() {
             self.pending_popover_anchor = None;
         }
-        if let Some((role, control)) = anchored_role
-            && let (Some(output), Some(target)) = (
-                self.panel_output.clone(),
+        let anchor_bounds =
+            if self.plugin_taskbar_host.is_some() && matches!(action, TaskbarAction::Control) {
+                self.plugin_taskbar_host.as_ref().and_then(|host| {
+                    host.query_unique(&nickel_ui::SemanticSelector::Id(nickel_ui::UiId::new(
+                        "taskbar-control",
+                    )))
+                    .ok()
+                    .map(|target| target.bounds)
+                })
+            } else {
                 self.panel_host
                     .semantic_targets_for_message(&action)
                     .into_iter()
-                    .next(),
-            )
+                    .next()
+                    .map(|target| target.bounds)
+            };
+        if let Some((role, control)) = anchored_role
+            && let (Some(output), Some(bounds)) = (self.panel_output.clone(), anchor_bounds)
         {
             self.pending_popover_anchor = Some(PendingPopoverAnchor {
                 role,
-                control: control.to_owned(),
+                control: if self.plugin_taskbar_host.is_some()
+                    && matches!(action, TaskbarAction::Control)
+                {
+                    "taskbar-control".to_owned()
+                } else {
+                    control.to_owned()
+                },
                 output,
-                bounds: target.bounds,
+                bounds,
             });
         }
         match action {
@@ -3851,11 +3956,24 @@ impl LiveShell {
                         .as_ref()
                         .is_some_and(|id| id.as_str() == application_id)
                 })?;
-                let bounds = host
-                    .semantic_targets_for_message(&TaskbarAction::Task(index))
-                    .into_iter()
-                    .next()?
-                    .bounds;
+                let plugin_host = if output.is_none() || output == &self.panel_output {
+                    self.plugin_taskbar_host.as_ref()
+                } else {
+                    self.plugin_taskbar_hosts.get(output)
+                };
+                let bounds = if let Some(plugin_host) = plugin_host {
+                    plugin_host
+                        .query_unique(&nickel_ui::SemanticSelector::Id(nickel_ui::UiId::new(
+                            format!("taskbar-item-{index}"),
+                        )))
+                        .ok()?
+                        .bounds
+                } else {
+                    host.semantic_targets_for_message(&TaskbarAction::Task(index))
+                        .into_iter()
+                        .next()?
+                        .bounds
+                };
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
                     output: output.clone(),
@@ -3865,6 +3983,25 @@ impl LiveShell {
                 })
             }
             ShellSemanticTarget::PanelControlCenter { output } => {
+                if let Some(plugin_host) = if output.is_none() || output == &self.panel_output {
+                    self.plugin_taskbar_host.as_ref()
+                } else {
+                    self.plugin_taskbar_hosts.get(output)
+                } {
+                    let bounds = plugin_host
+                        .query_unique(&nickel_ui::SemanticSelector::Id(nickel_ui::UiId::new(
+                            "taskbar-control",
+                        )))
+                        .ok()?
+                        .bounds;
+                    return Some(ResolvedShellTarget {
+                        role: ShellRole::Panel,
+                        output: output.clone(),
+                        x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                        y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
+                        interaction: PointerInteraction::LeftClick,
+                    });
+                }
                 let host = if output.is_none() || output == &self.panel_output {
                     &self.panel_host
                 } else {
@@ -3973,23 +4110,45 @@ impl LiveShell {
     }
 
     pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
-        let application_changed = self.sync_panel_host();
-        self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, 56)),
-            events: vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
-            ..HostBatch::default()
-        });
-        let hovered_action = self
-            .panel_host
-            .inspect()
-            .pointer_hover
-            .as_ref()
-            .and_then(|target| self.panel_host.message_for_semantic_target(target))
-            .cloned();
-        let hovered = hovered_action
-            .as_ref()
-            .and_then(|action| self.panel_hover_for_action(action));
+        let hovered = if self.plugin_taskbar_host.is_some() {
+            self.step_taskbar_plugin(
+                vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
+                width,
+            );
+            self.plugin_taskbar_host
+                .as_ref()
+                .and_then(|host| host.inspect().pointer_hover)
+                .and_then(|id| {
+                    let id = id.as_str();
+                    if id == "taskbar-launcher" {
+                        Some(TaskbarHover::Launcher)
+                    } else if id == "taskbar-control" {
+                        Some(TaskbarHover::Control)
+                    } else {
+                        id.strip_prefix("taskbar-item-")
+                            .and_then(|index| index.parse().ok())
+                            .map(TaskbarHover::Task)
+                    }
+                })
+        } else {
+            let application_changed = self.sync_panel_host();
+            self.panel_host.step(HostBatch {
+                application_changed,
+                surface_size: Some((width, 56)),
+                events: vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
+                ..HostBatch::default()
+            });
+            let hovered_action = self
+                .panel_host
+                .inspect()
+                .pointer_hover
+                .as_ref()
+                .and_then(|target| self.panel_host.message_for_semantic_target(target))
+                .cloned();
+            hovered_action
+                .as_ref()
+                .and_then(|action| self.panel_hover_for_action(action))
+        };
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
         self.panel_hover_output.clone_from(&self.panel_output);
@@ -4060,9 +4219,48 @@ impl LiveShell {
         if self.panel_hosts.len() >= 32 {
             self.panel_hosts.clear();
         }
-        self.panel_hosts
-            .insert(std::mem::replace(&mut self.panel_output, output), previous);
-        self.panel_deadline = self.panel_host.next_deadline();
+        let previous_output = std::mem::replace(&mut self.panel_output, output);
+        self.panel_hosts.insert(previous_output.clone(), previous);
+        if let Some(current) = self.plugin_taskbar_host.take() {
+            let next = self
+                .plugin_taskbar_hosts
+                .remove(&self.panel_output)
+                .or_else(|| {
+                    self.sync_panel_host();
+                    let (clock, _) = panel_clock_text();
+                    let projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(
+                        self.panel_host.application().groups.as_ref(),
+                        &clock,
+                    );
+                    match crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(
+                        &projection,
+                    ) {
+                        Ok(application) => Some(nickel_ui::UiHost::new(application, 1920, 56)),
+                        Err(error) => {
+                            tracing::error!(%error, "taskbar plugin failed on an output");
+                            let _ = self
+                                .plugin_registry
+                                .mark_failed(&crate::plugin_panel::taskbar_manifest().id, error);
+                            None
+                        }
+                    }
+                });
+            if next.is_some() {
+                if self.plugin_taskbar_hosts.len() >= 32 {
+                    self.plugin_taskbar_hosts.clear();
+                }
+                self.plugin_taskbar_hosts.insert(previous_output, current);
+                self.plugin_taskbar_host = next;
+            } else {
+                self.plugin_taskbar_hosts.clear();
+                self.plugin_taskbar_memory.clear();
+            }
+        }
+        self.panel_deadline = if self.plugin_taskbar_host.is_some() {
+            Some(Instant::now() + taskbar::duration_until_next_minute())
+        } else {
+            self.panel_host.next_deadline()
+        };
     }
 
     /// Render a concrete output without transferring popover/input ownership.
@@ -6807,6 +7005,14 @@ impl LiveShell {
     }
 
     fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        if self.plugin_taskbar_host.is_some() {
+            self.step_taskbar_plugin(vec![HostEvent::Poll], width);
+            return self
+                .plugin_taskbar_host
+                .as_ref()
+                .map(|host| host.commands().to_vec())
+                .unwrap_or_default();
+        }
         let had_project_pet = self
             .panel_host
             .application()
@@ -6848,6 +7054,63 @@ impl LiveShell {
         self.panel_deadline = outcome.next_deadline;
         self.apply_panel_effects();
         self.panel_host.commands().to_vec()
+    }
+
+    fn step_taskbar_plugin(
+        &mut self,
+        events: Vec<HostEvent>,
+        width: u32,
+    ) -> Option<nickel_ui::HostEventOutcome> {
+        self.sync_panel_host();
+        let (clock, _) = panel_clock_text();
+        let projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(
+            self.panel_host.application().groups.as_ref(),
+            &clock,
+        );
+        let host = self.plugin_taskbar_host.as_mut()?;
+        let application_changed = match host.application_mut().sync_taskbar_projection(&projection)
+        {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::error!(%error, "taskbar plugin projection failed");
+                false
+            }
+        };
+        let mut outcome = host.step(HostBatch {
+            application_changed,
+            surface_size: Some((width, 56)),
+            events,
+            ..HostBatch::default()
+        });
+        let effects = host.application_mut().take_effects();
+        if self.plugin_taskbar_memory.len() >= 32
+            && !self.plugin_taskbar_memory.contains_key(&self.panel_output)
+        {
+            self.plugin_taskbar_memory.clear();
+        }
+        self.plugin_taskbar_memory.insert(
+            self.panel_output.clone(),
+            outcome.telemetry.retained_frame_bytes as u64,
+        );
+        let retained_ui = self
+            .plugin_taskbar_memory
+            .values()
+            .copied()
+            .fold(0_u64, u64::saturating_add);
+        let _ = self.plugin_registry.record_memory(
+            &crate::plugin_panel::taskbar_manifest().id,
+            nickel_core::plugins::PluginMemory {
+                native_ui_bytes: Some(retained_ui),
+                ..nickel_core::plugins::PluginMemory::default()
+            },
+        );
+        self.panel_change_token = outcome.change_token;
+        self.panel_deadline = outcome
+            .next_deadline
+            .or_else(|| Some(Instant::now() + taskbar::duration_until_next_minute()));
+        outcome.changed |= self.apply_plugin_effects(effects);
+        self.maybe_publish_plugin_status();
+        Some(outcome)
     }
 
     fn panel_groups(&mut self) -> Arc<Vec<crate::launcher::TaskbarApplication>> {
@@ -6901,6 +7164,16 @@ impl LiveShell {
                 .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
         });
         self.panel_projections.retain(|output, _| {
+            output
+                .as_ref()
+                .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
+        });
+        self.plugin_taskbar_hosts.retain(|output, _| {
+            output
+                .as_ref()
+                .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
+        });
+        self.plugin_taskbar_memory.retain(|output, _| {
             output
                 .as_ref()
                 .is_none_or(|name| outputs.iter().any(|output| &output.name == name))

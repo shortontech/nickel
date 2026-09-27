@@ -158,6 +158,7 @@ pub enum PluginOutputScope {
 #[serde(rename_all = "kebab-case")]
 pub enum PluginCapability {
     LauncherShow,
+    ControlCenterShow,
     ApplicationsRead,
     ApplicationsLaunch,
     WindowsRead,
@@ -174,6 +175,7 @@ impl PluginCapability {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LauncherShow => "launcher-show",
+            Self::ControlCenterShow => "control-center-show",
             Self::ApplicationsRead => "applications-read",
             Self::ApplicationsLaunch => "applications-launch",
             Self::WindowsRead => "windows-read",

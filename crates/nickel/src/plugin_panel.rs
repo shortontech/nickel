@@ -12,7 +12,7 @@ use nickel_ui::{
 };
 use serde_json::Value;
 
-use crate::launcher::Launcher;
+use crate::launcher::{Launcher, TaskbarApplication};
 
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
@@ -41,6 +41,18 @@ pub fn launcher_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn taskbar_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!("../../../assets/plugins/taskbar/plugin.json"))
+            .expect("bundled taskbar plugin manifest must be valid")
+    })
+}
+
+pub fn taskbar_enabled() -> bool {
+    std::env::var_os("NICKEL_DEV_PLUGIN_TASKBAR").is_some()
+}
+
 pub fn launcher_enabled() -> bool {
     std::env::var_os("NICKEL_DEV_PLUGIN_LAUNCHER").is_some()
 }
@@ -63,6 +75,7 @@ const Column = 'column';
 const Text = 'text';
 const TextField = 'text-field';
 const Button = 'button';
+const Spacer = 'spacer';
 const Dialog = 'dialog';
 const __componentIds = new WeakMap();
 let __nextComponentId = 0;
@@ -143,6 +156,7 @@ function h(kind, props, ...children) {
     const action = typeof handler === 'function' ? __handlers.push(handler) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         width: props?.width, height: props?.height, background: props?.background,
+        accessibilityLabel: props?.accessibilityLabel,
         value: props?.value, placeholder: props?.placeholder,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
 }
@@ -172,10 +186,12 @@ enum PanelNode {
     Panel {
         children: Vec<Self>,
         background: u32,
+        height: u32,
     },
     Row(Vec<Self>),
     Column(Vec<Self>),
     Text(String),
+    Spacer,
     TextField {
         id: String,
         value: String,
@@ -185,6 +201,7 @@ enum PanelNode {
     Button {
         id: String,
         label: String,
+        accessibility_label: String,
         action: usize,
     },
     Dialog {
@@ -219,9 +236,15 @@ impl PanelNode {
                         .get("background")
                         .and_then(Value::as_u64)
                         .map_or(0xc926_2b36, |value| value as u32);
+                    let height = value
+                        .get("height")
+                        .and_then(Value::as_u64)
+                        .filter(|height| (1..=8192).contains(height))
+                        .unwrap_or(64) as u32;
                     Ok(Self::Panel {
                         children,
                         background,
+                        height,
                     })
                 } else if kind == "row" {
                     Ok(Self::Row(children))
@@ -230,6 +253,7 @@ impl PanelNode {
                 }
             }
             "text" => Ok(Self::Text(child_text(children)?)),
+            "spacer" => Ok(Self::Spacer),
             "text-field" => Ok(Self::TextField {
                 id: value
                     .get("id")
@@ -252,23 +276,32 @@ impl PanelNode {
                     .ok_or("text field needs an onChange handler")?
                     as usize,
             }),
-            "button" => Ok(Self::Button {
-                id: value
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| {
-                        format!(
-                            "plugin-button-{}",
-                            value.get("action").and_then(Value::as_u64).unwrap_or(0)
-                        )
-                    }),
-                label: child_text(children)?,
-                action: value
-                    .get("action")
-                    .and_then(Value::as_u64)
-                    .ok_or("button needs an onClick handler")? as usize,
-            }),
+            "button" => {
+                let label = child_text(children)?;
+                Ok(Self::Button {
+                    id: value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "plugin-button-{}",
+                                value.get("action").and_then(Value::as_u64).unwrap_or(0)
+                            )
+                        }),
+                    accessibility_label: value
+                        .get("accessibilityLabel")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&label)
+                        .to_owned(),
+                    label,
+                    action: value
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .ok_or("button needs an onClick handler")?
+                        as usize,
+                })
+            }
             "dialog" => Ok(Self::Dialog {
                 id: value
                     .get("id")
@@ -297,8 +330,11 @@ impl PanelNode {
             Self::Panel {
                 children,
                 background,
+                height,
             } => {
-                let mut row = Row::new().fill_width().height(48.0);
+                let mut row = Row::new()
+                    .fill_width()
+                    .height((*height).saturating_sub(16) as f32);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
                         row = row.child(child.view());
@@ -306,7 +342,7 @@ impl PanelNode {
                 }
                 AnyView::new(
                     Container::new()
-                        .height(64.0)
+                        .height(*height as f32)
                         .background(*background)
                         .radius(16.0)
                         .padding(Insets::all(8.0))
@@ -333,6 +369,7 @@ impl PanelNode {
                     .padding(Insets::all(10.0))
                     .child(Text::new(text).color(0xf4f6fa).scale(1.0)),
             ),
+            Self::Spacer => AnyView::new(Spacer::flex()),
             Self::TextField {
                 id,
                 value,
@@ -347,10 +384,15 @@ impl PanelNode {
                 .accessibility_label(placeholder)
                 .height(44.0),
             ),
-            Self::Button { id, label, action } => AnyView::new(
+            Self::Button {
+                id,
+                label,
+                accessibility_label,
+                action,
+            } => AnyView::new(
                 Container::new()
                     .id(id.clone())
-                    .accessibility_label(label)
+                    .accessibility_label(accessibility_label)
                     .semantic_role(SemanticRole::Button)
                     .message(PluginMessage::Click(*action))
                     .height(42.0)
@@ -393,14 +435,17 @@ pub struct PluginPanelApplication {
     pending_transient: Option<(OverlayId, UiId)>,
     last_error: Option<String>,
     manifest: &'static PluginManifest,
-    launcher_data: Option<String>,
+    projection_data: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
+    ToggleLauncher,
     SetLauncherQuery(String),
     ActivateLauncherResult { index: usize, id: String },
+    ActivateTaskbarItem { index: usize, id: String },
+    ToggleControlCenter,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -420,6 +465,67 @@ pub struct LauncherPluginResult {
 pub struct LauncherPluginProjection {
     pub query: String,
     pub results: Vec<LauncherPluginResult>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarPluginItem {
+    pub index: usize,
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskbarPluginProjection {
+    pub items: Vec<TaskbarPluginItem>,
+    pub clock: String,
+}
+
+impl TaskbarPluginProjection {
+    pub fn from_groups(groups: &[TaskbarApplication], clock: &str) -> Self {
+        Self {
+            items: groups
+                .iter()
+                .take(12)
+                .enumerate()
+                .map(|(index, group)| TaskbarPluginItem {
+                    index,
+                    id: taskbar_item_id(group),
+                    name: group.application_name.clone(),
+                    active: group.active(),
+                    pinned: group.pinned,
+                })
+                .collect(),
+            clock: clock.to_owned(),
+        }
+    }
+
+    fn to_json(&self) -> String {
+        serde_json::json!({"items": self.items.iter().map(|item| serde_json::json!({
+            "index": item.index, "id": item.id, "name": item.name,
+            "active": item.active, "pinned": item.pinned,
+        })).collect::<Vec<_>>(), "clock": self.clock})
+        .to_string()
+    }
+}
+
+pub fn taskbar_item_id(group: &TaskbarApplication) -> String {
+    group.application_id.as_ref().map_or_else(
+        || {
+            group.windows.last().map_or_else(
+                || format!("unidentified:{}", group.application_name),
+                |window| format!("window:{}", window.id.0),
+            )
+        },
+        |id| id.as_str().to_owned(),
+    )
+}
+
+pub fn taskbar_item_matches(groups: &[TaskbarApplication], index: usize, id: &str) -> bool {
+    groups
+        .get(index)
+        .is_some_and(|group| taskbar_item_id(group) == id)
 }
 
 impl LauncherPluginProjection {
@@ -482,6 +588,11 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, launcher_manifest(), Some(data))
     }
 
+    pub fn taskbar_with_projection(projection: &TaskbarPluginProjection) -> Result<Self, String> {
+        let source = include_str!("../../../assets/plugins/taskbar/main.js");
+        Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
+    }
+
     fn new_with_manifest(
         source: &str,
         manifest: &'static PluginManifest,
@@ -507,7 +618,7 @@ impl PluginPanelApplication {
             pending_transient: None,
             last_error: None,
             manifest,
-            launcher_data: data,
+            projection_data: data,
         })
     }
 
@@ -523,14 +634,33 @@ impl PluginPanelApplication {
             return Err("this plugin is not the launcher".into());
         }
         let data = projection.to_json();
-        if self.launcher_data.as_deref() == Some(data.as_str()) {
+        if self.projection_data.as_deref() == Some(data.as_str()) {
             return Ok(false);
         }
         self.context
             .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
             .map_err(|error| error.to_string())?;
         self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
-        self.launcher_data = Some(data);
+        self.projection_data = Some(data);
+        Ok(true)
+    }
+
+    pub fn sync_taskbar_projection(
+        &mut self,
+        projection: &TaskbarPluginProjection,
+    ) -> Result<bool, String> {
+        if self.manifest.id != taskbar_manifest().id {
+            return Err("this plugin is not the taskbar".into());
+        }
+        let data = projection.to_json();
+        if self.projection_data.as_deref() == Some(data.as_str()) {
+            return Ok(false);
+        }
+        self.context
+            .eval(Source::from_bytes(&format!("__nickelSetData({data})")))
+            .map_err(|error| error.to_string())?;
+        self.node = evaluate_tree(&mut self.context, "__nickelRender()")?;
+        self.projection_data = Some(data);
         Ok(true)
     }
 
@@ -593,6 +723,59 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
                             approved.push(PluginEffect::ShowLauncher);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-toggle-launcher")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::LauncherShow) =>
+                        {
+                            approved.push(PluginEffect::ToggleLauncher);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-toggle-control")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ControlCenterShow) =>
+                        {
+                            approved.push(PluginEffect::ToggleControlCenter);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-activate-item")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::WindowsFocus)
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsLaunch) =>
+                        {
+                            let Some(index) = effect
+                                .get("index")
+                                .and_then(Value::as_u64)
+                                .and_then(|index| usize::try_from(index).ok())
+                            else {
+                                self.last_error = Some("taskbar item index is invalid".into());
+                                return;
+                            };
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("taskbar item ID is missing".into());
+                                return;
+                            };
+                            if id.len() > 256 || index >= 12 {
+                                self.last_error = Some("taskbar item reference is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ActivateTaskbarItem {
+                                index,
+                                id: id.to_owned(),
+                            });
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
@@ -674,7 +857,7 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        if self.launcher_data.is_some() {
+        if self.manifest.id == launcher_manifest().id {
             AnyView::new(
                 Container::new()
                     .fill_width()
@@ -683,6 +866,8 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .background(0xf12b_303c)
                     .child(self.node.view()),
             )
+        } else if self.manifest.id == taskbar_manifest().id {
+            AnyView::new(self.node.view())
         } else {
             AnyView::new(
                 Column::new()
@@ -738,8 +923,10 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn title(&self) -> &str {
-        if self.launcher_data.is_some() {
+        if self.manifest.id == launcher_manifest().id {
             "Plugin Launcher"
+        } else if self.manifest.id == taskbar_manifest().id {
+            "Plugin Taskbar"
         } else {
             "Plugin Panel"
         }

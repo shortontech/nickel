@@ -1,0 +1,16 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.taskbar",
+  "name": "Nickel Taskbar Preview",
+  "entry": "main.js",
+  "surfaces": [
+    {"id": "main", "kind": "panel", "width": 1920, "height": 56, "output": "all"}
+  ],
+  "capabilities": [
+    "launcher-show",
+    "control-center-show",
+    "windows-read",
+    "windows-focus",
+    "applications-launch"
+  ]
+}

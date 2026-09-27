@@ -1,5 +1,6 @@
 use nickel_shell::plugin_panel::{
-    LauncherPluginProjection, LauncherPluginResult, PluginEffect, PluginPanelApplication, surface,
+    LauncherPluginProjection, LauncherPluginResult, PluginEffect, PluginPanelApplication,
+    TaskbarPluginItem, TaskbarPluginProjection, surface,
 };
 use nickel_ui::{
     ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueSnapshot, UiEvent,
@@ -280,4 +281,62 @@ fn keyed_function_components_keep_state_across_conditional_siblings() {
         name: "second:1".into(),
     })
     .expect("stable keyed sibling retains its state");
+}
+
+#[test]
+fn bundled_taskbar_renders_grouped_items_and_emits_typed_actions() {
+    let projection = TaskbarPluginProjection {
+        items: vec![TaskbarPluginItem {
+            index: 0,
+            id: "org.example.editor".into(),
+            name: "Editor".into(),
+            active: true,
+            pinned: true,
+        }],
+        clock: "4:20 PM".into(),
+    };
+    let mut host = UiHost::new(
+        PluginPanelApplication::taskbar_with_projection(&projection).unwrap(),
+        900,
+        56,
+    );
+    let editor = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Editor".into(),
+        })
+        .expect("task group button")
+        .id;
+    host.perform_semantic_action(editor, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ActivateTaskbarItem {
+            index: 0,
+            id: "org.example.editor".into(),
+        }]
+    );
+    let launcher = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Nickel".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(launcher, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ToggleLauncher]
+    );
+    let control = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "4:20 PM".into(),
+        })
+        .unwrap()
+        .id;
+    host.perform_semantic_action(control, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ToggleControlCenter]
+    );
 }
