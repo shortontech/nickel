@@ -364,7 +364,10 @@ fn run_with_arguments(
         }
     }
 
-    state.enable_internal_shell(Arc::new(in_process_session_host.clone()))?;
+    state.enable_internal_shell_with_safe_mode(
+        Arc::new(in_process_session_host.clone()),
+        arguments.safe_mode,
+    )?;
     state.schedule_internal_shell_deadline();
     tracing::info!(
         surfaces = state.internal_ui.len(),

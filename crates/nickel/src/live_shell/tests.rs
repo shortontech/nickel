@@ -31,6 +31,13 @@ use super::{
     visible_tray_item, window_belongs_to_panel,
 };
 
+#[test]
+fn safe_mode_suppresses_installed_autostart_without_discarding_saved_choice() {
+    assert!(super::should_auto_start_installed_plugin(true, false));
+    assert!(!super::should_auto_start_installed_plugin(true, true));
+    assert!(!super::should_auto_start_installed_plugin(false, false));
+}
+
 include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
 

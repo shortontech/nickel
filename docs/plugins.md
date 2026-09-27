@@ -113,6 +113,12 @@ to an individual plugin. An unavailable category is shown as unavailable rather
 than counted as zero. Disabling a plugin retires its host and clears its
 reported memory.
 
+Start Nickel with `--safe-mode` to keep installed plugins from starting
+automatically for that session. Bundled shell plugins retain their saved
+enablement. Installed packages remain listed in Settings and may be enabled
+manually after the shell starts. Safe mode does not rewrite saved enablement;
+the next normal start follows the saved choices again.
+
 Plugins may declare up to 32 bounded settings in `plugin.json`: `boolean`,
 `integer` with `min`/`max`, `text` with `max_length`, or `choice` with an
 `options` list. Each setting has an ID, label, and default. Nickel validates

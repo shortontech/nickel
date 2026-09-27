@@ -5125,9 +5125,18 @@ impl NickelSession {
         &mut self,
         host: std::sync::Arc<dyn crate::session_host::SessionHost>,
     ) -> Result<(), String> {
-        self.enable_internal_shell_with_system_updates(
+        self.enable_internal_shell_with_safe_mode(host, false)
+    }
+
+    pub(crate) fn enable_internal_shell_with_safe_mode(
+        &mut self,
+        host: std::sync::Arc<dyn crate::session_host::SessionHost>,
+        safe_mode: bool,
+    ) -> Result<(), String> {
+        self.enable_internal_shell_with_system_updates_in_mode(
             host,
             crate::platform::system_status_receiver(),
+            safe_mode,
         )
     }
 
@@ -5136,9 +5145,19 @@ impl NickelSession {
         host: std::sync::Arc<dyn crate::session_host::SessionHost>,
         platform_updates: crate::platform::status_mailbox::StatusReceiver,
     ) -> Result<(), String> {
+        self.enable_internal_shell_with_system_updates_in_mode(host, platform_updates, false)
+    }
+
+    fn enable_internal_shell_with_system_updates_in_mode(
+        &mut self,
+        host: std::sync::Arc<dyn crate::session_host::SessionHost>,
+        platform_updates: crate::platform::status_mailbox::StatusReceiver,
+        safe_mode: bool,
+    ) -> Result<(), String> {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
-        let mut shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
+        let mut shell =
+            InternalShellCoordinator::new_with_safe_mode(host, PanelEdge::Bottom, safe_mode)?;
         self.publish_internal_keyboard_snapshot();
         // Apply updates that were already available without delaying shell
         // construction. Later transitions remain calloop-driven.

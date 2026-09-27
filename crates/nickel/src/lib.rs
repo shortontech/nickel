@@ -162,11 +162,13 @@ use winit_shell::{
 
 const NO_DESKTOP_WINDOWS_FLAG: &str = "--no-desktop-windows";
 const PANEL_TOP_FLAG: &str = "--panel-top";
+const SAFE_MODE_FLAG: &str = "--safe-mode";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CommandLineOptions {
     no_desktop_windows: bool,
     panel_top: bool,
+    safe_mode: bool,
 }
 
 impl CommandLineOptions {
@@ -180,10 +182,11 @@ impl CommandLineOptions {
             match argument.as_str() {
                 NO_DESKTOP_WINDOWS_FLAG => options.no_desktop_windows = true,
                 PANEL_TOP_FLAG => options.panel_top = true,
+                SAFE_MODE_FLAG => options.safe_mode = true,
                 _ => {
                     return Err(format!(
                         "unknown Nickel shell argument {argument:?}; supported acceptance flags: \
-                         {NO_DESKTOP_WINDOWS_FLAG}, {PANEL_TOP_FLAG}"
+                         {NO_DESKTOP_WINDOWS_FLAG}, {PANEL_TOP_FLAG}, {SAFE_MODE_FLAG}"
                     ));
                 }
             }
@@ -206,7 +209,7 @@ impl CommandLineOptions {
 
 #[cfg(test)]
 mod command_line_tests {
-    use super::{CommandLineOptions, NO_DESKTOP_WINDOWS_FLAG, PANEL_TOP_FLAG};
+    use super::{CommandLineOptions, NO_DESKTOP_WINDOWS_FLAG, PANEL_TOP_FLAG, SAFE_MODE_FLAG};
     use crate::winit_shell::{PanelEdge, ShellOptions};
     use std::ffi::OsString;
 
@@ -247,6 +250,12 @@ mod command_line_tests {
                 bar_on_all_displays: true,
             }
         );
+    }
+
+    #[test]
+    fn safe_mode_is_an_explicit_shell_startup_option() {
+        assert!(parse(&[SAFE_MODE_FLAG]).unwrap().safe_mode);
+        assert!(!parse(&[]).unwrap().safe_mode);
     }
 
     #[test]
@@ -2458,7 +2467,7 @@ pub fn run() -> Result<(), String> {
         };
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
-    let mut state = LiveShell::new()?;
+    let mut state = LiveShell::new_with_safe_mode(command_line.safe_mode)?;
     shell.set_plugin_panels(state.plugin_panels())?;
     let mut feature_settings = OptionalFeatureSettings::load_default();
     feature_settings.codex_enabled = feature_settings.effective_codex_enabled();

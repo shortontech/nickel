@@ -59,6 +59,7 @@ pub enum BackendSelectionError {
 pub struct SessionArguments {
     pub backend: BackendKind,
     pub test_control: bool,
+    pub safe_mode: bool,
     pub ui_renderer: InternalUiRendererMode,
 }
 
@@ -73,6 +74,7 @@ impl SessionArguments {
             BackendKind::Winit
         };
         let mut test_control = false;
+        let mut safe_mode = false;
         let mut ui_renderer = InternalUiRendererMode::Gpu;
         while let Some(argument) = args.next() {
             match argument.to_str() {
@@ -85,6 +87,7 @@ impl SessionArguments {
                     )?;
                 }
                 Some("--test-control") => test_control = true,
+                Some("--safe-mode") => safe_mode = true,
                 Some("--ui-renderer") => {
                     let value = args
                         .next()
@@ -97,7 +100,7 @@ impl SessionArguments {
                 }
                 _ => {
                     return Err(format!(
-                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--ui-renderer gpu|software]",
+                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--safe-mode] [--ui-renderer gpu|software]",
                         argument.to_string_lossy()
                     )
                     .into());
@@ -116,6 +119,7 @@ impl SessionArguments {
         Ok(Self {
             backend,
             test_control,
+            safe_mode,
             ui_renderer,
         })
     }
@@ -192,6 +196,14 @@ mod tests {
         ])
         .expect_err("the out-of-process shell is retired");
         assert!(error.to_string().contains("unexpected argument"));
+    }
+
+    #[test]
+    fn safe_mode_is_an_explicit_shell_startup_option() {
+        let arguments = SessionArguments::parse([OsString::from("--safe-mode")]).unwrap();
+        assert!(arguments.safe_mode);
+        let normal = SessionArguments::parse([]).unwrap();
+        assert!(!normal.safe_mode);
     }
 
     #[test]

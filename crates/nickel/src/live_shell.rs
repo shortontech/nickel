@@ -972,6 +972,10 @@ enum ExecutableExtensionKind {
     DesktopWidget,
 }
 
+fn should_auto_start_installed_plugin(desired_enabled: bool, safe_mode: bool) -> bool {
+    desired_enabled && !safe_mode
+}
+
 fn executable_extension_priority(
     manifest: &nickel_core::plugins::PluginManifest,
     registry: &nickel_core::plugins::PluginRegistry,
@@ -1228,6 +1232,15 @@ impl LiveShell {
         Self::new_with_hosts(default_session_host(), default_file_window_host())
     }
 
+    pub fn new_with_safe_mode(safe_mode: bool) -> Result<Self, String> {
+        Self::new_with_hosts_and_transport(
+            default_session_host(),
+            default_file_window_host(),
+            true,
+            safe_mode,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn new_with_session_host(
         session_host: Arc<dyn SessionHost>,
@@ -1239,22 +1252,27 @@ impl LiveShell {
         session_host: Arc<dyn SessionHost>,
         file_window_host: Arc<dyn FileWindowHost>,
     ) -> Result<Self, String> {
-        Self::new_with_hosts_and_transport(session_host, file_window_host, true)
+        Self::new_with_hosts_and_transport(session_host, file_window_host, true, false)
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn new_with_internal_hosts(
+    pub(crate) fn new_with_internal_hosts_in_mode(
         session_host: Arc<dyn SessionHost>,
         file_window_host: Arc<dyn FileWindowHost>,
+        safe_mode: bool,
     ) -> Result<Self, String> {
-        Self::new_with_hosts_and_transport(session_host, file_window_host, false)
+        Self::new_with_hosts_and_transport(session_host, file_window_host, false, safe_mode)
     }
 
     fn new_with_hosts_and_transport(
         session_host: Arc<dyn SessionHost>,
         file_window_host: Arc<dyn FileWindowHost>,
         external_session_transport: bool,
+        safe_mode: bool,
     ) -> Result<Self, String> {
+        if safe_mode {
+            tracing::info!("plugin safe mode: installed plugins will not start automatically");
+        }
         let shell_settings = ShellSettings::load_default();
         #[cfg(target_os = "windows")]
         let optional_feature_settings =
@@ -1898,7 +1916,10 @@ impl LiveShell {
             .cloned()
             .collect::<Vec<_>>()
         {
-            if plugin_activation.desired_enabled(&id, false) {
+            if should_auto_start_installed_plugin(
+                plugin_activation.desired_enabled(&id, false),
+                safe_mode,
+            ) {
                 if let Some(descriptor) = shell.external_plugin_packages.get(&id)
                     && !plugin_activation
                         .approval_current(&descriptor.manifest, &descriptor.source_digest)

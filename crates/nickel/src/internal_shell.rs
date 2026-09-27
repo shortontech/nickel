@@ -122,13 +122,22 @@ pub(crate) struct InternalShellCoordinator {
 
 impl InternalShellCoordinator {
     pub fn new(session_host: Arc<dyn SessionHost>, panel_edge: PanelEdge) -> Result<Self, String> {
+        Self::new_with_safe_mode(session_host, panel_edge, false)
+    }
+
+    pub fn new_with_safe_mode(
+        session_host: Arc<dyn SessionHost>,
+        panel_edge: PanelEdge,
+        safe_mode: bool,
+    ) -> Result<Self, String> {
         let (file_window_host, file_requests) = internal_file_window_channel();
         let bar_on_all_displays =
             nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays;
         Ok(Self {
-            shell: Box::new(LiveShell::new_with_internal_hosts(
+            shell: Box::new(LiveShell::new_with_internal_hosts_in_mode(
                 session_host,
                 file_window_host,
+                safe_mode,
             )?),
             surfaces: InternalSurfaceSet::new(),
             entries: Vec::new(),
