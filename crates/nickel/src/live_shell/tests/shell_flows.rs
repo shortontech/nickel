@@ -297,6 +297,51 @@
     }
 
     #[test]
+    fn plugin_launcher_submit_activates_the_focused_search_result() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(vec![
+            crate::model::Application::new(
+                "org.nickel.demo-one".into(),
+                "Demo One".into(),
+                None,
+                None,
+                Some(vec!["nickel-test-command-one-does-not-exist".into()]),
+            ),
+            crate::model::Application::new(
+                "org.nickel.demo-two".into(),
+                "Demo Two".into(),
+                None,
+                None,
+                Some(vec!["nickel-test-command-two-does-not-exist".into()]),
+            ),
+        ]);
+        shell.launcher.set_query("demo");
+        let id = &crate::plugin_panel::launcher_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        shell.set_plugin_enabled(id, true).unwrap();
+        shell.apply_session_launcher_visibility(true);
+        shell.scene(SurfaceRole::Launcher, 920, 680);
+        let host = shell.plugin_launcher_host.as_mut().unwrap();
+        let target = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Demo Two".into(),
+            })
+            .unwrap();
+        host.request_focus(target.id.clone());
+        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
+        assert!(
+            shell
+                .launcher_status
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("Could not launch Demo Two: "),
+            "launcher status: {:?}",
+            shell.launcher_status
+        );
+    }
+
+    #[test]
     fn controller_cancel_closes_nested_overlay_before_requesting_launcher_dismissal() {
         assert!(matches!(
             super::launcher_controller_host_event(ControllerAction::Cancel, true),

@@ -3147,10 +3147,28 @@ impl LiveShell {
                 .expect("launcher plugin host exists");
             let overlay_open = host.inspect().open_overlay.is_some();
             host.application_mut().set_overlay_open(overlay_open);
-            let event = if matches!(&event, HostEvent::Shortcut(Shortcut::Escape)) && overlay_open {
-                HostEvent::Ui(UiEvent::Dismiss)
-            } else {
-                event
+            let event = match event {
+                HostEvent::Shortcut(Shortcut::Escape) if overlay_open => {
+                    HostEvent::Ui(UiEvent::Dismiss)
+                }
+                HostEvent::Shortcut(Shortcut::Submit) if overlay_open => {
+                    HostEvent::Ui(UiEvent::KeyboardNavigateActivate)
+                }
+                HostEvent::Shortcut(Shortcut::Submit) => {
+                    let inspection = host.inspect();
+                    let focused_button = inspection
+                        .keyboard_focus
+                        .into_iter()
+                        .chain(inspection.controller_target)
+                        .find(|id| {
+                            host.query_unique(&nickel_ui::SemanticSelector::Id(id.clone()))
+                                .is_ok_and(|target| target.role == Some(SemanticRole::Button))
+                        });
+                    focused_button.map_or(HostEvent::Shortcut(Shortcut::Submit), |target| {
+                        HostEvent::Ui(UiEvent::AccessibilityActivate(target))
+                    })
+                }
+                event => event,
             };
             let outcome = host.step(HostBatch {
                 clipboard_text_limit: limit,

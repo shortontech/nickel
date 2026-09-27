@@ -1350,6 +1350,9 @@ impl nickel_ui::Application for PluginPanelApplication {
         if self.overlay_open && shortcut == Shortcut::Escape {
             return nickel_ui::ShortcutOutcome::from_changed(false);
         }
+        if self.overlay_open && shortcut == Shortcut::Submit {
+            return nickel_ui::ShortcutOutcome::from_changed(false);
+        }
         let Some(shortcuts) = &self.launcher_shortcuts else {
             return nickel_ui::ShortcutOutcome::from_changed(false);
         };
@@ -2123,6 +2126,25 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::RunDismiss]
         );
+    }
+
+    #[test]
+    fn launcher_plugin_submit_does_not_bypass_open_menu() {
+        let mut launcher = Launcher::new(vec![crate::launcher::Application::new(
+            "org.nickel.demo".into(),
+            "Demo".into(),
+            None,
+            None,
+            None,
+        )]);
+        launcher.set_query("demo");
+        let mut panel = PluginPanelApplication::launcher(&launcher).unwrap();
+        panel.set_overlay_open(true);
+        assert_eq!(
+            panel.shortcut_outcome(Shortcut::Submit).disposition,
+            nickel_ui::EventDisposition::Unhandled
+        );
+        assert!(panel.take_effects().is_empty());
     }
 
     #[test]
