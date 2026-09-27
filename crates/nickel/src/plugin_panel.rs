@@ -561,6 +561,8 @@ impl PanelNode {
             }
             Self::Text(text) => AnyView::new(
                 Container::new()
+                    .semantic_role(SemanticRole::Text)
+                    .accessibility_label(text.clone())
                     .height(48.0)
                     .padding(Insets::all(10.0))
                     .child(Text::new(text).color(0xf4f6fa).scale(1.0)),
@@ -785,6 +787,7 @@ pub struct LauncherPluginProject {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherPluginProjection {
     pub query: String,
+    pub status: Option<String>,
     pub dashboard_visible: bool,
     pub view: LauncherView,
     pub result_page: usize,
@@ -987,6 +990,7 @@ impl LauncherPluginProjection {
             .collect();
         Self {
             query: launcher.query().to_owned(),
+            status: None,
             dashboard_visible: launcher.mode() == LauncherMode::Dashboard,
             view: launcher.view(),
             result_page,
@@ -1042,6 +1046,11 @@ impl LauncherPluginProjection {
         }
     }
 
+    pub(crate) fn with_status(mut self, status: Option<String>) -> Self {
+        self.status = status.map(|status| status.chars().take(160).collect());
+        self
+    }
+
     fn to_json(&self) -> String {
         let results = self.results.iter().map(|result| {
             serde_json::json!({"index": result.index, "id": result.id, "name": result.name, "pinned": result.pinned})
@@ -1056,7 +1065,7 @@ impl LauncherPluginProjection {
             LauncherView::Applications => "applications",
             LauncherView::Places => "places",
         };
-        serde_json::json!({"query": self.query, "dashboardVisible": self.dashboard_visible, "view": view,
+        serde_json::json!({"query": self.query, "status": self.status, "dashboardVisible": self.dashboard_visible, "view": view,
             "resultPage": self.result_page, "resultPageCount": self.result_page_count,
             "dashboardPage": self.dashboard_page, "dashboardPageCount": self.dashboard_page_count,
             "results": results,
@@ -2145,6 +2154,22 @@ mod tests {
             nickel_ui::EventDisposition::Unhandled
         );
         assert!(panel.take_effects().is_empty());
+    }
+
+    #[test]
+    fn launcher_plugin_renders_bounded_host_status_updates() {
+        let launcher = Launcher::new(Vec::new());
+        let projection = LauncherPluginProjection::from_launcher(&launcher)
+            .with_status(Some("Could not launch Demo".repeat(30)));
+        assert_eq!(projection.status.as_ref().unwrap().chars().count(), 160);
+        let mut panel = PluginPanelApplication::launcher_with_projection(&projection).unwrap();
+        assert!(format!("{:?}", panel.node).contains("Could not launch Demo"));
+        assert!(
+            panel
+                .sync_launcher_projection(&LauncherPluginProjection::from_launcher(&launcher))
+                .unwrap()
+        );
+        assert!(!format!("{:?}", panel.node).contains("Could not launch Demo"));
     }
 
     #[test]

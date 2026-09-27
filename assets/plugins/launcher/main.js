@@ -10,6 +10,7 @@ function App() {
     };
     return h(Column, null,
         h(Text, null, "Nickel Launcher"),
+        data.status ? h(Text, null, data.status) : null,
         h(TextField, { id: "launcher-query", value: data.query, placeholder: "Search applications", onChange: query => nickel.request({ type: "launcher-set-query", query }) }),
         data.dashboardVisible ? h(ScrollView, { id: "launcher-dashboard-scroll", height: 580 },
             h(Text, null, "Places"),

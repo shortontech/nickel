@@ -1295,7 +1295,8 @@ impl LiveShell {
             let id = &crate::plugin_panel::launcher_manifest().id;
             plugin_registry.set_enabled(id, true)?;
             let projection =
-                crate::plugin_panel::LauncherPluginProjection::from_launcher(&launcher);
+                crate::plugin_panel::LauncherPluginProjection::from_launcher(&launcher)
+                    .with_status(application_status.clone());
             let images = launcher_plugin_images(&launcher, &mut launcher_icons, &projection);
             match crate::plugin_panel::PluginPanelApplication::launcher_with_projection(&projection)
             {
@@ -2905,8 +2906,7 @@ impl LiveShell {
         } else if id == crate::plugin_panel::launcher_manifest().id {
             self.launcher_plugin_result_page = 0;
             self.launcher_plugin_dashboard_page = 0;
-            let projection =
-                crate::plugin_panel::LauncherPluginProjection::from_launcher(&self.launcher);
+            let projection = self.current_plugin_launcher_projection();
             let images =
                 launcher_plugin_images(&self.launcher, &mut self.launcher_icons, &projection);
             crate::plugin_panel::PluginPanelApplication::launcher_with_projection(&projection).map(
@@ -3985,6 +3985,7 @@ impl LiveShell {
             self.launcher_plugin_result_page,
             self.launcher_plugin_dashboard_page,
         )
+        .with_status(self.launcher_status_text())
     }
 
     pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {

@@ -342,6 +342,27 @@
     }
 
     #[test]
+    fn plugin_launcher_displays_live_host_status() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::launcher_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        shell.set_plugin_enabled(id, true).unwrap();
+        shell.launcher_status = Some("Could not launch Demo".into());
+        shell.scene(SurfaceRole::Launcher, 920, 680);
+        let projection = shell.current_plugin_launcher_projection();
+        assert_eq!(projection.status.as_deref(), Some("Could not launch Demo"));
+        assert!(!shell
+            .plugin_launcher_host
+            .as_ref()
+            .unwrap()
+            .query(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Text,
+                name: "Could not launch Demo".into(),
+            })
+            .is_empty());
+    }
+
+    #[test]
     fn controller_cancel_closes_nested_overlay_before_requesting_launcher_dismissal() {
         assert!(matches!(
             super::launcher_controller_host_event(ControllerAction::Cancel, true),
