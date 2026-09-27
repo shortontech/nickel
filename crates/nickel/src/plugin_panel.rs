@@ -288,13 +288,18 @@ function __nickelRestoreHooks(hooks, values, effectsLength) {
 
 function __nickelRollbackEvent() {
     if (__pendingEvent === null) return;
-    const {hooks, values, effectsLength} = __pendingEvent;
+    const {handlers, hooks, values, effectsLength, effects} = __pendingEvent;
+    __handlers = handlers;
     __nickelRestoreHooks(hooks, values, effectsLength);
+    __effects = effects;
     __pendingEvent = null;
 }
 
 function __nickelCommitRender() {
     __pendingRender = null;
+}
+
+function __nickelAcceptEvent() {
     __pendingEvent = null;
 }
 
@@ -330,7 +335,8 @@ function __nickelDispatch(action, value) {
     const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
     const effectsLength = __effects.length;
-    __pendingEvent = {hooks, values, effectsLength};
+    __pendingEvent = {handlers: __handlers, hooks, values,
+        effectsLength, effects: __effects.slice()};
     try {
         handler(value);
         return __nickelRender();
@@ -2441,7 +2447,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                 serde_json::from_str::<Vec<Value>>(&value.to_std_string_escaped())
                     .map_err(|error| error.to_string())
             });
-        match (rendered, effects) {
+        (|| match (rendered, effects) {
             (Ok(node), Ok(effects)) => {
                 let mut approved = Vec::new();
                 let mut requested_dialog = None;
@@ -3021,6 +3027,14 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = None;
             }
             (Err(error), _) | (_, Err(error)) => self.last_error = Some(error),
+        })();
+        let finalizer = if self.last_error.is_some() {
+            "__nickelRollbackEvent()"
+        } else {
+            "__nickelAcceptEvent()"
+        };
+        if let Err(error) = self.context.eval(Source::from_bytes(finalizer)) {
+            self.last_error = Some(format!("could not finalize plugin event: {error}"));
         }
     }
 
@@ -3278,6 +3292,33 @@ mod tests {
         let invalid = panel.button_message("invalid").unwrap();
         panel.update(invalid);
         assert!(panel.last_error().is_some());
+        assert!(panel.take_effects().is_empty());
+        assert!(format!("{:?}", panel.node).contains("Count: 0"));
+
+        let valid = panel.button_message("valid").unwrap();
+        panel.update(valid);
+        assert!(panel.last_error().is_none());
+        assert!(format!("{:?}", panel.node).contains("Count: 2"));
+    }
+
+    #[test]
+    fn denied_effect_restores_previous_tree_and_event_state() {
+        let source = r#"
+            function App() {
+                const [count, setCount] = useState(0);
+                return h(Panel, {},
+                    h(Text, {}, `Count: ${count}`),
+                    h(Button, {id: 'denied', onClick: () => {
+                        setCount(1);
+                        nickel.request({type: 'ungranted-action'});
+                    }}, 'Denied'),
+                    h(Button, {id: 'valid', onClick: () => setCount(value => value + 2)}, 'Valid'));
+            }
+        "#;
+        let mut panel = PluginPanelApplication::new(source).unwrap();
+        let denied = panel.button_message("denied").unwrap();
+        panel.update(denied);
+        assert!(panel.last_error().unwrap().contains("not granted"));
         assert!(panel.take_effects().is_empty());
         assert!(format!("{:?}", panel.node).contains("Count: 0"));
 
