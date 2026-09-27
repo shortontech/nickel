@@ -73,6 +73,7 @@ settings-network-connect = Connect
 settings-plugin-self-name = Nickel Settings
 settings-plugin-self-disabled = The ordinary Settings plugin is disabled.
 settings-plugin-self-review-enable = Review and enable
+settings-bluetooth-status = Adapter status
 settings-nav-section-system = System
 settings-search-placeholder = Search settings...
 settings-search-no-results = No matching settings

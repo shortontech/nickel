@@ -1176,6 +1176,29 @@ impl SettingsApp {
     }
 
     pub(super) fn bluetooth_components(&self) -> AnyView<SettingsMessage> {
+        if self.settings_jsx_enabled {
+            let data = crate::bluetooth_plugin::projection(self);
+            let rendered = self
+                .bluetooth_page
+                .borrow_mut()
+                .get_or_insert_with(crate::bluetooth_plugin::BluetoothPage::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| {
+                    page.render(
+                        &data,
+                        self.ui_theme(),
+                        self.page == SettingsPage::BluetoothPair,
+                    )
+                });
+            if let Ok(view) = rendered {
+                return view;
+            }
+        }
+        self.native_bluetooth_components()
+    }
+
+    fn native_bluetooth_components(&self) -> AnyView<SettingsMessage> {
         let palette = self.palette();
         let theme = self.ui_theme();
         let pairing = self.page == SettingsPage::BluetoothPair;

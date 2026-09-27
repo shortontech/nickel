@@ -1,0 +1,25 @@
+// @jsx h
+// Bluetooth presentation. The host checks the live adapter and device before acting.
+function request(type, fields = {}) {
+    nickel.request({ type, ...fields });
+}
+function App() {
+    const data = nickel.data;
+    return h("settings-stack", null,
+        !data.pairing && h("settings-row", { label: data.powerLabel, value: data.adapterName },
+            h("settings-switch", { id: "bluetooth-power", label: data.powerLabel, value: data.switchState, onClick: data.powerEditable
+                    ? () => request('power', { enabled: !data.powered })
+                    : undefined })),
+        h("settings-card", { label: data.statusLabel, value: data.status }),
+        h("settings-card", { label: data.devicesLabel, value: "" },
+            h("settings-row", { label: data.discoveryLabel, value: "" },
+                h("settings-button", { id: "bluetooth-discovery-action", label: data.discoveryLabel, value: "secondary", onClick: data.discoveryEditable
+                        ? () => request(data.pairing ? 'discovery' : 'open-pairing')
+                        : undefined })),
+            data.devices.length
+                ? data.devices.map(device => h("settings-row", { key: device.id, label: device.name, value: device.detail },
+                    h("settings-button", { id: `bluetooth-device-${device.index}-action`, label: device.actionLabel, value: "secondary", onClick: data.deviceEditable
+                            ? () => request('device', { index: device.index, id: device.id })
+                            : undefined })))
+                : h("settings-row", { label: data.emptyLabel, value: "" })));
+}

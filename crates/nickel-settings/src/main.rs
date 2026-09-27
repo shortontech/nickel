@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod bar_plugin;
+mod bluetooth_plugin;
 mod cli;
 mod effects;
 mod model;
@@ -502,6 +503,7 @@ enum SettingsMessage {
     OpenBluetoothPairing,
     BluetoothDiscovery,
     BluetoothDevice(usize),
+    BluetoothJsxAction(usize),
     BluetoothScroll,
     SetWifiPower(bool),
     WifiNetwork(usize),
@@ -1102,6 +1104,7 @@ impl SettingsApp {
         self.bar_page.get_mut().take();
         self.optional_features_page.get_mut().take();
         self.network_page.get_mut().take();
+        self.bluetooth_page.get_mut().take();
         if let Some(navigation) = navigation {
             *self.navigation_plugin.get_mut() = Some(Ok(navigation));
         }
@@ -1357,6 +1360,9 @@ impl SettingsApp {
         if page != SettingsPage::Network {
             self.network_page.get_mut().take();
         }
+        if !matches!(page, SettingsPage::Bluetooth | SettingsPage::BluetoothPair) {
+            self.bluetooth_page.get_mut().take();
+        }
         if !matches!(page, SettingsPage::KeyboardShortcuts | SettingsPage::About) {
             self.ordinary_pages.get_mut().take();
         }
@@ -1556,6 +1562,7 @@ impl SettingsApp {
                     toggle_bluetooth_device(&device)
                 });
             }
+            SettingsMessage::BluetoothJsxAction(index) => self.handle_bluetooth_jsx_action(index),
             SettingsMessage::AppearanceLight => {
                 self.shell_settings.theme = ThemePreference::Light;
                 self.persist_appearance();
@@ -3368,6 +3375,25 @@ mod tests {
     }
 
     #[test]
+    fn failed_bluetooth_jsx_keeps_native_power_and_pairing_controls_available() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
+        app.bluetooth.available = true;
+        app.bluetooth.powered = true;
+        *app.bluetooth_page.borrow_mut() = Some(Err("JSX failed".into()));
+        let host = UiHost::new(app, 850, 580);
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::SetBluetoothPower(false))
+                .len(),
+            1
+        );
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::OpenBluetoothPairing)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn failed_optional_features_jsx_keeps_native_codex_switch_available() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         app.codex_feature.requested_enabled = false;
@@ -4262,9 +4288,16 @@ mod tests {
         app.bluetooth.powered = true;
         app.bluetooth.adapter_name = "Test adapter".to_owned();
         let tree = app.build_ui(850.0, 900.0);
+        let action = app
+            .bluetooth_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id("bluetooth-power"))
+            .unwrap();
 
         assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::SetBluetoothPower(false))
+            tree.semantic_targets_for_message(&SettingsMessage::BluetoothJsxAction(action))
                 .len(),
             1
         );
@@ -4301,9 +4334,16 @@ mod tests {
             signal_dbm: Some(-30),
         });
         let settings_tree = settings.build_ui(850.0, 900.0);
+        let open_action = settings
+            .bluetooth_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id("bluetooth-discovery-action"))
+            .unwrap();
         assert_eq!(
             settings_tree
-                .semantic_targets_for_message(&SettingsMessage::OpenBluetoothPairing)
+                .semantic_targets_for_message(&SettingsMessage::BluetoothJsxAction(open_action))
                 .len(),
             1
         );
@@ -4323,9 +4363,16 @@ mod tests {
             .find(|node| node.id.as_str().ends_with("bluetooth-device-0-action"))
             .expect("pair action");
         assert_eq!(action.label.as_deref(), Some("Pair"));
+        let pair_action = pairing
+            .bluetooth_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id("bluetooth-device-0-action"))
+            .unwrap();
         assert_eq!(
             pairing_tree
-                .semantic_targets_for_message(&SettingsMessage::BluetoothDevice(0))
+                .semantic_targets_for_message(&SettingsMessage::BluetoothJsxAction(pair_action))
                 .len(),
             1
         );
@@ -4515,8 +4562,15 @@ mod tests {
             kind: None,
             signal_dbm: None,
         });
-        let bluetooth = bluetooth.build_ui(850.0, 900.0);
-        let device = bluetooth
+        let bluetooth_tree = bluetooth.build_ui(850.0, 900.0);
+        let action = bluetooth
+            .bluetooth_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id("bluetooth-device-0-action"))
+            .unwrap();
+        let device = bluetooth_tree
             .accessibility_nodes()
             .iter()
             .find(|node| node.id.as_str().ends_with("bluetooth-device-0-action"))
@@ -4524,8 +4578,8 @@ mod tests {
         assert_eq!(device.semantic_role, Some(SemanticRole::Button));
         assert_eq!(device.label.as_deref(), Some("Connect"));
         assert_eq!(
-            bluetooth
-                .semantic_targets_for_message(&SettingsMessage::BluetoothDevice(0))
+            bluetooth_tree
+                .semantic_targets_for_message(&SettingsMessage::BluetoothJsxAction(action))
                 .len(),
             1,
             "only the explicit trailing button toggles the device"

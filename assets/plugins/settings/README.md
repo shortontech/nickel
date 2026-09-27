@@ -55,3 +55,9 @@ list, and adapter summary. Requests carry the observed network index and
 profile; the host checks the current projection before invoking the existing
 platform path. The native Network view remains available if JSX fails. Build
 it with the same command and its source filename.
+
+`settings-bluetooth.jsx` owns the Bluetooth and pairing page layout. Its
+requests carry the observed device index and ID; the host checks the current
+adapter state and device identity before using the existing Bluetooth handlers.
+The native Bluetooth view remains available if JSX fails. Build it with the
+same command and its source filename.
