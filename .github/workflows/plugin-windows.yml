@@ -71,6 +71,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib installed_panel_geometry_uses_its_manifest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::plugin_launcher_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::jsx_taskbar_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::plugin_taskbar_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::desktop_plugin_opens_only_the_current_projected_tile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::notification_plugin_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::control_center_plugin_renders_and_dispatches_typed_desktop_action
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::disabling_plugin_retires_host_and_clears_reported_memory
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --bin nickel-plugin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
