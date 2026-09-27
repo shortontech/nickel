@@ -177,17 +177,38 @@ fn javascript_text_fields_route_to_their_own_handlers() {
 fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
     let projection = LauncherPluginProjection {
         query: String::new(),
+        dashboard_visible: true,
         results: vec![LauncherPluginResult {
             index: 0,
             id: "calculator".into(),
             name: "Calculator".into(),
         }],
+        dashboard: vec![LauncherPluginResult {
+            index: 0,
+            id: "editor".into(),
+            name: "Editor".into(),
+        }],
+        places: vec![],
     };
     let mut host = UiHost::new(
         PluginPanelApplication::launcher_with_projection(&projection)
             .expect("launcher script loads"),
         920,
         680,
+    );
+    let dashboard = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Editor".into(),
+        })
+        .expect("dashboard application")
+        .id;
+    host.perform_semantic_action(dashboard, SemanticAction::Invoke(ActionKind::Activate));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::LaunchDashboardApplication {
+            id: "editor".into()
+        }]
     );
     let field = host
         .query_unique(&SemanticSelector::Role(SemanticRole::TextField))
@@ -202,6 +223,7 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
 
     let mut updated = projection.clone();
     updated.query = "calc".into();
+    updated.dashboard_visible = false;
     assert!(
         host.application_mut()
             .sync_launcher_projection(&updated)

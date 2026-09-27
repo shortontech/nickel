@@ -15,11 +15,14 @@ NICKEL_DEV_PLUGIN_LAUNCHER=1 cargo run -p nickel --no-default-features \
   --features backend-winit --bin nickel-nested
 ```
 
-The host supplies `nickel.data.query` and up to 12 ranked application results.
-The plugin renders the native text field and result buttons, and requests
-`launcher-set-query` or `launcher-activate-result` through `nickel.request`.
-The host checks the declared capabilities and confirms a result's ID before
-launching it. Search ranking and application execution remain Rust services.
+The host supplies `nickel.data.query`, up to 12 ranked search results, a
+bounded pinned and recent app list, and Places. The plugin renders dashboard
+and search buttons, then requests `launcher-set-query`,
+`launcher-activate-result`, or `launcher-launch-dashboard` through
+`nickel.request`. The host checks declared capabilities and confirms the app
+ID against current launcher state before launching it. Search ranking and
+application execution remain Rust services.
 
-This is a comparison path while the full launcher, including dashboard,
-keyboard and controller behavior, menus, and dialogs, is migrated and tested.
+This is a comparison path while the full launcher, including the rest of its
+dashboard, keyboard and controller behavior, menus, and dialogs, is migrated
+and tested.

@@ -15,7 +15,7 @@ use nickel_ui::{
 };
 use serde_json::Value;
 
-use crate::launcher::{Launcher, TaskbarApplication};
+use crate::launcher::{Launcher, LauncherMode, TaskbarApplication};
 
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
@@ -479,6 +479,7 @@ pub enum PluginEffect {
     ToggleLauncher,
     SetLauncherQuery(String),
     ActivateLauncherResult { index: usize, id: String },
+    LaunchDashboardApplication { id: String },
     ActivateTaskbarItem { index: usize, id: String },
     ActivateTrayItem { id: String },
     ContextTrayItem { id: String },
@@ -502,7 +503,10 @@ pub struct LauncherPluginResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherPluginProjection {
     pub query: String,
+    pub dashboard_visible: bool,
     pub results: Vec<LauncherPluginResult>,
+    pub dashboard: Vec<LauncherPluginResult>,
+    pub places: Vec<LauncherPluginResult>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -589,7 +593,7 @@ pub fn taskbar_item_matches(groups: &[TaskbarApplication], index: usize, id: &st
 }
 
 impl LauncherPluginProjection {
-    fn from_launcher(launcher: &Launcher) -> Self {
+    pub(crate) fn from_launcher(launcher: &Launcher) -> Self {
         let results = (0..launcher.result_count().min(12))
             .filter_map(|index| {
                 launcher
@@ -603,7 +607,44 @@ impl LauncherPluginProjection {
             .collect();
         Self {
             query: launcher.query().to_owned(),
+            dashboard_visible: launcher.mode() == LauncherMode::Dashboard,
             results,
+            dashboard: {
+                let mut seen = HashSet::new();
+                let home = launcher
+                    .favorite_applications()
+                    .into_iter()
+                    .chain(launcher.recent_applications())
+                    .filter(|application| seen.insert(application.id().to_owned()))
+                    .take(12)
+                    .collect::<Vec<_>>();
+                let home = if home.is_empty() {
+                    launcher
+                        .discovered_applications()
+                        .take(12)
+                        .collect::<Vec<_>>()
+                } else {
+                    home
+                };
+                home.into_iter()
+                    .enumerate()
+                    .map(|(index, application)| LauncherPluginResult {
+                        index,
+                        id: application.id().to_owned(),
+                        name: application.name().to_owned(),
+                    })
+                    .collect()
+            },
+            places: launcher
+                .place_applications()
+                .take(12)
+                .enumerate()
+                .map(|(index, application)| LauncherPluginResult {
+                    index,
+                    id: application.id().to_owned(),
+                    name: application.name().to_owned(),
+                })
+                .collect(),
         }
     }
 
@@ -611,7 +652,14 @@ impl LauncherPluginProjection {
         let results = self.results.iter().map(|result| {
             serde_json::json!({"index": result.index, "id": result.id, "name": result.name})
         }).collect::<Vec<_>>();
-        serde_json::json!({"query": self.query, "results": results}).to_string()
+        let items = |items: &[LauncherPluginResult]| {
+            items.iter().map(|item| {
+            serde_json::json!({"index": item.index, "id": item.id, "name": item.name})
+        }).collect::<Vec<_>>()
+        };
+        serde_json::json!({"query": self.query, "dashboardVisible": self.dashboard_visible, "results": results,
+            "dashboard": items(&self.dashboard), "places": items(&self.places)})
+        .to_string()
     }
 }
 
@@ -949,6 +997,28 @@ impl nickel_ui::Application for PluginPanelApplication {
                             };
                             approved.push(PluginEffect::ActivateLauncherResult {
                                 index,
+                                id: id.to_owned(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-launch-dashboard")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsLaunch) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error =
+                                    Some("dashboard application ID is missing".into());
+                                return;
+                            };
+                            if id.is_empty() || id.len() > 256 {
+                                self.last_error =
+                                    Some("dashboard application ID is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::LaunchDashboardApplication {
                                 id: id.to_owned(),
                             });
                         }

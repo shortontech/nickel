@@ -3504,6 +3504,21 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::LaunchDashboardApplication { id } => {
+                    let projection = crate::plugin_panel::LauncherPluginProjection::from_launcher(
+                        &self.launcher,
+                    );
+                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard
+                        && projection
+                            .dashboard
+                            .iter()
+                            .chain(projection.places.iter())
+                            .any(|item| item.id == id)
+                    {
+                        self.apply_launcher_action(LauncherAction::LaunchApplication(id));
+                        changed = true;
+                    }
+                }
             }
         }
         changed
