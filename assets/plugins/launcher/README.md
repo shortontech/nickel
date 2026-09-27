@@ -28,6 +28,9 @@ query, then dismisses the launcher; an open component dialog receives Escape
 first.
 Right-clicking an application opens a JSX-defined native menu with Launch and
 Pin actions. Its requests still pass through the host's current-ID checks.
+Application buttons use icon slots from Nickel's existing asynchronous icon
+cache. The host owns the image buffers; JSX keeps the app name visible and
+uses the same name for accessibility.
 
 This is a comparison path while the full launcher, including keyboard and
 controller behavior, complete catalog paging, and menus, is migrated and

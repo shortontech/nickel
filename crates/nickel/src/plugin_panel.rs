@@ -166,7 +166,8 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onContextMenu) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         width: props?.width, height: props?.height, background: props?.background,
-        accessibilityLabel: props?.accessibilityLabel, icon: props?.icon, contextAction,
+        accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
+        showLabel: props?.showLabel, contextAction,
         value: props?.value, placeholder: props?.placeholder,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
 }
@@ -218,6 +219,7 @@ enum PanelNode {
         label: String,
         accessibility_label: String,
         icon: Option<String>,
+        show_label: bool,
         action: usize,
         context_action: Option<usize>,
     },
@@ -344,6 +346,10 @@ impl PanelNode {
                         .and_then(Value::as_str)
                         .filter(|asset| asset.len() <= 128)
                         .map(str::to_owned),
+                    show_label: value
+                        .get("showLabel")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     label,
                     action: value
                         .get("action")
@@ -518,6 +524,7 @@ impl PanelNode {
                 label,
                 accessibility_label,
                 icon,
+                show_label,
                 action,
                 context_action,
             } => {
@@ -527,9 +534,17 @@ impl PanelNode {
                     .map_or_else(
                         || AnyView::new(Text::new(label).color(0xffffff)),
                         |(id, image)| {
-                            AnyView::new(
-                                Image::new(*id, Arc::clone(image)).width(32.0).height(32.0),
-                            )
+                            let icon = Image::new(*id, Arc::clone(image)).width(32.0).height(32.0);
+                            if *show_label {
+                                AnyView::new(
+                                    Row::new()
+                                        .gap(8.0)
+                                        .child(icon)
+                                        .child(Text::new(label).color(0xffffff)),
+                                )
+                            } else {
+                                AnyView::new(icon)
+                            }
                         },
                     );
                 let mut container = Container::new()

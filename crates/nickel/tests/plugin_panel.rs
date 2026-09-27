@@ -236,11 +236,25 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
         account_name: "Local session".into(),
         logout_available: false,
     };
-    let mut host = UiHost::new(
-        PluginPanelApplication::launcher_with_projection(&projection)
-            .expect("launcher script loads"),
-        920,
-        680,
+    let mut application = PluginPanelApplication::launcher_with_projection(&projection)
+        .expect("launcher script loads");
+    let icon = std::sync::Arc::new(image::RgbaImage::from_pixel(
+        16,
+        16,
+        image::Rgba([40, 140, 240, 255]),
+    ));
+    application.sync_images(
+        [
+            ("dashboard:0".into(), (0x4000, std::sync::Arc::clone(&icon))),
+            ("search:0".into(), (0x4000, icon)),
+        ]
+        .into(),
+    );
+    let mut host = UiHost::new(application, 920, 680);
+    assert!(
+        host.commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::Image { id: 0x4000, .. }))
     );
     let dashboard = host
         .query_unique(&SemanticSelector::RoleAndName {

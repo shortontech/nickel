@@ -497,7 +497,7 @@ impl LauncherIconCache {
         }
     }
 
-    fn revision(&self) -> u64 {
+    pub(crate) fn revision(&self) -> u64 {
         self.shared.revision.load(Ordering::Acquire)
     }
 

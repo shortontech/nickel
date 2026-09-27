@@ -16,6 +16,7 @@ function App() {
             <Text>Places</Text>
             {data.places.map(place => <Row>
                 <Button id={"launcher-place-" + place.index}
+                    icon={"place:" + place.index} showLabel={true}
                     onContextMenu={() => openAppMenu(place, "dashboard", "launcher-place-" + place.index)}
                     onClick={() => nickel.request({type: "launcher-launch-dashboard", id: place.id})}>
                     {place.name}
@@ -51,6 +52,7 @@ function App() {
             {data.dashboard.length === 0 ? <Text>No applications in this view</Text> : null}
             {data.dashboard.map(app => <Row>
                 <Button id={"launcher-dashboard-" + app.index}
+                    icon={"dashboard:" + app.index} showLabel={true}
                     onContextMenu={() => openAppMenu(app, "dashboard", "launcher-dashboard-" + app.index)}
                     onClick={() => nickel.request({type: "launcher-launch-dashboard", id: app.id})}>
                     {app.name}
@@ -77,6 +79,7 @@ function App() {
             {data.results.length === 0 ? <Text>No applications found</Text> : null}
             {data.results.map(result => <Row>
                 <Button id={"launcher-result-" + result.index}
+                    icon={"search:" + result.index} showLabel={true}
                     onContextMenu={() => openAppMenu(result, "search", "launcher-result-" + result.index)}
                     onClick={() => nickel.request({type: "launcher-activate-result", index: result.index, id: result.id})}>
                     {result.name}

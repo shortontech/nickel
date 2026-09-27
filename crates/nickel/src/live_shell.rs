@@ -721,6 +721,7 @@ pub struct LiveShell {
     projection_rollback_deadline: Option<Instant>,
     launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
+    launcher_icon_revision: u64,
     launcher_host: nickel_ui::UiHost<LauncherApplication>,
     launcher_status: Option<String>,
     #[cfg(target_os = "windows")]
@@ -913,6 +914,33 @@ fn taskbar_plugin_data(
             });
     }
     (projection, images)
+}
+
+fn launcher_plugin_images(
+    launcher: &Launcher,
+    icons: &mut LauncherIconCache,
+    projection: &crate::plugin_panel::LauncherPluginProjection,
+) -> crate::plugin_panel::PluginImages {
+    let mut images = crate::plugin_panel::PluginImages::new();
+    for (slot, items) in [
+        ("search", projection.results.as_slice()),
+        ("dashboard", projection.dashboard.as_slice()),
+        ("place", projection.places.as_slice()),
+    ] {
+        for item in items {
+            let application = if slot == "place" {
+                launcher.place_applications().nth(item.index)
+            } else {
+                launcher.result_at(item.index)
+            };
+            if let Some(application) = application.filter(|application| application.id() == item.id)
+                && let Some(icon) = icons.resolve(application)
+            {
+                images.insert(format!("{slot}:{}", item.index), icon);
+            }
+        }
+    }
+    images
 }
 
 // This shared shell implementation includes the compositor-facing API. The
@@ -1175,7 +1203,7 @@ impl LiveShell {
             1080,
         );
         let launcher_view = LauncherViewState::default();
-        let launcher_icons = LauncherIconCache::new();
+        let mut launcher_icons = LauncherIconCache::new();
         let launcher_host = nickel_ui::UiHost::new(
             LauncherApplication::new(
                 launcher.clone(),
@@ -1254,8 +1282,13 @@ impl LiveShell {
         ) {
             let id = &crate::plugin_panel::launcher_manifest().id;
             plugin_registry.set_enabled(id, true)?;
-            match crate::plugin_panel::PluginPanelApplication::launcher(&launcher) {
-                Ok(application) => {
+            let projection =
+                crate::plugin_panel::LauncherPluginProjection::from_launcher(&launcher);
+            let images = launcher_plugin_images(&launcher, &mut launcher_icons, &projection);
+            match crate::plugin_panel::PluginPanelApplication::launcher_with_projection(&projection)
+            {
+                Ok(mut application) => {
+                    application.sync_images(images);
                     plugin_registry.mark_running(id)?;
                     Some(nickel_ui::UiHost::new(application, 920, 680))
                 }
@@ -1292,6 +1325,7 @@ impl LiveShell {
         } else {
             None
         };
+        let launcher_icon_revision = launcher_icons.revision();
         let mut shell = Self {
             session_host: session_host.clone(),
             screenshot_capture_pending: false,
@@ -1417,6 +1451,7 @@ impl LiveShell {
             projection_rollback_deadline: None,
             launcher_view,
             launcher_icons,
+            launcher_icon_revision,
             launcher_host,
             launcher_status: application_status,
             #[cfg(target_os = "windows")]
@@ -1710,6 +1745,11 @@ impl LiveShell {
         }
         if changed {
             redraw.extend([SurfaceRole::WindowPreview, SurfaceRole::WindowContextMenu]);
+        }
+        let icon_revision = self.launcher_icons.revision();
+        if icon_revision != self.launcher_icon_revision {
+            self.launcher_icon_revision = icon_revision;
+            redraw.extend([SurfaceRole::Launcher, SurfaceRole::Taskbar]);
         }
         let tray = normalize_tray_items(self.tray_feed.snapshot());
         if tray != self.tray {
@@ -2767,8 +2807,13 @@ impl LiveShell {
                 ));
             })
         } else if id == crate::plugin_panel::launcher_manifest().id {
-            crate::plugin_panel::PluginPanelApplication::launcher(&self.launcher).map(
-                |application| {
+            let projection =
+                crate::plugin_panel::LauncherPluginProjection::from_launcher(&self.launcher);
+            let images =
+                launcher_plugin_images(&self.launcher, &mut self.launcher_icons, &projection);
+            crate::plugin_panel::PluginPanelApplication::launcher_with_projection(&projection).map(
+                |mut application| {
+                    application.sync_images(images);
                     self.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
                 },
             )
@@ -2962,16 +3007,14 @@ impl LiveShell {
             self.host_runtime_samples.record(outcome.telemetry);
             return outcome;
         }
-        if let Some(host) = self.plugin_launcher_host.as_mut() {
+        if self.plugin_launcher_host.is_some() {
+            let application_changed = self.sync_plugin_launcher();
+            let host = self
+                .plugin_launcher_host
+                .as_mut()
+                .expect("launcher plugin host exists");
             let overlay_open = host.inspect().open_overlay.is_some();
             host.application_mut().set_overlay_open(overlay_open);
-            let application_changed = match host.application_mut().sync_launcher(&self.launcher) {
-                Ok(changed) => changed,
-                Err(error) => {
-                    tracing::error!(%error, "launcher plugin projection failed");
-                    false
-                }
-            };
             let event = if matches!(&event, HostEvent::Shortcut(Shortcut::Escape)) && overlay_open {
                 HostEvent::Ui(UiEvent::Dismiss)
             } else {
@@ -3034,13 +3077,14 @@ impl LiveShell {
             self.host_runtime_samples.record(outcome.telemetry);
             return outcome.changed;
         }
-        if let Some(host) = self.plugin_launcher_host.as_mut() {
+        if self.plugin_launcher_host.is_some() {
+            let application_changed = self.sync_plugin_launcher();
+            let host = self
+                .plugin_launcher_host
+                .as_mut()
+                .expect("launcher plugin host exists");
             let overlay_open = host.inspect().open_overlay.is_some();
             host.application_mut().set_overlay_open(overlay_open);
-            let application_changed = host
-                .application_mut()
-                .sync_launcher(&self.launcher)
-                .unwrap_or(false);
             let event =
                 launcher_controller_host_event(action, host.inspect().open_overlay.is_some());
             let outcome = host.step(HostBatch {
@@ -3609,6 +3653,29 @@ impl LiveShell {
             }
         }
         changed
+    }
+
+    fn sync_plugin_launcher(&mut self) -> bool {
+        if self.plugin_launcher_host.is_none() {
+            return false;
+        }
+        let projection =
+            crate::plugin_panel::LauncherPluginProjection::from_launcher(&self.launcher);
+        let images = launcher_plugin_images(&self.launcher, &mut self.launcher_icons, &projection);
+        let host = self
+            .plugin_launcher_host
+            .as_mut()
+            .expect("launcher plugin host exists");
+        let image_changed = host.application_mut().sync_images(images);
+        let projection_changed = match host.application_mut().sync_launcher_projection(&projection)
+        {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::error!(%error, "launcher plugin projection failed");
+                false
+            }
+        };
+        image_changed || projection_changed
     }
 
     pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
@@ -5891,11 +5958,12 @@ impl LiveShell {
                 })
                 .changed;
         }
-        if let Some(host) = self.plugin_launcher_host.as_mut() {
-            let application_changed = host
-                .application_mut()
-                .sync_launcher(&self.launcher)
-                .unwrap_or(false);
+        if self.plugin_launcher_host.is_some() {
+            let application_changed = self.sync_plugin_launcher();
+            let host = self
+                .plugin_launcher_host
+                .as_mut()
+                .expect("launcher plugin host exists");
             let mut changed = host
                 .step(HostBatch {
                     application_changed,
@@ -7077,14 +7145,12 @@ impl LiveShell {
     }
 
     fn launcher_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        if let Some(host) = self.plugin_launcher_host.as_mut() {
-            let changed = match host.application_mut().sync_launcher(&self.launcher) {
-                Ok(changed) => changed,
-                Err(error) => {
-                    tracing::error!(%error, "launcher plugin projection failed");
-                    false
-                }
-            };
+        if self.plugin_launcher_host.is_some() {
+            let changed = self.sync_plugin_launcher();
+            let host = self
+                .plugin_launcher_host
+                .as_mut()
+                .expect("launcher plugin host exists");
             let outcome = host.step(HostBatch {
                 surface_size: Some((width, height)),
                 application_changed: changed,
