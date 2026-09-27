@@ -194,6 +194,9 @@ pub(super) fn recovery(localizer: &Localizer) -> Vec<Destination> {
 
 impl SettingsApp {
     pub(super) fn navigation_destinations(&self) -> Vec<Destination> {
+        if !self.settings_jsx_enabled {
+            return recovery(&self.localizer);
+        }
         let result = self
             .navigation_plugin
             .borrow_mut()

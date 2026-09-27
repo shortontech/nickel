@@ -3,9 +3,12 @@
 `plugin.json` declares the first-party Settings window and service grants. The
 separate `nickel-settings` process validates this manifest and loads these
 embedded JavaScript sources through the shared JSX runtime. Permission review
-and native recovery controls remain owned by Rust. The Settings package is not
-yet managed by the shell activation registry; its process-owned memory account
-is a remaining migration step.
+and native recovery controls remain owned by Rust. Settings persists the bundled
+package's enabled state in Nickel's activation settings. Disabling it retires
+its JSX contexts and leaves the native Plugins recovery view available to
+review and re-enable it. The shell activation registry does not yet manage the
+separate Settings process, and its process-owned memory account is a remaining
+migration step.
 
 `settings-pages.jsx` starts the bundled Settings process view migration. It
 currently renders the Keyboard Shortcuts and About cards through the shared

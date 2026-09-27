@@ -6,6 +6,7 @@ use crate::persistence::{
 pub(super) struct SettingsApp {
     pub(super) controller_family: nickel_ui::ControllerFamily,
     pub(super) localizer: Localizer,
+    pub(super) settings_jsx_enabled: bool,
     pub(super) ordinary_pages:
         std::cell::RefCell<Option<Result<crate::settings_plugin::OrdinaryPages, String>>>,
     pub(super) plugin_list:
@@ -201,9 +202,15 @@ impl Default for SettingsApp {
             shell_settings.desktop_count = snapshot.desktop_count;
             shell_topology_generation = snapshot.topology_generation;
         }
+        let settings_jsx_enabled = crate::settings_package::manifest().is_ok()
+            && (cfg!(test)
+                || nickel_core::plugins::PluginActivationSettings::load_default()
+                    .unwrap_or_default()
+                    .desired_enabled(crate::settings_package::ID, true));
         Self {
             controller_family: nickel_ui::ControllerFamily::Generic,
             localizer,
+            settings_jsx_enabled,
             ordinary_pages: std::cell::RefCell::new(None),
             plugin_list: std::cell::RefCell::new(None),
             navigation_plugin: std::cell::RefCell::new(None),
@@ -252,7 +259,7 @@ impl Default for SettingsApp {
             next_optional_feature_refresh: Instant::now(),
             shell_settings,
             shell_topology_generation,
-            plugin_status: None,
+            plugin_status: crate::settings_package::local_snapshot(settings_jsx_enabled).ok(),
             plugin_notice: None,
             plugin_enable_review: None,
             plugin_pending: None,

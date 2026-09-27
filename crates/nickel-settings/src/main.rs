@@ -1028,6 +1028,10 @@ impl SettingsApp {
     }
 
     fn request_plugin_activation(&mut self, id: String, enabled: bool) {
+        if id == settings_package::ID {
+            self.set_settings_jsx_enabled(enabled);
+            return;
+        }
         if self.plugin_pending.is_some() {
             return;
         }
@@ -1063,6 +1067,57 @@ impl SettingsApp {
         } else {
             self.plugin_notice = Some("Could not start plugin activation request.".into());
         }
+    }
+
+    fn set_settings_jsx_enabled(&mut self, enabled: bool) {
+        if self.settings_jsx_enabled == enabled {
+            return;
+        }
+        let navigation = if enabled {
+            match navigation_plugin::NavigationPlugin::new() {
+                Ok(navigation) => Some(navigation),
+                Err(error) => {
+                    self.plugin_notice = Some(format!("Could not start Settings plugin: {error}"));
+                    self.request_redraw();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if self.persistence_enabled
+            && let Err(error) = nickel_core::plugins::PluginActivationSettings::update_default(
+                settings_package::ID,
+                enabled,
+            )
+        {
+            self.plugin_notice = Some(format!("Could not save Settings plugin choice: {error}"));
+            self.request_redraw();
+            return;
+        }
+        self.settings_jsx_enabled = enabled;
+        self.ordinary_pages.get_mut().take();
+        self.plugin_list.get_mut().take();
+        self.navigation_plugin.get_mut().take();
+        self.bar_page.get_mut().take();
+        self.optional_features_page.get_mut().take();
+        self.network_page.get_mut().take();
+        if let Some(navigation) = navigation {
+            *self.navigation_plugin.get_mut() = Some(Ok(navigation));
+        }
+        if let Some(snapshot) = self.plugin_status.as_mut() {
+            snapshot
+                .plugins
+                .retain(|plugin| plugin.id != settings_package::ID);
+            if let Ok(status) = settings_package::status(enabled) {
+                snapshot.plugins.push(status);
+            }
+        } else {
+            self.plugin_status = settings_package::local_snapshot(enabled).ok();
+        }
+        self.plugin_enable_review = None;
+        self.plugin_notice = None;
+        self.request_redraw();
     }
 
     fn request_plugin_setting(&mut self, id: String, key: String, value: serde_json::Value) {
@@ -1152,7 +1207,7 @@ impl SettingsApp {
 
     fn apply_plugin_status(&mut self, snapshot: nickel_session_protocol::PluginStatusSnapshot) {
         if snapshot.activation_generation == 0 {
-            self.plugin_status = None;
+            self.plugin_status = settings_package::local_snapshot(self.settings_jsx_enabled).ok();
             self.plugin_enable_review = None;
             self.plugin_pending = None;
             self.plugin_pending_started = None;
@@ -1160,6 +1215,13 @@ impl SettingsApp {
             self.next_plugin_refresh = Instant::now();
             self.request_redraw();
             return;
+        }
+        let mut snapshot = snapshot;
+        snapshot
+            .plugins
+            .retain(|plugin| plugin.id != settings_package::ID);
+        if let Ok(settings) = settings_package::status(self.settings_jsx_enabled) {
+            snapshot.plugins.push(settings);
         }
         if let Some((id, enabled)) = &self.plugin_pending
             && snapshot
@@ -3219,6 +3281,76 @@ mod tests {
         app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
         assert!(app.network_page.borrow().is_none());
         assert!(app.navigation_plugin.borrow().is_some());
+    }
+
+    #[test]
+    fn settings_plugin_can_disable_and_reenable_through_native_recovery() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
+        app.persistence_enabled = false;
+        let _ = app.build_ui(1100.0, 800.0);
+        let action = app
+            .plugin_list
+            .borrow()
+            .as_ref()
+            .and_then(|list| list.as_ref().ok())
+            .and_then(|list| list.action_for_id("plugin-enable-org.nickel.settings"))
+            .expect("Settings plugin has a JSX disable action");
+        app.handle_settings_message(SettingsMessage::PluginJsxAction(action));
+        assert!(!app.settings_jsx_enabled);
+        assert!(app.navigation_plugin.borrow().is_none());
+        assert!(app.plugin_list.borrow().is_none());
+        assert!(
+            app.plugin_status
+                .as_ref()
+                .unwrap()
+                .plugins
+                .iter()
+                .any(|plugin| {
+                    plugin.id == crate::settings_package::ID && !plugin.desired_enabled
+                })
+        );
+        let recovery = app.build_ui(1100.0, 800.0);
+        assert!(app.navigation_plugin.borrow().is_none());
+        assert!(app.plugin_list.borrow().is_none());
+        assert_eq!(
+            recovery
+                .semantic_targets_for_message(&SettingsMessage::ReviewPluginEnable(
+                    crate::settings_package::ID.into(),
+                ))
+                .len(),
+            1
+        );
+        app.handle_settings_message(SettingsMessage::ReviewPluginEnable(
+            crate::settings_package::ID.into(),
+        ));
+        let review = app.build_ui(1100.0, 800.0);
+        assert_eq!(
+            review
+                .semantic_targets_for_message(&SettingsMessage::ConfirmPluginEnable)
+                .len(),
+            1
+        );
+        app.handle_settings_message(SettingsMessage::ConfirmPluginEnable);
+        assert!(app.settings_jsx_enabled);
+        assert!(app.navigation_plugin.borrow().is_some());
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.plugin_list.borrow().is_some());
+    }
+
+    #[test]
+    fn shell_status_refresh_preserves_process_owned_settings_plugin_entry() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
+        app.persistence_enabled = false;
+        app.set_settings_jsx_enabled(false);
+        app.apply_plugin_status(nickel_session_protocol::PluginStatusSnapshot {
+            activation_generation: 19,
+            plugins: Vec::new(),
+        });
+        let snapshot = app.plugin_status.as_ref().unwrap();
+        assert_eq!(snapshot.activation_generation, 19);
+        assert_eq!(snapshot.plugins.len(), 1);
+        assert_eq!(snapshot.plugins[0].id, crate::settings_package::ID);
+        assert!(!snapshot.plugins[0].desired_enabled);
     }
 
     #[test]

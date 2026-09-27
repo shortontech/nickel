@@ -3,7 +3,11 @@
 use std::sync::OnceLock;
 
 use nickel_core::plugins::{PluginManifest, PluginSurfaceKind};
+use nickel_session_protocol::{
+    PluginMemorySnapshot, PluginRuntimeHealth, PluginStatus, PluginStatusSnapshot,
+};
 
+pub(super) const ID: &str = "org.nickel.settings";
 const MANIFEST_SOURCE: &str = include_str!("../../../assets/plugins/settings/plugin.json");
 static MANIFEST: OnceLock<Result<PluginManifest, String>> = OnceLock::new();
 
@@ -21,7 +25,7 @@ pub(super) fn manifest() -> Result<&'static PluginManifest, String> {
     MANIFEST
         .get_or_init(|| {
             let manifest = PluginManifest::from_json(MANIFEST_SOURCE)?;
-            if manifest.id != "org.nickel.settings"
+            if manifest.id != ID
                 || manifest.entry != "settings-navigation.js"
                 || manifest.surfaces.len() != 1
                 || manifest.surfaces[0].id != "main"
@@ -33,6 +37,42 @@ pub(super) fn manifest() -> Result<&'static PluginManifest, String> {
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+pub(super) fn status(enabled: bool) -> Result<PluginStatus, String> {
+    let manifest = manifest()?;
+    Ok(PluginStatus {
+        id: manifest.id.clone(),
+        name: manifest.name.clone(),
+        author: manifest.author.clone(),
+        version: manifest.version.clone(),
+        desired_enabled: enabled,
+        health: if enabled {
+            PluginRuntimeHealth::Running
+        } else {
+            PluginRuntimeHealth::Disabled
+        },
+        capabilities: manifest
+            .capabilities
+            .iter()
+            .map(|grant| grant.as_str().into())
+            .collect(),
+        surfaces: manifest
+            .surfaces
+            .iter()
+            .map(|surface| format!("{}: {}", surface.id, surface.kind.as_str()))
+            .collect(),
+        composition: Vec::new(),
+        settings: Vec::new(),
+        memory: PluginMemorySnapshot::default(),
+    })
+}
+
+pub(super) fn local_snapshot(enabled: bool) -> Result<PluginStatusSnapshot, String> {
+    Ok(PluginStatusSnapshot {
+        activation_generation: 0,
+        plugins: vec![status(enabled)?],
+    })
 }
 
 pub(super) fn source(script: Script) -> Result<&'static str, String> {

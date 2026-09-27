@@ -138,19 +138,22 @@ impl SettingsApp {
             self.plugin_setting_pending.as_ref(),
             self.plugin_setting_edit.as_ref(),
         );
-        let list = self
-            .plugin_list
-            .borrow_mut()
-            .get_or_insert_with(crate::plugin_list::PluginList::new)
-            .as_mut()
-            .map_err(|error| error.clone())
-            .and_then(|list| {
-                list.render(
-                    &projection,
-                    theme,
-                    &self.localizer.text("settings-plugin-input-placeholder"),
-                )
-            });
+        let list = if self.settings_jsx_enabled {
+            self.plugin_list
+                .borrow_mut()
+                .get_or_insert_with(crate::plugin_list::PluginList::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|list| {
+                    list.render(
+                        &projection,
+                        theme,
+                        &self.localizer.text("settings-plugin-input-placeholder"),
+                    )
+                })
+        } else {
+            Err("Settings plugin is disabled".into())
+        };
         content = content.child(match list {
             Ok(list) => list,
             Err(error) => {
@@ -166,6 +169,25 @@ impl SettingsApp {
                     ButtonPresentation::Secondary,
                 ));
                 if let Some(snapshot) = &self.plugin_status {
+                    if snapshot.plugins.iter().any(|plugin| {
+                        plugin.id == crate::settings_package::ID && !plugin.desired_enabled
+                    }) {
+                        recovery = recovery.child(
+                            SettingsRow::new(
+                                theme,
+                                self.localizer.text("settings-plugin-self-name"),
+                                self.localizer.text("settings-plugin-self-disabled"),
+                            )
+                            .trailing(Button::semantic(
+                                theme,
+                                SettingsMessage::ReviewPluginEnable(
+                                    crate::settings_package::ID.into(),
+                                ),
+                                self.localizer.text("settings-plugin-self-review-enable"),
+                                ButtonPresentation::Primary,
+                            )),
+                        );
+                    }
                     for plugin in snapshot
                         .plugins
                         .iter()
@@ -201,13 +223,16 @@ impl SettingsApp {
         }
         let theme = self.ui_theme();
         let data = crate::optional_features_plugin::projection(self);
-        let plugin_view = self
-            .optional_features_page
-            .borrow_mut()
-            .get_or_insert_with(crate::optional_features_plugin::OptionalFeaturesPage::new)
-            .as_mut()
-            .map_err(|error| error.clone())
-            .and_then(|page| page.render(&data, theme));
+        let plugin_view = if self.settings_jsx_enabled {
+            self.optional_features_page
+                .borrow_mut()
+                .get_or_insert_with(crate::optional_features_plugin::OptionalFeaturesPage::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| page.render(&data, theme))
+        } else {
+            Err("Settings plugin is disabled".into())
+        };
         if let Ok(view) = plugin_view {
             return view;
         }
@@ -995,13 +1020,16 @@ impl SettingsApp {
             return AnyView::new(Container::new());
         }
         let data = crate::network_plugin::projection(self);
-        let plugin_view = self
-            .network_page
-            .borrow_mut()
-            .get_or_insert_with(crate::network_plugin::NetworkPage::new)
-            .as_mut()
-            .map_err(|error| error.clone())
-            .and_then(|page| page.render(&data, self.ui_theme()));
+        let plugin_view = if self.settings_jsx_enabled {
+            self.network_page
+                .borrow_mut()
+                .get_or_insert_with(crate::network_plugin::NetworkPage::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| page.render(&data, self.ui_theme()))
+        } else {
+            Err("Settings plugin is disabled".into())
+        };
         if let Ok(view) = plugin_view {
             return view;
         }
@@ -1394,6 +1422,9 @@ impl SettingsApp {
     pub(super) fn bar_components(&self) -> AnyView<SettingsMessage> {
         if self.page != SettingsPage::Bar {
             return AnyView::new(Container::new());
+        }
+        if !self.settings_jsx_enabled {
+            return AnyView::new(self.native_bar_components());
         }
         let data = crate::bar_plugin::projection(
             &self.localizer,
@@ -1849,6 +1880,50 @@ impl SettingsApp {
         if self.page != SettingsPage::KeyboardShortcuts {
             return AnyView::new(Container::new());
         }
+        if !self.settings_jsx_enabled {
+            return AnyView::new(
+                SettingsCard::titled(
+                    self.ui_theme(),
+                    self.localizer.text("settings-keyboard-card-title"),
+                    self.localizer.text("settings-keyboard-card-description"),
+                )
+                .child(SettingsRow::new(
+                    self.ui_theme(),
+                    self.localizer.text("settings-keyboard-open-launcher"),
+                    "Super",
+                ))
+                .child(SettingsRow::new(
+                    self.ui_theme(),
+                    self.localizer.text("settings-keyboard-search"),
+                    self.localizer.text("settings-keyboard-search-value"),
+                ))
+                .child(SettingsRow::new(
+                    self.ui_theme(),
+                    self.localizer.text("settings-keyboard-navigate"),
+                    "Arrow keys · Tab · Shift+Tab",
+                ))
+                .child(SettingsRow::new(
+                    self.ui_theme(),
+                    self.localizer.text("settings-keyboard-activate"),
+                    "Enter",
+                ))
+                .child(SettingsRow::new(
+                    self.ui_theme(),
+                    self.localizer.text("settings-keyboard-back"),
+                    "Escape",
+                ))
+                .child(SettingsRow::new(
+                    self.ui_theme(),
+                    self.localizer.text("settings-keyboard-workspaces"),
+                    if cfg!(target_os = "windows") {
+                        self.localizer
+                            .text("settings-keyboard-workspaces-unavailable")
+                    } else {
+                        self.localizer.text("settings-keyboard-workspaces-value")
+                    },
+                )),
+            );
+        }
         let page = self
             .ordinary_pages
             .borrow_mut()
@@ -1868,6 +1943,25 @@ impl SettingsApp {
     pub(super) fn about_components(&self) -> AnyView<SettingsMessage> {
         if self.page != SettingsPage::About {
             return AnyView::new(Container::new());
+        }
+        if !self.settings_jsx_enabled {
+            return AnyView::new(
+                SettingsCard::titled(
+                    self.ui_theme(),
+                    self.localizer.text("settings-about-card-title"),
+                    self.localizer.text("settings-about-card-description"),
+                )
+                .child(SettingsRow::new(
+                    self.ui_theme(),
+                    self.localizer.text("settings-about-version"),
+                    env!("CARGO_PKG_VERSION"),
+                ))
+                .child(SettingsRow::new(
+                    self.ui_theme(),
+                    self.localizer.text("settings-about-platform"),
+                    format!("{} · {}", std::env::consts::OS, std::env::consts::ARCH),
+                )),
+            );
         }
         let page = self
             .ordinary_pages
