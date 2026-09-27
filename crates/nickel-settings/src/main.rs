@@ -6,6 +6,7 @@ mod bluetooth_plugin;
 mod cli;
 mod default_app_picker_plugin;
 mod default_apps_plugin;
+mod display_plugin;
 mod effects;
 mod model;
 mod navigation_plugin;
@@ -594,6 +595,7 @@ enum SettingsMessage {
     SetDesktopCount(u8),
     DisplayScroll,
     DisplayIdentify,
+    DisplayJsxAction(usize),
     SelectDisplay(usize),
     DisplayDrag {
         index: usize,
@@ -1126,6 +1128,7 @@ impl SettingsApp {
         self.appearance_page.get_mut().take();
         self.default_apps_page.get_mut().take();
         self.default_app_picker_page.get_mut().take();
+        self.display_page.get_mut().take();
         self.default_app_picker_row.set(None);
         if self.custom_hue_open {
             self.pending_transient_dismissal = Some(OverlayId::new("appearance-custom-hue-dialog"));
@@ -1220,7 +1223,13 @@ impl SettingsApp {
                 .map_or(
                     0,
                     default_app_picker_plugin::DefaultAppPickerPage::retained_bytes,
-                );
+                )
+            + self
+                .display_page
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(0, display_plugin::DisplayPage::retained_bytes);
         let total = u64::try_from(total).unwrap_or(u64::MAX);
         self.settings_jsx_peak_bytes
             .set(self.settings_jsx_peak_bytes.get().max(total));
@@ -1456,6 +1465,9 @@ impl SettingsApp {
     }
 
     fn retire_inactive_jsx(&mut self, page: SettingsPage) {
+        if page != SettingsPage::Display {
+            self.display_page.get_mut().take();
+        }
         if page != SettingsPage::Plugins {
             self.plugin_list.get_mut().take();
         }
@@ -1869,6 +1881,7 @@ impl SettingsApp {
                     _ => self.status = self.localizer.text("settings-status-identify-failed"),
                 }
             }
+            SettingsMessage::DisplayJsxAction(index) => self.handle_display_jsx_action(index),
             SettingsMessage::SelectDisplay(index) => {
                 if index < self.displays.len() {
                     self.selected = index;
@@ -5354,15 +5367,16 @@ mod tests {
                 .collect::<Vec<_>>();
             assert!(diagnostics.is_empty(), "{locale}: {diagnostics:#?}");
 
-            let buttons = [
-                SettingsMessage::DisplayIdentify,
-                SettingsMessage::DisplayPrimary,
-                SettingsMessage::DisplayApply,
-            ]
-            .iter()
-            .flat_map(|message| tree.semantic_targets_for_message(message))
-            .map(|target| target.bounds)
-            .collect::<Vec<_>>();
+            let display_page = app.display_page.borrow();
+            let display_page = display_page.as_ref().unwrap().as_ref().unwrap();
+            let buttons = ["display-identify", "display-primary", "display-apply"]
+                .iter()
+                .flat_map(|id| {
+                    let action = display_page.action_for_id(id).unwrap();
+                    tree.semantic_targets_for_message(&SettingsMessage::DisplayJsxAction(action))
+                })
+                .map(|target| target.bounds)
+                .collect::<Vec<_>>();
             assert_eq!(
                 buttons.len(),
                 3,

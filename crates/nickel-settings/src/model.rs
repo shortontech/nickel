@@ -31,6 +31,8 @@ pub(super) struct SettingsApp {
     pub(super) default_app_picker_page: std::cell::RefCell<
         Option<Result<crate::default_app_picker_plugin::DefaultAppPickerPage, String>>,
     >,
+    pub(super) display_page:
+        std::cell::RefCell<Option<Result<crate::display_plugin::DisplayPage, String>>>,
     pub(super) redraw_requested: Cell<bool>,
     pub(super) displays: Vec<DisplayCard>,
     pub(super) selected: usize,
@@ -241,6 +243,7 @@ impl Default for SettingsApp {
             appearance_page: std::cell::RefCell::new(None),
             default_apps_page: std::cell::RefCell::new(None),
             default_app_picker_page: std::cell::RefCell::new(None),
+            display_page: std::cell::RefCell::new(None),
             redraw_requested: Cell::new(true),
             displays: displays.clone(),
             selected: 1,

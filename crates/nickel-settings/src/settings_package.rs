@@ -23,6 +23,7 @@ pub(super) enum Script {
     Appearance,
     DefaultApps,
     DefaultAppPicker,
+    Display,
 }
 
 pub(super) fn manifest() -> Result<&'static PluginManifest, String> {
@@ -106,6 +107,7 @@ pub(super) fn source(script: Script) -> Result<&'static str, String> {
         Script::DefaultAppPicker => {
             include_str!("../../../assets/plugins/settings/settings-default-app-picker.js")
         }
+        Script::Display => include_str!("../../../assets/plugins/settings/settings-display.js"),
     })
 }
 
@@ -133,6 +135,7 @@ mod tests {
             Script::Appearance,
             Script::DefaultApps,
             Script::DefaultAppPicker,
+            Script::Display,
         ] {
             JsxRuntime::new(source(script).unwrap(), None).unwrap();
         }

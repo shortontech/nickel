@@ -1,8 +1,8 @@
 use super::*;
 use nickel_ui::{
     Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
-    GridColumnSpec, Layer, NavigationScope, Point, RadioGroup, RadioOption, Row, SettingsListCard,
-    Text, Track,
+    Grid, Layer, NavigationScope, Point, RadioGroup, RadioOption, Row, SettingsListCard, Text,
+    Track,
 };
 
 fn bluetooth_kind_icon(kind: &str) -> Option<String> {
@@ -986,6 +986,31 @@ impl SettingsApp {
         } else {
             AnyView::new(nickel_ui::Container::new())
         };
+        let native_actions: AnyView<SettingsMessage> = AnyView::new(
+            Grid::auto_fit(Track::minmax(Track::px(120.0), Track::fr(1.0)))
+                .gap(12.0)
+                .child(identify)
+                .child(make_primary)
+                .child(apply),
+        );
+        let plugin_actions = if self.settings_jsx_enabled {
+            let data = crate::display_plugin::projection(self);
+            self.display_page
+                .borrow_mut()
+                .get_or_insert_with(crate::display_plugin::DisplayPage::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| page.render(&data, theme))
+                .ok()
+        } else {
+            None
+        };
+        let (enabled, actions, confirmation) =
+            if let Some([enabled, actions, confirmation]) = plugin_actions {
+                (enabled, actions, confirmation)
+            } else {
+                (AnyView::new(enabled), native_actions, confirmation)
+            };
         let compact_cards = content_width < 520.0;
         let mut display_order = (0..self.displays.len()).collect::<Vec<_>>();
         display_order.sort_by_key(|index| (*index == self.selected) as u8);
@@ -1085,9 +1110,7 @@ impl SettingsApp {
                                 {resolution}
                                 {refresh_rate}
                                 {scale}
-                                <Grid columns={GridColumnSpec::AutoFit(Track::minmax(120.0, Track::fr(1.0)))} gap={12.0}>
-                                    {identify}{make_primary}{apply}
-                                </Grid>
+                                {actions}
                                 {confirmation}
                             </Column>
                         </Container>

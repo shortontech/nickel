@@ -33,6 +33,7 @@ pub(super) enum Node {
         accessibility_label: Option<String>,
         state: Option<String>,
         style: String,
+        max_lines: Option<usize>,
         action: Option<usize>,
     },
     Switch {
@@ -205,6 +206,10 @@ impl Node {
                     .map(|_| text(value, "state", 64))
                     .transpose()?,
                 style: text(value, "value", 24)?,
+                max_lines: value
+                    .get("maxLines")
+                    .and_then(Value::as_u64)
+                    .map(|lines| lines.clamp(1, 3) as usize),
                 action: action()?,
             },
             "settings-switch" => {
@@ -419,6 +424,7 @@ impl Node {
                 accessibility_label,
                 state,
                 style,
+                max_lines,
                 action,
             } => {
                 let presentation = match style.as_str() {
@@ -437,6 +443,11 @@ impl Node {
                         ButtonPresentation::Disabled
                     },
                 );
+                let button = if let Some(lines) = max_lines {
+                    button.max_lines(*lines)
+                } else {
+                    button
+                };
                 let button = if let Some(id) = id {
                     button.id(id.as_str())
                 } else {
