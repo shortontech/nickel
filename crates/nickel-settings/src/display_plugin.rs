@@ -16,6 +16,14 @@ pub(super) struct DisplayPage {
     context: SettingsJsxContext,
 }
 
+#[derive(Clone)]
+pub(super) struct DisplayCardView {
+    pub(super) index: usize,
+    pub(super) name: String,
+    pub(super) detail: String,
+    pub(super) primary_label: String,
+}
+
 impl DisplayPage {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
@@ -36,22 +44,73 @@ impl DisplayPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<[AnyView<SettingsMessage>; 8], String> {
+    ) -> Result<(Vec<DisplayCardView>, [AnyView<SettingsMessage>; 8]), String> {
         let Node::Stack(children) = self.context.render(data)? else {
             return Err("Display actions have an invalid root".into());
         };
+        let Node::Fragment(card_nodes) = &children[0] else {
+            return Err("Display arrangement is invalid".into());
+        };
+        let projected = data["cards"]
+            .as_array()
+            .ok_or("Display arrangement projection is invalid")?;
+        if card_nodes.len() != projected.len() {
+            return Err("Display arrangement changed".into());
+        }
+        let mut cards = Vec::with_capacity(card_nodes.len());
+        for node in card_nodes {
+            let Node::Card {
+                label,
+                value,
+                children,
+            } = node
+            else {
+                return Err("Display card is invalid".into());
+            };
+            let [
+                Node::Button {
+                    id: Some(id),
+                    state: Some(primary_label),
+                    action: Some(_),
+                    ..
+                },
+            ] = children.as_slice()
+            else {
+                return Err("Display card action is invalid".into());
+            };
+            let index = id
+                .strip_prefix("display-card-")
+                .and_then(|index| index.parse::<usize>().ok())
+                .ok_or("Display card ID is invalid")?;
+            if !projected
+                .iter()
+                .any(|card| card["index"].as_u64() == Some(index as u64))
+                || cards
+                    .iter()
+                    .any(|card: &DisplayCardView| card.index == index)
+            {
+                return Err("Display card identity changed".into());
+            }
+            cards.push(DisplayCardView {
+                index,
+                name: label.clone(),
+                detail: value.clone(),
+                primary_label: primary_label.clone(),
+            });
+        }
         let view =
-            |index: usize| children[index].view(theme, "", SettingsMessage::DisplayJsxAction);
-        Ok([
+            |index: usize| children[index + 1].view(theme, "", SettingsMessage::DisplayJsxAction);
+        let controls = [
             view(0),
             view(1),
             view(2),
-            children[3].slider_view(theme, display_slider_message)?,
+            children[4].slider_view(theme, display_slider_message)?,
             view(4),
             view(5),
             view(6),
-            children[7].slider_view(theme, application_slider_message)?,
-        ])
+            children[8].slider_view(theme, application_slider_message)?,
+        ];
+        Ok((cards, controls))
     }
 
     fn dispatch(
@@ -70,6 +129,10 @@ impl DisplayPage {
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
         self.context.action_for_id(id)
+    }
+
+    pub(super) fn card_action(&self, index: usize) -> Option<usize> {
+        self.context.action_for_id(&format!("display-card-{index}"))
     }
 
     fn slider_action(&self, id: &str) -> Option<usize> {
@@ -98,17 +161,28 @@ fn parse_tree(value: &Value) -> Result<Node, String> {
         .and_then(Value::as_array)
         .ok_or("Display actions have no children")?;
     if value["kind"] != "settings-stack"
-        || children.len() != 8
-        || children[0]["kind"] != "settings-row"
-        || children[1]["kind"] != "settings-select"
+        || children.len() != 9
+        || children[0]["kind"] != "settings-fragment"
+        || children[0]["children"].as_array().is_none_or(|cards| {
+            cards.is_empty()
+                || cards.len() > 16
+                || cards.iter().any(|card| {
+                    card["kind"] != "settings-card"
+                        || card["children"].as_array().is_none_or(|children| {
+                            children.len() != 1 || children[0]["kind"] != "settings-button"
+                        })
+                })
+        })
+        || children[1]["kind"] != "settings-row"
         || children[2]["kind"] != "settings-select"
-        || children[3]["kind"] != "settings-slider"
-        || children[4]["kind"] != "settings-grid"
-        || children[5]["kind"] != "settings-inline"
-        || children[6]["kind"] != "settings-radio-group"
-        || children[7]["kind"] != "settings-slider"
-        || children[3]["id"] != "display-scale"
-        || children[7]["id"] != "application-custom-scale"
+        || children[3]["kind"] != "settings-select"
+        || children[4]["kind"] != "settings-slider"
+        || children[5]["kind"] != "settings-grid"
+        || children[6]["kind"] != "settings-inline"
+        || children[7]["kind"] != "settings-radio-group"
+        || children[8]["kind"] != "settings-slider"
+        || children[4]["id"] != "display-scale"
+        || children[8]["id"] != "application-custom-scale"
     {
         return Err("Display actions have an invalid structure".into());
     }
@@ -122,6 +196,10 @@ fn parse_tree(value: &Value) -> Result<Node, String> {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 enum DisplayRequest {
+    SelectDisplay {
+        index: usize,
+        connector: String,
+    },
     Enabled {
         connector: String,
         enabled: bool,
@@ -172,6 +250,17 @@ enum DisplayRequest {
 
 fn validate_request(request: DisplayRequest, data: &Value) -> Result<SettingsMessage, String> {
     let (connector, message) = match request {
+        DisplayRequest::SelectDisplay { index, connector } => {
+            if !data["cards"].as_array().is_some_and(|cards| {
+                cards.iter().any(|card| {
+                    card["index"].as_u64() == Some(index as u64)
+                        && card["connector"].as_str() == Some(connector.as_str())
+                })
+            }) {
+                return Err(STALE_STATUS.into());
+            }
+            return Ok(SettingsMessage::SelectDisplay(index));
+        }
         DisplayRequest::Enabled { connector, enabled } => {
             if data["enabled"].as_bool() == Some(enabled) {
                 return Err(STALE_STATUS.into());
@@ -271,6 +360,22 @@ fn validate_request(request: DisplayRequest, data: &Value) -> Result<SettingsMes
 
 pub(super) fn projection(app: &SettingsApp) -> Value {
     let selected = &app.displays[app.selected];
+    let mut display_order = (0..app.displays.len()).collect::<Vec<_>>();
+    display_order.sort_by_key(|index| (*index == app.selected) as u8);
+    let cards = display_order
+        .into_iter()
+        .map(|index| {
+            let display = &app.displays[index];
+            json!({
+                "index": index,
+                "connector": display.connector,
+                "name": display.name,
+                "detail": display.detail,
+                "enabled": display.enabled,
+                "primary": display.primary,
+            })
+        })
+        .collect::<Vec<_>>();
     let mut resolutions = selected
         .modes
         .iter()
@@ -293,6 +398,9 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
     };
     json!({
         "connector": selected.connector,
+        "cards": cards,
+        "disabledLabel": "DISABLED",
+        "cardPrimaryLabel": "PRIMARY",
         "enabled": selected.enabled,
         "pendingRevert": app.pending_display_revert.is_some(),
         "resolutionLabel": "Resolution",
@@ -360,6 +468,7 @@ impl SettingsApp {
             .ok_or_else(|| STALE_STATUS.to_owned())
             .and_then(|page| page.dispatch(index, value, &data));
         match message {
+            Ok(SettingsMessage::SelectDisplay(index)) => self.select_display_native(index),
             Ok(message) => self.handle_settings_message(message),
             Err(error) => {
                 if error != STALE_STATUS {
@@ -380,7 +489,14 @@ mod tests {
         let app = SettingsApp::with_initial_page(SettingsPage::Display);
         let data = projection(&app);
         let mut page = DisplayPage::new().unwrap();
-        let _ = page.render(&data, app.ui_theme()).unwrap();
+        let (cards, _) = page.render(&data, app.ui_theme()).unwrap();
+        assert_eq!(cards.len(), app.displays.len());
+        assert!(cards.iter().any(|card| card.name == app.displays[0].name));
+        let select = page.action_for_id("display-card-0").unwrap();
+        assert!(matches!(
+            page.dispatch(select, Value::Null, &data),
+            Ok(SettingsMessage::SelectDisplay(0))
+        ));
         let enabled = page.action_for_id("display-enabled").unwrap();
         assert!(matches!(
             page.dispatch(enabled, Value::Null, &data),

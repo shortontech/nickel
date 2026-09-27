@@ -5,6 +5,8 @@ function App() {
     const data = nickel.data;
     const request = (type, fields = {}) => nickel.request({ type, connector: data.connector, ...fields });
     return h("settings-stack", null,
+        h("settings-fragment", null, data.cards.map(card => h("settings-card", { key: card.connector, label: card.name, value: card.enabled ? card.detail : `${card.detail}  ${data.disabledLabel}` },
+            h("settings-button", { id: `display-card-${card.index}`, label: "", value: "quiet", state: card.primary ? data.cardPrimaryLabel : '', onClick: () => request('select-display', { index: card.index, connector: card.connector }) })))),
         h("settings-row", { label: data.enabledLabel, value: "", compact: true },
             h("settings-switch", { id: "display-enabled", label: data.enabledLabel, value: data.enabled ? 'on' : 'off', onClick: () => request('enabled', { enabled: !data.enabled }) })),
         h("settings-select", { id: "display-resolution", label: data.resolutionLabel, placeholder: "", value: data.resolutionValue, open: data.resolutionOpen, onClick: () => request('toggle-resolution') }, data.resolutions.map(mode => h("settings-option", { key: `${mode.width}x${mode.height}`, id: `display-resolution-${mode.width}x${mode.height}`, label: mode.label, selected: mode.label === data.resolutionValue, onClick: () => request('resolution', { width: mode.width, height: mode.height }) }))),

@@ -1921,10 +1921,19 @@ impl SettingsApp {
                 self.handle_display_jsx_slider(id, position)
             }
             SettingsMessage::SelectDisplay(index) => {
-                if index < self.displays.len() {
-                    self.selected = index;
-                    self.display_resolution_select_expanded = false;
-                    self.display_refresh_select_expanded = false;
+                let action = if self.page == SettingsPage::Display && self.settings_jsx_enabled {
+                    self.display_page
+                        .borrow()
+                        .as_ref()
+                        .and_then(|page| page.as_ref().ok())
+                        .and_then(|page| page.card_action(index))
+                } else {
+                    None
+                };
+                if let Some(action) = action {
+                    self.handle_display_jsx_action(action);
+                } else {
+                    self.select_display_native(index);
                 }
             }
             SettingsMessage::DisplayDrag { index, phase, x, y } => match phase {
@@ -2115,6 +2124,14 @@ impl SettingsApp {
         );
         self.applied = false;
         self.status = self.localizer.text("settings-status-changes-not-applied");
+    }
+
+    fn select_display_native(&mut self, index: usize) {
+        if index < self.displays.len() {
+            self.selected = index;
+            self.display_resolution_select_expanded = false;
+            self.display_refresh_select_expanded = false;
+        }
     }
 
     fn begin_display_drag(&mut self, index: usize, x: i32, y: i32) {

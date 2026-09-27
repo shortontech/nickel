@@ -5,6 +5,15 @@ function App() {
     const data = nickel.data;
     const request = (type, fields = {}) => nickel.request({type, connector: data.connector, ...fields});
     return <settings-stack>
+        <settings-fragment>
+            {data.cards.map(card => <settings-card key={card.connector}
+                label={card.name}
+                value={card.enabled ? card.detail : `${card.detail}  ${data.disabledLabel}`}>
+                <settings-button id={`display-card-${card.index}`} label="" value="quiet"
+                    state={card.primary ? data.cardPrimaryLabel : ''}
+                    onClick={() => request('select-display', {index: card.index, connector: card.connector})} />
+            </settings-card>)}
+        </settings-fragment>
         <settings-row label={data.enabledLabel} value="" compact={true}>
             <settings-switch id="display-enabled" label={data.enabledLabel}
                 value={data.enabled ? 'on' : 'off'}

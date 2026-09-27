@@ -973,7 +973,7 @@ impl SettingsApp {
                 .child(make_primary)
                 .child(apply),
         );
-        let plugin_actions = if self.settings_jsx_enabled {
+        let plugin_view = if self.settings_jsx_enabled {
             let data = crate::display_plugin::projection(self);
             self.display_page
                 .borrow_mut()
@@ -984,6 +984,10 @@ impl SettingsApp {
                 .ok()
         } else {
             None
+        };
+        let (plugin_cards, plugin_actions) = match plugin_view {
+            Some((cards, actions)) => (Some(cards), Some(actions)),
+            None => (None, None),
         };
         let (
             enabled,
@@ -1050,16 +1054,26 @@ impl SettingsApp {
         .child(application_scale_slider)
         .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
         let compact_cards = content_width < 520.0;
-        let mut display_order = (0..self.displays.len()).collect::<Vec<_>>();
-        display_order.sort_by_key(|index| (*index == self.selected) as u8);
+        let mut display_order = plugin_cards.as_ref().map_or_else(
+            || (0..self.displays.len()).collect::<Vec<_>>(),
+            |cards| cards.iter().map(|card| card.index).collect::<Vec<_>>(),
+        );
+        if plugin_cards.is_none() {
+            display_order.sort_by_key(|index| (*index == self.selected) as u8);
+        }
         let display_cards = display_order.into_iter().map(|index| {
             let display = &self.displays[index];
             let selected = index == self.selected;
-            let detail = if display.enabled {
-                display.detail.clone()
-            } else {
-                format!("{}  DISABLED", display.detail)
-            };
+            let plugin_card = plugin_cards.as_ref().and_then(|cards| cards.iter().find(|card| card.index == index));
+            let name = plugin_card.map_or_else(|| display.name.clone(), |card| card.name.clone());
+            let detail = plugin_card.map_or_else(
+                || if display.enabled { display.detail.clone() } else { format!("{}  DISABLED", display.detail) },
+                |card| card.detail.clone(),
+            );
+            let primary_label = plugin_card.map_or_else(
+                || if display.primary { "PRIMARY".to_owned() } else { String::new() },
+                |card| card.primary_label.clone(),
+            );
             let border_color = if !display.enabled {
                 palette.muted
             } else if display.primary {
@@ -1084,13 +1098,13 @@ impl SettingsApp {
                     on_drag={(SettingsMessage::SelectDisplay(index), display_drag_message)}
                     on_press={SettingsMessage::SelectDisplay(index)}
                     semantic_role={SemanticRole::Button}
-                    accessibility_label={format!("{} display, {}", display.name, detail)}
+                    accessibility_label={format!("{} display, {}", name, detail)}
                     accessibility_state={if selected { "selected" } else { "not selected" }}>
                     <Column gap={4.0}>
-                        <Text color={palette.text} wrap={true}>{&display.name}</Text>
+                        <Text color={palette.text} wrap={true}>{&name}</Text>
                         <Text scale={0.9} color={palette.muted} wrap={true}>{detail}</Text>
                         <Text scale={0.9} bold={true} color={palette.accent}>
-                            {if display.primary { "PRIMARY" } else { "" }}
+                            {&primary_label}
                         </Text>
                     </Column>
                 </Container>
