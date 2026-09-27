@@ -15,7 +15,7 @@ function App() {
                 nickel.openDialog("launcher-dialog");
             }}>Open dialog</Button>
         </Row>
-        <Dialog id="launcher-dialog" anchor="open-dialog" open={dialogOpen} width={320} height={120}>
+        <Dialog id="launcher-dialog" anchor="open-dialog" open={dialogOpen} onClose={() => setDialogOpen(false)} width={320} height={120}>
             <Row>
                 <Text>Show the launcher?</Text>
                 <Button onClick={() => {

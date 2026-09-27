@@ -16,7 +16,7 @@ function App() {
                     setDialogOpen(true);
                     nickel.openDialog("launcher-dialog");
                 } }, "Open dialog")),
-        h(Dialog, { id: "launcher-dialog", anchor: "open-dialog", open: dialogOpen, width: 320, height: 120 },
+        h(Dialog, { id: "launcher-dialog", anchor: "open-dialog", open: dialogOpen, onClose: () => setDialogOpen(false), width: 320, height: 120 },
             h(Row, null,
                 h(Text, null, "Show the launcher?"),
                 h(Button, { onClick: () => {

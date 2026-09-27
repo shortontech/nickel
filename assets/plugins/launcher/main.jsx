@@ -10,6 +10,7 @@ function App() {
     };
     return <Column>
         <Text>Nickel Launcher</Text>
+        {data.status ? <Text>{data.status}</Text> : null}
         <TextField id="launcher-query" value={data.query} placeholder="Search applications"
             onChange={query => nickel.request({type: "launcher-set-query", query})} />
         {data.dashboardVisible ? <ScrollView id="launcher-dashboard-scroll" height={580}>
@@ -109,7 +110,7 @@ function App() {
                 </Button> : null}
             </Row> : null}
         </ScrollView> : null}
-        <Dialog id="launcher-logout-dialog" anchor="launcher-logout" open={logoutOpen} width={320} height={160}>
+        <Dialog id="launcher-logout-dialog" anchor="launcher-logout" open={logoutOpen} onClose={() => setLogoutOpen(false)} width={320} height={160}>
             <Column>
                 <Text>Log out of this session?</Text>
                 <Button id="launcher-confirm-logout" accessibilityLabel="Confirm log out" onClick={() => {

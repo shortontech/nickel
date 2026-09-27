@@ -74,6 +74,9 @@ host asset renders a placeholder without giving the plugin filesystem access.
 `Button` may also handle `onDrag({ phase, x, y, bounds })`; Nickel captures the
 pointer through start, move, end, and cancel events. The callback can request a
 typed effect, as the bundled taskbar does when moving a pinned app.
+`Dialog` accepts `onClose`, called when the host dismisses an open dialog by
+Escape, outside input, or focus loss. The handler should clear the state that
+controls `open`; dialog buttons may still update state and request typed effects.
 Nickel does not embed
 React, a browser DOM, or the TypeScript compiler. The host checks declared
 capabilities and current shell state before executing a requested effect.

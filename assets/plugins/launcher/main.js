@@ -50,7 +50,7 @@ function App() {
                     data.resultPage > 0 ? h(Button, { id: "launcher-search-previous", onClick: () => nickel.request({ type: "launcher-set-page", view: "search", page: data.resultPage - 1 }) }, "Previous") : null,
                     h(Text, null, "Page " + (data.resultPage + 1) + " of " + data.resultPageCount),
                     data.resultPage + 1 < data.resultPageCount ? h(Button, { id: "launcher-search-next", onClick: () => nickel.request({ type: "launcher-set-page", view: "search", page: data.resultPage + 1 }) }, "Next") : null) : null) : null,
-        h(Dialog, { id: "launcher-logout-dialog", anchor: "launcher-logout", open: logoutOpen, width: 320, height: 160 },
+        h(Dialog, { id: "launcher-logout-dialog", anchor: "launcher-logout", open: logoutOpen, onClose: () => setLogoutOpen(false), width: 320, height: 160 },
             h(Column, null,
                 h(Text, null, "Log out of this session?"),
                 h(Button, { id: "launcher-confirm-logout", accessibilityLabel: "Confirm log out", onClick: () => {

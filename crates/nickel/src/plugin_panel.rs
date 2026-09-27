@@ -248,6 +248,8 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onContextMenu) - 1 : null;
     const dragAction = typeof props?.onDrag === 'function'
         ? __handlers.push(props.onDrag) - 1 : null;
+    const closeAction = typeof props?.onClose === 'function'
+        ? __handlers.push(props.onClose) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         x: props?.x, y: props?.y, width: props?.width, height: props?.height,
         background: props?.background, radius: props?.radius, color: props?.color,
@@ -259,7 +261,7 @@ function h(kind, props, ...children) {
         item: props?.item, count: props?.count,
         asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
-        showLabel: props?.showLabel, contextAction, dragAction,
+        showLabel: props?.showLabel, contextAction, dragAction, closeAction,
         value: props?.value, placeholder: props?.placeholder,
         percent: props?.percent,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
@@ -441,6 +443,7 @@ enum PanelNode {
         id: String,
         anchor: String,
         open: bool,
+        close_action: Option<usize>,
         width: u32,
         height: u32,
         children: Vec<Self>,
@@ -839,6 +842,10 @@ impl PanelNode {
                     .ok_or("dialog needs an anchor")?
                     .to_owned(),
                 open: value.get("open").and_then(Value::as_bool).unwrap_or(false),
+                close_action: value
+                    .get("closeAction")
+                    .and_then(Value::as_u64)
+                    .and_then(|action| usize::try_from(action).ok()),
                 width: value.get("width").and_then(Value::as_u64).unwrap_or(320) as u32,
                 height: value.get("height").and_then(Value::as_u64).unwrap_or(120) as u32,
                 children: children
@@ -3240,6 +3247,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                     width,
                     height,
                     children,
+                    ..
                 } => {
                     let mut content = Column::new().fill_width();
                     for child in children {
@@ -3290,6 +3298,18 @@ impl nickel_ui::Application for PluginPanelApplication {
 
     fn take_transient_request(&mut self) -> Option<(OverlayId, UiId)> {
         self.pending_transient.take()
+    }
+
+    fn transient_dismissed(&self, id: &OverlayId) -> Option<Self::Message> {
+        let dialog_id = id.as_ui_id().as_str().strip_prefix("plugin-")?;
+        match self.node.dialog(dialog_id)? {
+            PanelNode::Dialog {
+                open: true,
+                close_action: Some(action),
+                ..
+            } => Some(PluginMessage::Click(*action)),
+            _ => None,
+        }
     }
 
     fn title(&self) -> &str {
@@ -3609,6 +3629,61 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowLauncher]
         );
+    }
+
+    #[test]
+    fn host_dismissal_calls_dialog_on_close_and_allows_reopen() {
+        let package = PluginPackage {
+            manifest: manifest().clone(),
+            source: r#"
+                function App() {
+                    const [open, setOpen] = useState(false);
+                    return h(Panel, {},
+                        h(Button, {id: 'open', onClick: () => {
+                            setOpen(true);
+                            nickel.openDialog('confirm');
+                        }}, 'Open dialog'),
+                        h(Dialog, {id: 'confirm', anchor: 'open', open,
+                            onClose: () => setOpen(false)},
+                            h(Text, {}, 'Confirm?')));
+                }
+            "#
+            .into(),
+        };
+        let mut host = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package(&package).unwrap(),
+            440,
+            160,
+        );
+        let open = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open dialog".into(),
+            })
+            .unwrap();
+        for _ in 0..2 {
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::AccessibilityActivate(open.id.clone()),
+                )],
+                ..Default::default()
+            });
+            assert!(host.inspect().open_overlay.is_some());
+            assert!(matches!(
+                host.application_mut().node.dialog("confirm"),
+                Some(PanelNode::Dialog { open: true, .. })
+            ));
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Dismiss)],
+                ..Default::default()
+            });
+            assert!(host.inspect().open_overlay.is_none());
+            assert!(matches!(
+                host.application_mut().node.dialog("confirm"),
+                Some(PanelNode::Dialog { open: false, .. })
+            ));
+            assert!(host.application_mut().last_error().is_none());
+        }
     }
 
     #[test]

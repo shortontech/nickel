@@ -38,8 +38,9 @@ script or offset.
 
 The example opens a component dialog. Its **Show** button requests the
 `launcher-show` capability, which Nickel checks against `plugin.json` before
-opening the launcher. The dialog is managed by the panel's UI host; a separate
-dialog window is not yet supported.
+opening the launcher. Its `onClose` handler clears the dialog's `useState` value
+after host dismissal so the dialog can be opened again. The dialog is managed
+by the panel's UI host; a separate dialog window is not yet supported.
 
 Installed packages under the user's Nickel `plugins/<plugin-id>/` directory
 appear in Settings. Settings can enable or disable one external panel package

@@ -1232,6 +1232,13 @@ pub trait Application: Sized {
         None
     }
 
+    /// Returns an application message when the host dismisses an open transient
+    /// through input or focus loss. Applications can synchronize component state
+    /// before the next declarative frame is built.
+    fn transient_dismissed(&self, _id: &OverlayId) -> Option<Self::Message> {
+        None
+    }
+
     /// Drains text explicitly offered to the system clipboard by an application update.
     fn take_clipboard_write(&mut self) -> Option<String> {
         None
@@ -3041,6 +3048,7 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let prior_transient = self.state.open_overlay_id().cloned();
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
         let controller_authority = batch.controller_authority;
         if let Some(authority) = controller_authority
@@ -3392,6 +3400,17 @@ impl<A: Application> UiHost<A> {
             }
             cancellation.merge(outcome);
             combined.merge(cancellation);
+        }
+        if let Some(id) = prior_transient
+            && self.state.open_overlay_id() != Some(&id)
+            && let Some(message) = self.application.transient_dismissed(&id)
+        {
+            combined
+                .messages
+                .push(self.application.message_evidence(&message));
+            self.application.update(message);
+            combined.changed = true;
+            combined.invalidation = combined.invalidation.merge(Invalidation::Layout);
         }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {

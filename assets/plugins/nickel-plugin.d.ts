@@ -70,6 +70,7 @@ interface NickelDialogProps extends NickelProps {
     id?: string;
     anchor: string;
     open?: boolean;
+    onClose?: NickelClick;
     width?: number;
     height?: number;
 }

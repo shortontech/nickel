@@ -76,7 +76,7 @@ function App() {
                         h(Button, { id: "session-restart-shell", onClick: () => prepare("restart-shell") }, "Restart Nickel"),
                         h(Button, { id: "session-reboot", onClick: () => prepare("reboot") }, "Restart PC"),
                         h(Button, { id: "session-poweroff", onClick: () => prepare("poweroff") }, "Shut down")))),
-            h(Dialog, { id: "session-confirm-dialog", anchor: "session-" + confirming, open: confirming !== null, width: 320, height: 128 },
+            h(Dialog, { id: "session-confirm-dialog", anchor: "session-" + confirming, open: confirming !== null, onClose: () => setConfirming(null), width: 320, height: 128 },
                 h(Column, null,
                     h(Text, null, "Confirm " + (confirming || "action") + "?"),
                     h(Row, null,
