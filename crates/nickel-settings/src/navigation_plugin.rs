@@ -6,7 +6,8 @@ use nickel_i18n::Localizer;
 use nickel_plugin_runtime::JsxRuntime;
 use serde_json::{Value, json};
 
-use crate::{SettingsApp, SettingsPage};
+use crate::{SettingsApp, SettingsMessage, SettingsPage};
+use nickel_ui::SettingsSearchEntry;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Destination {
@@ -15,6 +16,59 @@ pub(super) struct Destination {
     pub(super) title: String,
     pub(super) subtitle: String,
     pub(super) section: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SearchDefinition {
+    target: String,
+    page_label: String,
+    section: String,
+    control: String,
+}
+
+impl SearchDefinition {
+    fn parse(value: &Value) -> Result<Self, String> {
+        if value["kind"] != "settings-search-entry" {
+            return Err("Settings search child must be an entry".into());
+        }
+        let target = text(value, "id")?;
+        if search_message(&target).is_none() {
+            return Err(format!("Unknown Settings search target {target:?}"));
+        }
+        Ok(Self {
+            target,
+            page_label: text(value, "state")?,
+            section: text(value, "value")?,
+            control: text(value, "label")?,
+        })
+    }
+
+    fn entry(self) -> SettingsSearchEntry<SettingsMessage> {
+        let message = search_message(&self.target).expect("validated search target");
+        SettingsSearchEntry::new(
+            self.page_label,
+            self.section,
+            self.control,
+            self.target,
+            message,
+        )
+    }
+}
+
+fn search_message(target: &str) -> Option<SettingsMessage> {
+    let page = match target {
+        "appearance-mode-system"
+        | "appearance-hue"
+        | "appearance-intensity"
+        | "appearance-transparency"
+        | "appearance-animations" => SettingsPage::Appearance,
+        "optional-feature-codex-enabled" | "on-screen-keyboard-mode" => {
+            SettingsPage::OptionalFeatures
+        }
+        "plugins-page" => return Some(SettingsMessage::Navigate(SettingsPage::Plugins)),
+        _ => return None,
+    };
+    Some(SettingsMessage::NavigateTarget(page, target.into()))
 }
 
 impl Destination {
@@ -67,7 +121,7 @@ fn text(value: &Value, key: &str) -> Result<String, String> {
     Ok(text.to_owned())
 }
 
-fn parse_tree(value: &Value) -> Result<Vec<Destination>, String> {
+fn parse_tree(value: &Value) -> Result<(Vec<Destination>, Vec<SearchDefinition>), String> {
     if value.get("kind").and_then(Value::as_str) != Some("settings-navigation") {
         return Err("Settings navigation root is invalid".into());
     }
@@ -75,10 +129,10 @@ fn parse_tree(value: &Value) -> Result<Vec<Destination>, String> {
         .get("children")
         .and_then(Value::as_array)
         .ok_or("Settings navigation has no destinations")?;
-    if children.len() != 11 {
-        return Err("Settings navigation must declare every destination".into());
+    if children.len() != 12 || children[11]["kind"] != "settings-search-index" {
+        return Err("Settings navigation must declare destinations and search".into());
     }
-    let destinations = children
+    let destinations = children[..11]
         .iter()
         .map(Destination::parse)
         .collect::<Result<Vec<_>, _>>()?;
@@ -89,13 +143,33 @@ fn parse_tree(value: &Value) -> Result<Vec<Destination>, String> {
     if unique.len() != destinations.len() {
         return Err("Settings navigation has duplicate destinations".into());
     }
-    Ok(destinations)
+    let search = children[11]["children"]
+        .as_array()
+        .ok_or("Settings search index has no entries")?;
+    if search.len() > 32 {
+        return Err("Settings search index is too large".into());
+    }
+    let definitions = search
+        .iter()
+        .map(SearchDefinition::parse)
+        .collect::<Result<Vec<_>, _>>()?;
+    if definitions
+        .iter()
+        .map(|entry| entry.target.as_str())
+        .collect::<HashSet<_>>()
+        .len()
+        != definitions.len()
+    {
+        return Err("Settings search has duplicate targets".into());
+    }
+    Ok((destinations, definitions))
 }
 
 pub(super) struct NavigationPlugin {
     runtime: JsxRuntime,
     last_data: Option<String>,
     destinations: Vec<Destination>,
+    search: Vec<SearchDefinition>,
 }
 
 impl NavigationPlugin {
@@ -112,6 +186,17 @@ impl NavigationPlugin {
                         + destination.section.capacity()
                 })
                 .sum::<usize>()
+            + self.search.capacity() * std::mem::size_of::<SearchDefinition>()
+            + self
+                .search
+                .iter()
+                .map(|entry| {
+                    entry.target.capacity()
+                        + entry.page_label.capacity()
+                        + entry.section.capacity()
+                        + entry.control.capacity()
+                })
+                .sum::<usize>()
     }
 
     pub(super) fn new() -> Result<Self, String> {
@@ -122,18 +207,30 @@ impl NavigationPlugin {
             )?,
             last_data: None,
             destinations: Vec::new(),
+            search: Vec::new(),
         })
     }
 
-    pub(super) fn render(&mut self, localizer: &Localizer) -> Result<Vec<Destination>, String> {
+    pub(super) fn render(
+        &mut self,
+        localizer: &Localizer,
+    ) -> Result<(Vec<Destination>, Vec<SettingsSearchEntry<SettingsMessage>>), String> {
         let data =
             serde_json::to_string(&projection(localizer)).map_err(|error| error.to_string())?;
         if self.last_data.as_deref() != Some(&data) {
             self.runtime.set_data(&data)?;
-            self.destinations = self.runtime.render("__nickelRender()", parse_tree)?;
+            (self.destinations, self.search) =
+                self.runtime.render("__nickelRender()", parse_tree)?;
             self.last_data = Some(data);
         }
-        Ok(self.destinations.clone())
+        Ok((
+            self.destinations.clone(),
+            self.search
+                .clone()
+                .into_iter()
+                .map(SearchDefinition::entry)
+                .collect(),
+        ))
     }
 }
 
@@ -170,6 +267,15 @@ pub(super) fn projection(localizer: &Localizer) -> Value {
             "personalization":localizer.text("settings-nav-section-personalization"),
             "connectivity":localizer.text("settings-nav-section-connectivity"),
             "support":localizer.text("settings-nav-section-support"),
+        },
+        "search": {
+            "interface":localizer.text("settings-interface-settings"),
+            "mode":localizer.text("settings-appearance-mode"),
+            "automatic":localizer.text("settings-appearance-automatic"),
+            "startingHue":localizer.text("settings-appearance-starting-hue"),
+            "colorIntensity":localizer.text("settings-appearance-color-intensity"),
+            "reduceTransparency":localizer.text("settings-reduce-transparency"),
+            "animations":localizer.text("settings-animations"),
         },
     })
 }
@@ -218,9 +324,87 @@ impl SettingsApp {
             .get_or_insert_with(NavigationPlugin::new)
             .as_mut()
             .map_err(|error| error.clone())
-            .and_then(|plugin| plugin.render(&self.localizer));
+            .and_then(|plugin| plugin.render(&self.localizer).map(|document| document.0));
         result.unwrap_or_else(|_| recovery(&self.localizer))
     }
+
+    pub(super) fn navigation_search_entries(&self) -> Vec<SettingsSearchEntry<SettingsMessage>> {
+        if !self.settings_jsx_enabled {
+            return recovery_search(&self.localizer);
+        }
+        self.navigation_plugin
+            .borrow_mut()
+            .get_or_insert_with(NavigationPlugin::new)
+            .as_mut()
+            .map_err(|error| error.clone())
+            .and_then(|plugin| plugin.render(&self.localizer).map(|document| document.1))
+            .unwrap_or_else(|_| recovery_search(&self.localizer))
+    }
+}
+
+fn recovery_search(localizer: &Localizer) -> Vec<SettingsSearchEntry<SettingsMessage>> {
+    let appearance = localizer.text("settings-nav-appearance");
+    let section = localizer.text("settings-interface-settings");
+    let mut entries = [
+        (
+            "appearance-mode-system",
+            localizer.text("settings-appearance-mode"),
+            localizer.text("settings-appearance-automatic"),
+        ),
+        (
+            "appearance-hue",
+            section.clone(),
+            localizer.text("settings-appearance-starting-hue"),
+        ),
+        (
+            "appearance-intensity",
+            section.clone(),
+            localizer.text("settings-appearance-color-intensity"),
+        ),
+        (
+            "appearance-transparency",
+            section.clone(),
+            localizer.text("settings-reduce-transparency"),
+        ),
+        (
+            "appearance-animations",
+            section,
+            localizer.text("settings-animations"),
+        ),
+    ]
+    .into_iter()
+    .map(|(target, section, control)| {
+        SettingsSearchEntry::new(
+            appearance.clone(),
+            section,
+            control,
+            target,
+            search_message(target).expect("recovery search target"),
+        )
+    })
+    .collect::<Vec<_>>();
+    entries.push(SettingsSearchEntry::new(
+        "Optional Features",
+        "Codex",
+        "Use Codex projects and conversations in Nickel",
+        "optional-feature-codex-enabled",
+        search_message("optional-feature-codex-enabled").unwrap(),
+    ));
+    entries.push(SettingsSearchEntry::new(
+        "Optional Features",
+        "On-screen keyboard",
+        "Screen keyboard · touch keyboard · virtual keyboard",
+        "on-screen-keyboard-mode",
+        search_message("on-screen-keyboard-mode").unwrap(),
+    ));
+    entries.push(SettingsSearchEntry::new(
+        "Plugins",
+        "Plugin memory and permissions",
+        "Enable or disable shell plugins and review their access",
+        "plugins-page",
+        search_message("plugins-page").unwrap(),
+    ));
+    entries
 }
 
 #[cfg(test)]
@@ -230,16 +414,27 @@ mod tests {
     #[test]
     fn jsx_navigation_declares_every_page_once() {
         let mut plugin = NavigationPlugin::new().unwrap();
-        let destinations = plugin.render(&Localizer::system()).unwrap();
+        let (destinations, search) = plugin.render(&Localizer::system()).unwrap();
         assert_eq!(destinations.len(), 11);
         assert_eq!(destinations[0].page, SettingsPage::Display);
         assert_eq!(destinations[8].page, SettingsPage::Plugins);
         assert_eq!(destinations.last().unwrap().page, SettingsPage::About);
         assert_eq!(destinations, recovery(&Localizer::system()));
+        assert_eq!(search, recovery_search(&Localizer::system()));
     }
 
     #[test]
     fn malformed_navigation_cannot_invent_a_page() {
         assert!(Destination::parse(&json!({"kind":"settings-destination","id":"superuser","label":"Root","value":"","children":[{"kind":"settings-header","label":"Root","value":""}]})).is_err());
+        assert!(
+            SearchDefinition::parse(&json!({
+                "kind": "settings-search-entry",
+                "id": "superuser-password",
+                "state": "Security",
+                "value": "Account",
+                "label": "Password"
+            }))
+            .is_err()
+        );
     }
 }

@@ -10,6 +10,7 @@ function Destination(props) {
 }
 
 function App() {
+    const data = nickel.data;
     return <settings-navigation>
         <Destination id="display" section="system" />
         <Destination id="bar" section="personalization" />
@@ -22,5 +23,23 @@ function App() {
         <Destination id="plugins" />
         <Destination id="keyboard-shortcuts" section="support" />
         <Destination id="about" />
+        <settings-search-index>
+            <settings-search-entry id="appearance-mode-system" state={data.labels.appearance}
+                label={data.search.automatic} value={data.search.mode} />
+            <settings-search-entry id="appearance-hue" state={data.labels.appearance}
+                label={data.search.startingHue} value={data.search.interface} />
+            <settings-search-entry id="appearance-intensity" state={data.labels.appearance}
+                label={data.search.colorIntensity} value={data.search.interface} />
+            <settings-search-entry id="appearance-transparency" state={data.labels.appearance}
+                label={data.search.reduceTransparency} value={data.search.interface} />
+            <settings-search-entry id="appearance-animations" state={data.labels.appearance}
+                label={data.search.animations} value={data.search.interface} />
+            <settings-search-entry id="optional-feature-codex-enabled" state={data.labels['optional-features']}
+                label="Use Codex projects and conversations in Nickel" value="Codex" />
+            <settings-search-entry id="on-screen-keyboard-mode" state={data.labels['optional-features']}
+                label="Screen keyboard · touch keyboard · virtual keyboard" value="On-screen keyboard" />
+            <settings-search-entry id="plugins-page" state={data.labels.plugins}
+                label="Enable or disable shell plugins and review their access" value="Plugin memory and permissions" />
+        </settings-search-index>
     </settings-navigation>;
 }

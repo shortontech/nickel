@@ -53,9 +53,6 @@ impl SettingsApp {
                 AnyView::new(PageHeader::new(theme, title, subtitle))
             }
         };
-        let appearance_label = self.localizer.text("settings-nav-appearance");
-        let optional_features_label = "Optional Features".to_owned();
-        let plugins_label = "Plugins".to_owned();
         let palette = self.palette();
         let query = self.sidebar_query.trim().to_lowercase();
         let mut navigation = SettingsNavigation::embedded_header(theme, SIDEBAR_WIDTH as f32)
@@ -68,86 +65,7 @@ impl SettingsApp {
                 sidebar_icon(SidebarIconKind::Search),
             ));
         if !query.is_empty() {
-            let appearance_section = self.localizer.text("settings-interface-settings");
-            let entries = [
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    self.localizer.text("settings-appearance-mode"),
-                    self.localizer.text("settings-appearance-automatic"),
-                    "appearance-mode-system",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-mode-system".into(),
-                    ),
-                ),
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    &appearance_section,
-                    self.localizer.text("settings-appearance-starting-hue"),
-                    "appearance-hue",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-hue".into(),
-                    ),
-                ),
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    &appearance_section,
-                    self.localizer.text("settings-appearance-color-intensity"),
-                    "appearance-intensity",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-intensity".into(),
-                    ),
-                ),
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    &appearance_section,
-                    self.localizer.text("settings-reduce-transparency"),
-                    "appearance-transparency",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-transparency".into(),
-                    ),
-                ),
-                SettingsSearchEntry::new(
-                    &appearance_label,
-                    &appearance_section,
-                    self.localizer.text("settings-animations"),
-                    "appearance-animations",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::Appearance,
-                        "appearance-animations".into(),
-                    ),
-                ),
-                SettingsSearchEntry::new(
-                    &optional_features_label,
-                    "Codex",
-                    "Use Codex projects and conversations in Nickel",
-                    "optional-feature-codex-enabled",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::OptionalFeatures,
-                        "optional-feature-codex-enabled".into(),
-                    ),
-                ),
-                SettingsSearchEntry::new(
-                    &optional_features_label,
-                    "On-screen keyboard",
-                    "Screen keyboard · touch keyboard · virtual keyboard",
-                    "on-screen-keyboard-mode",
-                    SettingsMessage::NavigateTarget(
-                        SettingsPage::OptionalFeatures,
-                        "on-screen-keyboard-mode".into(),
-                    ),
-                ),
-                SettingsSearchEntry::new(
-                    &plugins_label,
-                    "Plugin memory and permissions",
-                    "Enable or disable shell plugins and review their access",
-                    "plugins-page",
-                    SettingsMessage::Navigate(SettingsPage::Plugins),
-                ),
-            ];
+            let entries = self.navigation_search_entries();
             let results = search_settings(&query, &entries);
             if !results.is_empty() {
                 navigation =

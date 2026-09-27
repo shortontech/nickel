@@ -72,9 +72,9 @@ use nickel_ui::{
     NavigationItem, OverlayAnchor, OverlayId, OverlayStyle, PageHeader, Popover, PreviewTile,
     ReadingDirection, ResponsiveNavigation, ResponsiveNavigationDestination, SelectField,
     SemanticControllerAction, SemanticRole, SemanticSelector, SemanticTheme, SettingsCard,
-    SettingsNavigation, SettingsRow, SettingsSearchEntry, SettingsSearchField, SettingsStatus,
-    SettingsStatusKind, Size, SliderField, Surface, SurfaceRole, Switch, SwitchState, TextAlign,
-    UiHost, UiId, ViewContext, search_settings, ui,
+    SettingsNavigation, SettingsRow, SettingsSearchField, SettingsStatus, SettingsStatusKind, Size,
+    SliderField, Surface, SurfaceRole, Switch, SwitchState, TextAlign, UiHost, UiId, ViewContext,
+    search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
 

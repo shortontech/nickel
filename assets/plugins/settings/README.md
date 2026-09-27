@@ -7,10 +7,10 @@ and native recovery controls remain owned by Rust. Settings persists the bundled
 package's enabled state in Nickel's activation settings. Disabling it retires
 its JSX contexts and leaves the native Plugins recovery view available to
 review and re-enable it. The shell activation registry does not yet manage the
-separate Settings process; publishing its process-owned memory account to the
-shell is a remaining migration step.
+separate Settings process.
 The Plugins page reports a measured lower bound for the Settings package's
-retained Rust component trees and cached page projections. Boa heap, textures,
+retained Rust component trees and cached page projections, and the separate
+process publishes that lower bound to the shell while running. Boa heap, textures,
 the shared native Settings frame, and process RSS remain unattributed.
 
 `settings-pages.jsx` starts the bundled Settings process view migration. It
@@ -35,8 +35,9 @@ it after navigation to another page. Building the navigation destinations for
 other pages does not allocate those contexts. The navigation context stays
 alive while Settings is open.
 
-`settings-navigation.jsx` declares destination order, grouping, labels, and
-headers. The native `ResponsiveNavigation` adapter owns focus, responsive
+`settings-navigation.jsx` declares destination order, grouping, labels,
+headers, and searchable controls. The host accepts only known focus targets.
+The native `ResponsiveNavigation` adapter owns focus, responsive
 layout, and the trusted page slots while the remaining page views migrate.
 Rebuild it with the same `tsc` command and its source filename.
 
