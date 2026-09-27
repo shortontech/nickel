@@ -1551,13 +1551,59 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn appearance_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+    fn appearance_frame(
+        &self,
+        theme: nickel_ui::SemanticTheme,
+        content: impl nickel_ui::Component<SettingsMessage>,
+    ) -> AnyView<SettingsMessage> {
+        let mut general = nickel_ui::Column::new().gap(10.0).child(content);
+        if let Some(notice) = self.appearance_notice.as_ref().map(|notice| match notice {
+            AppearanceNotice::Confirmation(message) => SettingsStatus::<SettingsMessage>::new(
+                theme,
+                SettingsStatusKind::Validation,
+                message.clone(),
+            ),
+            AppearanceNotice::Error(message) => SettingsStatus::<SettingsMessage>::new(
+                theme,
+                SettingsStatusKind::Error,
+                message.clone(),
+            ),
+        }) {
+            general = general.child(notice);
+        }
+        AnyView::new(ui! {
+            <Column grow={1.0} padding={Insets {
+                top: 16.0, right: 24.0, bottom: 20.0, left: 20.0,
+            }} gap={10.0}>
+                <VerticalScroll id={"appearance-list"} on_scroll={SettingsMessage::AppearanceScroll}
+                    offset={0.0} theme={theme}>{general}</VerticalScroll>
+            </Column>
+        })
+    }
+
+    pub(super) fn appearance_components(&self) -> AnyView<SettingsMessage> {
         let system = nickel_platform::appearance();
         let appearance = self.shell_settings.resolve_appearance(system);
         let palette = ThemePalette::from_appearance(appearance);
         let theme = self.ui_theme();
         let hue = self.shell_settings.displayed_hue(system);
         let intensity = self.shell_settings.displayed_intensity(system);
+        if self.settings_jsx_enabled {
+            let data = crate::appearance_plugin::projection(self);
+            let plugin_view = self
+                .appearance_page
+                .borrow_mut()
+                .get_or_insert_with(crate::appearance_plugin::AppearancePage::new)
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| {
+                    page.render(&data, theme, appearance, self.wallpaper_preview.as_ref())
+                })
+                .ok();
+            if let Some(plugin_view) = plugin_view {
+                return self.appearance_frame(theme, plugin_view);
+            }
+        }
         let preview = |preview_palette: ThemePalette| {
             Surface::new(theme, SurfaceRole::Raised)
                 .height(82.0)
@@ -1707,18 +1753,7 @@ impl SettingsApp {
                     .child(native_accent_card),
             )
         };
-        let appearance_choices = if self.settings_jsx_enabled {
-            let data = crate::appearance_choices_plugin::projection(self);
-            self.appearance_choices_page
-                .borrow_mut()
-                .get_or_insert_with(crate::appearance_choices_plugin::AppearanceChoicesPage::new)
-                .as_mut()
-                .map_err(|error| error.clone())
-                .and_then(|page| page.render(&data, theme, appearance))
-                .unwrap_or_else(|_| native_choices())
-        } else {
-            native_choices()
-        };
+        let appearance_choices = native_choices();
         let wallpaper_card = SettingsCard::titled(
             theme,
             self.localizer.text("settings-wallpaper-image"),
@@ -1891,13 +1926,7 @@ impl SettingsApp {
             .child(animation_row)
             .child(file_icon_provider_row)
         };
-        let interface_card = self
-            .appearance_choices_page
-            .borrow()
-            .as_ref()
-            .and_then(|page| page.as_ref().ok())
-            .and_then(|page| page.interface_view(theme))
-            .unwrap_or_else(|| AnyView::new(native_interface_card()));
+        let interface_card = native_interface_card();
         let reset = Button::semantic(
             theme,
             SettingsMessage::AppearanceReset,
@@ -1906,39 +1935,19 @@ impl SettingsApp {
         )
         .id("appearance-reset")
         .width(220.0);
-        let appearance_notice = self.appearance_notice.as_ref().map(|notice| match notice {
-            AppearanceNotice::Confirmation(message) => SettingsStatus::<SettingsMessage>::new(
-                theme,
-                SettingsStatusKind::Validation,
-                message.clone(),
-            ),
-            AppearanceNotice::Error(message) => SettingsStatus::<SettingsMessage>::new(
-                theme,
-                SettingsStatusKind::Error,
-                message.clone(),
-            ),
-        });
-        let mut general = nickel_ui::Column::new()
-            .gap(10.0)
-            .child(appearance_choices)
-            .child(wallpaper_card)
-            .child(interface_card)
-            .child(
-                nickel_ui::Row::new()
-                    .justify_content(nickel_ui::Justify::End)
-                    .child(reset),
-            );
-        if let Some(notice) = appearance_notice {
-            general = general.child(notice);
-        }
-        ui! {
-            <Column grow={1.0} padding={Insets {
-                top: 16.0, right: 24.0, bottom: 20.0, left: 20.0,
-            }} gap={10.0}>
-                <VerticalScroll id={"appearance-list"} on_scroll={SettingsMessage::AppearanceScroll}
-                    offset={0.0} theme={theme}>{general}</VerticalScroll>
-            </Column>
-        }
+        self.appearance_frame(
+            theme,
+            nickel_ui::Column::new()
+                .gap(10.0)
+                .child(appearance_choices)
+                .child(wallpaper_card)
+                .child(interface_card)
+                .child(
+                    nickel_ui::Row::new()
+                        .justify_content(nickel_ui::Justify::End)
+                        .child(reset),
+                ),
+        )
     }
 
     pub(super) fn keyboard_shortcuts_components(&self) -> AnyView<SettingsMessage> {

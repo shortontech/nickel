@@ -24,9 +24,8 @@ pub(super) struct SettingsApp {
         std::cell::RefCell<Option<Result<crate::network_plugin::NetworkPage, String>>>,
     pub(super) bluetooth_page:
         std::cell::RefCell<Option<Result<crate::bluetooth_plugin::BluetoothPage, String>>>,
-    pub(super) appearance_choices_page: std::cell::RefCell<
-        Option<Result<crate::appearance_choices_plugin::AppearanceChoicesPage, String>>,
-    >,
+    pub(super) appearance_page:
+        std::cell::RefCell<Option<Result<crate::appearance_plugin::AppearancePage, String>>>,
     pub(super) redraw_requested: Cell<bool>,
     pub(super) displays: Vec<DisplayCard>,
     pub(super) selected: usize,
@@ -233,7 +232,7 @@ impl Default for SettingsApp {
             optional_features_page: std::cell::RefCell::new(None),
             network_page: std::cell::RefCell::new(None),
             bluetooth_page: std::cell::RefCell::new(None),
-            appearance_choices_page: std::cell::RefCell::new(None),
+            appearance_page: std::cell::RefCell::new(None),
             redraw_requested: Cell::new(true),
             displays: displays.clone(),
             selected: 1,

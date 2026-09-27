@@ -3,16 +3,18 @@
 use nickel_core::{
     shell_settings::{AnimationLevel, FileIconPreference, ThemePreference},
     theme::{Appearance, ThemeMode, ThemePalette, accent_from_hue},
+    wallpaper_settings::WallpaperPosition,
 };
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
-    AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, Column,
-    FrameOverlay, Insets, OverlayAnchor, OverlayStyle, Popover, Row, SelectField, SemanticTheme,
-    SettingsCard, SettingsRow, Size, SliderField, Surface, SurfaceRole, Switch, TextField, UiId,
-    ui,
+    Align, AnyView, Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, Column,
+    FrameOverlay, Image, ImageFit, Insets, Justify, OverlayAnchor, OverlayStyle, Popover,
+    PreviewTile, Row, SelectField, SemanticTheme, SettingsCard, SettingsRow, SettingsStatus,
+    SettingsStatusKind, Size, SliderField, Surface, SurfaceRole, Switch, Text, TextField, UiId, ui,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::{SettingsApp, SettingsMessage, SettingsPage};
 
@@ -54,8 +56,40 @@ struct AppearanceTree {
     mode: ModeTree,
     accent: AccentTree,
     dialog: DialogTree,
+    wallpaper: WallpaperTree,
     interface: InterfaceTree,
-    accent_first: bool,
+    reset: ResetTree,
+    order: Vec<AppearanceSection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppearanceSection {
+    Mode,
+    Accent,
+    Wallpaper,
+    Interface,
+    Reset,
+}
+
+#[derive(Clone)]
+struct WallpaperTree {
+    title: String,
+    description: String,
+    name: String,
+    dimensions: String,
+    unavailable: String,
+    status: String,
+    choose_label: String,
+    choose_action: usize,
+    remove_label: String,
+    remove_action: usize,
+    position: SelectTree,
+}
+
+#[derive(Clone)]
+struct ResetTree {
+    label: String,
+    action: usize,
 }
 
 #[derive(Clone)]
@@ -98,6 +132,213 @@ struct SelectOption {
     label: String,
     selected: bool,
     action: usize,
+}
+
+impl WallpaperTree {
+    fn parse(value: &Value) -> Result<Self, String> {
+        if value.get("kind").and_then(Value::as_str) != Some("settings-wallpaper")
+            || value.get("id").and_then(Value::as_str) != Some("appearance-wallpaper-card")
+        {
+            return Err("Appearance wallpaper card is invalid".into());
+        }
+        let children = value
+            .get("children")
+            .and_then(Value::as_array)
+            .ok_or("Wallpaper controls are missing")?;
+        if children.len() != 4
+            || children[0].get("kind").and_then(Value::as_str) != Some("settings-wallpaper-preview")
+            || children[0].get("id").and_then(Value::as_str) != Some("appearance-wallpaper-preview")
+            || children[1].get("kind").and_then(Value::as_str) != Some("settings-button")
+            || children[1].get("id").and_then(Value::as_str) != Some("appearance-wallpaper-choose")
+            || children[2].get("kind").and_then(Value::as_str) != Some("settings-button")
+            || children[2].get("id").and_then(Value::as_str) != Some("appearance-wallpaper-remove")
+        {
+            return Err("Wallpaper controls are invalid".into());
+        }
+        let position = SelectTree::parse(&children[3])?;
+        if position.id != "appearance-wallpaper-position"
+            || position.options.len() != 6
+            || position
+                .options
+                .iter()
+                .filter(|option| option.selected)
+                .count()
+                != 1
+            || ["fill", "fit", "stretch", "center", "tile", "span"]
+                .iter()
+                .any(|id| {
+                    position
+                        .options
+                        .iter()
+                        .filter(|option| option.id == format!("appearance-wallpaper-position-{id}"))
+                        .count()
+                        != 1
+                })
+        {
+            return Err("Wallpaper position choices are invalid".into());
+        }
+        Ok(Self {
+            title: text(value, "label")?,
+            description: text(value, "value")?,
+            name: text(&children[0], "label")?,
+            dimensions: text(&children[0], "value")?,
+            unavailable: text(&children[0], "placeholder")?,
+            status: text(&children[0], "state")?,
+            choose_label: text(&children[1], "label")?,
+            choose_action: action(&children[1])?,
+            remove_label: text(&children[2], "label")?,
+            remove_action: action(&children[2])?,
+            position,
+        })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.title.capacity()
+            + self.description.capacity()
+            + self.name.capacity()
+            + self.dimensions.capacity()
+            + self.unavailable.capacity()
+            + self.status.capacity()
+            + self.choose_label.capacity()
+            + self.remove_label.capacity()
+            + self.position.id.capacity()
+            + self.position.label.capacity()
+            + self.position.description.capacity()
+            + self.position.value_label.capacity()
+            + self.position.options.capacity() * std::mem::size_of::<SelectOption>()
+            + self
+                .position
+                .options
+                .iter()
+                .map(|option| option.id.capacity() + option.label.capacity())
+                .sum::<usize>()
+    }
+
+    fn view(
+        &self,
+        theme: SemanticTheme,
+        preview: Option<&Arc<image::RgbaImage>>,
+    ) -> AnyView<SettingsMessage> {
+        let image = preview
+            .map(|image| {
+                PreviewTile::new(
+                    theme,
+                    Image::new(1, image.clone())
+                        .fit(ImageFit::Cover)
+                        .width(124.0)
+                        .height(96.0),
+                )
+            })
+            .unwrap_or_else(|| PreviewTile::unavailable(theme, &self.unavailable))
+            .width(124.0)
+            .height(96.0);
+        let mut details = Column::new()
+            .grow(1.0)
+            .gap(8.0)
+            .child(Text::new(&self.name).color(theme.text.primary));
+        if !self.dimensions.is_empty() {
+            details = details.child(Text::new(&self.dimensions).color(theme.text.secondary));
+        }
+        details = details.child(
+            Row::new()
+                .gap(10.0)
+                .child(
+                    Button::semantic(
+                        theme,
+                        SettingsMessage::AppearanceJsxAction(self.choose_action),
+                        &self.choose_label,
+                        ButtonPresentation::Primary,
+                    )
+                    .id("appearance-wallpaper-choose")
+                    .width(168.0),
+                )
+                .child(
+                    Button::semantic(
+                        theme,
+                        SettingsMessage::AppearanceJsxAction(self.remove_action),
+                        &self.remove_label,
+                        ButtonPresentation::Secondary,
+                    )
+                    .id("appearance-wallpaper-remove")
+                    .width(100.0),
+                ),
+        );
+        if !self.status.is_empty() {
+            details = details.child(SettingsStatus::new(
+                theme,
+                SettingsStatusKind::Error,
+                &self.status,
+            ));
+        }
+        let options = self.position.options.iter().map(|option| {
+            (
+                option.label.as_str(),
+                SettingsMessage::AppearanceJsxAction(option.action),
+            )
+        });
+        AnyView::new(
+            SettingsCard::titled(theme, &self.title, &self.description)
+                .id("appearance-wallpaper-card")
+                .child(
+                    Row::new()
+                        .gap(14.0)
+                        .align_items(Align::Center)
+                        .child(image)
+                        .child(details),
+                )
+                .child(
+                    SelectField::new(
+                        theme,
+                        &self.position.label,
+                        &self.position.description,
+                        SettingsMessage::AppearanceJsxAction(self.position.toggle_action),
+                        &self.position.value_label,
+                        options,
+                        self.position.expanded,
+                    )
+                    .id("appearance-wallpaper-position"),
+                ),
+        )
+    }
+
+    #[cfg(test)]
+    fn action_for_id(&self, id: &str) -> Option<usize> {
+        match id {
+            "appearance-wallpaper-choose" => Some(self.choose_action),
+            "appearance-wallpaper-remove" => Some(self.remove_action),
+            _ => self.position.action_for_id(id),
+        }
+    }
+}
+
+impl ResetTree {
+    fn parse(value: &Value) -> Result<Self, String> {
+        if value.get("kind").and_then(Value::as_str) != Some("settings-reset")
+            || value.get("id").and_then(Value::as_str) != Some("appearance-reset")
+        {
+            return Err("Appearance reset control is invalid".into());
+        }
+        Ok(Self {
+            label: text(value, "label")?,
+            action: action(value)?,
+        })
+    }
+
+    fn view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
+        AnyView::new(
+            Row::new().justify_content(Justify::End).child(
+                Button::semantic(
+                    theme,
+                    SettingsMessage::AppearanceJsxAction(self.action),
+                    &self.label,
+                    ButtonPresentation::Secondary,
+                )
+                .id("appearance-reset")
+                .width(220.0),
+            ),
+        )
+    }
 }
 
 impl InterfaceTree {
@@ -235,12 +476,12 @@ impl InterfaceControl {
                     theme,
                     &control.label,
                     &control.description,
-                    SettingsMessage::AppearanceChoicesJsxAction(control.toggle_action),
+                    SettingsMessage::AppearanceJsxAction(control.toggle_action),
                     &control.value_label,
                     control.options.iter().map(|option| {
                         (
                             option.label.as_str(),
-                            SettingsMessage::AppearanceChoicesJsxAction(option.action),
+                            SettingsMessage::AppearanceJsxAction(option.action),
                         )
                     }),
                     control.expanded,
@@ -256,17 +497,7 @@ impl InterfaceControl {
             Self::Transparency(control) => {
                 (id == "appearance-transparency").then_some(control.action)
             }
-            Self::Select(control) => {
-                (id == control.id)
-                    .then_some(control.toggle_action)
-                    .or_else(|| {
-                        control
-                            .options
-                            .iter()
-                            .find(|option| option.id == id)
-                            .map(|option| option.action)
-                    })
-            }
+            Self::Select(control) => control.action_for_id(id),
         }
     }
 }
@@ -298,7 +529,10 @@ impl SliderTree {
 impl SelectTree {
     fn parse(value: &Value) -> Result<Self, String> {
         let id = text(value, "id")?;
-        if id != "appearance-animations" && id != "appearance-file-artwork" {
+        if id != "appearance-animations"
+            && id != "appearance-file-artwork"
+            && id != "appearance-wallpaper-position"
+        {
             return Err("Appearance select ID is invalid".into());
         }
         let children = value
@@ -348,16 +582,25 @@ impl SelectTree {
             options,
         })
     }
+
+    fn action_for_id(&self, id: &str) -> Option<usize> {
+        (id == self.id).then_some(self.toggle_action).or_else(|| {
+            self.options
+                .iter()
+                .find(|option| option.id == id)
+                .map(|option| option.action)
+        })
+    }
 }
 
 fn appearance_jsx_hue_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::AppearanceChoicesJsxHue(
-        (fraction.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16,
+    SettingsMessage::AppearanceJsxHue(
+        (fraction.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
     )
 }
 
 fn appearance_jsx_intensity_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::AppearanceChoicesJsxIntensity(
+    SettingsMessage::AppearanceJsxIntensity(
         (fraction.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16,
     )
 }
@@ -409,7 +652,7 @@ impl TransparencyTree {
                     } else {
                         nickel_ui::SwitchState::Off
                     },
-                    Some(SettingsMessage::AppearanceChoicesJsxAction(self.action)),
+                    Some(SettingsMessage::AppearanceJsxAction(self.action)),
                     theme,
                 )
                 .id("appearance-transparency")
@@ -497,7 +740,7 @@ impl DialogTree {
                         TextField::on_change_with_placeholder_mapped(
                             &self.draft,
                             &self.input_placeholder,
-                            move |value| SettingsMessage::AppearanceChoicesJsxInput(action, value),
+                            move |value| SettingsMessage::AppearanceJsxInput(action, value),
                         )
                         .id("appearance-custom-hue-input"),
                     ),
@@ -508,7 +751,7 @@ impl DialogTree {
                         .child(
                             Button::semantic(
                                 theme,
-                                SettingsMessage::AppearanceChoicesJsxAction(self.apply_action),
+                                SettingsMessage::AppearanceJsxAction(self.apply_action),
                                 &self.apply_label,
                                 ButtonPresentation::Primary,
                             )
@@ -517,7 +760,7 @@ impl DialogTree {
                         .child(
                             Button::semantic(
                                 theme,
-                                SettingsMessage::AppearanceChoicesJsxAction(self.cancel_action),
+                                SettingsMessage::AppearanceJsxAction(self.cancel_action),
                                 &self.cancel_label,
                                 ButtonPresentation::Secondary,
                             )
@@ -540,35 +783,50 @@ impl DialogTree {
 
 impl AppearanceTree {
     fn parse(value: &Value) -> Result<Self, String> {
-        if value.get("kind").and_then(Value::as_str) != Some("settings-appearance-choices") {
+        if value.get("kind").and_then(Value::as_str) != Some("settings-appearance-page") {
             return Err("Appearance choices root is invalid".into());
         }
         let children = value
             .get("children")
             .and_then(Value::as_array)
             .ok_or("Appearance choice cards are missing")?;
-        if children.len() != 4 {
-            return Err("Appearance needs mode, accent, dialog, and interface components".into());
+        if children.len() != 6 {
+            return Err("Appearance needs six page components".into());
         }
-        let accent_first =
-            children[0].get("kind").and_then(Value::as_str) == Some("settings-accent-choices");
-        let (mode, accent) = if accent_first {
-            (
-                ModeTree::parse(&children[1])?,
-                AccentTree::parse(&children[0])?,
-            )
-        } else {
-            (
-                ModeTree::parse(&children[0])?,
-                AccentTree::parse(&children[1])?,
-            )
+        let find = |kind: &str| -> Result<&Value, String> {
+            let mut matches = children
+                .iter()
+                .filter(|child| child.get("kind").and_then(Value::as_str) == Some(kind));
+            let found = matches
+                .next()
+                .ok_or_else(|| format!("Appearance {kind} is missing"))?;
+            if matches.next().is_some() {
+                return Err(format!("Appearance {kind} is duplicated"));
+            }
+            Ok(found)
         };
+        let order = children
+            .iter()
+            .filter_map(|child| match child.get("kind").and_then(Value::as_str) {
+                Some("settings-appearance-modes") => Some(AppearanceSection::Mode),
+                Some("settings-accent-choices") => Some(AppearanceSection::Accent),
+                Some("settings-wallpaper") => Some(AppearanceSection::Wallpaper),
+                Some("settings-interface") => Some(AppearanceSection::Interface),
+                Some("settings-reset") => Some(AppearanceSection::Reset),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if order.len() != 5 {
+            return Err("Appearance page component order is invalid".into());
+        }
         Ok(Self {
-            mode,
-            accent,
-            dialog: DialogTree::parse(&children[2])?,
-            interface: InterfaceTree::parse(&children[3])?,
-            accent_first,
+            mode: ModeTree::parse(find("settings-appearance-modes")?)?,
+            accent: AccentTree::parse(find("settings-accent-choices")?)?,
+            dialog: DialogTree::parse(find("settings-hue-dialog")?)?,
+            wallpaper: WallpaperTree::parse(find("settings-wallpaper")?)?,
+            interface: InterfaceTree::parse(find("settings-interface")?)?,
+            reset: ResetTree::parse(find("settings-reset")?)?,
+            order,
         })
     }
 
@@ -576,24 +834,31 @@ impl AppearanceTree {
         self.mode.retained_bytes()
             + self.accent.retained_bytes()
             + self.dialog.retained_bytes()
+            + self.wallpaper.retained_bytes()
             + self.interface.retained_bytes()
+            + self.reset.label.capacity()
+            + self.order.capacity() * std::mem::size_of::<AppearanceSection>()
     }
 
-    fn view(&self, theme: SemanticTheme, appearance: Appearance) -> AnyView<SettingsMessage> {
-        let (first, second) = if self.accent_first {
-            (self.accent.view(theme), self.mode.view(theme, appearance))
-        } else {
-            (self.mode.view(theme, appearance), self.accent.view(theme))
-        };
-        AnyView::new(Column::new().gap(10.0).child(first).child(second))
+    fn view(
+        &self,
+        theme: SemanticTheme,
+        appearance: Appearance,
+        wallpaper_preview: Option<&Arc<image::RgbaImage>>,
+    ) -> AnyView<SettingsMessage> {
+        AnyView::new(Column::new().gap(10.0).children(self.order.iter().map(
+            |section| match section {
+                AppearanceSection::Mode => self.mode.view(theme, appearance),
+                AppearanceSection::Accent => self.accent.view(theme),
+                AppearanceSection::Wallpaper => self.wallpaper.view(theme, wallpaper_preview),
+                AppearanceSection::Interface => self.interface.view(theme),
+                AppearanceSection::Reset => self.reset.view(theme),
+            },
+        )))
     }
 
     fn dialog_view(&self, theme: SemanticTheme) -> Option<AnyView<SettingsMessage>> {
         self.dialog.open.then(|| self.dialog.view(theme))
-    }
-
-    fn interface_view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
-        self.interface.view(theme)
     }
 
     #[cfg(test)]
@@ -601,7 +866,9 @@ impl AppearanceTree {
         self.mode
             .action_for_id(id)
             .or_else(|| self.dialog.action_for_id(id))
+            .or_else(|| self.wallpaper.action_for_id(id))
             .or_else(|| self.interface.action_for_id(id))
+            .or_else(|| (id == "appearance-reset").then_some(self.reset.action))
             .or_else(|| {
                 self.accent
                     .swatches
@@ -696,7 +963,7 @@ impl AccentTree {
             .swatches
             .iter()
             .map(|swatch| {
-                let message = SettingsMessage::AppearanceChoicesJsxAction(swatch.action);
+                let message = SettingsMessage::AppearanceJsxAction(swatch.action);
                 if swatch.custom {
                     ColorSwatch::custom(theme, message).id(swatch.id.as_str())
                 } else {
@@ -833,7 +1100,7 @@ impl ModeTree {
             };
                     ChoiceCard::new(
                         theme,
-                        SettingsMessage::AppearanceChoicesJsxAction(choice.action),
+                        SettingsMessage::AppearanceJsxAction(choice.action),
                         &choice.label,
                         choice.selected,
                         picture,
@@ -868,19 +1135,17 @@ fn text(value: &Value, key: &str) -> Result<String, String> {
     Ok(text.into())
 }
 
-pub(super) struct AppearanceChoicesPage {
+pub(super) struct AppearancePage {
     runtime: JsxRuntime,
     last_data: Option<String>,
     tree: Option<AppearanceTree>,
 }
 
-impl AppearanceChoicesPage {
+impl AppearancePage {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
             runtime: JsxRuntime::new(
-                crate::settings_package::source(
-                    crate::settings_package::Script::AppearanceChoices,
-                )?,
+                crate::settings_package::source(crate::settings_package::Script::Appearance)?,
                 None,
             )?,
             last_data: None,
@@ -898,6 +1163,7 @@ impl AppearanceChoicesPage {
         data: &Value,
         theme: SemanticTheme,
         appearance: Appearance,
+        wallpaper_preview: Option<&Arc<image::RgbaImage>>,
     ) -> Result<AnyView<SettingsMessage>, String> {
         let serialized = serde_json::to_string(data).map_err(|error| error.to_string())?;
         if self.last_data.as_deref() != Some(&serialized) {
@@ -912,15 +1178,11 @@ impl AppearanceChoicesPage {
             .tree
             .as_ref()
             .ok_or("Appearance choices are unavailable")?
-            .view(theme, appearance))
+            .view(theme, appearance, wallpaper_preview))
     }
 
     pub(super) fn dialog_view(&self, theme: SemanticTheme) -> Option<AnyView<SettingsMessage>> {
         self.tree.as_ref()?.dialog_view(theme)
-    }
-
-    pub(super) fn interface_view(&self, theme: SemanticTheme) -> Option<AnyView<SettingsMessage>> {
-        Some(self.tree.as_ref()?.interface_view(theme))
     }
 
     fn action_for_control(&self, id: &str) -> Option<usize> {
@@ -984,6 +1246,11 @@ enum AppearanceRequest {
     Animation { value: String },
     ToggleFileArtworkSelect,
     FileArtwork { value: String },
+    WallpaperChoose,
+    WallpaperRemove,
+    ToggleWallpaperPosition,
+    WallpaperPosition { value: String },
+    AppearanceReset,
 }
 
 fn validate_request(request: AppearanceRequest, data: &Value) -> Result<SettingsMessage, String> {
@@ -1091,6 +1358,36 @@ fn validate_request(request: AppearanceRequest, data: &Value) -> Result<Settings
                 Ok(SettingsMessage::SetFileIconTheme(theme.to_owned()))
             }
         },
+        AppearanceRequest::WallpaperChoose => {
+            if data.get("wallpaperDialogPending").and_then(Value::as_bool) != Some(false) {
+                return Err("Wallpaper chooser is already open".into());
+            }
+            Ok(SettingsMessage::WallpaperChoose)
+        }
+        AppearanceRequest::WallpaperRemove => Ok(SettingsMessage::WallpaperRemove),
+        AppearanceRequest::ToggleWallpaperPosition => {
+            Ok(SettingsMessage::ToggleWallpaperPositionSelect)
+        }
+        AppearanceRequest::WallpaperPosition { value } => {
+            if data
+                .get("wallpaperPositionExpanded")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                return Err("Wallpaper position choices are closed".into());
+            }
+            let position = match value.as_str() {
+                "fill" => WallpaperPosition::Fill,
+                "fit" => WallpaperPosition::Fit,
+                "stretch" => WallpaperPosition::Stretch,
+                "center" => WallpaperPosition::Center,
+                "tile" => WallpaperPosition::Tile,
+                "span" => WallpaperPosition::Span,
+                _ => return Err("Wallpaper position is invalid".into()),
+            };
+            Ok(SettingsMessage::WallpaperPosition(position))
+        }
+        AppearanceRequest::AppearanceReset => Ok(SettingsMessage::AppearanceReset),
     }
 }
 
@@ -1146,7 +1443,33 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
             |theme| json!({"id":format!("theme:{theme}"),"label":format!("System — {theme}")}),
         ),
     );
-    json!({
+    let wallpaper_positions = [
+        ("fill", "settings-wallpaper-fill"),
+        ("fit", "settings-wallpaper-fit"),
+        ("stretch", "settings-wallpaper-stretch"),
+        ("center", "settings-wallpaper-center"),
+        ("tile", "settings-wallpaper-tile"),
+        ("span", "settings-wallpaper-span"),
+    ]
+    .into_iter()
+    .map(|(id, key)| json!({"id":id,"label":app.localizer.text(key)}))
+    .collect::<Vec<_>>();
+    let wallpaper_position_id = match app.wallpaper_settings.position {
+        WallpaperPosition::Fill => "fill",
+        WallpaperPosition::Fit => "fit",
+        WallpaperPosition::Stretch => "stretch",
+        WallpaperPosition::Center => "center",
+        WallpaperPosition::Tile => "tile",
+        WallpaperPosition::Span => "span",
+    };
+    let wallpaper_name = app
+        .wallpaper_settings
+        .image
+        .as_deref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| app.localizer.text("settings-wallpaper-none"));
+    let mut page = json!({
         "title":app.localizer.text("settings-appearance-mode"),
         "description":app.localizer.text("settings-appearance-mode-description"),
         "light":app.localizer.text("settings-appearance-light"),
@@ -1195,32 +1518,66 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         "fileArtworkId":file_artwork_id,
         "fileArtworkExpanded":app.file_icon_provider_select_expanded,
         "fileArtworkOptions":file_artwork_options,
-    })
+    });
+    let wallpaper = json!({
+        "wallpaperTitle":app.localizer.text("settings-wallpaper-image"),
+        "wallpaperDescription":app.localizer.text("settings-wallpaper-description"),
+        "wallpaperName":wallpaper_name,
+        "wallpaperDimensions":app.wallpaper_dimensions.map_or_else(String::new, |(width,height)| format!("{width} × {height}")),
+        "wallpaperNone":app.localizer.text("settings-wallpaper-none"),
+        "wallpaperStatus":app.wallpaper_status.as_deref().unwrap_or("").chars().take(256).collect::<String>(),
+        "wallpaperChoose":app.localizer.text("settings-wallpaper-choose"),
+        "wallpaperRemove":app.localizer.text("settings-wallpaper-remove"),
+        "wallpaperFitTitle":app.localizer.text("settings-wallpaper-fit-label"),
+        "wallpaperFitDescription":app.localizer.text("settings-wallpaper-fit-description"),
+        "wallpaperPositionId":wallpaper_position_id,
+        "wallpaperPositionValue":app.localizer.text(match app.wallpaper_settings.position {
+            WallpaperPosition::Fill => "settings-wallpaper-fill",
+            WallpaperPosition::Fit => "settings-wallpaper-fit",
+            WallpaperPosition::Stretch => "settings-wallpaper-stretch",
+            WallpaperPosition::Center => "settings-wallpaper-center",
+            WallpaperPosition::Tile => "settings-wallpaper-tile",
+            WallpaperPosition::Span => "settings-wallpaper-span",
+        }),
+        "wallpaperPositionExpanded":app.wallpaper_position_select_expanded,
+        "wallpaperDialogPending":app.wallpaper_dialog_rx.is_some(),
+        "wallpaperPositions":wallpaper_positions,
+        "resetLabel":app.localizer.text("settings-appearance-reset"),
+    });
+    page.as_object_mut()
+        .expect("Appearance projection is an object")
+        .extend(
+            wallpaper
+                .as_object()
+                .expect("Wallpaper projection is an object")
+                .clone(),
+        );
+    page
 }
 
 impl SettingsApp {
     pub(super) fn handle_appearance_jsx_slider(&mut self, id: &str, position: u16) {
         let action = self
-            .appearance_choices_page
+            .appearance_page
             .borrow()
             .as_ref()
             .and_then(|page| page.as_ref().ok())
             .and_then(|page| page.action_for_control(id));
         if let Some(action) = action {
-            self.handle_appearance_choices_jsx_action(
+            self.handle_appearance_jsx_action(
                 action,
                 Value::from(f32::from(position) / f32::from(u16::MAX)),
             );
         }
     }
 
-    pub(super) fn handle_appearance_choices_jsx_action(&mut self, index: usize, value: Value) {
+    pub(super) fn handle_appearance_jsx_action(&mut self, index: usize, value: Value) {
         if self.page != SettingsPage::Appearance {
             return;
         }
         let data = projection(self);
         let result = self
-            .appearance_choices_page
+            .appearance_page
             .borrow_mut()
             .as_mut()
             .ok_or_else(|| "Appearance choices are not loaded".to_owned())
@@ -1230,7 +1587,7 @@ impl SettingsApp {
             Ok(message) => self.handle_settings_message(message),
             Err(error) => {
                 if error != STALE_STATUS {
-                    *self.appearance_choices_page.borrow_mut() = Some(Err(error));
+                    *self.appearance_page.borrow_mut() = Some(Err(error));
                 }
                 self.request_redraw();
             }
@@ -1243,7 +1600,7 @@ impl SettingsApp {
         }
         let theme = self.ui_theme();
         let content = self
-            .appearance_choices_page
+            .appearance_page
             .borrow()
             .as_ref()
             .and_then(|page| page.as_ref().ok())
@@ -1382,13 +1739,36 @@ mod tests {
                     {"kind":"settings-option","id":"appearance-file-artwork-option-0","label":"Nickel","selected":true,"action":16},
                     {"kind":"settings-option","id":"appearance-file-artwork-option-1","label":"System","selected":false,"action":17}
                 ]}
+            ]});
+        let wallpaper = json!({"kind":"settings-wallpaper","id":"appearance-wallpaper-card",
+        "label":"Wallpaper","value":"Description","children":[
+            {"kind":"settings-wallpaper-preview","id":"appearance-wallpaper-preview","label":"None","value":"","placeholder":"None","state":""},
+            {"kind":"settings-button","id":"appearance-wallpaper-choose","label":"Choose","action":18},
+            {"kind":"settings-button","id":"appearance-wallpaper-remove","label":"Remove","action":19},
+            {"kind":"settings-select","id":"appearance-wallpaper-position","label":"Fit","placeholder":"Description","value":"Fill","open":false,"action":20,
+                "children":[
+                    {"kind":"settings-option","id":"appearance-wallpaper-position-fill","label":"Fill","selected":true,"action":21},
+                    {"kind":"settings-option","id":"appearance-wallpaper-position-fit","label":"Fit","selected":false,"action":22},
+                    {"kind":"settings-option","id":"appearance-wallpaper-position-stretch","label":"Stretch","selected":false,"action":23},
+                    {"kind":"settings-option","id":"appearance-wallpaper-position-center","label":"Center","selected":false,"action":24},
+                    {"kind":"settings-option","id":"appearance-wallpaper-position-tile","label":"Tile","selected":false,"action":25},
+                    {"kind":"settings-option","id":"appearance-wallpaper-position-span","label":"Span","selected":false,"action":26}
+                ]}
         ]});
-        let root = json!({"kind":"settings-appearance-choices",
-            "children":[accents, modes, dialog, interface]});
+        let reset =
+            json!({"kind":"settings-reset","id":"appearance-reset","label":"Reset","action":27});
+        let root = json!({"kind":"settings-appearance-page",
+            "children":[wallpaper, interface, accents, modes, dialog, reset]});
         let tree = AppearanceTree::parse(&root).unwrap();
-        assert!(tree.accent_first);
+        assert_eq!(tree.order[0], AppearanceSection::Wallpaper);
+        assert_eq!(tree.order[1], AppearanceSection::Interface);
+        assert_eq!(tree.order[2], AppearanceSection::Accent);
         assert_eq!(tree.action_for_id("appearance-accent-224"), Some(3));
         assert_eq!(tree.action_for_id("appearance-transparency"), Some(10));
+        assert_eq!(
+            tree.action_for_id("appearance-wallpaper-position-fit"),
+            Some(22)
+        );
     }
 
     #[test]
@@ -1396,8 +1776,8 @@ mod tests {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.shell_settings.theme = ThemePreference::Light;
         let data = projection(&app);
-        let mut page = AppearanceChoicesPage::new().unwrap();
-        page.render(&data, app.ui_theme(), nickel_platform::appearance())
+        let mut page = AppearancePage::new().unwrap();
+        page.render(&data, app.ui_theme(), nickel_platform::appearance(), None)
             .unwrap();
         let action = page.action_for_id("appearance-mode-dark").unwrap();
         assert_eq!(
@@ -1417,8 +1797,8 @@ mod tests {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.shell_settings.accent_hue = Some(224);
         let data = projection(&app);
-        let mut page = AppearanceChoicesPage::new().unwrap();
-        page.render(&data, app.ui_theme(), nickel_platform::appearance())
+        let mut page = AppearancePage::new().unwrap();
+        page.render(&data, app.ui_theme(), nickel_platform::appearance(), None)
             .unwrap();
         let action = page.action_for_id("appearance-accent-188").unwrap();
         assert_eq!(
@@ -1439,8 +1819,8 @@ mod tests {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.shell_settings.reduce_transparency = false;
         let data = projection(&app);
-        let mut page = AppearanceChoicesPage::new().unwrap();
-        page.render(&data, app.ui_theme(), nickel_platform::appearance())
+        let mut page = AppearancePage::new().unwrap();
+        page.render(&data, app.ui_theme(), nickel_platform::appearance(), None)
             .unwrap();
         let action = page.action_for_id("appearance-transparency").unwrap();
         assert_eq!(
@@ -1491,6 +1871,46 @@ mod tests {
         assert_eq!(
             validate_request(AppearanceRequest::AppearanceHue { fraction: 0.5 }, &data).unwrap(),
             SettingsMessage::SetAppearanceHue(180)
+        );
+    }
+
+    #[test]
+    fn wallpaper_requests_require_current_menu_and_chooser_state() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let closed = projection(&app);
+        assert!(
+            validate_request(
+                AppearanceRequest::WallpaperPosition {
+                    value: "tile".into()
+                },
+                &closed,
+            )
+            .is_err()
+        );
+        app.wallpaper_position_select_expanded = true;
+        let open = projection(&app);
+        assert_eq!(
+            validate_request(
+                AppearanceRequest::WallpaperPosition {
+                    value: "tile".into()
+                },
+                &open,
+            )
+            .unwrap(),
+            SettingsMessage::WallpaperPosition(WallpaperPosition::Tile)
+        );
+        assert!(
+            validate_request(
+                AppearanceRequest::WallpaperPosition {
+                    value: "other".into()
+                },
+                &open,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            validate_request(AppearanceRequest::WallpaperChoose, &open).unwrap(),
+            SettingsMessage::WallpaperChoose
         );
     }
 }

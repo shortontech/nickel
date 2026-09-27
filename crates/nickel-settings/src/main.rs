@@ -1,6 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod appearance_choices_plugin;
+mod appearance_plugin;
 mod bar_plugin;
 mod bluetooth_plugin;
 mod cli;
@@ -555,10 +555,10 @@ enum SettingsMessage {
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
-    AppearanceChoicesJsxAction(usize),
-    AppearanceChoicesJsxInput(usize, String),
-    AppearanceChoicesJsxHue(u16),
-    AppearanceChoicesJsxIntensity(u16),
+    AppearanceJsxAction(usize),
+    AppearanceJsxInput(usize, String),
+    AppearanceJsxHue(u16),
+    AppearanceJsxIntensity(u16),
     OpenCustomHue,
     CustomHueDraftChanged(String),
     ApplyCustomHue(String),
@@ -1116,7 +1116,7 @@ impl SettingsApp {
         self.optional_features_page.get_mut().take();
         self.network_page.get_mut().take();
         self.bluetooth_page.get_mut().take();
-        self.appearance_choices_page.get_mut().take();
+        self.appearance_page.get_mut().take();
         if self.custom_hue_open {
             self.pending_transient_dismissal = Some(OverlayId::new("appearance-custom-hue-dialog"));
         }
@@ -1191,14 +1191,11 @@ impl SettingsApp {
                 .map_or(0, bluetooth_plugin::BluetoothPage::retained_bytes);
         let total = total
             + self
-                .appearance_choices_page
+                .appearance_page
                 .borrow()
                 .as_ref()
                 .and_then(|page| page.as_ref().ok())
-                .map_or(
-                    0,
-                    appearance_choices_plugin::AppearanceChoicesPage::retained_bytes,
-                );
+                .map_or(0, appearance_plugin::AppearancePage::retained_bytes);
         let total = u64::try_from(total).unwrap_or(u64::MAX);
         self.settings_jsx_peak_bytes
             .set(self.settings_jsx_peak_bytes.get().max(total));
@@ -1450,7 +1447,7 @@ impl SettingsApp {
             self.bluetooth_page.get_mut().take();
         }
         if page != SettingsPage::Appearance {
-            self.appearance_choices_page.get_mut().take();
+            self.appearance_page.get_mut().take();
             if self.custom_hue_open {
                 self.pending_transient_dismissal =
                     Some(OverlayId::new("appearance-custom-hue-dialog"));
@@ -1670,16 +1667,16 @@ impl SettingsApp {
                 self.shell_settings.theme = ThemePreference::System;
                 self.persist_appearance();
             }
-            SettingsMessage::AppearanceChoicesJsxAction(index) => {
-                self.handle_appearance_choices_jsx_action(index, serde_json::Value::Null);
+            SettingsMessage::AppearanceJsxAction(index) => {
+                self.handle_appearance_jsx_action(index, serde_json::Value::Null);
             }
-            SettingsMessage::AppearanceChoicesJsxInput(index, value) => {
-                self.handle_appearance_choices_jsx_action(index, serde_json::Value::String(value));
+            SettingsMessage::AppearanceJsxInput(index, value) => {
+                self.handle_appearance_jsx_action(index, serde_json::Value::String(value));
             }
-            SettingsMessage::AppearanceChoicesJsxHue(position) => {
+            SettingsMessage::AppearanceJsxHue(position) => {
                 self.handle_appearance_jsx_slider("appearance-hue", position);
             }
-            SettingsMessage::AppearanceChoicesJsxIntensity(position) => {
+            SettingsMessage::AppearanceJsxIntensity(position) => {
                 self.handle_appearance_jsx_slider("appearance-intensity", position);
             }
             SettingsMessage::OpenCustomHue => {
@@ -1743,6 +1740,9 @@ impl SettingsApp {
                 self.set_appearance_intensity(intensity);
             }
             SettingsMessage::WallpaperChoose => {
+                if self.wallpaper_dialog_rx.is_some() {
+                    return;
+                }
                 let (sender, receiver) = mpsc::channel();
                 match nickel_platform::choose_image_file(Box::new(move |outcome| {
                     let _ = sender.send(outcome);
@@ -3180,7 +3180,7 @@ mod tests {
         FeatureInstallation, FeatureSupport, FileIconPreference, NetworkAdapter,
         OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
         SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
-        WallpaperSettings, WifiNetwork, codex_feature_state, constrain_center,
+        WallpaperPosition, WallpaperSettings, WifiNetwork, codex_feature_state, constrain_center,
         resolve_codex_feature_state, separate_overlapping_display_cards,
         shell_behavior_transaction, snap_rect,
     };
@@ -3205,7 +3205,7 @@ mod tests {
     }
 
     fn appearance_choice_action(app: &SettingsApp, id: &str) -> usize {
-        app.appearance_choices_page
+        app.appearance_page
             .borrow()
             .as_ref()
             .and_then(|page| page.as_ref().ok())
@@ -3607,7 +3607,7 @@ mod tests {
     #[test]
     fn failed_appearance_jsx_keeps_native_choices_and_transparency_available() {
         let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
-        *app.appearance_choices_page.borrow_mut() = Some(Err("JSX failed".into()));
+        *app.appearance_page.borrow_mut() = Some(Err("JSX failed".into()));
         let tree = app.build_ui(850.0, 900.0);
         for message in [
             SettingsMessage::AppearanceLight,
@@ -3617,6 +3617,9 @@ mod tests {
             SettingsMessage::SetReduceTransparency(true),
             SettingsMessage::ToggleAnimationSelect,
             SettingsMessage::ToggleFileIconProviderSelect,
+            SettingsMessage::WallpaperChoose,
+            SettingsMessage::WallpaperRemove,
+            SettingsMessage::AppearanceReset,
         ] {
             assert_eq!(tree.semantic_targets_for_message(&message).len(), 1);
         }
@@ -3643,7 +3646,7 @@ mod tests {
         ] {
             let toggle = appearance_choice_action(host.application(), toggle_id);
             let target = host
-                .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(toggle))
+                .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(toggle))
                 .into_iter()
                 .next()
                 .expect("JSX select toggle");
@@ -3654,20 +3657,20 @@ mod tests {
             assert!(selected.changed, "{option_id}: {selected:?}");
             assert!(
                 host.application()
-                    .appearance_choices_page
+                    .appearance_page
                     .borrow()
                     .as_ref()
                     .is_some_and(Result::is_ok),
                 "Appearance JSX failed after {option_id}: {:?}",
                 host.application()
-                    .appearance_choices_page
+                    .appearance_page
                     .borrow()
                     .as_ref()
                     .and_then(|page| page.as_ref().err())
             );
             let option = appearance_choice_action(host.application(), option_id);
             let target = host
-                .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(option))
+                .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(option))
                 .into_iter()
                 .next()
                 .expect("JSX select option");
@@ -3678,13 +3681,13 @@ mod tests {
             assert!(selected.changed, "{option_id}: {selected:?}");
             assert!(
                 host.application()
-                    .appearance_choices_page
+                    .appearance_page
                     .borrow()
                     .as_ref()
                     .is_some_and(Result::is_ok),
                 "Appearance JSX failed after selecting {option_id}: {:?}",
                 host.application()
-                    .appearance_choices_page
+                    .appearance_page
                     .borrow()
                     .as_ref()
                     .and_then(|page| page.as_ref().err())
@@ -3701,12 +3704,57 @@ mod tests {
     }
 
     #[test]
+    fn jsx_wallpaper_position_remove_and_reset_reach_host_transactions() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.persistence_enabled = false;
+        app.wallpaper_settings.image = Some("fixture.png".into());
+        app.wallpaper_settings.position = WallpaperPosition::Fill;
+        app.shell_settings.theme = ThemePreference::Dark;
+        let mut host = UiHost::new(app, 1424, 1800);
+        for id in [
+            "appearance-wallpaper-position",
+            "appearance-wallpaper-position-tile",
+            "appearance-wallpaper-remove",
+            "appearance-reset",
+        ] {
+            let action = appearance_choice_action(host.application(), id);
+            let target = host
+                .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(action))
+                .into_iter()
+                .next()
+                .expect("wallpaper plugin action");
+            let result = host.perform_semantic_action(
+                target.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert!(result.changed, "{id}: {result:?}");
+            if id == "appearance-wallpaper-position-tile" {
+                assert_eq!(
+                    host.application().wallpaper_settings.position,
+                    WallpaperPosition::Tile
+                );
+            }
+            if id == "appearance-wallpaper-remove" {
+                assert!(host.application().wallpaper_settings.image.is_none());
+            }
+        }
+        assert_eq!(
+            host.application().shell_settings.theme,
+            nickel_core::shell_settings::ShellSettings::default().theme
+        );
+        assert_eq!(
+            host.application().wallpaper_settings,
+            WallpaperSettings::default()
+        );
+    }
+
+    #[test]
     fn custom_hue_dialog_opens_from_jsx_and_applies_validated_input() {
         let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         let mut host = UiHost::new(app, 850, 900);
         let action = appearance_choice_action(host.application(), "appearance-accent-custom");
         let opener = host
-            .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(action))
+            .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(action))
             .into_iter()
             .next()
             .expect("custom accent swatch");
@@ -3745,7 +3793,7 @@ mod tests {
     #[test]
     fn custom_hue_native_recovery_rejects_invalid_value_and_dismisses() {
         let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
-        *app.appearance_choices_page.borrow_mut() = Some(Err("JSX failed".into()));
+        *app.appearance_page.borrow_mut() = Some(Err("JSX failed".into()));
         let mut host = UiHost::new(app, 850, 900);
         let opener = host
             .semantic_targets_for_message(&SettingsMessage::OpenCustomHue)
@@ -4536,6 +4584,12 @@ mod tests {
                 .is_some_and(|extent| extent.can_scroll())
         );
         let expanded = app.build_ui(850.0, 1600.0);
+        assert!(
+            expanded
+                .semantic_targets_for_message(&SettingsMessage::WallpaperChoose)
+                .is_empty(),
+            "JSX Appearance should not also retain the native wallpaper controls"
+        );
         for id in [
             "appearance-mode-light",
             "appearance-mode-dark",
@@ -4544,17 +4598,24 @@ mod tests {
             let action = appearance_choice_action(&app, id);
             assert_eq!(
                 expanded
-                    .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(
-                        action
-                    ))
+                    .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(action))
                     .len(),
                 1
             );
         }
         for message in [
-            SettingsMessage::WallpaperChoose,
-            SettingsMessage::WallpaperRemove,
-            SettingsMessage::AppearanceReset,
+            SettingsMessage::AppearanceJsxAction(appearance_choice_action(
+                &app,
+                "appearance-wallpaper-choose",
+            )),
+            SettingsMessage::AppearanceJsxAction(appearance_choice_action(
+                &app,
+                "appearance-wallpaper-remove",
+            )),
+            SettingsMessage::AppearanceJsxAction(appearance_choice_action(
+                &app,
+                "appearance-reset",
+            )),
         ] {
             assert!(
                 !expanded.semantic_targets_for_message(&message).is_empty(),
@@ -4564,7 +4625,7 @@ mod tests {
         let transparency_action = appearance_choice_action(&app, "appearance-transparency");
         assert_eq!(
             expanded
-                .semantic_targets_for_message(&SettingsMessage::AppearanceChoicesJsxAction(
+                .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(
                     transparency_action,
                 ))
                 .len(),
@@ -5270,11 +5331,8 @@ mod tests {
             let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
             let _ = app.build_ui(1424.0, 1800.0);
             let dark_action = appearance_choice_action(&app, "appearance-mode-dark");
-            let mut scenario = activate(
-                app,
-                SettingsMessage::AppearanceChoicesJsxAction(dark_action),
-                via,
-            );
+            let mut scenario =
+                activate(app, SettingsMessage::AppearanceJsxAction(dark_action), via);
             assert_eq!(
                 scenario.host_mut().application_mut().shell_settings.theme,
                 ThemePreference::Dark,
@@ -5284,11 +5342,7 @@ mod tests {
             let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
             let _ = app.build_ui(1424.0, 1800.0);
             let hue_action = appearance_choice_action(&app, "appearance-accent-224");
-            let mut scenario = activate(
-                app,
-                SettingsMessage::AppearanceChoicesJsxAction(hue_action),
-                via,
-            );
+            let mut scenario = activate(app, SettingsMessage::AppearanceJsxAction(hue_action), via);
             assert_eq!(
                 scenario
                     .host_mut()
@@ -5304,7 +5358,7 @@ mod tests {
             let transparency_action = appearance_choice_action(&app, "appearance-transparency");
             let mut scenario = activate(
                 app,
-                SettingsMessage::AppearanceChoicesJsxAction(transparency_action),
+                SettingsMessage::AppearanceJsxAction(transparency_action),
                 via,
             );
             assert!(

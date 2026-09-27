@@ -2,7 +2,7 @@
 // Appearance controls. Persistence, platform lookup, and color policy stay in the host.
 function App() {
     const data = nickel.data;
-    return <settings-appearance-choices>
+    return <settings-appearance-page>
         <settings-appearance-modes label={data.title} value={data.description}>
             <settings-choice id="appearance-mode-light" label={data.light}
                 selected={data.selected === 'light'}
@@ -32,6 +32,25 @@ function App() {
             <settings-button id="appearance-custom-hue-cancel" label={data.customHueCancel}
                 value="secondary" onClick={() => nickel.request({type: 'cancel-custom-hue'})} />
         </settings-hue-dialog>
+        <settings-wallpaper id="appearance-wallpaper-card" label={data.wallpaperTitle}
+            value={data.wallpaperDescription}>
+            <settings-wallpaper-preview id="appearance-wallpaper-preview"
+                label={data.wallpaperName} value={data.wallpaperDimensions}
+                placeholder={data.wallpaperNone} state={data.wallpaperStatus} />
+            <settings-button id="appearance-wallpaper-choose" label={data.wallpaperChoose}
+                value="primary" onClick={() => nickel.request({type: 'wallpaper-choose'})} />
+            <settings-button id="appearance-wallpaper-remove" label={data.wallpaperRemove}
+                value="secondary" onClick={() => nickel.request({type: 'wallpaper-remove'})} />
+            <settings-select id="appearance-wallpaper-position" label={data.wallpaperFitTitle}
+                placeholder={data.wallpaperFitDescription} value={data.wallpaperPositionValue}
+                open={data.wallpaperPositionExpanded}
+                onClick={() => nickel.request({type: 'toggle-wallpaper-position'})}>
+                {data.wallpaperPositions.map(option => <settings-option key={option.id}
+                    id={`appearance-wallpaper-position-${option.id}`} label={option.label}
+                    selected={option.id === data.wallpaperPositionId}
+                    onClick={() => nickel.request({type: 'wallpaper-position', value: option.id})} />)}
+            </settings-select>
+        </settings-wallpaper>
         <settings-interface id="appearance-interface-card" label={data.interfaceTitle}>
             <settings-slider id="appearance-hue" label={data.hueTitle}
                 value={data.hueValue} placeholder={data.hueDescription}
@@ -63,5 +82,7 @@ function App() {
                     onClick={() => nickel.request({type: 'file-artwork', value: option.id})} />)}
             </settings-select>
         </settings-interface>
-    </settings-appearance-choices>;
+        <settings-reset id="appearance-reset" label={data.resetLabel}
+            onClick={() => nickel.request({type: 'appearance-reset'})} />
+    </settings-appearance-page>;
 }

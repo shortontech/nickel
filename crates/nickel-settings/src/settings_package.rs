@@ -20,7 +20,7 @@ pub(super) enum Script {
     OptionalFeatures,
     Network,
     Bluetooth,
-    AppearanceChoices,
+    Appearance,
 }
 
 pub(super) fn manifest() -> Result<&'static PluginManifest, String> {
@@ -95,8 +95,8 @@ pub(super) fn source(script: Script) -> Result<&'static str, String> {
         Script::Bluetooth => {
             include_str!("../../../assets/plugins/settings/settings-bluetooth.js")
         }
-        Script::AppearanceChoices => {
-            include_str!("../../../assets/plugins/settings/settings-appearance-choices.js")
+        Script::Appearance => {
+            include_str!("../../../assets/plugins/settings/settings-appearance.js")
         }
     })
 }
@@ -122,7 +122,7 @@ mod tests {
             Script::OptionalFeatures,
             Script::Network,
             Script::Bluetooth,
-            Script::AppearanceChoices,
+            Script::Appearance,
         ] {
             JsxRuntime::new(source(script).unwrap(), None).unwrap();
         }
