@@ -24,8 +24,10 @@ The permission review and emergency disable view remain native Rust. Rebuild
 its shipped JS with the same command, replacing `settings-pages.jsx` with
 `settings-plugins.jsx`.
 
-Settings starts each Boa context when its page is first opened. Building the
-navigation destinations for other pages does not allocate those contexts.
+Settings starts each page Boa context when its page is first opened and retires
+it after navigation to another page. Building the navigation destinations for
+other pages does not allocate those contexts. The navigation context stays
+alive while Settings is open.
 
 `settings-navigation.jsx` declares destination order, grouping, labels, and
 headers. The native `ResponsiveNavigation` adapter owns focus, responsive

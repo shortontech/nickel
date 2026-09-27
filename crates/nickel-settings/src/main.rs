@@ -1276,10 +1276,23 @@ impl SettingsApp {
         }
     }
 
+    fn retire_inactive_jsx(&mut self, page: SettingsPage) {
+        if page != SettingsPage::Plugins {
+            self.plugin_list.get_mut().take();
+        }
+        if page != SettingsPage::Bar {
+            self.bar_page.get_mut().take();
+        }
+        if !matches!(page, SettingsPage::KeyboardShortcuts | SettingsPage::About) {
+            self.ordinary_pages.get_mut().take();
+        }
+    }
+
     fn handle_settings_message(&mut self, message: SettingsMessage) {
         match message {
             SettingsMessage::Navigate(page) => {
                 self.page = page;
+                self.retire_inactive_jsx(page);
                 self.active_destination = Some(page);
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
@@ -1296,6 +1309,7 @@ impl SettingsApp {
             }
             SettingsMessage::NavigateTarget(page, target) => {
                 self.page = page;
+                self.retire_inactive_jsx(page);
                 self.active_destination = Some(page);
                 self.sidebar_query.clear();
                 self.pending_effects
@@ -3126,7 +3140,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_jsx_contexts_start_only_when_their_page_is_opened() {
+    fn settings_jsx_contexts_start_on_demand_and_retire_after_navigation() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
         assert!(app.navigation_plugin.borrow().is_none());
         assert!(app.plugin_list.borrow().is_none());
@@ -3143,13 +3157,21 @@ mod tests {
         assert!(app.plugin_list.borrow().is_some());
         assert!(app.ordinary_pages.borrow().is_none());
 
+        app.retire_inactive_jsx(SettingsPage::About);
         app.page = SettingsPage::About;
+        assert!(app.plugin_list.borrow().is_none());
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.ordinary_pages.borrow().is_some());
 
+        app.retire_inactive_jsx(SettingsPage::Bar);
         app.page = SettingsPage::Bar;
+        assert!(app.ordinary_pages.borrow().is_none());
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.bar_page.borrow().is_some());
+
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
+        assert!(app.bar_page.borrow().is_none());
+        assert!(app.navigation_plugin.borrow().is_some());
     }
 
     #[test]
