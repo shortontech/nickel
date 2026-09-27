@@ -16,3 +16,10 @@ tsc --allowJs --checkJs false --noCheck --jsx react --jsxFactory h \
   --target ES2020 --outDir assets/plugin-runtime \
   assets/plugin-runtime/settings-pages.jsx
 ```
+
+`settings-plugins.jsx` renders the ordinary Plugins list, live memory labels,
+enable and disable controls, and registered plugin settings. Its callbacks send
+typed requests that the Settings host validates against the current status.
+The permission review and emergency disable view remain native Rust. Rebuild
+its shipped JS with the same command, replacing `settings-pages.jsx` with
+`settings-plugins.jsx`.

@@ -3791,6 +3791,7 @@ dependencies = [
  "nickel-ui",
  "nickel-ui-testkit",
  "resvg",
+ "serde",
  "serde_json",
  "tracing",
  "windows",

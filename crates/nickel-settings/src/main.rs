@@ -5,6 +5,7 @@ mod effects;
 mod model;
 mod persistence;
 mod platform;
+mod plugin_list;
 mod settings_plugin;
 mod view;
 
@@ -524,6 +525,8 @@ enum SettingsMessage {
         key: String,
         value: serde_json::Value,
     },
+    PluginJsxAction(usize),
+    PluginJsxInput(usize, String),
     EditPluginTextSetting {
         id: String,
         key: String,
@@ -1379,6 +1382,12 @@ impl SettingsApp {
             }
             SettingsMessage::SetPluginSetting { id, key, value } => {
                 self.request_plugin_setting(id, key, value);
+            }
+            SettingsMessage::PluginJsxAction(index) => {
+                self.handle_plugin_jsx_action(index, serde_json::Value::Null);
+            }
+            SettingsMessage::PluginJsxInput(index, value) => {
+                self.handle_plugin_jsx_action(index, serde_json::Value::String(value));
             }
             SettingsMessage::EditPluginTextSetting { id, key } => {
                 let Some(value) = self.plugin_status.as_ref().and_then(|snapshot| {
@@ -2930,12 +2939,18 @@ mod tests {
         enabled_status.plugins[0].desired_enabled = true;
         enabled_status.plugins[0].health = nickel_session_protocol::PluginRuntimeHealth::Running;
         enabled_app.plugin_status = Some(enabled_status);
-        let host = UiHost::new(app, 1100, 800);
+        let mut host = UiHost::new(app, 1100, 800);
+        let enable_action = host
+            .application()
+            .plugin_list
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .action_for_id("plugin-enable-org.nickel.launcher")
+            .expect("JSX launcher enable action");
         assert_eq!(
-            host.semantic_targets_for_message(&SettingsMessage::ReviewPluginEnable(
-                "org.nickel.launcher".into(),
-            ))
-            .len(),
+            host.semantic_targets_for_message(&SettingsMessage::PluginJsxAction(enable_action))
+                .len(),
             1
         );
         let labels = host
@@ -2958,23 +2973,38 @@ mod tests {
                 .iter()
                 .any(|node| node.label.as_deref() == Some("Disable Nickel Launcher"))
         );
+        let disable_action = enabled_host
+            .application()
+            .plugin_list
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .action_for_id("plugin-enable-org.nickel.launcher")
+            .expect("JSX launcher disable action");
         assert_eq!(
             enabled_host
-                .semantic_targets_for_message(&SettingsMessage::SetPluginEnabled {
-                    id: "org.nickel.launcher".into(),
-                    enabled: false,
-                })
+                .semantic_targets_for_message(&SettingsMessage::PluginJsxAction(disable_action))
                 .len(),
             1
         );
+        let setting_action = host
+            .application()
+            .plugin_list
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .action_for_id("plugin-setting-org.nickel.launcher-show-count")
+            .expect("JSX boolean setting action");
         assert_eq!(
-            host.semantic_targets_for_message(&SettingsMessage::SetPluginSetting {
-                id: "org.nickel.launcher".into(),
-                key: "show-count".into(),
-                value: serde_json::json!(false),
-            })
-            .len(),
+            host.semantic_targets_for_message(&SettingsMessage::PluginJsxAction(setting_action))
+                .len(),
             1
+        );
+        host.application_mut()
+            .handle_settings_message(SettingsMessage::PluginJsxAction(enable_action));
+        assert_eq!(
+            host.application().plugin_enable_review,
+            Some(("org.nickel.launcher".into(), 4))
         );
     }
 
@@ -3040,6 +3070,42 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("Review it again")
+        );
+    }
+
+    #[test]
+    fn failed_jsx_plugin_list_keeps_native_disable_available() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
+        app.plugin_status = Some(nickel_session_protocol::PluginStatusSnapshot {
+            activation_generation: 3,
+            plugins: vec![nickel_session_protocol::PluginStatus {
+                id: "example.plugin".into(),
+                name: "Example".into(),
+                author: None,
+                version: None,
+                desired_enabled: true,
+                health: nickel_session_protocol::PluginRuntimeHealth::Running,
+                capabilities: Vec::new(),
+                surfaces: Vec::new(),
+                composition: Vec::new(),
+                settings: Vec::new(),
+                memory: Default::default(),
+            }],
+        });
+        *app.plugin_list.borrow_mut() = Err("JSX failed".into());
+        let host = UiHost::new(app, 1100, 800);
+        assert!(
+            host.accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("Plugin list unavailable") })
+        );
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::SetPluginEnabled {
+                id: "example.plugin".into(),
+                enabled: false,
+            })
+            .len(),
+            1
         );
     }
 

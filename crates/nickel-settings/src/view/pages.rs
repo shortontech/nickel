@@ -63,121 +63,31 @@ impl SettingsApp {
             .fill_width()
             .gap(16.0)
             .padding(Insets::all(20.0));
-        if let Some(notice) = &self.plugin_notice {
-            content = content.child(SettingsCard::titled(theme, "Plugin status", notice));
-        }
-        if let Some(snapshot) = &self.plugin_status {
-            if let Some((review_id, generation)) = &self.plugin_enable_review
-                && *generation == snapshot.activation_generation
-                && let Some(plugin) = snapshot
-                    .plugins
-                    .iter()
-                    .find(|plugin| plugin.id == *review_id && !plugin.desired_enabled)
-            {
-                let grants = if plugin.capabilities.is_empty() {
-                    "No additional access".to_owned()
-                } else {
-                    plugin.capabilities.join(", ")
-                };
-                let surfaces = if plugin.surfaces.is_empty() {
-                    "No surfaces".to_owned()
-                } else {
-                    plugin.surfaces.join(", ")
-                };
-                let composition = if plugin.composition.is_empty() {
-                    "No extension changes".to_owned()
-                } else {
-                    plugin.composition.join(", ")
-                };
-                content = content.child(
-                    SettingsCard::titled(theme, &format!("Enable {}?", plugin.name), &plugin.id)
-                        .child(SettingsRow::new(
-                            theme,
-                            "Publisher",
-                            plugin.author.as_deref().unwrap_or("Unknown"),
-                        ))
-                        .child(SettingsRow::new(
-                            theme,
-                            "Version",
-                            plugin.version.as_deref().unwrap_or("Unspecified"),
-                        ))
-                        .child(SettingsRow::new(theme, "Access requested", grants))
-                        .child(SettingsRow::new(theme, "Surfaces affected", surfaces))
-                        .child(SettingsRow::new(theme, "Composition changes", composition))
-                        .child(
-                            Row::new()
-                                .gap(12.0)
-                                .child(Button::semantic(
-                                    theme,
-                                    SettingsMessage::CancelPluginEnable,
-                                    "Cancel",
-                                    ButtonPresentation::Quiet,
-                                ))
-                                .child(Button::semantic(
-                                    theme,
-                                    SettingsMessage::ConfirmPluginEnable,
-                                    "Enable plugin",
-                                    ButtonPresentation::Primary,
-                                )),
-                        ),
-                );
-            }
-            for plugin in &snapshot.plugins {
-                let health = match &plugin.health {
-                    nickel_session_protocol::PluginRuntimeHealth::Disabled => "Disabled".to_owned(),
-                    nickel_session_protocol::PluginRuntimeHealth::Starting => "Starting".to_owned(),
-                    nickel_session_protocol::PluginRuntimeHealth::Running => "Running".to_owned(),
-                    nickel_session_protocol::PluginRuntimeHealth::Failed(reason) => {
-                        format!("Failed: {reason}")
-                    }
-                };
-                let pending = self
-                    .plugin_pending
-                    .as_ref()
-                    .is_some_and(|(id, _)| id == &plugin.id);
-                let switch_state = if pending {
-                    if plugin.desired_enabled {
-                        SwitchState::DisabledOn
-                    } else {
-                        SwitchState::DisabledOff
-                    }
-                } else if plugin.desired_enabled {
-                    match &plugin.health {
-                        nickel_session_protocol::PluginRuntimeHealth::Running => SwitchState::On,
-                        nickel_session_protocol::PluginRuntimeHealth::Starting => {
-                            SwitchState::DisabledOn
-                        }
-                        _ => SwitchState::Mixed,
-                    }
-                } else {
-                    SwitchState::Off
-                };
-                let action = (!pending).then(|| {
-                    if plugin.desired_enabled {
-                        SettingsMessage::SetPluginEnabled {
-                            id: plugin.id.clone(),
-                            enabled: false,
-                        }
-                    } else {
-                        SettingsMessage::ReviewPluginEnable(plugin.id.clone())
-                    }
-                });
-                let grants = if plugin.capabilities.is_empty() {
-                    "None".to_owned()
-                } else {
-                    plugin.capabilities.join(", ")
-                };
-                let surfaces = if plugin.surfaces.is_empty() {
-                    "None".to_owned()
-                } else {
-                    plugin.surfaces.join(", ")
-                };
-                let composition = if plugin.composition.is_empty() {
-                    "None".to_owned()
-                } else {
-                    plugin.composition.join(", ")
-                };
-                let mut card = SettingsCard::titled(theme, &plugin.name, &plugin.id)
+        if let Some(snapshot) = &self.plugin_status
+            && let Some((review_id, generation)) = &self.plugin_enable_review
+            && *generation == snapshot.activation_generation
+            && let Some(plugin) = snapshot
+                .plugins
+                .iter()
+                .find(|plugin| plugin.id == *review_id && !plugin.desired_enabled)
+        {
+            let grants = if plugin.capabilities.is_empty() {
+                "No additional access".to_owned()
+            } else {
+                plugin.capabilities.join(", ")
+            };
+            let surfaces = if plugin.surfaces.is_empty() {
+                "No surfaces".to_owned()
+            } else {
+                plugin.surfaces.join(", ")
+            };
+            let composition = if plugin.composition.is_empty() {
+                "No extension changes".to_owned()
+            } else {
+                plugin.composition.join(", ")
+            };
+            content = content.child(
+                SettingsCard::titled(theme, &format!("Enable {}?", plugin.name), &plugin.id)
                     .child(SettingsRow::new(
                         theme,
                         "Publisher",
@@ -188,219 +98,74 @@ impl SettingsApp {
                         "Version",
                         plugin.version.as_deref().unwrap_or("Unspecified"),
                     ))
+                    .child(SettingsRow::new(theme, "Access requested", grants))
+                    .child(SettingsRow::new(theme, "Surfaces affected", surfaces))
+                    .child(SettingsRow::new(theme, "Composition changes", composition))
                     .child(
-                        SettingsRow::new(theme, "Enabled", health).trailing(
-                            Switch::with_state_action(switch_state, action, theme)
-                                .id(format!("plugin-enable-{}", plugin.id))
-                                .accessibility_label(format!(
-                                    "{} {}",
-                                    if plugin.desired_enabled {
-                                        "Disable"
-                                    } else {
-                                        "Enable"
-                                    },
-                                    plugin.name
-                                )),
-                        ),
-                    )
-                    .child(SettingsRow::new(theme, "Access", grants))
-                    .child(SettingsRow::new(theme, "Surfaces", surfaces))
-                    .child(SettingsRow::new(theme, "Composition", composition))
-                    .child(SettingsRow::new(
-                        theme,
-                        "Tracked memory (lower bound)",
-                        plugin_tracked_memory_label(&plugin.memory),
-                    ))
-                    .child(SettingsRow::new(
-                        theme,
-                        "Peak tracked memory (lower bound)",
-                        plugin_memory_label(plugin.memory.tracked_peak_bytes),
-                    ))
-                    .child(SettingsRow::new(
-                        theme,
-                        "JavaScript heap",
-                        plugin_memory_label(plugin.memory.js_heap_bytes),
-                    ))
-                    .child(SettingsRow::new(
-                        theme,
-                        "Native UI (lower bound)",
-                        plugin_memory_label(plugin.memory.native_ui_bytes),
-                    ))
-                    .child(SettingsRow::new(
-                        theme,
-                        "Textures",
-                        plugin_memory_label(plugin.memory.texture_bytes),
-                    ))
-                    .child(SettingsRow::new(
-                        theme,
-                        "Timers and subscriptions",
-                        format!("{} / {}", plugin.memory.timers, plugin.memory.subscriptions),
-                    ));
-                if plugin
-                    .composition
-                    .iter()
-                    .any(|entry| entry.starts_with("add ") || entry.starts_with("replace "))
-                {
-                    card = card.child(SettingsRow::new(
-                        theme,
-                        "Memory attribution",
-                        "Extension UI also appears in the target plugin's native UI count",
-                    ));
-                }
-                for setting in &plugin.settings {
-                    let value = match &setting.value {
-                        serde_json::Value::Bool(value) => {
-                            if *value {
-                                "On".to_owned()
-                            } else {
-                                "Off".to_owned()
-                            }
-                        }
-                        serde_json::Value::Number(value) => value.to_string(),
-                        serde_json::Value::String(value) => value.clone(),
-                        _ => "Unavailable".to_owned(),
-                    };
-                    let label = format!("Setting: {}", setting.label);
-                    let pending = self
-                        .plugin_setting_pending
-                        .as_ref()
-                        .is_some_and(|(id, key, _)| id == &plugin.id && key == &setting.id);
-                    let action = |value| SettingsMessage::SetPluginSetting {
-                        id: plugin.id.clone(),
-                        key: setting.id.clone(),
-                        value,
-                    };
-                    match &setting.kind {
-                        nickel_session_protocol::PluginSettingKind::Boolean => {
-                            let enabled = setting.value.as_bool().unwrap_or(false);
-                            card = card.child(
-                                SettingsRow::new(theme, &label, &setting.description).trailing(
-                                    Switch::with_state_action(
-                                        if pending {
-                                            if enabled {
-                                                SwitchState::DisabledOn
-                                            } else {
-                                                SwitchState::DisabledOff
-                                            }
-                                        } else if enabled {
-                                            SwitchState::On
-                                        } else {
-                                            SwitchState::Off
-                                        },
-                                        (!pending)
-                                            .then(|| action(serde_json::Value::Bool(!enabled))),
-                                        theme,
-                                    )
-                                    .id(format!("plugin-setting-{}-{}", plugin.id, setting.id))
-                                    .accessibility_label(label),
-                                ),
-                            );
-                        }
-                        nickel_session_protocol::PluginSettingKind::Integer { min, max } => {
-                            let current = setting.value.as_i64().unwrap_or(*min);
-                            card = card.child(
-                                SettingsRow::new(theme, &label, value).trailing(
-                                    Row::new()
-                                        .gap(8.0)
-                                        .child(Button::semantic(
-                                            theme,
-                                            action(serde_json::Value::from(
-                                                current.saturating_sub(1).max(*min),
-                                            )),
-                                            "−",
-                                            ButtonPresentation::Quiet,
-                                        ))
-                                        .child(Button::semantic(
-                                            theme,
-                                            action(serde_json::Value::from(
-                                                current.saturating_add(1).min(*max),
-                                            )),
-                                            "+",
-                                            ButtonPresentation::Quiet,
-                                        )),
-                                ),
-                            );
-                        }
-                        nickel_session_protocol::PluginSettingKind::Choice { options } => {
-                            let next = options
-                                .iter()
-                                .position(|option| Some(option.as_str()) == setting.value.as_str())
-                                .map(|index| (index + 1) % options.len())
-                                .unwrap_or(0);
-                            if let Some(option) = options.get(next) {
-                                card = card.child(SettingsRow::new(theme, &label, value).trailing(
-                                    Button::semantic(
-                                        theme,
-                                        action(serde_json::Value::String(option.clone())),
-                                        "Change",
-                                        ButtonPresentation::Quiet,
-                                    ),
-                                ));
-                            }
-                        }
-                        nickel_session_protocol::PluginSettingKind::Text { .. } => {
-                            card = card.child(SettingsRow::new(theme, &label, value).trailing(
-                                Button::semantic(
-                                    theme,
-                                    SettingsMessage::EditPluginTextSetting {
-                                        id: plugin.id.clone(),
-                                        key: setting.id.clone(),
-                                    },
-                                    "Edit",
-                                    ButtonPresentation::Quiet,
-                                ),
-                            ));
-                            if let Some((id, key, draft)) = &self.plugin_setting_edit
-                                && id == &plugin.id
-                                && key == &setting.id
-                            {
-                                card = card.child(
-                                    Row::new()
-                                        .gap(8.0)
-                                        .child(
-                                            SettingsSearchField::new(
-                                                theme,
-                                                format!("plugin-setting-text-{}-{}", id, key),
-                                                draft,
-                                                "Value",
-                                                SettingsMessage::PluginTextSettingChanged,
-                                            )
-                                            .width(260.0),
-                                        )
-                                        .child(Button::semantic(
-                                            theme,
-                                            SettingsMessage::SavePluginTextSetting,
-                                            "Save",
-                                            ButtonPresentation::Primary,
-                                        ))
-                                        .child(Button::semantic(
-                                            theme,
-                                            SettingsMessage::CancelPluginTextSetting,
-                                            "Cancel",
-                                            ButtonPresentation::Quiet,
-                                        )),
-                                );
-                            }
-                        }
-                    }
-                }
-                content = content.child(card);
-            }
-        } else {
-            content = content.child(
-                SettingsCard::titled(
-                    theme,
-                    "Waiting for Nickel",
-                    "Live plugin status is unavailable.",
-                )
-                .child(Button::semantic(
-                    theme,
-                    SettingsMessage::RefreshPlugins,
-                    "Refresh",
-                    ButtonPresentation::Secondary,
-                )),
+                        Row::new()
+                            .gap(12.0)
+                            .child(Button::semantic(
+                                theme,
+                                SettingsMessage::CancelPluginEnable,
+                                "Cancel",
+                                ButtonPresentation::Quiet,
+                            ))
+                            .child(Button::semantic(
+                                theme,
+                                SettingsMessage::ConfirmPluginEnable,
+                                "Enable plugin",
+                                ButtonPresentation::Primary,
+                            )),
+                    ),
             );
         }
+        let projection = crate::plugin_list::projection(
+            self.plugin_status.as_ref(),
+            self.plugin_notice.as_deref(),
+            self.plugin_pending.as_ref(),
+            self.plugin_setting_pending.as_ref(),
+            self.plugin_setting_edit.as_ref(),
+        );
+        let list = self
+            .plugin_list
+            .borrow_mut()
+            .as_mut()
+            .map_err(|error| error.clone())
+            .and_then(|list| list.render(&projection, theme));
+        content = content.child(match list {
+            Ok(list) => list,
+            Err(error) => {
+                let mut recovery = SettingsCard::titled(theme, "Plugin list unavailable", error)
+                    .child(Button::semantic(
+                        theme,
+                        SettingsMessage::RefreshPlugins,
+                        "Refresh",
+                        ButtonPresentation::Secondary,
+                    ));
+                if let Some(snapshot) = &self.plugin_status {
+                    for plugin in snapshot
+                        .plugins
+                        .iter()
+                        .filter(|plugin| plugin.desired_enabled)
+                    {
+                        recovery = recovery.child(
+                            SettingsRow::new(theme, &plugin.name, &plugin.id).trailing(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::SetPluginEnabled {
+                                        id: plugin.id.clone(),
+                                        enabled: false,
+                                    },
+                                    "Disable",
+                                    ButtonPresentation::Destructive,
+                                ),
+                            ),
+                        );
+                    }
+                }
+                AnyView::new(recovery)
+            }
+        });
         nickel_ui::VerticalScroll::new(SettingsMessage::PluginsScroll, 0.0)
             .grow(1.0)
             .theme(theme)
@@ -2022,29 +1787,4 @@ impl SettingsApp {
             .render_about(&self.localizer, self.ui_theme())
             .expect("bundled Settings About page must render")
     }
-}
-
-fn plugin_memory_label(bytes: Option<u64>) -> String {
-    match bytes {
-        None => "Unavailable".into(),
-        Some(bytes) if bytes < 1024 => format!("{bytes} B"),
-        Some(bytes) => format!("{} KiB", bytes.div_ceil(1024)),
-    }
-}
-
-fn plugin_tracked_memory_label(memory: &nickel_session_protocol::PluginMemorySnapshot) -> String {
-    let measured = [
-        memory.js_heap_bytes,
-        memory.native_ui_bytes,
-        memory.texture_bytes,
-    ];
-    if measured.iter().all(Option::is_none) {
-        return "Unavailable".into();
-    }
-    plugin_memory_label(Some(
-        measured
-            .into_iter()
-            .flatten()
-            .fold(0_u64, u64::saturating_add),
-    ))
 }

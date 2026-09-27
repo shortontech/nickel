@@ -7,6 +7,7 @@ pub(super) struct SettingsApp {
     pub(super) controller_family: nickel_ui::ControllerFamily,
     pub(super) localizer: Localizer,
     pub(super) ordinary_pages: std::cell::RefCell<crate::settings_plugin::OrdinaryPages>,
+    pub(super) plugin_list: std::cell::RefCell<Result<crate::plugin_list::PluginList, String>>,
     pub(super) redraw_requested: Cell<bool>,
     pub(super) displays: Vec<DisplayCard>,
     pub(super) selected: usize,
@@ -197,6 +198,7 @@ impl Default for SettingsApp {
                 crate::settings_plugin::OrdinaryPages::new()
                     .expect("bundled Settings JSX pages must load"),
             ),
+            plugin_list: std::cell::RefCell::new(crate::plugin_list::PluginList::new()),
             redraw_requested: Cell::new(true),
             displays: displays.clone(),
             selected: 1,
