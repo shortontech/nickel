@@ -6,5 +6,5 @@
   "surfaces": [
     {"id": "main", "kind": "window", "width": 920, "height": 680}
   ],
-  "capabilities": ["applications-read", "applications-launch"]
+  "capabilities": ["applications-read", "applications-launch", "settings-show", "control-center-show", "projects-read", "projects-open", "session-logout-request"]
 }

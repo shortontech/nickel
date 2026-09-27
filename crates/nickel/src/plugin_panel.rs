@@ -15,7 +15,7 @@ use nickel_ui::{
 };
 use serde_json::Value;
 
-use crate::launcher::{Launcher, LauncherMode, TaskbarApplication};
+use crate::launcher::{Application, DashboardSection, Launcher, LauncherMode, TaskbarApplication};
 
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
@@ -520,6 +520,11 @@ pub enum PluginEffect {
     SetLauncherQuery(String),
     ActivateLauncherResult { index: usize, id: String },
     LaunchDashboardApplication { id: String },
+    LauncherOpenSettings,
+    LauncherOpenAccount,
+    LauncherOpenProject { id: String },
+    LauncherSeeAllProjects,
+    LauncherRequestLogout,
     ActivateTaskbarItem { index: usize, id: String },
     ActivateTrayItem { id: String },
     ContextTrayItem { id: String },
@@ -542,12 +547,22 @@ pub struct LauncherPluginResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherPluginProject {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherPluginProjection {
     pub query: String,
     pub dashboard_visible: bool,
     pub results: Vec<LauncherPluginResult>,
     pub dashboard: Vec<LauncherPluginResult>,
     pub places: Vec<LauncherPluginResult>,
+    pub projects: Vec<LauncherPluginProject>,
+    pub codex_available: bool,
+    pub account_name: String,
+    pub logout_available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -639,11 +654,7 @@ impl LauncherPluginProjection {
             .filter_map(|index| {
                 launcher
                     .result_at(index)
-                    .map(|application| LauncherPluginResult {
-                        index,
-                        id: application.id().to_owned(),
-                        name: application.name().to_owned(),
-                    })
+                    .and_then(|application| launcher_plugin_result(index, application))
             })
             .collect();
         Self {
@@ -669,23 +680,45 @@ impl LauncherPluginProjection {
                 };
                 home.into_iter()
                     .enumerate()
-                    .map(|(index, application)| LauncherPluginResult {
-                        index,
-                        id: application.id().to_owned(),
-                        name: application.name().to_owned(),
-                    })
+                    .filter_map(|(index, application)| launcher_plugin_result(index, application))
                     .collect()
             },
             places: launcher
                 .place_applications()
                 .take(12)
                 .enumerate()
-                .map(|(index, application)| LauncherPluginResult {
-                    index,
-                    id: application.id().to_owned(),
-                    name: application.name().to_owned(),
-                })
+                .filter_map(|(index, application)| launcher_plugin_result(index, application))
                 .collect(),
+            projects: match launcher.dashboard_projects() {
+                DashboardSection::Ready(projects) if launcher.codex_available() => {
+                    let mut recent = projects
+                        .iter()
+                        .filter(|project| {
+                            project.last_used_at.is_some()
+                                && !project.id.is_empty()
+                                && project.id.len() <= 256
+                        })
+                        .collect::<Vec<_>>();
+                    recent.sort_by_key(|project| std::cmp::Reverse(project.last_used_at));
+                    recent
+                        .into_iter()
+                        .take(3)
+                        .map(|project| LauncherPluginProject {
+                            id: project.id.clone(),
+                            name: project.name.chars().take(120).collect(),
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            },
+            codex_available: launcher.codex_available(),
+            account_name: match launcher.dashboard_account() {
+                DashboardSection::Ready(account) => {
+                    account.display_name.chars().take(120).collect()
+                }
+                _ => "Local session".into(),
+            },
+            logout_available: launcher.logout_available(),
         }
     }
 
@@ -699,9 +732,21 @@ impl LauncherPluginProjection {
         }).collect::<Vec<_>>()
         };
         serde_json::json!({"query": self.query, "dashboardVisible": self.dashboard_visible, "results": results,
-            "dashboard": items(&self.dashboard), "places": items(&self.places)})
+            "dashboard": items(&self.dashboard), "places": items(&self.places),
+            "projects": self.projects.iter().map(|project| serde_json::json!({"id": project.id, "name": project.name})).collect::<Vec<_>>(),
+            "codexAvailable": self.codex_available, "accountName": self.account_name,
+            "logoutAvailable": self.logout_available})
         .to_string()
     }
+}
+
+fn launcher_plugin_result(index: usize, application: &Application) -> Option<LauncherPluginResult> {
+    let id = application.id();
+    (!id.is_empty() && id.len() <= 256).then(|| LauncherPluginResult {
+        index,
+        id: id.to_owned(),
+        name: application.name().chars().take(120).collect(),
+    })
 }
 
 impl PluginPanelApplication {
@@ -1066,6 +1111,64 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::LaunchDashboardApplication {
                                 id: id.to_owned(),
                             });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-open-settings")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::SettingsShow) =>
+                        {
+                            approved.push(PluginEffect::LauncherOpenSettings);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-open-account")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ControlCenterShow) =>
+                        {
+                            approved.push(PluginEffect::LauncherOpenAccount);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-open-project")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ProjectsOpen) =>
+                        {
+                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
+                                self.last_error = Some("project ID is missing".into());
+                                return;
+                            };
+                            if id.is_empty() || id.len() > 256 {
+                                self.last_error = Some("project ID is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::LauncherOpenProject { id: id.to_owned() });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-see-all-projects")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ProjectsRead) =>
+                        {
+                            approved.push(PluginEffect::LauncherSeeAllProjects);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("launcher-request-logout")
+                            && self.manifest.id == launcher_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::SessionLogoutRequest) =>
+                        {
+                            approved.push(PluginEffect::LauncherRequestLogout);
                         }
                         _ => {
                             self.last_error =

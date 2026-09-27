@@ -1,7 +1,7 @@
 use nickel_shell::plugin_panel::{
-    LauncherPluginProjection, LauncherPluginResult, PluginEffect, PluginMessage,
-    PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection, TaskbarPluginTrayItem,
-    surface,
+    LauncherPluginProject, LauncherPluginProjection, LauncherPluginResult, PluginEffect,
+    PluginMessage, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
+    TaskbarPluginTrayItem, surface,
 };
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
@@ -190,6 +190,10 @@ fn bundled_launcher_renders_host_results_and_requests_typed_actions() {
             name: "Editor".into(),
         }],
         places: vec![],
+        projects: vec![],
+        codex_available: false,
+        account_name: "Local session".into(),
+        logout_available: false,
     };
     let mut host = UiHost::new(
         PluginPanelApplication::launcher_with_projection(&projection)
@@ -267,6 +271,10 @@ fn launcher_dashboard_scrolls_without_dispatching_a_plugin_handler() {
         results: vec![],
         dashboard,
         places: vec![],
+        projects: vec![],
+        codex_available: false,
+        account_name: "Local session".into(),
+        logout_available: false,
     })
     .expect("launcher script loads");
     let mut host = UiHost::new(application, 920, 680);
@@ -280,6 +288,69 @@ fn launcher_dashboard_scrolls_without_dispatching_a_plugin_handler() {
     });
     assert!(host.scroll_extent(&PluginMessage::Scroll).unwrap().offset > 0.0);
     assert!(host.application_mut().take_effects().is_empty());
+}
+
+#[test]
+fn launcher_dashboard_requests_projects_settings_account_and_logout() {
+    let application = PluginPanelApplication::launcher_with_projection(&LauncherPluginProjection {
+        query: String::new(),
+        dashboard_visible: true,
+        results: vec![],
+        dashboard: vec![],
+        places: vec![],
+        projects: vec![LauncherPluginProject {
+            id: "project-1".into(),
+            name: "Nickel source".into(),
+        }],
+        codex_available: true,
+        account_name: "Ada".into(),
+        logout_available: true,
+    })
+    .expect("launcher script loads");
+    let mut host = UiHost::new(application, 920, 680);
+    let invoke = |host: &mut UiHost<PluginPanelApplication>, name: &str| {
+        let id = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .expect("dashboard button")
+            .id;
+        host.perform_semantic_action(id, SemanticAction::Invoke(ActionKind::Activate));
+    };
+    invoke(&mut host, "Nickel source");
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::LauncherOpenProject {
+            id: "project-1".into()
+        }]
+    );
+    invoke(&mut host, "All projects");
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::LauncherSeeAllProjects]
+    );
+    invoke(&mut host, "Ada");
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::LauncherOpenAccount]
+    );
+    invoke(&mut host, "Settings");
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::LauncherOpenSettings]
+    );
+    invoke(&mut host, "Log out");
+    assert!(host.inspect().open_overlay.is_some());
+    assert!(host.application_mut().take_effects().is_empty());
+    invoke(&mut host, "Cancel");
+    assert!(host.inspect().open_overlay.is_none());
+    invoke(&mut host, "Log out");
+    invoke(&mut host, "Confirm log out");
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::LauncherRequestLogout]
+    );
 }
 
 #[test]

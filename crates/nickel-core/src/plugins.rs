@@ -172,6 +172,10 @@ pub enum PluginCapability {
     NotificationsAct,
     SettingsRead,
     SettingsWrite,
+    SettingsShow,
+    ProjectsRead,
+    ProjectsOpen,
+    SessionLogoutRequest,
 }
 
 impl PluginCapability {
@@ -192,6 +196,10 @@ impl PluginCapability {
             Self::NotificationsAct => "notifications-act",
             Self::SettingsRead => "settings-read",
             Self::SettingsWrite => "settings-write",
+            Self::SettingsShow => "settings-show",
+            Self::ProjectsRead => "projects-read",
+            Self::ProjectsOpen => "projects-open",
+            Self::SessionLogoutRequest => "session-logout-request",
         }
     }
 }

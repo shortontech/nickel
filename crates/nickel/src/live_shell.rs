@@ -3520,6 +3520,47 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::LauncherOpenSettings => {
+                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard {
+                        self.apply_launcher_action(LauncherAction::OpenSettings(
+                            crate::launcher::SettingsDestination::Nickel,
+                        ));
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::LauncherOpenAccount => {
+                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard {
+                        self.apply_launcher_action(LauncherAction::OpenAccount);
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::LauncherOpenProject { id } => {
+                    let projection = crate::plugin_panel::LauncherPluginProjection::from_launcher(
+                        &self.launcher,
+                    );
+                    if projection.dashboard_visible
+                        && projection.projects.iter().any(|project| project.id == id)
+                    {
+                        self.apply_launcher_action(LauncherAction::OpenProject(id));
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::LauncherSeeAllProjects => {
+                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard
+                        && self.launcher.codex_available()
+                    {
+                        self.apply_launcher_action(LauncherAction::SeeAllProjects);
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::LauncherRequestLogout => {
+                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard
+                        && self.launcher.logout_available()
+                    {
+                        self.apply_launcher_action(LauncherAction::RequestLogout);
+                        changed = true;
+                    }
+                }
             }
         }
         changed
