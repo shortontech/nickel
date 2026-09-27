@@ -1,6 +1,6 @@
 use super::*;
 use nickel_ui::{
-    Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt,
+    Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
     GridColumnSpec, Layer, NavigationScope, Point, RadioGroup, RadioOption, Row, SettingsListCard,
     Text, Track,
 };
@@ -59,6 +59,12 @@ pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
 impl SettingsApp {
     pub(super) fn plugins_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let theme = self.ui_theme();
+        if self.page != SettingsPage::Plugins {
+            return nickel_ui::VerticalScroll::new(SettingsMessage::PluginsScroll, 0.0)
+                .grow(1.0)
+                .theme(theme)
+                .child(Column::new());
+        }
         let mut content = Column::new()
             .fill_width()
             .gap(16.0)
@@ -129,6 +135,7 @@ impl SettingsApp {
         let list = self
             .plugin_list
             .borrow_mut()
+            .get_or_insert_with(crate::plugin_list::PluginList::new)
             .as_mut()
             .map_err(|error| error.clone())
             .and_then(|list| list.render(&projection, theme));
@@ -1775,16 +1782,42 @@ impl SettingsApp {
     }
 
     pub(super) fn keyboard_shortcuts_components(&self) -> AnyView<SettingsMessage> {
-        self.ordinary_pages
+        if self.page != SettingsPage::KeyboardShortcuts {
+            return AnyView::new(Container::new());
+        }
+        let page = self
+            .ordinary_pages
             .borrow_mut()
-            .render_keyboard(&self.localizer, self.ui_theme())
-            .expect("bundled Settings keyboard page must render")
+            .get_or_insert_with(crate::settings_plugin::OrdinaryPages::new)
+            .as_mut()
+            .map_err(|error| error.clone())
+            .and_then(|pages| pages.render_keyboard(&self.localizer, self.ui_theme()));
+        page.unwrap_or_else(|error| {
+            AnyView::new(SettingsCard::titled(
+                self.ui_theme(),
+                "Keyboard page unavailable",
+                error,
+            ))
+        })
     }
 
     pub(super) fn about_components(&self) -> AnyView<SettingsMessage> {
-        self.ordinary_pages
+        if self.page != SettingsPage::About {
+            return AnyView::new(Container::new());
+        }
+        let page = self
+            .ordinary_pages
             .borrow_mut()
-            .render_about(&self.localizer, self.ui_theme())
-            .expect("bundled Settings About page must render")
+            .get_or_insert_with(crate::settings_plugin::OrdinaryPages::new)
+            .as_mut()
+            .map_err(|error| error.clone())
+            .and_then(|pages| pages.render_about(&self.localizer, self.ui_theme()));
+        page.unwrap_or_else(|error| {
+            AnyView::new(SettingsCard::titled(
+                self.ui_theme(),
+                "About page unavailable",
+                error,
+            ))
+        })
     }
 }

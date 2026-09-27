@@ -614,7 +614,8 @@ impl SettingsApp {
             .plugin_list
             .borrow_mut()
             .as_mut()
-            .map_err(|error| error.clone())
+            .ok_or_else(|| "Plugin list is not loaded".to_owned())
+            .and_then(|list| list.as_mut().map_err(|error| error.clone()))
             .and_then(|list| {
                 list.dispatch(index, value, &data, |request| {
                     validate_request(

@@ -23,3 +23,6 @@ typed requests that the Settings host validates against the current status.
 The permission review and emergency disable view remain native Rust. Rebuild
 its shipped JS with the same command, replacing `settings-pages.jsx` with
 `settings-plugins.jsx`.
+
+Settings starts each Boa context when its page is first opened. Building the
+navigation destinations for other pages does not allocate those contexts.

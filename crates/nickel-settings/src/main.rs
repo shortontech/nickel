@@ -2946,6 +2946,8 @@ mod tests {
             .borrow()
             .as_ref()
             .unwrap()
+            .as_ref()
+            .unwrap()
             .action_for_id("plugin-enable-org.nickel.launcher")
             .expect("JSX launcher enable action");
         assert_eq!(
@@ -2979,6 +2981,8 @@ mod tests {
             .borrow()
             .as_ref()
             .unwrap()
+            .as_ref()
+            .unwrap()
             .action_for_id("plugin-enable-org.nickel.launcher")
             .expect("JSX launcher disable action");
         assert_eq!(
@@ -2991,6 +2995,8 @@ mod tests {
             .application()
             .plugin_list
             .borrow()
+            .as_ref()
+            .unwrap()
             .as_ref()
             .unwrap()
             .action_for_id("plugin-setting-org.nickel.launcher-show-count")
@@ -3092,7 +3098,7 @@ mod tests {
                 memory: Default::default(),
             }],
         });
-        *app.plugin_list.borrow_mut() = Err("JSX failed".into());
+        *app.plugin_list.borrow_mut() = Some(Err("JSX failed".into()));
         let host = UiHost::new(app, 1100, 800);
         assert!(
             host.accessibility_nodes()
@@ -3107,6 +3113,25 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn settings_jsx_contexts_start_only_when_their_page_is_opened() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+        assert!(app.plugin_list.borrow().is_none());
+        assert!(app.ordinary_pages.borrow().is_none());
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.plugin_list.borrow().is_none());
+        assert!(app.ordinary_pages.borrow().is_none());
+
+        app.page = SettingsPage::Plugins;
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.plugin_list.borrow().is_some());
+        assert!(app.ordinary_pages.borrow().is_none());
+
+        app.page = SettingsPage::About;
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.ordinary_pages.borrow().is_some());
     }
 
     #[test]
