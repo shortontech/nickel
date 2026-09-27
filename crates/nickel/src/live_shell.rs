@@ -303,15 +303,15 @@ const WALLPAPER_MAX_WIDTH: u32 = 7680;
 const WALLPAPER_MAX_HEIGHT: u32 = 4320;
 const PREVIEW_CACHE_CAPACITY: usize = 32;
 
-#[path = "live_shell/panel.rs"]
-mod panel;
 pub(crate) mod remote_semantics;
-pub use panel::{PanelAction, PanelApplication};
-use panel::{
-    PanelHover, normalize_tray_items, panel_clock_text, panel_tray_icons, tint_panel_icon,
+#[path = "live_shell/taskbar.rs"]
+mod taskbar;
+pub use taskbar::{TaskbarAction, TaskbarUi};
+use taskbar::{
+    TaskbarHover, normalize_tray_items, panel_clock_text, panel_tray_icons, tint_panel_icon,
 };
 #[cfg(test)]
-use panel::{panel_status_layout, visible_tray_item};
+use taskbar::{panel_status_layout, visible_tray_item};
 
 #[path = "live_shell/keyboard.rs"]
 mod keyboard;
@@ -672,10 +672,11 @@ pub struct LiveShell {
     lock_deadline: Option<Instant>,
     control_visible: bool,
     codex_project_menu_visible: bool,
-    panel_hover: Option<PanelHover>,
+    panel_hover: Option<TaskbarHover>,
     panel_hover_output: Option<String>,
-    panel_host: nickel_ui::UiHost<PanelApplication>,
-    panel_hosts: HashMap<Option<String>, nickel_ui::UiHost<PanelApplication>>,
+    panel_host: nickel_ui::UiHost<TaskbarUi>,
+    plugin_panel_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
+    panel_hosts: HashMap<Option<String>, nickel_ui::UiHost<TaskbarUi>>,
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
@@ -1136,7 +1137,7 @@ impl LiveShell {
         let run_host = nickel_ui::UiHost::new(RunApplication::new(palette), 620, 150);
         let (clock, date) = panel_clock_text();
         let panel_host = nickel_ui::UiHost::new(
-            PanelApplication {
+            TaskbarUi {
                 keyboard_enabled: false,
                 keyboard_visible: false,
                 groups: Arc::new(launcher.taskbar_applications(&windows)),
@@ -1160,6 +1161,15 @@ impl LiveShell {
             1920,
             56,
         );
+        let plugin_panel_host = if crate::plugin_panel::enabled() {
+            Some(nickel_ui::UiHost::new(
+                crate::plugin_panel::PluginPanelApplication::bundled()?,
+                crate::plugin_panel::WIDTH,
+                crate::plugin_panel::HEIGHT,
+            ))
+        } else {
+            None
+        };
         Ok(Self {
             session_host: session_host.clone(),
             screenshot_capture_pending: false,
@@ -1236,6 +1246,7 @@ impl LiveShell {
             panel_hover: None,
             panel_hover_output: None,
             panel_host,
+            plugin_panel_host,
             panel_hosts: HashMap::new(),
             panel_projections: HashMap::new(),
             panel_change_token: HostChangeToken::default(),
@@ -1492,7 +1503,7 @@ impl LiveShell {
         }
         if changed {
             redraw.extend([
-                SurfaceRole::Panel,
+                SurfaceRole::Taskbar,
                 SurfaceRole::Launcher,
                 SurfaceRole::WindowPreview,
                 SurfaceRole::WindowContextMenu,
@@ -1527,7 +1538,7 @@ impl LiveShell {
             }
             redraw.extend([
                 SurfaceRole::Desktop,
-                SurfaceRole::Panel,
+                SurfaceRole::Taskbar,
                 SurfaceRole::WindowPreview,
                 SurfaceRole::WindowContextMenu,
             ]);
@@ -1572,7 +1583,7 @@ impl LiveShell {
         if tray != self.tray {
             self.tray = tray;
             self.tray_icons = panel_tray_icons(&self.tray);
-            redraw.push(SurfaceRole::Panel);
+            redraw.push(SurfaceRole::Taskbar);
         }
         let notification = self.notification_feed.snapshot();
         let notification = if notification.as_ref().is_some_and(|item| {
@@ -1904,7 +1915,7 @@ impl LiveShell {
                         .values()
                         .any(|viewport| viewport.host.remote_access_protected())
             }
-            SurfaceRole::Panel => {
+            SurfaceRole::Taskbar => {
                 self.panel_host.remote_access_protected()
                     || self
                         .panel_hosts
@@ -1938,7 +1949,17 @@ impl LiveShell {
     pub fn scene(&mut self, role: SurfaceRole, width: u32, height: u32) -> Vec<PaintCommand> {
         match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
-            SurfaceRole::Panel => self.panel_scene(width, height),
+            SurfaceRole::Taskbar => self.panel_scene(width, height),
+            SurfaceRole::Panel => self
+                .plugin_panel_host
+                .as_mut()
+                .map_or_else(Vec::new, |host| {
+                    host.step(HostBatch {
+                        surface_size: Some((width, height)),
+                        ..HostBatch::default()
+                    });
+                    host.commands().to_vec()
+                }),
             SurfaceRole::Launcher if self.run_visible => self.run_scene(width, height),
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => {
@@ -2471,7 +2492,8 @@ impl LiveShell {
 
     pub fn surface_visible(&self, role: SurfaceRole) -> bool {
         match role {
-            SurfaceRole::Desktop | SurfaceRole::Panel => true,
+            SurfaceRole::Desktop | SurfaceRole::Taskbar => true,
+            SurfaceRole::Panel => self.plugin_panel_host.is_some(),
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible,
             SurfaceRole::Notification => {
@@ -2562,7 +2584,11 @@ impl LiveShell {
         };
         match role {
             SurfaceRole::Desktop => Some(self.desktop_change_token),
-            SurfaceRole::Panel => Some(self.panel_change_token),
+            SurfaceRole::Taskbar => Some(self.panel_change_token),
+            SurfaceRole::Panel => self
+                .plugin_panel_host
+                .as_ref()
+                .map(|host| host_token(host.inspect())),
             SurfaceRole::Lock => Some(self.lock_change_token),
             SurfaceRole::Launcher if self.run_visible => Some(host_token(self.run_host.inspect())),
             SurfaceRole::Launcher => Some(host_token(self.launcher_host.inspect())),
@@ -2722,7 +2748,7 @@ impl LiveShell {
     pub fn poll_host_deadlines(&mut self, now: Instant) -> Vec<SurfaceRole> {
         let mut changed = Vec::new();
         if self.poll_launcher_preferences() {
-            changed.extend([SurfaceRole::Launcher, SurfaceRole::Panel]);
+            changed.extend([SurfaceRole::Launcher, SurfaceRole::Taskbar]);
         }
 
         let mut due_desktop_outputs = self
@@ -2781,7 +2807,7 @@ impl LiveShell {
             self.panel_change_token = outcome.change_token;
             self.panel_deadline = outcome.next_deadline;
             if outcome.changed | self.apply_panel_effects() {
-                changed.push(SurfaceRole::Panel);
+                changed.push(SurfaceRole::Taskbar);
             }
         }
         self.switch_panel_output(input_output);
@@ -2839,7 +2865,7 @@ impl LiveShell {
             let visible = self.keyboard_visible;
             if self.refresh_keyboard() {
                 outcome.redraw.push(SurfaceRole::OnScreenKeyboard);
-                outcome.redraw.push(SurfaceRole::Panel);
+                outcome.redraw.push(SurfaceRole::Taskbar);
             }
             outcome.visibility_changed |= visible != self.keyboard_visible;
             self.keyboard_deadline =
@@ -3048,6 +3074,26 @@ impl LiveShell {
         outcome.changed | self.apply_panel_effects()
     }
 
+    pub(crate) fn plugin_panel_host_input(
+        &mut self,
+        input: nickel_input::InputEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let Some(host) = self.plugin_panel_host.as_mut() else {
+            return false;
+        };
+        let (event, authority) =
+            internal_normalized_ingress(input, None, "plugin-panel", host.inspect(), None);
+        host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![event],
+            normalized_authorities: vec![authority],
+            ..HostBatch::default()
+        })
+        .changed
+    }
+
     pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
         self.launcher_host_event_with_clipboard_limit(HostEvent::Ui(event), width, height, None)
             .changed
@@ -3113,7 +3159,15 @@ impl LiveShell {
         height: u32,
     ) -> bool {
         match role {
-            SurfaceRole::Panel => self.panel_host_ui(event, width),
+            SurfaceRole::Taskbar => self.panel_host_ui(event, width),
+            SurfaceRole::Panel => self.plugin_panel_host.as_mut().is_some_and(|host| {
+                host.step(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Ui(event)],
+                    ..HostBatch::default()
+                })
+                .changed
+            }),
             SurfaceRole::Launcher => self.launcher_host_ui(event, width, height),
             SurfaceRole::ControlCenter => {
                 if !self.control_visible {
@@ -3297,10 +3351,10 @@ impl LiveShell {
         }
     }
 
-    fn apply_panel_action(&mut self, action: PanelAction) {
+    fn apply_panel_action(&mut self, action: TaskbarAction) {
         let anchored_role = match &action {
-            PanelAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),
-            PanelAction::Control => Some((ShellRole::ControlCenter, "panel-control")),
+            TaskbarAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),
+            TaskbarAction::Control => Some((ShellRole::ControlCenter, "panel-control")),
             _ => None,
         };
         if anchored_role.is_some() {
@@ -3323,11 +3377,11 @@ impl LiveShell {
             });
         }
         match action {
-            PanelAction::Launcher => self.set_launcher_visible(!self.launcher_visible),
-            PanelAction::OnScreenKeyboard => {
+            TaskbarAction::Launcher => self.set_launcher_visible(!self.launcher_visible),
+            TaskbarAction::OnScreenKeyboard => {
                 self.set_keyboard_visible(!self.keyboard_visible);
             }
-            PanelAction::Task(index) => {
+            TaskbarAction::Task(index) => {
                 let groups = self.panel_groups();
                 if let Some(window) = groups.get(index).and_then(|group| group.windows.last()) {
                     let _ = self.send_session_command(
@@ -3346,7 +3400,7 @@ impl LiveShell {
                     self.launch_application_by_id(application_id.as_str());
                 }
             }
-            PanelAction::TaskContext(index) => {
+            TaskbarAction::TaskContext(index) => {
                 let groups = self.panel_groups();
                 let Some(group) = groups.get(index) else {
                     return;
@@ -3365,7 +3419,7 @@ impl LiveShell {
                 self.application_menu_host = None;
                 let x = self
                     .panel_host
-                    .semantic_targets_for_message(&PanelAction::Task(index))
+                    .semantic_targets_for_message(&TaskbarAction::Task(index))
                     .into_iter()
                     .next()
                     .map(|target| target.bounds.origin.x.round() as i32)
@@ -3385,23 +3439,23 @@ impl LiveShell {
                 let _ =
                     self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
-            PanelAction::ToggleTaskPin(id) => {
+            TaskbarAction::ToggleTaskPin(id) => {
                 self.launcher.toggle_pin(&id);
                 self.persist_launcher_preferences();
             }
-            PanelAction::MoveTaskPinLeft(id) => {
+            TaskbarAction::MoveTaskPinLeft(id) => {
                 if self.launcher.move_pin(&id, -1) {
                     self.persist_launcher_preferences();
                 }
             }
-            PanelAction::MoveTaskPinRight(id) => {
+            TaskbarAction::MoveTaskPinRight(id) => {
                 if self.launcher.move_pin(&id, 1) {
                     self.persist_launcher_preferences();
                 }
             }
-            // Drag gestures are reduced by `PanelApplication` into a typed move action.
-            PanelAction::TaskDrag(_, _) => {}
-            PanelAction::Codex => {
+            // Drag gestures are reduced by `TaskbarApplication` into a typed move action.
+            TaskbarAction::TaskDrag(_, _) => {}
+            TaskbarAction::Codex => {
                 if !self.launcher.codex_available() {
                     self.codex_project_menu_visible = false;
                     return;
@@ -3411,9 +3465,9 @@ impl LiveShell {
                 }
                 self.codex_project_menu_visible = !self.codex_project_menu_visible;
             }
-            PanelAction::Tray(id) => self.tray_feed.activate(&id),
-            PanelAction::TrayContext(id) => self.tray_feed.context_menu(&id),
-            PanelAction::Control => {
+            TaskbarAction::Tray(id) => self.tray_feed.activate(&id),
+            TaskbarAction::TrayContext(id) => self.tray_feed.context_menu(&id),
+            TaskbarAction::Control => {
                 if self.launcher_visible {
                     self.set_launcher_visible(false);
                 }
@@ -3483,7 +3537,7 @@ impl LiveShell {
             ShellSemanticTarget::OnScreenKeyboardToggle => {
                 let target = self
                     .panel_host
-                    .semantic_targets_for_message(&PanelAction::OnScreenKeyboard)
+                    .semantic_targets_for_message(&TaskbarAction::OnScreenKeyboard)
                     .into_iter()
                     .next()?;
                 Some(ResolvedShellTarget {
@@ -3518,7 +3572,7 @@ impl LiveShell {
                         .is_some_and(|id| id.as_str() == application_id)
                 })?;
                 let bounds = host
-                    .semantic_targets_for_message(&PanelAction::Task(index))
+                    .semantic_targets_for_message(&TaskbarAction::Task(index))
                     .into_iter()
                     .next()?
                     .bounds;
@@ -3537,7 +3591,7 @@ impl LiveShell {
                     self.panel_hosts.get(output)?
                 };
                 let bounds = host
-                    .semantic_targets_for_message(&PanelAction::Control)
+                    .semantic_targets_for_message(&TaskbarAction::Control)
                     .into_iter()
                     .next()?
                     .bounds;
@@ -3659,7 +3713,7 @@ impl LiveShell {
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
         self.panel_hover_output.clone_from(&self.panel_output);
-        if let Some(PanelHover::Task(index)) = hovered {
+        if let Some(TaskbarHover::Task(index)) = hovered {
             if self.preview_group != Some(index)
                 && self.preview_pending.map(|(pending, _)| pending) != Some(index)
             {
@@ -3675,27 +3729,27 @@ impl LiveShell {
         changed
     }
 
-    fn panel_hover_for_action(&self, action: &PanelAction) -> Option<PanelHover> {
+    fn panel_hover_for_action(&self, action: &TaskbarAction) -> Option<TaskbarHover> {
         Some(match action {
-            PanelAction::OnScreenKeyboard => PanelHover::OnScreenKeyboard,
-            PanelAction::Launcher => PanelHover::Launcher,
-            PanelAction::Task(index)
-            | PanelAction::TaskContext(index)
-            | PanelAction::TaskDrag(index, _) => PanelHover::Task(*index),
-            PanelAction::ToggleTaskPin(_)
-            | PanelAction::MoveTaskPinLeft(_)
-            | PanelAction::MoveTaskPinRight(_) => return None,
-            PanelAction::Codex => PanelHover::Codex,
-            PanelAction::Tray(id) | PanelAction::TrayContext(id) => self
+            TaskbarAction::OnScreenKeyboard => TaskbarHover::OnScreenKeyboard,
+            TaskbarAction::Launcher => TaskbarHover::Launcher,
+            TaskbarAction::Task(index)
+            | TaskbarAction::TaskContext(index)
+            | TaskbarAction::TaskDrag(index, _) => TaskbarHover::Task(*index),
+            TaskbarAction::ToggleTaskPin(_)
+            | TaskbarAction::MoveTaskPinLeft(_)
+            | TaskbarAction::MoveTaskPinRight(_) => return None,
+            TaskbarAction::Codex => TaskbarHover::Codex,
+            TaskbarAction::Tray(id) | TaskbarAction::TrayContext(id) => self
                 .tray
                 .iter()
                 .rev()
                 .take(4)
                 .rev()
                 .position(|item| item.id == id.as_str())
-                .map(PanelHover::Tray)
-                .unwrap_or(PanelHover::Tray(0)),
-            PanelAction::Control => PanelHover::Control,
+                .map(TaskbarHover::Tray)
+                .unwrap_or(TaskbarHover::Tray(0)),
+            TaskbarAction::Control => TaskbarHover::Control,
         })
     }
 
@@ -3747,7 +3801,7 @@ impl LiveShell {
         scene
     }
 
-    fn visible_panel_hover(&self) -> Option<PanelHover> {
+    fn visible_panel_hover(&self) -> Option<TaskbarHover> {
         (self.panel_hover_output == self.panel_output)
             .then_some(self.panel_hover)
             .flatten()
@@ -4412,7 +4466,7 @@ impl LiveShell {
     fn preview_origin_x(&self, index: usize, width: u32) -> i32 {
         let control_bounds = self
             .panel_host
-            .semantic_targets_for_message(&PanelAction::Task(index))
+            .semantic_targets_for_message(&TaskbarAction::Task(index))
             .into_iter()
             .next()
             .map(|target| target.bounds)

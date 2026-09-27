@@ -2031,7 +2031,8 @@ impl NickelSession {
                 .filter_map(|surface| {
                     let role = match surface.role {
                         crate::winit_shell::SurfaceRole::Desktop => ShellRole::Desktop,
-                        crate::winit_shell::SurfaceRole::Panel => ShellRole::Panel,
+                        crate::winit_shell::SurfaceRole::Taskbar => ShellRole::Panel,
+                        crate::winit_shell::SurfaceRole::Panel => return None,
                         crate::winit_shell::SurfaceRole::Launcher => ShellRole::Launcher,
                         crate::winit_shell::SurfaceRole::ControlCenter => ShellRole::ControlCenter,
                         crate::winit_shell::SurfaceRole::Notification => ShellRole::Notification,
@@ -2185,7 +2186,7 @@ impl NickelSession {
                 .unwrap_or(u16::MAX)
             };
             let desktops = count(crate::winit_shell::SurfaceRole::Desktop);
-            let panels = count(crate::winit_shell::SurfaceRole::Panel);
+            let panels = count(crate::winit_shell::SurfaceRole::Taskbar);
             let locks = count(crate::winit_shell::SurfaceRole::Lock);
             let launchers = count(crate::winit_shell::SurfaceRole::Launcher);
             return nickel_session_protocol::ShellReadinessSnapshot {
@@ -2224,7 +2225,7 @@ impl NickelSession {
             use crate::winit_shell::SurfaceRole;
             Some(match role {
                 ShellRole::Desktop => SurfaceRole::Desktop,
-                ShellRole::Panel => SurfaceRole::Panel,
+                ShellRole::Panel => SurfaceRole::Taskbar,
                 ShellRole::Launcher => SurfaceRole::Launcher,
                 ShellRole::ControlCenter => SurfaceRole::ControlCenter,
                 ShellRole::ContextMenu => SurfaceRole::WindowContextMenu,

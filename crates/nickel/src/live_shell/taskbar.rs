@@ -65,7 +65,7 @@ pub(super) fn panel_status_layout(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PanelHover {
+pub(super) enum TaskbarHover {
     OnScreenKeyboard,
     Launcher,
     Task(usize),
@@ -75,7 +75,7 @@ pub(super) enum PanelHover {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum PanelAction {
+pub enum TaskbarAction {
     OnScreenKeyboard,
     Launcher,
     Task(usize),
@@ -91,7 +91,7 @@ pub enum PanelAction {
 }
 
 #[derive(Clone)]
-pub struct PanelApplication {
+pub struct TaskbarUi {
     pub(super) keyboard_enabled: bool,
     pub(super) keyboard_visible: bool,
     pub(super) groups: Arc<Vec<TaskbarApplication>>,
@@ -103,28 +103,28 @@ pub struct PanelApplication {
     pub(super) task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>>,
     pub(super) pet_frame: u8,
     pub(super) palette: ThemePalette,
-    pub(super) panel_hover: Option<PanelHover>,
+    pub(super) panel_hover: Option<TaskbarHover>,
     pub(super) launcher_visible: bool,
     pub(super) codex_project_menu_visible: bool,
     pub(super) control_visible: bool,
     pub(super) clock: String,
     pub(super) date: String,
-    pub(super) effects: Vec<PanelAction>,
+    pub(super) effects: Vec<TaskbarAction>,
     pub(super) task_drag: Option<(usize, isize)>,
 }
 
-fn map_task_drag(seed: PanelAction, gesture: DragGesture) -> PanelAction {
-    let PanelAction::Task(index) = seed else {
+fn map_task_drag(seed: TaskbarAction, gesture: DragGesture) -> TaskbarAction {
+    let TaskbarAction::Task(index) = seed else {
         unreachable!("task drag seeds retain their task index")
     };
-    PanelAction::TaskDrag(index, gesture)
+    TaskbarAction::TaskDrag(index, gesture)
 }
 
-impl nickel_ui::Application for PanelApplication {
-    type Message = PanelAction;
+impl nickel_ui::Application for TaskbarUi {
+    type Message = TaskbarAction;
 
     fn update(&mut self, message: Self::Message) {
-        if let PanelAction::TaskDrag(index, gesture) = message {
+        if let TaskbarAction::TaskDrag(index, gesture) = message {
             let direction = if gesture.position.x < gesture.bounds.origin.x {
                 -1
             } else if gesture.position.x > gesture.bounds.origin.x + gesture.bounds.size.width {
@@ -149,9 +149,9 @@ impl nickel_ui::Application for PanelApplication {
                             .and_then(|task| task.application_id.as_ref())
                     {
                         self.effects.push(if direction < 0 {
-                            PanelAction::MoveTaskPinLeft(id.as_str().to_owned())
+                            TaskbarAction::MoveTaskPinLeft(id.as_str().to_owned())
                         } else {
-                            PanelAction::MoveTaskPinRight(id.as_str().to_owned())
+                            TaskbarAction::MoveTaskPinRight(id.as_str().to_owned())
                         });
                     }
                 }
@@ -195,14 +195,14 @@ impl nickel_ui::Application for PanelApplication {
                         menu = menu.item(OverlayMenuItem::action(
                             "move-left",
                             "Move Left",
-                            PanelAction::MoveTaskPinLeft(id.clone()),
+                            TaskbarAction::MoveTaskPinLeft(id.clone()),
                         ));
                     }
                     if index + 1 < pinned_count {
                         menu = menu.item(OverlayMenuItem::action(
                             "move-right",
                             "Move Right",
-                            PanelAction::MoveTaskPinRight(id.clone()),
+                            TaskbarAction::MoveTaskPinRight(id.clone()),
                         ));
                     }
                 }
@@ -213,14 +213,14 @@ impl nickel_ui::Application for PanelApplication {
                     } else {
                         "Pin to Nickel Bar"
                     },
-                    PanelAction::ToggleTaskPin(id),
+                    TaskbarAction::ToggleTaskPin(id),
                 ))))
             })
             .collect()
     }
 
     fn title(&self) -> &str {
-        "Nickel Panel"
+        "Nickel Taskbar"
     }
 
     fn poll(&mut self) -> bool {
@@ -255,7 +255,7 @@ impl nickel_ui::Application for PanelApplication {
 }
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
-impl PanelApplication {
+impl TaskbarUi {
     #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
     pub fn fixture(launcher: Launcher, palette: ThemePalette) -> Self {
         let icon = Arc::new(image::RgbaImage::from_pixel(
@@ -353,8 +353,8 @@ fn duration_until_next_minute() -> Duration {
         .max(Duration::from_millis(1))
 }
 
-impl PanelApplication {
-    fn panel_view(&self, width: f32, height: f32) -> impl nickel_ui::View<PanelAction> {
+impl TaskbarUi {
+    fn panel_view(&self, width: f32, height: f32) -> impl nickel_ui::View<TaskbarAction> {
         let interactive_background = |hovered: bool, active: bool| {
             if active {
                 self.palette.accent_soft
@@ -369,12 +369,12 @@ impl PanelApplication {
                 .id("panel-launcher")
                 .accessibility_label("Open Nickel Start")
                 .semantic_role(SemanticRole::Button)
-                .message(PanelAction::Launcher)
+                .message(TaskbarAction::Launcher)
                 .width(PANEL_ITEM_WIDTH)
                 .height(height)
                 .padding(Insets::all(12.0))
                 .background(interactive_background(
-                    self.panel_hover == Some(PanelHover::Launcher),
+                    self.panel_hover == Some(TaskbarHover::Launcher),
                     self.launcher_visible,
                 ))
                 .radius(8.0)
@@ -386,7 +386,7 @@ impl PanelApplication {
         );
         let groups = &self.groups;
         for (index, group) in groups.iter().take(12).enumerate() {
-            let hovered = self.panel_hover == Some(PanelHover::Task(index));
+            let hovered = self.panel_hover == Some(TaskbarHover::Task(index));
             let is_codex_pet = group
                 .application_id
                 .as_ref()
@@ -434,9 +434,9 @@ impl PanelApplication {
                     .id(format!("panel-task-{index}"))
                     .accessibility_label(label)
                     .semantic_role(SemanticRole::Button)
-                    .message(PanelAction::Task(index))
-                    .context_message(PanelAction::TaskContext(index))
-                    .on_drag((PanelAction::Task(index), map_task_drag))
+                    .message(TaskbarAction::Task(index))
+                    .context_message(TaskbarAction::TaskContext(index))
+                    .on_drag((TaskbarAction::Task(index), map_task_drag))
                     .width(PANEL_ITEM_WIDTH)
                     .height(height)
                     .padding(if is_codex_pet {
@@ -484,13 +484,13 @@ impl PanelApplication {
                     .id("panel-on-screen-keyboard")
                     .accessibility_label("On-screen keyboard")
                     .semantic_role(SemanticRole::Button)
-                    .message(PanelAction::OnScreenKeyboard)
+                    .message(TaskbarAction::OnScreenKeyboard)
                     .width(48.0)
                     .height(height)
                     .justify_content(nickel_ui::Justify::Center)
                     .align_items(nickel_ui::Align::Center)
                     .background(interactive_background(
-                        self.panel_hover == Some(PanelHover::OnScreenKeyboard),
+                        self.panel_hover == Some(TaskbarHover::OnScreenKeyboard),
                         self.keyboard_visible,
                     ))
                     .radius(8.0)
@@ -503,7 +503,7 @@ impl PanelApplication {
                     .id("panel-codex")
                     .accessibility_label("Codex projects")
                     .semantic_role(SemanticRole::Button)
-                    .message(PanelAction::Codex)
+                    .message(TaskbarAction::Codex)
                     .width(PANEL_CODEX_WIDTH)
                     .height(height)
                     .padding(Insets {
@@ -513,7 +513,7 @@ impl PanelApplication {
                         left: 4.0,
                     })
                     .background(interactive_background(
-                        self.panel_hover == Some(PanelHover::Codex),
+                        self.panel_hover == Some(TaskbarHover::Codex),
                         self.codex_project_menu_visible,
                     ))
                     .radius(8.0)
@@ -533,8 +533,8 @@ impl PanelApplication {
                     .id(format!("panel-tray-{}", item.id))
                     .accessibility_label(&item.title)
                     .semantic_role(SemanticRole::Button)
-                    .message(PanelAction::Tray(item.id.clone()))
-                    .context_message(PanelAction::TrayContext(item.id.clone()))
+                    .message(TaskbarAction::Tray(item.id.clone()))
+                    .context_message(TaskbarAction::TrayContext(item.id.clone()))
                     .width(PANEL_TRAY_WIDTH)
                     .height(height)
                     .padding(Insets {
@@ -544,7 +544,7 @@ impl PanelApplication {
                         left: 5.0,
                     })
                     .background(interactive_background(
-                        self.panel_hover == Some(PanelHover::Tray(index)),
+                        self.panel_hover == Some(TaskbarHover::Tray(index)),
                         false,
                     ))
                     .radius(7.0)
@@ -560,7 +560,7 @@ impl PanelApplication {
                 .id("panel-control")
                 .accessibility_label("Open Quick Settings")
                 .semantic_role(SemanticRole::Button)
-                .message(PanelAction::Control)
+                .message(TaskbarAction::Control)
                 .width(PANEL_CLOCK_WIDTH)
                 .height(height)
                 .padding(Insets {
@@ -570,7 +570,7 @@ impl PanelApplication {
                     left: 0.0,
                 })
                 .background(interactive_background(
-                    self.panel_hover == Some(PanelHover::Control),
+                    self.panel_hover == Some(TaskbarHover::Control),
                     self.control_visible,
                 ))
                 .radius(8.0)

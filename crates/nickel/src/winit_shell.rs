@@ -43,7 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
-pub const PANEL_TITLE: &str = "Nickel Panel";
+pub const PANEL_TITLE: &str = "Nickel Taskbar";
 pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
@@ -182,13 +182,20 @@ fn desired_output_surfaces(
     output_names
         .iter()
         .flat_map(|output| {
-            [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock]
-                .into_iter()
-                .filter(|role| {
-                    (*role != SurfaceRole::Desktop || create_desktops)
-                        && (*role != SurfaceRole::Panel || panel_outputs.contains(output))
-                })
-                .map(|role| (output.clone(), role))
+            [
+                SurfaceRole::Desktop,
+                SurfaceRole::Taskbar,
+                SurfaceRole::Panel,
+                SurfaceRole::Lock,
+            ]
+            .into_iter()
+            .filter(|role| {
+                (*role != SurfaceRole::Desktop || create_desktops)
+                    && (*role != SurfaceRole::Taskbar || panel_outputs.contains(output))
+                    && (*role != SurfaceRole::Panel
+                        || (cfg!(target_os = "windows") && crate::plugin_panel::enabled()))
+            })
+            .map(|role| (output.clone(), role))
         })
         .collect()
 }
@@ -291,6 +298,7 @@ pub struct ShellRuntimeDiagnostics {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SurfaceRole {
     Desktop,
+    Taskbar,
     Panel,
     Launcher,
     ControlCenter,
@@ -687,7 +695,12 @@ impl WinitShell {
             let output_name = output_names.get(display_index).ok_or_else(|| {
                 "winit output identity count changed during shell startup".to_string()
             })?;
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+            for role in [
+                SurfaceRole::Desktop,
+                SurfaceRole::Taskbar,
+                SurfaceRole::Panel,
+                SurfaceRole::Lock,
+            ] {
                 if !desired.contains(&(output_name.clone(), role)) {
                     continue;
                 }
@@ -759,8 +772,8 @@ impl WinitShell {
         // dormant for the retirement grace period so a transient topology snapshot or a
         // quick reconnect can preserve their stable surface identities.
         self.surfaces.retain(|surface| {
-            surface.role != SurfaceRole::Panel
-                || desired.contains(&(surface.output_name.clone(), SurfaceRole::Panel))
+            !matches!(surface.role, SurfaceRole::Taskbar | SurfaceRole::Panel)
+                || desired.contains(&(surface.output_name.clone(), surface.role))
         });
         for surface in &mut self.surfaces {
             #[cfg(target_os = "windows")]
@@ -782,7 +795,12 @@ impl WinitShell {
             let output_name = output_names.get(display_index).ok_or_else(|| {
                 "winit output identity count changed during shell sync".to_string()
             })?;
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+            for role in [
+                SurfaceRole::Desktop,
+                SurfaceRole::Taskbar,
+                SurfaceRole::Panel,
+                SurfaceRole::Lock,
+            ] {
                 if !desired.contains(&(output_name.clone(), role)) {
                     continue;
                 }
@@ -842,7 +860,10 @@ impl WinitShell {
             if surface.display_connected
                 || matches!(
                     surface.role,
-                    SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+                    SurfaceRole::Desktop
+                        | SurfaceRole::Taskbar
+                        | SurfaceRole::Panel
+                        | SurfaceRole::Lock
                 )
             {
                 continue;
@@ -2027,6 +2048,7 @@ impl WinitShell {
         let title = base_title;
         let session_role = match role {
             SurfaceRole::Desktop => SessionShellRole::Desktop,
+            SurfaceRole::Taskbar => SessionShellRole::Panel,
             SurfaceRole::Panel => SessionShellRole::Panel,
             SurfaceRole::Launcher => SessionShellRole::Launcher,
             SurfaceRole::ControlCenter => SessionShellRole::ControlCenter,
@@ -2054,7 +2076,10 @@ impl WinitShell {
             );
             let output = matches!(
                 role,
-                SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+                SurfaceRole::Desktop
+                    | SurfaceRole::Taskbar
+                    | SurfaceRole::Panel
+                    | SurfaceRole::Lock
             )
             .then(|| output_name.to_owned());
             crate::platform::register_shell_surface(
@@ -2080,6 +2105,11 @@ impl WinitShell {
                     | SurfaceRole::OnScreenKeyboard
             ))
             .with_visible(!hidden || cfg!(target_os = "linux"));
+        let attributes = if role == SurfaceRole::Panel {
+            attributes.with_transparent(true)
+        } else {
+            attributes
+        };
         #[cfg(target_os = "linux")]
         let attributes = attributes.with_name(application_id.clone(), application_id.clone());
         #[allow(deprecated)]
@@ -2098,9 +2128,14 @@ impl WinitShell {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
-            SurfaceRole::Panel => {
+            SurfaceRole::Taskbar => {
                 if !crate::platform::configure_panel_window(&window) {
                     tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Panel => {
+                if !crate::platform::configure_preview_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows plugin panel window");
                 }
             }
             SurfaceRole::Launcher => {
@@ -2295,7 +2330,7 @@ fn surface_geometry(
             geometry.height,
             false,
         ),
-        SurfaceRole::Panel => (
+        SurfaceRole::Taskbar => (
             PANEL_TITLE,
             geometry.x,
             match panel_edge {
@@ -2307,6 +2342,18 @@ fn surface_geometry(
             geometry.width,
             PANEL_HEIGHT,
             false,
+        ),
+        SurfaceRole::Panel => (
+            "Nickel Plugin Panel",
+            geometry.x + geometry.width.saturating_sub(crate::plugin_panel::WIDTH) as i32 / 2,
+            geometry.y
+                + geometry.height.saturating_sub(
+                    crate::plugin_panel::HEIGHT
+                        .saturating_add(crate::plugin_panel::bottom_offset()),
+                ) as i32,
+            crate::plugin_panel::WIDTH.min(geometry.width),
+            crate::plugin_panel::HEIGHT.min(geometry.height),
+            true,
         ),
         SurfaceRole::Launcher => (
             LAUNCHER_TITLE,
@@ -2409,7 +2456,7 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
 fn output_role(role: SurfaceRole) -> bool {
     matches!(
         role,
-        SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+        SurfaceRole::Desktop | SurfaceRole::Taskbar | SurfaceRole::Panel | SurfaceRole::Lock
     )
 }
 
@@ -2619,7 +2666,7 @@ mod tests {
         }
         for role in [
             SurfaceRole::Desktop,
-            SurfaceRole::Panel,
+            SurfaceRole::Taskbar,
             SurfaceRole::Lock,
             SurfaceRole::Launcher,
             SurfaceRole::ControlCenter,
@@ -2740,7 +2787,11 @@ mod tests {
         let desired = desired_output_surfaces(&outputs, true, true, None);
         assert_eq!(desired.len(), 6);
         for output in outputs {
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+            for role in [
+                SurfaceRole::Desktop,
+                SurfaceRole::Taskbar,
+                SurfaceRole::Lock,
+            ] {
                 assert!(
                     desired.contains(&(output.clone(), role)),
                     "{output} {role:?}"
@@ -2766,8 +2817,8 @@ mod tests {
                 ("HDMI-A-1".to_owned(), SurfaceRole::Lock),
             ])
         );
-        assert!(after.contains(&("DP-1".to_owned(), SurfaceRole::Panel)));
-        assert!(!after.contains(&("HDMI-A-1".to_owned(), SurfaceRole::Panel)));
+        assert!(after.contains(&("DP-1".to_owned(), SurfaceRole::Taskbar)));
+        assert!(!after.contains(&("HDMI-A-1".to_owned(), SurfaceRole::Taskbar)));
     }
 
     #[test]
@@ -2799,7 +2850,7 @@ mod tests {
         assert!(
             desired
                 .iter()
-                .all(|(_, role)| *role == SurfaceRole::Panel || *role == SurfaceRole::Lock)
+                .all(|(_, role)| *role == SurfaceRole::Taskbar || *role == SurfaceRole::Lock)
         );
     }
 
@@ -2845,12 +2896,12 @@ mod tests {
             ("Nickel Desktop", 40, 20, 1920, 1006, false)
         );
         assert_eq!(
-            surface_geometry(SurfaceRole::Panel, display, PanelEdge::Bottom),
-            ("Nickel Panel", 40, 970, 1920, 56, false)
+            surface_geometry(SurfaceRole::Taskbar, display, PanelEdge::Bottom),
+            ("Nickel Taskbar", 40, 970, 1920, 56, false)
         );
         assert_eq!(
-            surface_geometry(SurfaceRole::Panel, display, PanelEdge::Top),
-            ("Nickel Panel", 40, 20, 1920, 56, false)
+            surface_geometry(SurfaceRole::Taskbar, display, PanelEdge::Top),
+            ("Nickel Taskbar", 40, 20, 1920, 56, false)
         );
     }
 
@@ -2860,7 +2911,7 @@ mod tests {
         let mut tracker = OutputRetirementTracker::default();
         let mut surfaces = vec![
             (SurfaceRole::Desktop, "winit".to_owned(), 11_u32),
-            (SurfaceRole::Panel, "winit".to_owned(), 12),
+            (SurfaceRole::Taskbar, "winit".to_owned(), 12),
             (SurfaceRole::Lock, "winit".to_owned(), 13),
         ];
 
@@ -2906,7 +2957,7 @@ mod tests {
         let mut surfaces = vec![
             (SurfaceRole::Desktop, "winit".to_owned(), 11_u32),
             (SurfaceRole::Desktop, "memory-a".to_owned(), 21),
-            (SurfaceRole::Panel, "memory-a".to_owned(), 22),
+            (SurfaceRole::Taskbar, "memory-a".to_owned(), 22),
             (SurfaceRole::Lock, "memory-a".to_owned(), 23),
         ];
         surfaces.retain(|(role, output, _)| !output_role_is_retired(*role, output, &retired));

@@ -49,7 +49,7 @@ smithay::backend::renderer::element::render_elements! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InternalSurfaceRole {
     Desktop,
-    Panel,
+    Taskbar,
     Overlay,
     /// Foremost compositor paint that never participates in hit testing or focus.
     PassiveOverlay,
@@ -1603,7 +1603,7 @@ impl Default for InternalUiRuntime {
 
 impl InternalUiRuntime {
     fn panel_is_suppressed(&self, surface: &PresentedSurface) -> bool {
-        surface.placement.role == InternalSurfaceRole::Panel
+        surface.placement.role == InternalSurfaceRole::Taskbar
             && surface
                 .placement
                 .output
@@ -2605,7 +2605,7 @@ impl InternalUiRuntime {
             InternalSurfaceRole::TrustedControl => 4,
             InternalSurfaceRole::Desktop => 0,
             InternalSurfaceRole::Application => 1,
-            InternalSurfaceRole::Panel => 2,
+            InternalSurfaceRole::Taskbar => 2,
             InternalSurfaceRole::Overlay
             | InternalSurfaceRole::PassiveOverlay
             | InternalSurfaceRole::OnScreenKeyboard => 3,
@@ -2617,7 +2617,7 @@ impl InternalUiRuntime {
             InternalSurfaceRole::Desktop => InternalSurfaceLayer::Background,
             InternalSurfaceRole::Application => InternalSurfaceLayer::Application,
             InternalSurfaceRole::TrustedControl
-            | InternalSurfaceRole::Panel
+            | InternalSurfaceRole::Taskbar
             | InternalSurfaceRole::Overlay
             | InternalSurfaceRole::PassiveOverlay
             | InternalSurfaceRole::OnScreenKeyboard => InternalSurfaceLayer::Overlay,
@@ -3389,7 +3389,7 @@ mod tests {
 
     fn placement(output: Option<&str>) -> InternalSurfacePlacement {
         InternalSurfacePlacement {
-            role: InternalSurfaceRole::Panel,
+            role: InternalSurfaceRole::Taskbar,
             geometry: (10, 20, 120, 32),
             output: output.map(str::to_owned),
         }
@@ -3470,7 +3470,7 @@ mod tests {
         let mut runtime = InternalUiRuntime::default();
         let id = runtime.insert(Label, placement(Some("DP-1")), 1.0);
         let moved = InternalSurfacePlacement {
-            role: InternalSurfaceRole::Panel,
+            role: InternalSurfaceRole::Taskbar,
             geometry: (-1910, 220, 120, 32),
             output: Some("HDMI-A-1".into()),
         };
@@ -3772,7 +3772,7 @@ mod tests {
         let panel = runtime.insert(
             Counter(0),
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 100, 40),
                 output: None,
             },
@@ -3892,7 +3892,7 @@ mod tests {
         let panel = runtime.insert(
             Label,
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 200, 32),
                 output: None,
             },
@@ -3913,7 +3913,7 @@ mod tests {
         let left_panel = runtime.insert(
             Label,
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 100, 32),
                 output: Some("left".into()),
             },
@@ -3922,7 +3922,7 @@ mod tests {
         let right_panel = runtime.insert(
             Label,
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (100, 0, 100, 32),
                 output: Some("right".into()),
             },
@@ -3989,7 +3989,7 @@ mod tests {
         let panel = runtime.insert(
             Label,
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 100, 100),
                 output: Some("nested".into()),
             },

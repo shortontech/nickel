@@ -49,7 +49,7 @@ fn pointer_opened_control_center_does_not_paint_initial_keyboard_focus() {
             .adopt_input_modality(InputModality::Pointer)
     );
 
-    shell.apply_panel_action(super::PanelAction::Control);
+    shell.apply_panel_action(super::TaskbarAction::Control);
 
     assert_eq!(
         shell.control_host.inspect().modality,

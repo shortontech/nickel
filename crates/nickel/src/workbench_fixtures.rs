@@ -14,7 +14,7 @@ use crate::{
     control_view::ControlCenterApp,
     launcher::{Launcher, LauncherInput},
     launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
-    live_shell::{DesktopApplication, LockApplication, PanelApplication},
+    live_shell::{DesktopApplication, LockApplication, TaskbarUi},
     model::{WindowGroup, WindowId},
     notification::{DesktopNotification, NotificationAction},
     notification_view::NotificationApp,
@@ -426,18 +426,18 @@ impl Fixture for DesktopFixture {
 }
 
 impl Fixture for PanelFixture {
-    type App = PanelApplication;
+    type App = TaskbarUi;
     fn metadata() -> &'static FixtureMetadata {
         &PANEL_METADATA
     }
     fn create() -> Self::App {
-        PanelApplication::fixture(Launcher::default(), palette())
+        TaskbarUi::fixture(Launcher::default(), palette())
     }
     fn create_variant(variant: &FixtureVariant) -> Self::App {
         if variant.id == "status-items" {
-            PanelApplication::populated_fixture(Launcher::default(), fixture_palette(variant.theme))
+            TaskbarUi::populated_fixture(Launcher::default(), fixture_palette(variant.theme))
         } else {
-            PanelApplication::fixture(Launcher::default(), fixture_palette(variant.theme))
+            TaskbarUi::fixture(Launcher::default(), fixture_palette(variant.theme))
         }
     }
     fn surface_size() -> (u32, u32) {

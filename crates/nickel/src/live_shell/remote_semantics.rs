@@ -117,20 +117,20 @@ fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
     }
 }
 
-fn panel_activate(action: &PanelAction) -> RemoteActionDisposition {
+fn panel_activate(action: &TaskbarAction) -> RemoteActionDisposition {
     match action {
-        PanelAction::Launcher
-        | PanelAction::ToggleTaskPin(_)
-        | PanelAction::MoveTaskPinLeft(_)
-        | PanelAction::MoveTaskPinRight(_)
-        | PanelAction::Control => RemoteActionDisposition::Guarded,
-        PanelAction::OnScreenKeyboard
-        | PanelAction::Task(_)
-        | PanelAction::TaskContext(_)
-        | PanelAction::TaskDrag(_, _)
-        | PanelAction::Codex
-        | PanelAction::Tray(_)
-        | PanelAction::TrayContext(_) => RemoteActionDisposition::Unavailable,
+        TaskbarAction::Launcher
+        | TaskbarAction::ToggleTaskPin(_)
+        | TaskbarAction::MoveTaskPinLeft(_)
+        | TaskbarAction::MoveTaskPinRight(_)
+        | TaskbarAction::Control => RemoteActionDisposition::Guarded,
+        TaskbarAction::OnScreenKeyboard
+        | TaskbarAction::Task(_)
+        | TaskbarAction::TaskContext(_)
+        | TaskbarAction::TaskDrag(_, _)
+        | TaskbarAction::Codex
+        | TaskbarAction::Tray(_)
+        | TaskbarAction::TrayContext(_) => RemoteActionDisposition::Unavailable,
     }
 }
 
@@ -161,7 +161,7 @@ impl LiveShell {
                         .map_err(|_| "shell semantics are protected or exceed budget".into())
                 }
             }
-            SurfaceRole::Panel => {
+            SurfaceRole::Taskbar => {
                 if output == self.panel_output.as_deref() {
                     project(&self.panel_host, panel_activate)
                 } else {
@@ -233,7 +233,7 @@ impl LiveShell {
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) enum RemoteShellEffect {
     Launcher(LauncherShellEffect),
-    Panel(PanelAction, Option<String>),
+    Panel(TaskbarAction, Option<String>),
     Control(ControlAction),
     Run(String),
 }
@@ -357,7 +357,7 @@ impl LiveShell {
                 );
                 outcome
             }
-            SurfaceRole::Panel => {
+            SurfaceRole::Taskbar => {
                 let previous = self.panel_output.clone();
                 let token = self.panel_change_token;
                 self.switch_panel_output(output.map(str::to_owned));
@@ -413,7 +413,7 @@ impl LiveShell {
                     .find(|app| app.id() == id)
                     .cloned(),
             ),
-            RemoteShellEffect::Panel(PanelAction::Task(index), output) => {
+            RemoteShellEffect::Panel(TaskbarAction::Task(index), output) => {
                 let previous = self.panel_output.clone();
                 let token = self.panel_change_token;
                 self.switch_panel_output(output.clone());
@@ -456,7 +456,7 @@ impl LiveShell {
                 Ok(())
             }
             RemoteShellEffect::Panel(
-                action @ (PanelAction::Launcher | PanelAction::Control),
+                action @ (TaskbarAction::Launcher | TaskbarAction::Control),
                 output,
             ) => {
                 let previous = self.panel_output.clone();

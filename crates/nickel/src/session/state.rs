@@ -6990,7 +6990,7 @@ impl NickelSession {
             let Some((shell_id, role, output)) = reverse.get(&runtime_id).cloned() else {
                 continue;
             };
-            if role == crate::winit_shell::SurfaceRole::Panel
+            if role == crate::winit_shell::SurfaceRole::Taskbar
                 && let Some(output) = output
             {
                 let origin = output_origins.get(&output).copied().unwrap_or_default();
@@ -7754,7 +7754,8 @@ fn remote_shell_event_role(
     use nickel_remote_control::desktop_events::ShellEventRole;
     match role {
         SurfaceRole::Desktop => Some(ShellEventRole::Desktop),
-        SurfaceRole::Panel => Some(ShellEventRole::Panel),
+        SurfaceRole::Taskbar => Some(ShellEventRole::Panel),
+        SurfaceRole::Panel => None,
         SurfaceRole::Launcher => Some(ShellEventRole::Launcher),
         SurfaceRole::ControlCenter => Some(ShellEventRole::ControlCenter),
         SurfaceRole::Notification => Some(ShellEventRole::Notification),
@@ -15394,9 +15395,18 @@ fn internal_shell_surface_placement(
         _ => surface_size,
     };
     let (x, y) = match surface_role {
-        SurfaceRole::Panel => (
+        SurfaceRole::Taskbar => (
             origin_x,
             origin_y + output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT) as i32,
+        ),
+        SurfaceRole::Panel => (
+            origin_x + output_width.saturating_sub(surface_size.0) as i32 / 2,
+            origin_y
+                + output_height.saturating_sub(
+                    surface_size
+                        .1
+                        .saturating_add(crate::plugin_panel::bottom_offset()),
+                ) as i32,
         ),
         SurfaceRole::Launcher => {
             let work_height = output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT);
@@ -15411,7 +15421,7 @@ fn internal_shell_surface_placement(
     };
     let role = match surface_role {
         SurfaceRole::Desktop => InternalSurfaceRole::Desktop,
-        SurfaceRole::Panel => InternalSurfaceRole::Panel,
+        SurfaceRole::Taskbar => InternalSurfaceRole::Taskbar,
         SurfaceRole::OnScreenKeyboard => InternalSurfaceRole::OnScreenKeyboard,
         _ => InternalSurfaceRole::Overlay,
     };

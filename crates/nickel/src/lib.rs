@@ -133,6 +133,7 @@ mod notification_view;
 mod places;
 #[allow(dead_code, unused_imports)]
 mod platform;
+pub mod plugin_panel;
 mod screenshot;
 mod session_host;
 mod softbuffer_presenter;
@@ -1236,7 +1237,7 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         if !state.surface_visible(role) {
             continue;
         }
-        if role == SurfaceRole::Panel {
+        if role == SurfaceRole::Taskbar {
             state.set_panel_output(output);
         } else if role == SurfaceRole::Desktop
             && let Some((origin, scale)) = state.desktop_output_projection(&output)
@@ -1279,7 +1280,7 @@ fn render_role(
         if !state.surface_visible(role) {
             continue;
         }
-        if role == SurfaceRole::Panel {
+        if role == SurfaceRole::Taskbar {
             state.set_panel_output(output);
         } else if role == SurfaceRole::Desktop
             && let Some((origin, scale)) = state.desktop_output_projection(&output)
@@ -1516,6 +1517,7 @@ fn session_visibility_role(role: SurfaceRole) -> Option<nickel_session_protocol:
         SurfaceRole::Screenshot => Some(ShellRole::Screenshot),
         SurfaceRole::OnScreenKeyboard => Some(ShellRole::OnScreenKeyboard),
         SurfaceRole::Desktop
+        | SurfaceRole::Taskbar
         | SurfaceRole::Panel
         | SurfaceRole::Launcher
         | SurfaceRole::Lock
@@ -1729,7 +1731,7 @@ fn handle_shell_input(
     let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
         return Ok(());
     };
-    if role == SurfaceRole::Panel
+    if role == SurfaceRole::Taskbar
         && let Some(output) = shell
             .surface(surface)
             .map(|entry| entry.output_name().to_owned())
@@ -1813,6 +1815,16 @@ fn handle_shell_input(
         }
         return Ok(());
     }
+    if role == SurfaceRole::Panel {
+        let (width, height) = shell
+            .surface(surface)
+            .map(|entry| entry.window().size())
+            .unwrap_or_default();
+        if state.plugin_panel_host_input(event, width, height) {
+            render_role(shell, state, role)?;
+        }
+        return Ok(());
+    }
     if role == SurfaceRole::OnScreenKeyboard {
         let (width, height) = shell
             .surface(surface)
@@ -1885,7 +1897,7 @@ fn handle_shell_input(
                 SurfaceRole::WindowPreview => state.preview_key(keycode),
                 SurfaceRole::WindowContextMenu => false,
                 SurfaceRole::Notification => state.notification_key(keycode),
-                SurfaceRole::Panel => state.preview_key(keycode),
+                SurfaceRole::Taskbar => state.preview_key(keycode),
                 SurfaceRole::Launcher => false,
                 SurfaceRole::Screenshot => state.screenshot_key(keycode),
                 _ => false,
@@ -1893,7 +1905,7 @@ fn handle_shell_input(
             if changed {
                 sync_visibility(shell, state);
                 render_role(shell, state, role)?;
-                if matches!(role, SurfaceRole::Panel | SurfaceRole::WindowPreview) {
+                if matches!(role, SurfaceRole::Taskbar | SurfaceRole::WindowPreview) {
                     render_role(shell, state, SurfaceRole::WindowPreview)?;
                     render_role(shell, state, SurfaceRole::WindowContextMenu)?;
                 }
@@ -1927,7 +1939,7 @@ fn handle_shell_input(
                     render_role(shell, state, SurfaceRole::WindowPreview)?;
                     render_role(shell, state, SurfaceRole::WindowContextMenu)?;
                 }
-            } else if edge == KeyEdge::Pressed && role == SurfaceRole::Panel {
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::Taskbar {
                 shell.set_active_output_from_surface(surface);
                 if let Some(output) = shell
                     .surface(surface)
@@ -1990,7 +2002,7 @@ fn handle_shell_input(
                 if state.screenshot_pointer_moved(x, y, width, height) {
                     render_role(shell, state, SurfaceRole::Screenshot)?;
                 }
-            } else if role == SurfaceRole::Panel {
+            } else if role == SurfaceRole::Taskbar {
                 if let Some(output) = shell
                     .surface(surface)
                     .map(|entry| entry.output_name().to_owned())
@@ -2010,7 +2022,7 @@ fn handle_shell_input(
                     state.sync_transient_overlays();
                     render_role(shell, state, SurfaceRole::WindowPreview)?;
                     *hover_repaint = Some((
-                        SurfaceRole::Panel,
+                        SurfaceRole::Taskbar,
                         Instant::now() + Duration::from_millis(24),
                     ));
                 }
@@ -2036,7 +2048,7 @@ fn handle_shell_input(
             }
         }
         InputEvent::Touch(nickel_input::TouchEvent::Ended { position, .. })
-            if role == SurfaceRole::Panel =>
+            if role == SurfaceRole::Taskbar =>
         {
             shell.set_active_output_from_surface(surface);
             let width = shell
@@ -2215,7 +2227,7 @@ fn handle_controller_action(
         SurfaceRole::WindowPreview => state.preview_controller(action),
         SurfaceRole::WindowContextMenu => state.window_menu_host_controller(action),
         SurfaceRole::Notification => state.notification_controller(action),
-        SurfaceRole::Panel => state.panel_controller(action, width),
+        SurfaceRole::Taskbar => state.panel_controller(action, width),
         SurfaceRole::Desktop => state.desktop_controller(action),
         SurfaceRole::Launcher => unreachable!("launcher controller input is handled semantically"),
         SurfaceRole::Screenshot => state.screenshot_controller(action),
@@ -2223,7 +2235,7 @@ fn handle_controller_action(
         _ => false,
     };
     if changed {
-        if role == SurfaceRole::Panel {
+        if role == SurfaceRole::Taskbar {
             sync_panel_popover_anchor(shell, state);
         }
         sync_visibility(shell, state);
@@ -2800,7 +2812,7 @@ pub fn run() -> Result<(), String> {
                     state.sync_transient_overlays();
                     focus_visible_overlay(&mut shell, &state);
                     render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
-                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Taskbar)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
                     render_role(&mut shell, &mut state, SurfaceRole::VolumeOsd)?;
@@ -2902,7 +2914,7 @@ pub fn run() -> Result<(), String> {
                 entered: false,
             }) if shell
                 .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Panel) =>
+                .is_some_and(|entry| entry.role() == SurfaceRole::Taskbar) =>
             {
                 if let Some(output) = shell
                     .surface(surface)
@@ -2911,7 +2923,7 @@ pub fn run() -> Result<(), String> {
                     state.set_panel_output(output);
                 }
                 if state.panel_pointer_left() {
-                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Taskbar)?;
                 }
             }
             Some(ShellEvent::PointerEntered {
@@ -2919,7 +2931,7 @@ pub fn run() -> Result<(), String> {
                 entered: true,
             }) if shell
                 .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Panel) =>
+                .is_some_and(|entry| entry.role() == SurfaceRole::Taskbar) =>
             {
                 state.panel_pointer_entered();
             }
@@ -2957,6 +2969,7 @@ pub fn run() -> Result<(), String> {
                 let role = shell.surface(surface).map(|entry| entry.role());
                 if let Some(
                     role @ (SurfaceRole::Desktop
+                    | SurfaceRole::Taskbar
                     | SurfaceRole::Panel
                     | SurfaceRole::WindowPreview
                     | SurfaceRole::WindowContextMenu
@@ -3184,7 +3197,7 @@ pub fn run() -> Result<(), String> {
                 }
                 if keyboard_changed {
                     sync_visibility(&mut shell, &state);
-                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Taskbar)?;
                     render_role(&mut shell, &mut state, SurfaceRole::OnScreenKeyboard)?;
                 }
             }
@@ -3549,12 +3562,12 @@ mod tests {
     #[test]
     fn visible_launcher_owns_controller_input_without_window_focus() {
         assert_eq!(
-            super::controller_target_role(true, Some(super::SurfaceRole::Panel)),
+            super::controller_target_role(true, Some(super::SurfaceRole::Taskbar)),
             Some(super::SurfaceRole::Launcher)
         );
         assert_eq!(
-            super::controller_target_role(false, Some(super::SurfaceRole::Panel)),
-            Some(super::SurfaceRole::Panel)
+            super::controller_target_role(false, Some(super::SurfaceRole::Taskbar)),
+            Some(super::SurfaceRole::Taskbar)
         );
     }
 
@@ -3589,7 +3602,7 @@ mod tests {
         }
         for persistent in [
             super::SurfaceRole::Desktop,
-            super::SurfaceRole::Panel,
+            super::SurfaceRole::Taskbar,
             super::SurfaceRole::Launcher,
             super::SurfaceRole::Lock,
             super::SurfaceRole::CodexChat,

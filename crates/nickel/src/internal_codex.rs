@@ -809,7 +809,7 @@ mod tests {
         let mut runtime = InternalUiRuntime::default();
         let menu = runtime.insert(TestApp, placement(InternalSurfaceRole::Overlay), 1.0);
         let chat = runtime.insert(TestApp, placement(InternalSurfaceRole::Application), 1.0);
-        let foreign = runtime.insert(TestApp, placement(InternalSurfaceRole::Panel), 1.0);
+        let foreign = runtime.insert(TestApp, placement(InternalSurfaceRole::Taskbar), 1.0);
         let mut host = host();
         host.project_menu = Some(menu);
         host.chats.push(ChatSurface {

@@ -169,13 +169,13 @@
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new((0..10_000).map(|index| crate::model::Application::new(format!("app.{index}"), format!("App {index}"), None, None, None)).collect());
         shell.windows = vec![OpenWindow { id: WindowId(77), application_id: None, active: true, title: "Nickel Settings".into(), state: Default::default() }];
-        shell.scene(SurfaceRole::Panel, 1280, 56);
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let groups = Arc::clone(&shell.panel_host.application().groups);
         let image = Arc::clone(&shell.panel_host.application().task_icons[0].as_ref().unwrap().1);
         let target = shell.panel_host.query_unique(&SemanticSelector::RoleAndName { role: SemanticRole::Button, name: "Open Nickel Start".into() }).unwrap();
         for _ in 0..20 {
             shell.panel_pointer_moved(target.bounds.origin.x + target.bounds.size.width / 2.0, 1280);
-            shell.scene(SurfaceRole::Panel, 1280, 56);
+            shell.scene(SurfaceRole::Taskbar, 1280, 56);
             assert!(Arc::ptr_eq(&groups, &shell.panel_host.application().groups));
             assert!(Arc::ptr_eq(&image, &shell.panel_host.application().task_icons[0].as_ref().unwrap().1));
             assert!(!shell.sync_panel_host());
@@ -198,7 +198,7 @@
         shell.apply_internal_session_snapshot(Snapshot { outputs: vec![output("left", 0), output("right", 1000)], windows: vec![window(1, 0, "Left task"), window(2, 1000, "Right task")], ..Default::default() });
         shell.refresh_fast();
         shell.set_panel_output("left");
-        shell.scene(SurfaceRole::Panel, 1000, 56);
+        shell.scene(SurfaceRole::Taskbar, 1000, 56);
         shell.panel_scene_for_output(Some("right"), 1000, 56);
         assert_eq!(shell.panel_output.as_deref(), Some("left"));
         assert_eq!(shell.panel_hosts[&Some("right".into())].application().groups[0].application_name, "Right task");
@@ -229,7 +229,7 @@
     fn rendering_a_sibling_panel_preserves_pointer_capture_and_keyboard_focus() {
         let mut shell = LiveShell::new().unwrap();
         shell.set_panel_output("left");
-        shell.scene(SurfaceRole::Panel, 1280, 56);
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let target = shell.panel_host.query_unique(&SemanticSelector::RoleAndName { role: SemanticRole::Button, name: "Open Nickel Start".into() }).unwrap();
         let point = Point { x: target.bounds.origin.x + target.bounds.size.width / 2.0, y: target.bounds.origin.y + target.bounds.size.height / 2.0 };
         shell.panel_host_ui(UiEvent::FocusNext, 1280);
@@ -263,7 +263,7 @@
     #[test]
     fn panel_host_owns_pointer_and_accessibility_targets() {
         let mut shell = LiveShell::new().unwrap();
-        let commands = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let commands = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         assert!(!commands.is_empty());
 
         let launcher = shell
@@ -278,7 +278,7 @@
             y: launcher.bounds.origin.y + launcher.bounds.size.height / 2.0,
         };
         assert!(shell.panel_pointer_moved(center.x, 1280));
-        assert_eq!(shell.panel_hover, Some(super::PanelHover::Launcher));
+        assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Launcher));
         assert!(
             shell
                 .panel_host
@@ -293,7 +293,7 @@
     #[test]
     fn panel_scene_rebuilds_when_persisted_appearance_changes() {
         let mut shell = LiveShell::new().unwrap();
-        let before_commands = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let before_commands = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let before = shell.panel_change_token;
         let light = ThemePalette::from_appearance(Appearance {
             mode: ThemeMode::Light,
@@ -307,7 +307,7 @@
         });
         shell.palette = if shell.palette == light { dark } else { light };
 
-        let commands = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let commands = shell.scene(SurfaceRole::Taskbar, 1280, 56);
 
         assert_ne!(shell.panel_change_token, before);
         assert_ne!(commands, before_commands);
@@ -316,7 +316,7 @@
     #[test]
     fn panel_scene_rebuilds_when_a_window_feed_adds_an_application() {
         let mut shell = LiveShell::new().unwrap();
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let before = shell.panel_change_token;
         shell.windows.push(OpenWindow {
             id: WindowId(77),
@@ -326,13 +326,13 @@
             state: crate::model::WindowState::default(),
         });
 
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
 
         assert_ne!(shell.panel_change_token, before);
         assert_eq!(
             shell
                 .panel_host
-                .semantic_targets_for_message(&super::PanelAction::Task(0))
+                .semantic_targets_for_message(&super::TaskbarAction::Task(0))
                 .len(),
             1
         );
@@ -357,7 +357,7 @@
         })
         .collect();
 
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         assert!(shell
             .panel_deadline
             .is_some_and(|deadline| deadline <= Instant::now() + Duration::from_millis(400)));
@@ -376,8 +376,8 @@
             .0;
         let now = Instant::now();
         shell.panel_deadline = Some(now);
-        assert!(shell.poll_host_deadlines(now).contains(&SurfaceRole::Panel));
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        assert!(shell.poll_host_deadlines(now).contains(&SurfaceRole::Taskbar));
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let animated = shell.panel_host.application().task_icons[0]
             .as_ref()
             .unwrap()
@@ -398,7 +398,7 @@
             state: Default::default(),
         }];
 
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
 
         assert_eq!(shell.panel_host.application().groups[0].application_name, "Music");
         assert_eq!(shell.panel_host.application().task_icons[0].as_ref().unwrap().0, 0x3001);
@@ -423,7 +423,7 @@
             ),
         ]);
         launcher.set_pins(vec![("first".into(), 0), ("second".into(), 1)]);
-        let mut panel = super::PanelApplication::fixture(
+        let mut panel = super::TaskbarUi::fixture(
             launcher,
             ThemePalette::from_appearance(Appearance::default()),
         );
@@ -431,7 +431,7 @@
 
         nickel_ui::Application::update(
             &mut panel,
-            super::PanelAction::TaskDrag(
+            super::TaskbarAction::TaskDrag(
                 0,
                 nickel_ui::DragGesture {
                     phase: nickel_ui::DragPhase::Moved,
@@ -442,7 +442,7 @@
         );
         nickel_ui::Application::update(
             &mut panel,
-            super::PanelAction::TaskDrag(
+            super::TaskbarAction::TaskDrag(
                 0,
                 nickel_ui::DragGesture {
                     phase: nickel_ui::DragPhase::Ended,
@@ -454,7 +454,7 @@
 
         assert_eq!(
             panel.effects,
-            [super::PanelAction::MoveTaskPinRight("first".into())]
+            [super::TaskbarAction::MoveTaskPinRight("first".into())]
         );
     }
 
@@ -476,7 +476,7 @@
         shell.windows.clear();
         shell.sync_panel_host();
 
-        shell.apply_panel_action(super::PanelAction::TaskContext(0));
+        shell.apply_panel_action(super::TaskbarAction::TaskContext(0));
 
         assert!(
             shell.window_menu.is_none(),
@@ -548,7 +548,7 @@
             })
             .collect();
         shell.sync_panel_host();
-        shell.apply_panel_action(super::PanelAction::TaskContext(0));
+        shell.apply_panel_action(super::TaskbarAction::TaskContext(0));
         assert!(shell.application_menu_target.is_some());
 
         shell.apply_application_menu_action(
@@ -562,13 +562,13 @@
     #[test]
     fn due_panel_clock_deadline_rebuilds_only_when_the_minute_changes() {
         let mut shell = LiveShell::new().unwrap();
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         shell.panel_host.application_mut().clock = "stale".into();
         shell.panel_host.application_mut().date = "stale".into();
         let now = Instant::now();
         shell.panel_deadline = Some(now);
 
-        assert!(shell.poll_host_deadlines(now).contains(&SurfaceRole::Panel));
+        assert!(shell.poll_host_deadlines(now).contains(&SurfaceRole::Taskbar));
         assert_ne!(shell.panel_host.application().clock, "stale");
         assert!(shell.panel_deadline.is_some_and(|deadline| deadline > now));
     }
@@ -577,7 +577,7 @@
     fn every_advertised_shell_deadline_is_consumed_when_due() {
         let mut shell = LiveShell::new().unwrap();
         let _ = shell.scene(SurfaceRole::Desktop, 1280, 720);
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let _ = shell.scene(SurfaceRole::Lock, 1280, 720);
         let _ = shell.scene(SurfaceRole::ControlCenter, 420, 640);
         shell.screenshot.request_capture();
@@ -617,7 +617,7 @@
             icon: RgbaImage::new(18, 18),
         }];
         shell.tray_icons = panel_tray_icons(&shell.tray);
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
 
         let tray = shell
             .panel_host
@@ -632,24 +632,24 @@
         };
 
         assert!(shell.panel_pointer_moved(center.x, 1280));
-        assert_eq!(shell.panel_hover, Some(super::PanelHover::Tray(0)));
+        assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Tray(0)));
     }
 
     #[test]
     fn panel_hover_is_projected_only_on_the_output_that_received_pointer_input() {
         let mut shell = LiveShell::new().unwrap();
-        shell.panel_hover = Some(super::PanelHover::Launcher);
+        shell.panel_hover = Some(super::TaskbarHover::Launcher);
         shell.panel_hover_output = Some("DP-1".into());
 
         shell.set_panel_output("DP-1");
         assert_eq!(
             shell.visible_panel_hover(),
-            Some(super::PanelHover::Launcher)
+            Some(super::TaskbarHover::Launcher)
         );
         shell.set_panel_output("HDMI-A-1");
         assert_eq!(shell.visible_panel_hover(), None);
         assert!(!shell.panel_pointer_left());
-        assert_eq!(shell.panel_hover, Some(super::PanelHover::Launcher));
+        assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Launcher));
 
         shell.set_panel_output("DP-1");
         assert!(shell.panel_pointer_left());
@@ -679,7 +679,7 @@
             None,
         ));
         assert_eq!(shell.take_requested_codex_project(), None);
-        shell.apply_panel_action(super::PanelAction::Codex);
+        shell.apply_panel_action(super::TaskbarAction::Codex);
         assert!(!shell.codex_project_menu_visible);
     }
 

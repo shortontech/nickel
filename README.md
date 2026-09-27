@@ -44,6 +44,9 @@ desktop-shaped bottle:
 cargo run -p nickel --no-default-features --features backend-winit --bin nickel-nested
 ```
 
+The [development plugin panel](assets/plugins/hello-panel/README.md) shows the
+experimental JSX component path in a nested session.
+
 For a direct DRM/udev session or an SDDM login session, see
 [Linux sessions](docs/linux-sessions.md). The direct session is still under
 development.

@@ -654,7 +654,7 @@
                 state: crate::model::WindowState::default(),
             },
         ];
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let panel = shell
             .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
                 application_id: "org.nickel.Terminal".into(),
@@ -665,7 +665,7 @@
         assert_eq!(panel.role, ShellRole::Panel);
         assert_eq!(panel.output.as_deref(), Some("DP-1"));
         assert!(shell.panel_pointer_moved(panel.x as f32, 1280));
-        assert_eq!(shell.panel_hover, Some(super::PanelHover::Task(0)));
+        assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Task(0)));
         assert!(shell.preview_group.is_none());
         assert_eq!(shell.preview_pending.map(|(index, _)| index), Some(0));
         assert!(shell.preview_pending.unwrap().1 > Instant::now());
@@ -754,10 +754,10 @@
             },
         ];
         shell.panel_origin_x = 1_920;
-        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
         let target = shell
             .panel_host
-            .unique_semantic_target_for_message(&super::PanelAction::Task(0))
+            .unique_semantic_target_for_message(&super::TaskbarAction::Task(0))
             .expect("taskbar item");
         let expected_anchor = shell.panel_origin_x + target.bounds.origin.x.round() as i32;
         let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
@@ -850,10 +850,10 @@
                 state: crate::model::WindowState::default(),
             })
             .collect();
-        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
         let target = shell
             .panel_host
-            .unique_semantic_target_for_message(&super::PanelAction::Task(0))
+            .unique_semantic_target_for_message(&super::TaskbarAction::Task(0))
             .expect("taskbar item");
         let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
 
@@ -889,7 +889,7 @@
             })
             .collect();
         shell.panel_origin_x = 300;
-        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
         shell.open_window_preview(0);
         let _ = shell.scene(SurfaceRole::WindowPreview, 640, 240);
         let (preview_width, preview_height) = super::preview_dimensions(2);
@@ -964,11 +964,11 @@
     #[test]
     fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
         let mut shell = LiveShell::new().unwrap();
-        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
         shell.set_panel_output("left");
         let target = shell
             .panel_host
-            .unique_semantic_target_for_message(&super::PanelAction::Control)
+            .unique_semantic_target_for_message(&super::TaskbarAction::Control)
             .expect("control button");
         let expected = target.bounds;
         let outcome = shell
@@ -986,7 +986,7 @@
         for _ in 0..2 {
             let target = shell
                 .panel_host
-                .unique_semantic_target_for_message(&super::PanelAction::Control)
+                .unique_semantic_target_for_message(&super::TaskbarAction::Control)
                 .unwrap();
             let outcome = shell.panel_host.perform_accessibility_action(
                 target.id,

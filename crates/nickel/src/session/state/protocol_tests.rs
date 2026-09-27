@@ -2270,7 +2270,7 @@ fn remote_lease_approval_rejects_retired_and_nonexistent_generation_targets() {
     let surface = session.internal_ui.insert_scene(
         Vec::new(),
         super::super::internal_ui::InternalSurfacePlacement {
-            role: super::super::internal_ui::InternalSurfaceRole::Panel,
+            role: super::super::internal_ui::InternalSurfaceRole::Taskbar,
             geometry: (0, 0, 100, 40),
             output: None,
         },
@@ -2410,7 +2410,7 @@ fn remote_lease_resume_checks_live_protection_and_pending_retirement() {
     let surface =
         session
             .internal_ui
-            .insert_scene(Vec::new(), placement(InternalSurfaceRole::Panel), 1.0);
+            .insert_scene(Vec::new(), placement(InternalSurfaceRole::Taskbar), 1.0);
     let control = session.remote_control.control();
     let mut authority = control.lock().unwrap();
     authority.set_enabled(true);
@@ -2463,7 +2463,7 @@ fn remote_lease_resume_checks_live_protection_and_pending_retirement() {
     );
     session
         .internal_ui
-        .relocate(surface, placement(InternalSurfaceRole::Panel));
+        .relocate(surface, placement(InternalSurfaceRole::Taskbar));
     assert!(matches!(
         manage(&mut session, RemoteLeaseAction::Resume),
         ServerMessage::RemoteControl(_)
@@ -6875,7 +6875,7 @@ fn first_native_launcher_open_accepts_typing(pointer: bool) {
             .internal_shell
             .as_ref()
             .unwrap()
-            .surface(crate::winit_shell::SurfaceRole::Panel, Some("file-test"))
+            .surface(crate::winit_shell::SurfaceRole::Taskbar, Some("file-test"))
             .unwrap()
             .id;
         let runtime = session.internal_shell_surfaces[&panel];
@@ -7522,7 +7522,7 @@ fn remote_panel_effect_is_staged_without_changing_local_host_dispatch() {
         .shell_mut()
         .stage_remote_shell_effect(
             crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
-                crate::live_shell::PanelAction::Launcher,
+                crate::live_shell::TaskbarAction::Launcher,
                 Some("file-test".into()),
             ),
         )
@@ -8317,7 +8317,7 @@ fn applying_multi_output_fractional_scale_rebuilds_internal_surfaces_at_native_s
         assert_eq!(session.internal_ui.scale_factor(runtime), Some(expected));
 
         let panel = shell
-            .surface(crate::winit_shell::SurfaceRole::Panel, Some(name))
+            .surface(crate::winit_shell::SurfaceRole::Taskbar, Some(name))
             .unwrap();
         let panel_runtime = session.internal_shell_surfaces[&panel.id];
         let placement = session.internal_ui.placement(panel_runtime).unwrap();

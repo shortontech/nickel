@@ -918,15 +918,15 @@ impl NickelSession {
                         crate::launcher_view::LauncherShellEffect::TogglePin(application),
                     )
                     | crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
-                        crate::live_shell::PanelAction::ToggleTaskPin(application),
+                        crate::live_shell::TaskbarAction::ToggleTaskPin(application),
                         _,
                     ) => Some(SemanticFavoriteAction::Toggle(application.clone())),
                     crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
-                        crate::live_shell::PanelAction::MoveTaskPinLeft(application),
+                        crate::live_shell::TaskbarAction::MoveTaskPinLeft(application),
                         _,
                     ) => Some(SemanticFavoriteAction::MoveLeft(application.clone())),
                     crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
-                        crate::live_shell::PanelAction::MoveTaskPinRight(application),
+                        crate::live_shell::TaskbarAction::MoveTaskPinRight(application),
                         _,
                     ) => Some(SemanticFavoriteAction::MoveRight(application.clone())),
                     _ => None,
@@ -1300,7 +1300,7 @@ impl NickelSession {
             // need their own production protection evidence before being projected.
             let role = match entry.role {
                 SurfaceRole::Desktop => ShellDiagnosticRole::Desktop,
-                SurfaceRole::Panel => ShellDiagnosticRole::Panel,
+                SurfaceRole::Taskbar => ShellDiagnosticRole::Panel,
                 SurfaceRole::Launcher => ShellDiagnosticRole::Launcher,
                 SurfaceRole::ControlCenter => ShellDiagnosticRole::ControlCenter,
                 SurfaceRole::Notification => ShellDiagnosticRole::Notification,
@@ -1309,7 +1309,10 @@ impl NickelSession {
                 SurfaceRole::WindowContextMenu => ShellDiagnosticRole::WindowContextMenu,
                 SurfaceRole::Screenshot => ShellDiagnosticRole::Screenshot,
                 SurfaceRole::OnScreenKeyboard => ShellDiagnosticRole::OnScreenKeyboard,
-                SurfaceRole::Lock | SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => {
+                SurfaceRole::Panel
+                | SurfaceRole::Lock
+                | SurfaceRole::CodexProjectMenu
+                | SurfaceRole::CodexChat => {
                     return None;
                 }
             };

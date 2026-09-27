@@ -271,6 +271,11 @@ impl InternalShellCoordinator {
                 desired.push((role, Some(output.name.clone()), size));
             }
             if self.bar_on_all_displays || index == 0 {
+                let role = SurfaceRole::Taskbar;
+                let size = role_size(role, output.width, output.height, self.panel_edge);
+                desired.push((role, Some(output.name.clone()), size));
+            }
+            if crate::plugin_panel::enabled() {
                 let role = SurfaceRole::Panel;
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, Some(output.name.clone()), size));
@@ -476,7 +481,7 @@ impl InternalShellCoordinator {
             // whole output. Undo only the top reservation so it stays visible in
             // local icon coordinates rather than being subtracted a second time.
             let top_reservation = if self.panel_edge == PanelEdge::Top
-                && self.surface(SurfaceRole::Panel, Some(output)).is_some()
+                && self.surface(SurfaceRole::Taskbar, Some(output)).is_some()
             {
                 PANEL_HEIGHT.min(entry.size.1) as f32
             } else {
@@ -497,7 +502,7 @@ impl InternalShellCoordinator {
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
-        let commands = if surface.role == SurfaceRole::Panel {
+        let commands = if surface.role == SurfaceRole::Taskbar {
             self.shell.panel_scene_for_output(
                 surface.output.as_deref(),
                 surface.size.0,
@@ -551,7 +556,7 @@ impl InternalShellCoordinator {
             .filter(|(surface, was_visible)| {
                 self.shell.surface_visible(surface.role) != *was_visible
                     || outcome.redraw.contains(&surface.role)
-                    || (outcome.visibility_changed && surface.role == SurfaceRole::Panel)
+                    || (outcome.visibility_changed && surface.role == SurfaceRole::Taskbar)
             })
             .map(|(surface, _)| surface.id)
             .collect()
@@ -638,7 +643,7 @@ impl InternalShellCoordinator {
         Ok(self
             .entries
             .iter()
-            .filter(|entry| matches!(entry.role, SurfaceRole::Launcher | SurfaceRole::Panel))
+            .filter(|entry| matches!(entry.role, SurfaceRole::Launcher | SurfaceRole::Taskbar))
             .map(|entry| entry.id)
             .collect())
     }
@@ -651,7 +656,7 @@ impl InternalShellCoordinator {
         let changed = self
             .entries
             .iter()
-            .filter(|entry| matches!(entry.role, SurfaceRole::Launcher | SurfaceRole::Panel))
+            .filter(|entry| matches!(entry.role, SurfaceRole::Launcher | SurfaceRole::Taskbar))
             .map(|entry| entry.id)
             .collect();
         (changed, applications, partial)
@@ -683,7 +688,7 @@ impl InternalShellCoordinator {
             }
             crate::platform::SystemStatusUpdate::ShellSettingsChanged => None,
             crate::platform::SystemStatusUpdate::ApplicationInventory(_) => {
-                Some(&[SurfaceRole::Launcher, SurfaceRole::Panel])
+                Some(&[SurfaceRole::Launcher, SurfaceRole::Taskbar])
             }
         };
         if !self.shell.apply_system_status_update(update) {
@@ -825,21 +830,20 @@ impl InternalShellCoordinator {
             };
             if let Some(action) = controller_action {
                 match entry.role {
-                    SurfaceRole::Panel => dependent_roles.extend([
-                        SurfaceRole::Panel,
+                    SurfaceRole::Taskbar => dependent_roles.extend([
+                        SurfaceRole::Taskbar,
                         SurfaceRole::WindowPreview,
                         SurfaceRole::WindowContextMenu,
                     ]),
                     SurfaceRole::ControlCenter => dependent_roles.extend([
-                        SurfaceRole::Panel,
+                        SurfaceRole::Taskbar,
                         SurfaceRole::VolumeOsd,
                         SurfaceRole::OnScreenKeyboard,
                     ]),
-                    SurfaceRole::WindowPreview => {
-                        dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowContextMenu])
-                    }
+                    SurfaceRole::WindowPreview => dependent_roles
+                        .extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu]),
                     SurfaceRole::WindowContextMenu => {
-                        dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowPreview])
+                        dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview])
                     }
                     _ => {}
                 }
@@ -857,7 +861,7 @@ impl InternalShellCoordinator {
                         self.shell.window_menu_host_controller(action)
                     }
                     SurfaceRole::Notification => self.shell.notification_controller(action),
-                    SurfaceRole::Panel => self.shell.panel_controller(action, entry.size.0),
+                    SurfaceRole::Taskbar => self.shell.panel_controller(action, entry.size.0),
                     SurfaceRole::Desktop => self.shell.desktop_controller(action),
                     SurfaceRole::Screenshot => self.shell.screenshot_controller(action),
                     SurfaceRole::OnScreenKeyboard => self.shell.keyboard_controller(action),
@@ -892,7 +896,7 @@ impl InternalShellCoordinator {
                     )
                 } else {
                     dependent_roles.extend([
-                        SurfaceRole::Panel,
+                        SurfaceRole::Taskbar,
                         SurfaceRole::VolumeOsd,
                         SurfaceRole::OnScreenKeyboard,
                     ]);
@@ -958,14 +962,14 @@ impl InternalShellCoordinator {
                     }
                     SurfaceRole::WindowPreview => {
                         dependent_roles
-                            .extend([SurfaceRole::Panel, SurfaceRole::WindowContextMenu]);
+                            .extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu]);
                         changed |= self
                             .shell
                             .preview_host_event_authorized(event, normalized_authority)
                             .changed;
                     }
                     SurfaceRole::WindowContextMenu => {
-                        dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowPreview]);
+                        dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview]);
                         changed |= self.shell.window_menu_host_event_authorized(
                             event,
                             entry.size.0,
@@ -1016,23 +1020,23 @@ impl InternalShellCoordinator {
                     | nickel_ui::UiEvent::KeyboardNavigateBack
             );
             match entry.role {
-                SurfaceRole::Panel if action => dependent_roles.extend([
-                    SurfaceRole::Panel,
+                SurfaceRole::Taskbar if action => dependent_roles.extend([
+                    SurfaceRole::Taskbar,
                     SurfaceRole::WindowPreview,
                     SurfaceRole::WindowContextMenu,
                 ]),
                 SurfaceRole::ControlCenter => dependent_roles.extend([
-                    SurfaceRole::Panel,
+                    SurfaceRole::Taskbar,
                     SurfaceRole::VolumeOsd,
                     SurfaceRole::OnScreenKeyboard,
                 ]),
                 SurfaceRole::WindowPreview => {
-                    dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowContextMenu])
+                    dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu])
                 }
                 SurfaceRole::WindowContextMenu => {
-                    dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowPreview])
+                    dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview])
                 }
-                SurfaceRole::Launcher if action => dependent_roles.push(SurfaceRole::Panel),
+                SurfaceRole::Launcher if action => dependent_roles.push(SurfaceRole::Taskbar),
                 _ => {}
             }
             // Semantic commands and context-menu activation need the same
@@ -1078,7 +1082,7 @@ impl InternalShellCoordinator {
             .any(|(surface, was_visible)| self.shell.surface_visible(surface.role) != *was_visible);
         for (surface, was_visible) in self.entries.iter().zip(visibility) {
             if self.shell.surface_visible(surface.role) != was_visible
-                || (visibility_changed && surface.role == SurfaceRole::Panel)
+                || (visibility_changed && surface.role == SurfaceRole::Taskbar)
                 || (changed && dependent_roles.contains(&surface.role))
             {
                 changes.push(surface.id);
@@ -1230,7 +1234,11 @@ fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) 
     let _ = panel_edge;
     match role {
         SurfaceRole::Desktop | SurfaceRole::Lock => (width, height),
-        SurfaceRole::Panel => (width, PANEL_HEIGHT),
+        SurfaceRole::Taskbar => (width, PANEL_HEIGHT),
+        SurfaceRole::Panel => (
+            crate::plugin_panel::WIDTH.min(width),
+            crate::plugin_panel::HEIGHT.min(height),
+        ),
         SurfaceRole::Launcher => launcher_size(width, height),
         SurfaceRole::ControlCenter => control_center_size(width, height),
         SurfaceRole::Notification => (420.min(width), 180.min(height)),
@@ -1744,7 +1752,7 @@ mod tests {
 
         assert_eq!(coordinator.surfaces().len(), 15);
         let panel = coordinator
-            .surface(SurfaceRole::Panel, Some("two"))
+            .surface(SurfaceRole::Taskbar, Some("two"))
             .unwrap();
         assert_eq!(panel.size, (1280, PANEL_HEIGHT));
         assert!(coordinator.visible(panel.id));
@@ -1776,12 +1784,12 @@ mod tests {
 
         assert!(
             coordinator
-                .surface(SurfaceRole::Panel, Some("primary"))
+                .surface(SurfaceRole::Taskbar, Some("primary"))
                 .is_some()
         );
         assert!(
             coordinator
-                .surface(SurfaceRole::Panel, Some("secondary"))
+                .surface(SurfaceRole::Taskbar, Some("secondary"))
                 .is_none()
         );
         assert!(
@@ -1816,7 +1824,7 @@ mod tests {
         ]);
         assert!(
             coordinator
-                .surface(SurfaceRole::Panel, Some("secondary"))
+                .surface(SurfaceRole::Taskbar, Some("secondary"))
                 .is_some()
         );
     }
@@ -1843,7 +1851,7 @@ mod tests {
             },
         ]);
         let left_panel = coordinator
-            .surface(SurfaceRole::Panel, Some("left"))
+            .surface(SurfaceRole::Taskbar, Some("left"))
             .unwrap()
             .id;
         let right_desktop = coordinator
@@ -1873,7 +1881,7 @@ mod tests {
 
         assert!(
             coordinator
-                .surface(SurfaceRole::Panel, Some("left"))
+                .surface(SurfaceRole::Taskbar, Some("left"))
                 .is_none()
         );
         assert_eq!(
@@ -1889,7 +1897,7 @@ mod tests {
         );
         assert_eq!(
             coordinator
-                .surface(SurfaceRole::Panel, Some("right"))
+                .surface(SurfaceRole::Taskbar, Some("right"))
                 .unwrap()
                 .size,
             (1600, PANEL_HEIGHT)
@@ -1914,11 +1922,15 @@ mod tests {
             scale: 1.0,
         }]);
         let panel = coordinator
-            .surface(SurfaceRole::Panel, Some("nested"))
+            .surface(SurfaceRole::Taskbar, Some("nested"))
             .unwrap()
             .id;
         assert!(!coordinator.scene(panel).unwrap().is_empty());
-        assert!(coordinator.shell_mut().surface_visible(SurfaceRole::Panel));
+        assert!(
+            coordinator
+                .shell_mut()
+                .surface_visible(SurfaceRole::Taskbar)
+        );
     }
 
     #[test]
@@ -2192,7 +2204,7 @@ mod tests {
             .unwrap()
             .id;
         let panel = coordinator
-            .surface(SurfaceRole::Panel, Some("nested"))
+            .surface(SurfaceRole::Taskbar, Some("nested"))
             .unwrap()
             .id;
         let control = coordinator
@@ -2248,7 +2260,7 @@ mod tests {
         );
         assert_eq!(
             coordinator
-                .surface(SurfaceRole::Panel, Some("nested"))
+                .surface(SurfaceRole::Taskbar, Some("nested"))
                 .unwrap()
                 .scene_generation,
             1
@@ -2296,11 +2308,11 @@ mod tests {
             .unwrap()
             .id;
         let left_panel = coordinator
-            .surface(SurfaceRole::Panel, Some("left"))
+            .surface(SurfaceRole::Taskbar, Some("left"))
             .unwrap()
             .id;
         let right_panel = coordinator
-            .surface(SurfaceRole::Panel, Some("right"))
+            .surface(SurfaceRole::Taskbar, Some("right"))
             .unwrap()
             .id;
         for id in [desktop, right_panel, left_panel] {
@@ -2335,7 +2347,7 @@ mod tests {
         }
         assert_eq!(
             coordinator
-                .surface(SurfaceRole::Panel, Some("right"))
+                .surface(SurfaceRole::Taskbar, Some("right"))
                 .unwrap()
                 .scene_generation,
             1
@@ -2426,7 +2438,7 @@ mod tests {
         );
         assert_eq!(
             coordinator
-                .surface(SurfaceRole::Panel, Some("left"))
+                .surface(SurfaceRole::Taskbar, Some("left"))
                 .unwrap()
                 .scene_generation,
             2
@@ -2455,7 +2467,7 @@ mod tests {
             .collect::<Vec<_>>();
         let changes = coordinator.deadline_changes(
             &crate::live_shell::ShellDeadlineOutcome {
-                redraw: vec![SurfaceRole::Panel],
+                redraw: vec![SurfaceRole::Taskbar],
                 visibility_changed: true,
                 ..Default::default()
             },
@@ -2476,7 +2488,7 @@ mod tests {
             scale: 1.0,
         }]);
         let panel = coordinator
-            .surface(SurfaceRole::Panel, Some("nested"))
+            .surface(SurfaceRole::Taskbar, Some("nested"))
             .unwrap()
             .id;
         let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;

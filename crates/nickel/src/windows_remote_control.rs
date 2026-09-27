@@ -9983,7 +9983,7 @@ mod tests {
         assert_eq!(point(&surface, &identity), Ok((1199, 899)));
         let panel = SurfaceObservation {
             native: 42,
-            role: crate::winit_shell::SurfaceRole::Panel,
+            role: crate::winit_shell::SurfaceRole::Taskbar,
             generation: 6,
             geometry: Some([0, 0, 800, 56]),
             ..surface.clone()
@@ -10679,7 +10679,7 @@ mod tests {
         let observations = shell.remote_shell_surface_observations(&state);
         let panel = observations
             .iter()
-            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Panel)
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Taskbar)
             .expect("one temporary Nickel Panel");
         assert!(panel.native_visible && panel.canonical_visible);
         let identity = nickel_remote_control::leases::ResourceId {
