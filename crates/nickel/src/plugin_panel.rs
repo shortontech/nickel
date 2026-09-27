@@ -1394,8 +1394,14 @@ impl PanelNode {
                 if let Some(action) = context_action {
                     container = container.context_message(PluginMessage::Context(*action));
                 }
-                if let Some(action) = drag_action {
-                    container = container.on_drag((PluginMessage::Click(*action), map_plugin_drag));
+                if let Some(drag) = drag_action {
+                    container = container.on_drag((
+                        PluginMessage::Button {
+                            click: *action,
+                            drag: *drag,
+                        },
+                        map_plugin_drag,
+                    ));
                 }
                 AnyView::new(container.child(visual))
             }
@@ -1884,6 +1890,7 @@ fn control_request(effect: &Value) -> Result<(ControlAction, PluginCapability), 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginMessage {
     Click(usize),
+    Button { click: usize, drag: usize },
     TileMove(usize, f32, f32),
     Context(usize),
     Drag(usize, DragGesture),
@@ -1892,10 +1899,10 @@ pub enum PluginMessage {
 }
 
 fn map_plugin_drag(seed: PluginMessage, gesture: DragGesture) -> PluginMessage {
-    let PluginMessage::Click(action) = seed else {
+    let PluginMessage::Button { drag, .. } = seed else {
         unreachable!("plugin drag seed retains its handler")
     };
-    PluginMessage::Drag(action, gesture)
+    PluginMessage::Drag(drag, gesture)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2896,7 +2903,9 @@ impl nickel_ui::Application for PluginPanelApplication {
             return;
         }
         let expression = match message {
-            PluginMessage::Click(action) | PluginMessage::Context(action) => {
+            PluginMessage::Click(action)
+            | PluginMessage::Button { click: action, .. }
+            | PluginMessage::Context(action) => {
                 format!("__nickelDispatch({action})")
             }
             PluginMessage::TileMove(action, dx, dy) => {
