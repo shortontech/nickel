@@ -995,6 +995,101 @@ impl DesktopApplication {
         }
         self.icon_cache.len() != previous_len
     }
+
+    pub(super) fn plugin_tiles(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> (Vec<serde_json::Value>, crate::plugin_panel::PluginImages) {
+        let mut tiles = Vec::new();
+        let mut images = crate::plugin_panel::PluginImages::new();
+        if !self.layout.icons_visible() {
+            return (tiles, images);
+        }
+        let origin = self.projection_origin();
+        let hovered = self
+            .pointer_seen
+            .then(|| self.hit(self.pointer_position))
+            .flatten();
+        let (cell_width, cell_height) = self.layout.grid();
+        for (index, item) in self
+            .layout
+            .items()
+            .iter()
+            .filter(|item| item.output == self.active_output)
+            .enumerate()
+        {
+            let mut x = item.position.x - origin.x;
+            let mut y = item.position.y - origin.y;
+            let selected = self.layout.selected().contains(&item.id);
+            if selected
+                && self.pointer_dragged
+                && let Some((_, pressed)) = self.pointer_down
+            {
+                x += self.pointer_position.x - pressed.x;
+                y += self.pointer_position.y - pressed.y;
+            }
+            if x + cell_width < 0.0
+                || y + cell_height < 0.0
+                || x > width as f32
+                || y > height as f32
+            {
+                continue;
+            }
+            let focused = self.layout.active() == Some(item.id);
+            let active = hovered == Some(item.id) || focused;
+            let interaction_surface = if selected {
+                Some(self.palette.accent_soft)
+            } else if active {
+                Some(self.palette.surface_hover)
+            } else {
+                None
+            };
+            let foreground = desktop_label_foreground(
+                self.wallpaper.as_deref(),
+                Size {
+                    width: width as f32,
+                    height: height as f32,
+                },
+                Rect::new(
+                    x + 3.0,
+                    y + 62.0,
+                    (cell_width - 6.0).max(1.0),
+                    (cell_height - 74.0).max(1.0),
+                ),
+                self.palette.background,
+                interaction_surface,
+            );
+            let asset = format!("desktop-icon-{index}");
+            if let Some(icon) = self.icon_cache.get(&item.entry.path) {
+                images.insert(
+                    asset.clone(),
+                    (
+                        0x8000_u16.saturating_add(u16::try_from(tiles.len()).unwrap_or(u16::MAX)),
+                        Arc::clone(icon),
+                    ),
+                );
+            }
+            tiles.push(serde_json::json!({
+                "asset": asset,
+                "label": item.entry.display_name(),
+                "x": x.clamp(-8192.0, 8192.0),
+                "y": y.clamp(-8192.0, 8192.0),
+                "width": cell_width,
+                "height": cell_height - 4.0,
+                "selected": selected,
+                "hovered": active,
+                "dragging": self.pointer_dragged && selected,
+                "color": foreground,
+                "outline": if foreground == 0x111111 { 0xccffffff_u32 } else { 0xcc111111_u32 },
+                "hoverBackground": self.palette.surface_hover,
+                "selectedBackground": self.palette.accent_soft,
+                "accent": self.palette.accent,
+                "complement": self.palette.complement,
+            }));
+        }
+        (tiles, images)
+    }
 }
 
 type DesktopEntryFingerprint = (bool, Option<u64>, Option<std::time::SystemTime>);
@@ -1596,6 +1691,22 @@ impl nickel_ui::Application for DesktopApplication {
             {
                 position.x += self.pointer_position.x - pressed.x;
                 position.y += self.pointer_position.y - pressed.y;
+            }
+            if self.plugin_background {
+                // Keep the host's stable hit and menu-anchor IDs. The plugin
+                // paints the tile, while Rust still owns file interaction.
+                layer = layer.child(
+                    Container::new()
+                        .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
+                        .position(position)
+                        .width(cell_width)
+                        .height(cell_height - 4.0)
+                        .message(DesktopMessage::Activate(item.id))
+                        .context_message(DesktopMessage::Context(item.id))
+                        .semantic_role(SemanticRole::GridCell)
+                        .accessibility_label(item.entry.display_name()),
+                );
+                continue;
             }
             let focused = self.layout.active() == Some(item.id);
             let icon = self

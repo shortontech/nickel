@@ -11,10 +11,10 @@ use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, ImageFit, Insets, Layer,
-    OverlayAnchor, OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Row, SemanticRole,
-    Shortcut, Size, Spacer, Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll,
-    ViewContext,
+    AnyView, Column, ComponentBuilderExt, Container, FilePlaneItem, FrameOverlay, Image, ImageFit,
+    Insets, Layer, OverlayAnchor, OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Point,
+    Row, SemanticRole, Shortcut, Size, Spacer, Text, TextField as UiTextField, TransientSurface,
+    UiId, VerticalScroll, ViewContext,
 };
 use serde_json::Value;
 
@@ -149,6 +149,7 @@ const BOOTSTRAP: &str = r#"
 const Panel = 'panel';
 const Surface = 'surface';
 const Box = 'box';
+const FileTile = 'file-tile';
 const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
@@ -246,6 +247,11 @@ function h(kind, props, ...children) {
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         x: props?.x, y: props?.y, width: props?.width, height: props?.height,
         background: props?.background, radius: props?.radius, color: props?.color,
+        label: props?.label, selected: props?.selected, hovered: props?.hovered,
+        dragging: props?.dragging, outline: props?.outline,
+        hoverBackground: props?.hoverBackground,
+        selectedBackground: props?.selectedBackground, accent: props?.accent,
+        complement: props?.complement,
         asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
         showLabel: props?.showLabel, contextAction,
@@ -307,6 +313,23 @@ function __nickelDispatch(action, value) {
 
 #[derive(Clone, Debug, PartialEq)]
 enum PanelNode {
+    FileTile {
+        asset: String,
+        label: String,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        selected: bool,
+        hovered: bool,
+        dragging: bool,
+        foreground: u32,
+        outline: u32,
+        hover_background: u32,
+        selected_background: u32,
+        accent: u32,
+        complement: u32,
+    },
     Box {
         children: Vec<Self>,
         x: i32,
@@ -401,6 +424,63 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
+            "file-tile" => {
+                if !children.is_empty() {
+                    return Err("file tile cannot have children".into());
+                }
+                let number = |name: &str, min: f64, max: f64| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_f64)
+                        .filter(|number| number.is_finite() && (min..=max).contains(number))
+                        .map(|number| number as f32)
+                        .ok_or_else(|| format!("file tile {name} must be {min} to {max}"))
+                };
+                let color = |name: &str| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_u64)
+                        .filter(|color| *color <= u32::MAX as u64)
+                        .map(|color| color as u32)
+                        .ok_or_else(|| format!("file tile {name} needs a color"))
+                };
+                Ok(Self::FileTile {
+                    asset: value
+                        .get("asset")
+                        .and_then(Value::as_str)
+                        .filter(|asset| !asset.is_empty() && asset.len() <= 128)
+                        .ok_or("file tile needs an asset")?
+                        .to_owned(),
+                    label: value
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .filter(|label| !label.is_empty() && label.len() <= 1024)
+                        .ok_or("file tile needs a label")?
+                        .to_owned(),
+                    x: number("x", -8192.0, 8192.0)?,
+                    y: number("y", -8192.0, 8192.0)?,
+                    width: number("width", 1.0, 8192.0)?,
+                    height: number("height", 1.0, 8192.0)?,
+                    selected: value
+                        .get("selected")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    hovered: value
+                        .get("hovered")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    dragging: value
+                        .get("dragging")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    foreground: color("color")?,
+                    outline: color("outline")?,
+                    hover_background: color("hoverBackground")?,
+                    selected_background: color("selectedBackground")?,
+                    accent: color("accent")?,
+                    complement: color("complement")?,
+                })
+            }
             "box" => {
                 let coordinate = |name| {
                     value
@@ -751,6 +831,62 @@ impl PanelNode {
 
     fn view(&self, images: &PluginImages) -> AnyView<PluginMessage> {
         match self {
+            Self::FileTile {
+                asset,
+                label,
+                x,
+                y,
+                width,
+                height,
+                selected,
+                hovered,
+                dragging,
+                foreground,
+                outline,
+                hover_background,
+                selected_background,
+                accent,
+                complement,
+            } => {
+                let icon = images.get(asset).map_or_else(
+                    || Arc::new(image::RgbaImage::new(1, 1)),
+                    |(_, icon)| Arc::clone(icon),
+                );
+                let icon_id = images.get(asset).map_or(0, |(id, _)| *id);
+                let mut tile = FilePlaneItem::new(
+                    PluginMessage::Click(usize::MAX),
+                    label.clone(),
+                    icon_id,
+                    icon,
+                )
+                .position(Point { x: *x, y: *y })
+                .width(*width)
+                .height(*height)
+                .padding(Insets {
+                    top: 6.0,
+                    right: 3.0,
+                    bottom: 8.0,
+                    left: 3.0,
+                })
+                .radius(8.0)
+                .semantic_role(SemanticRole::GridCell)
+                .accessibility_label(label.clone())
+                .interaction_backgrounds(*hover_background, *selected_background)
+                .selected_background(*selected, *selected_background)
+                .hovered_background(!*selected && *hovered, *hover_background)
+                .focus_background_tint(*accent)
+                .controller_focus_background_tint(*complement)
+                .icon_size(48.0)
+                .label_height((*height - 70.0).max(1.0))
+                .label_scale(0.85)
+                .foreground(*foreground)
+                .label_outline(*outline, 1.0)
+                .gap(8.0);
+                if *dragging {
+                    tile = tile.border(*accent, 2.0);
+                }
+                AnyView::new(tile)
+            }
             Self::Box {
                 children,
                 x,

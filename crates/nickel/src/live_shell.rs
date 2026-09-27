@@ -7552,6 +7552,27 @@ impl LiveShell {
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         self.load_wallpaper_for(width, height);
+        let application = self.desktop_host.application_mut();
+        let wallpaper_changed = match (&application.wallpaper, &self.wallpaper) {
+            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
+            (None, None) => false,
+            _ => true,
+        };
+        let palette_changed = application.palette != self.palette;
+        if palette_changed {
+            application.icon_cache.clear();
+        }
+        application.wallpaper.clone_from(&self.wallpaper);
+        if wallpaper_changed {
+            application.wallpaper_generation = application.wallpaper_generation.wrapping_add(1);
+        }
+        application.palette = self.palette;
+        let icons_changed = application.prepare_icons();
+        let (tiles, tile_images) = if self.plugin_desktop_host.is_some() {
+            application.plugin_tiles(width, height)
+        } else {
+            (Vec::new(), crate::plugin_panel::PluginImages::new())
+        };
         let plugin_commands = if let Some(host) = self.plugin_desktop_host.as_mut() {
             let data = serde_json::json!({
                 "width": width.clamp(1, 8192),
@@ -7561,6 +7582,7 @@ impl LiveShell {
                 "surface": self.palette.surface,
                 "text": self.palette.text,
                 "error": self.desktop_host.application().error,
+                "tiles": tiles,
             });
             match host.application_mut().sync_desktop_data(&data) {
                 Ok(data_changed) => {
@@ -7568,6 +7590,7 @@ impl LiveShell {
                     if let Some(wallpaper) = &self.wallpaper {
                         images.insert("wallpaper".into(), (0x6000, Arc::clone(wallpaper)));
                     }
+                    images.extend(tile_images);
                     let images_changed = host.application_mut().sync_images(images);
                     let outcome = host.step(HostBatch {
                         application_changed: data_changed || images_changed,
@@ -7600,21 +7623,6 @@ impl LiveShell {
         let application = self.desktop_host.application_mut();
         let background_changed = application.plugin_background != plugin_commands.is_some();
         application.plugin_background = plugin_commands.is_some();
-        let wallpaper_changed = match (&application.wallpaper, &self.wallpaper) {
-            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
-            (None, None) => false,
-            _ => true,
-        };
-        let palette_changed = application.palette != self.palette;
-        if palette_changed {
-            application.icon_cache.clear();
-        }
-        application.wallpaper.clone_from(&self.wallpaper);
-        if wallpaper_changed {
-            application.wallpaper_generation = application.wallpaper_generation.wrapping_add(1);
-        }
-        application.palette = self.palette;
-        let icons_changed = application.prepare_icons();
         let application_changed = self.desktop_application_dirty
             || background_changed
             || wallpaper_changed

@@ -1,4 +1,72 @@
     #[test]
+    fn desktop_file_tiles_render_in_jsx_with_native_hit_targets_and_fallback() {
+        use std::{ffi::OsString, path::PathBuf};
+
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            primary: true,
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0, y: 0.0, width: 400.0, height: 300.0,
+            },
+            scale: 1.0,
+        }]);
+        let path = PathBuf::from("/desktop/plugin-tile.txt");
+        desktop.layout.reconcile(vec![(
+            nickel_file::FileIdentity(1, 1),
+            nickel_file::FileEntry {
+                display_name_override: None,
+                name: OsString::from("plugin-tile.txt"),
+                path: path.clone(),
+                is_directory: false,
+                size: None,
+                modified: None,
+            },
+        )]);
+        let item = &desktop.layout.items()[0];
+        let hit = nickel_file::desktop::Point {
+            x: item.position.x + 4.0,
+            y: item.position.y + 4.0,
+        };
+        desktop.icon_cache.insert(
+            path,
+            Arc::new(RgbaImage::from_pixel(4, 4, Rgba([17, 61, 119, 255]))),
+        );
+        let mut shell = LiveShell::new().unwrap();
+        shell.desktop_host = UiHost::new(desktop, 400, 300);
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(shell.plugin_desktop_host.as_ref().unwrap().commands().iter().any(|command| matches!(
+            command, nickel_ui::backend::PaintCommand::Image { id: 0x8000, .. }
+        )));
+        assert!(!shell.desktop_host.commands().iter().any(|command| matches!(
+            command, nickel_ui::backend::PaintCommand::Image { id: 10_000, .. }
+        )));
+        assert!(shell.desktop_host.accessibility_nodes().iter().any(|node|
+            node.semantic_role == Some(SemanticRole::GridCell)
+                && node.label.as_deref() == Some("plugin-tile.txt")
+        ));
+        assert!(shell.desktop_host.application_mut().pointer_press(hit, false, Default::default()));
+        assert!(!shell.desktop_host.application().layout.selected().is_empty());
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        let plugin_commands = shell.plugin_desktop_host.as_ref().unwrap().commands();
+        let painted_colors = plugin_commands.iter().filter_map(|command| match command {
+            nickel_ui::backend::PaintCommand::RoundedFill { color, .. }
+            | nickel_ui::backend::PaintCommand::TopRoundedFill { color, .. }
+            | nickel_ui::backend::PaintCommand::Fill { color, .. } => Some(*color),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert!(painted_colors.contains(&shell.palette.accent_soft),
+            "selected color {:x} absent from {painted_colors:x?}", shell.palette.accent_soft);
+
+        shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(shell.desktop_host.commands().iter().any(|command| matches!(
+            command, nickel_ui::backend::PaintCommand::Image { id: 10_000, .. }
+        )));
+    }
+
+    #[test]
     fn desktop_overflow_plane_is_scrollable_hittable_and_focus_revealable() {
         use std::{ffi::OsString, path::PathBuf};
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
