@@ -30,10 +30,11 @@ script or offset.
 
 The example opens a component dialog. Its **Show** button requests the
 `launcher-show` capability, which Nickel checks against `plugin.json` before
-opening the launcher. The dialog uses space inside this prototype's 220-pixel
-surface; a separate managed dialog surface is part of the next runtime step.
+opening the launcher. The dialog is managed by the panel's UI host; a separate
+dialog window is not yet supported.
 
-This prototype hosts one panel shape per output and one shared JavaScript app
-instance. It does not yet have plugin discovery, Settings enable/disable or
-memory reporting, multiple panel definitions, hot reload, or a production
-crash boundary.
+Installed packages under the user's Nickel `plugins/<plugin-id>/` directory
+appear in Settings. Settings can enable or disable one external panel package
+at a time and shows its declared access, health, and measured retained UI
+memory. The panel uses the manifest's surface height and bottom offset. JS heap
+measurement, multiple external surfaces, and hot reload remain open work.

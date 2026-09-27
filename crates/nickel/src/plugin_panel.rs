@@ -2570,7 +2570,7 @@ impl nickel_ui::Application for PluginPanelApplication {
         }
     }
 
-    fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         if self.manifest.id == launcher_manifest().id {
             AnyView::new(
                 Container::new()
@@ -2590,7 +2590,7 @@ impl nickel_ui::Application for PluginPanelApplication {
             AnyView::new(
                 Column::new()
                     .fill_width()
-                    .height(surface().height as f32)
+                    .height(context.viewport.size.height)
                     .child(Spacer::flex())
                     .child(
                         Row::new()
@@ -2797,6 +2797,57 @@ mod tests {
         ));
         assert!(panel.take_effects().is_empty());
         assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn packaged_panel_uses_declared_height_and_dispatches_dialog_action() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.tall-panel".into();
+        external_manifest.surfaces[0].height = 400;
+        let package = PluginPackage {
+            manifest: external_manifest,
+            source: r#"
+                function App() {
+                    return h(Panel, {height: 80},
+                        h(Button, {id: 'open', onClick: () => nickel.openDialog('action')}, 'Open dialog'),
+                        h(Dialog, {id: 'action', anchor: 'open', open: true, width: 220, height: 120},
+                            h(Button, {id: 'show', onClick: () => nickel.request('show-launcher')}, 'Show launcher')));
+                }
+            "#
+            .into(),
+        };
+        let app = PluginPanelApplication::from_package(&package).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 440, 400);
+        let open = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open dialog".into(),
+            })
+            .unwrap();
+        assert!(open.bounds.origin.y > 250.0);
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(open.id),
+            )],
+            ..Default::default()
+        });
+        assert!(host.inspect().open_overlay.is_some());
+        let show = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Show launcher".into(),
+            })
+            .unwrap();
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(show.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ShowLauncher]
+        );
     }
 
     #[test]
