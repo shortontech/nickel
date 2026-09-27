@@ -17,7 +17,11 @@ use nickel_input::InputEvent;
 use nickel_session_protocol::ShellRole as SessionShellRole;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
-use winit::dpi::{LogicalPosition, LogicalSize};
+#[cfg(not(target_os = "windows"))]
+use winit::dpi::LogicalPosition;
+use winit::dpi::LogicalSize;
+#[cfg(target_os = "windows")]
+use winit::dpi::PhysicalPosition;
 use winit::event::{Event, WindowEvent};
 #[cfg(not(target_os = "windows"))]
 use winit::event_loop::EventLoopProxy;
@@ -802,9 +806,7 @@ impl WinitShell {
                     surface.display_connected = true;
                     let (_, x, y, width, height, _) =
                         surface_geometry(role, geometry, self.options.panel_edge);
-                    surface
-                        .window
-                        .set_outer_position(LogicalPosition::new(x, y));
+                    set_surface_position(&surface.window, x, y);
                     let _ = surface
                         .window
                         .request_inner_size(LogicalSize::new(width, height));
@@ -852,9 +854,7 @@ impl WinitShell {
             surface.display_connected = true;
             let (_, x, y, width, height, _) =
                 surface_geometry(surface.role, primary, self.options.panel_edge);
-            surface
-                .window
-                .set_outer_position(LogicalPosition::new(x, y));
+            set_surface_position(&surface.window, x, y);
             let _ = surface
                 .window
                 .request_inner_size(LogicalSize::new(width, height));
@@ -894,9 +894,7 @@ impl WinitShell {
             };
             let (_, x, y, width, height, _) =
                 surface_geometry(surface.role, display, self.options.panel_edge);
-            surface
-                .window
-                .set_outer_position(LogicalPosition::new(x, y));
+            set_surface_position(&surface.window, x, y);
             let _ = surface
                 .window
                 .request_inner_size(LogicalSize::new(width, height));
@@ -990,9 +988,10 @@ impl WinitShell {
     pub fn launcher_maximum_size(&self) -> Option<(u32, u32)> {
         let index = self.active_output_index()?;
         let geometry = self.displays.get(index)?.0;
+        let (width, height) = output_layout_size(geometry);
         Some((
-            920.min(geometry.width),
-            680.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
+            920.min(width),
+            680.min(height.saturating_sub(PANEL_HEIGHT + 8)),
         ))
     }
 
@@ -1028,22 +1027,23 @@ impl WinitShell {
         {
             let width = preferred_width.min(width);
             let height = preferred_height.min(height);
-            let y = match self.options.panel_edge {
-                PanelEdge::Top => geometry.y + PANEL_HEIGHT as i32 + 8,
-                PanelEdge::Bottom => {
-                    geometry.y + geometry.height as i32 - PANEL_HEIGHT as i32 - height as i32 - 8
-                }
+            let (_, output_height) = output_layout_size(geometry);
+            let local_y = match self.options.panel_edge {
+                PanelEdge::Top => PANEL_HEIGHT + 8,
+                PanelEdge::Bottom => output_height
+                    .saturating_sub(PANEL_HEIGHT)
+                    .saturating_sub(height)
+                    .saturating_sub(8),
             };
-            (geometry.x + 18, y, width, height)
+            let (x, y) = output_position(geometry, 18, local_y);
+            (x, y, width, height)
         } else {
             (x, y, width, height)
         };
         let surface = &mut self.surfaces[index];
         surface.display_index = display_index;
         surface.output_name = output_name;
-        surface
-            .window
-            .set_outer_position(LogicalPosition::new(x, y));
+        set_surface_position(&surface.window, x, y);
         if surface.window.size() != (width, height) {
             let _ = surface
                 .window
@@ -2067,9 +2067,12 @@ impl WinitShell {
             .map_err(|error| format!("failed to register shell surface: {error}"))?;
             application_id
         };
-        let attributes = Window::default_attributes()
-            .with_title(title)
-            .with_position(LogicalPosition::new(x, y))
+        let attributes = Window::default_attributes().with_title(title);
+        #[cfg(target_os = "windows")]
+        let attributes = attributes.with_position(PhysicalPosition::new(x, y));
+        #[cfg(not(target_os = "windows"))]
+        let attributes = attributes.with_position(LogicalPosition::new(x, y));
+        let attributes = attributes
             .with_inner_size(LogicalSize::new(width, height))
             .with_decorations(!surface_is_borderless(role))
             .with_resizable(matches!(
@@ -2286,116 +2289,179 @@ fn surface_geometry(
     geometry: DisplayGeometry,
     panel_edge: PanelEdge,
 ) -> (&'static str, i32, i32, u32, u32, bool) {
+    let (output_width, output_height) = output_layout_size(geometry);
     match role {
-        SurfaceRole::Desktop => (
-            DESKTOP_TITLE,
-            geometry.x,
-            geometry.y,
-            geometry.width,
-            geometry.height,
-            false,
-        ),
-        SurfaceRole::Panel => (
-            PANEL_TITLE,
-            geometry.x,
-            match panel_edge {
-                PanelEdge::Top => geometry.y,
-                PanelEdge::Bottom => {
-                    geometry.y + geometry.height.saturating_sub(PANEL_HEIGHT) as i32
-                }
-            },
-            geometry.width,
-            PANEL_HEIGHT,
-            false,
-        ),
-        SurfaceRole::Launcher => (
-            LAUNCHER_TITLE,
-            geometry.x + 18,
-            geometry.y + geometry.height.saturating_sub(744) as i32,
-            920.min(geometry.width),
-            680.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
-            cfg!(not(target_os = "linux")),
-        ),
-        SurfaceRole::ControlCenter => (
-            CONTROL_CENTER_TITLE,
-            geometry.x + geometry.width.saturating_sub(438) as i32,
-            geometry.y + geometry.height.saturating_sub(672) as i32,
-            420.min(geometry.width),
-            600.min(geometry.height),
-            true,
-        ),
-        SurfaceRole::Notification => (
-            NOTIFICATION_TITLE,
-            geometry.x + geometry.width.saturating_sub(438) as i32,
-            geometry.y + 24,
-            420.min(geometry.width),
-            180.min(geometry.height),
-            true,
-        ),
-        SurfaceRole::VolumeOsd => (
-            VOLUME_OSD_TITLE,
-            geometry.x + (geometry.width.saturating_sub(320) / 2) as i32,
-            geometry.y + geometry.height.saturating_sub(170) as i32,
-            320.min(geometry.width),
-            88.min(geometry.height),
-            true,
-        ),
-        SurfaceRole::WindowPreview => (
-            WINDOW_PREVIEW_TITLE,
-            geometry.x + geometry.width.saturating_sub(1160.min(geometry.width)) as i32 / 2,
-            geometry.y + geometry.height.saturating_sub(220.min(geometry.height)) as i32 / 2,
-            1160.min(geometry.width),
-            220.min(geometry.height),
-            true,
-        ),
-        SurfaceRole::WindowContextMenu => (
-            WINDOW_CONTEXT_MENU_TITLE,
-            geometry.x,
-            geometry.y,
-            220.min(geometry.width),
-            156.min(geometry.height),
-            true,
-        ),
-        SurfaceRole::CodexProjectMenu => (
-            CODEX_PROJECT_MENU_TITLE,
-            geometry.x + geometry.width.saturating_sub(464) as i32,
-            geometry.y + geometry.height.saturating_sub(476) as i32,
-            360.min(geometry.width),
-            420.min(geometry.height.saturating_sub(PANEL_HEIGHT)),
-            true,
-        ),
-        SurfaceRole::Lock => (
-            LOCK_TITLE,
-            geometry.x,
-            geometry.y,
-            geometry.width,
-            geometry.height,
-            true,
-        ),
-        SurfaceRole::Screenshot => (
-            SCREENSHOT_TITLE,
-            geometry.x,
-            geometry.y,
-            geometry.width,
-            geometry.height,
-            true,
-        ),
+        SurfaceRole::Desktop => {
+            let (x, y) = output_position(geometry, 0, 0);
+            (DESKTOP_TITLE, x, y, output_width, output_height, false)
+        }
+        SurfaceRole::Panel => {
+            let local_y = match panel_edge {
+                PanelEdge::Top => 0,
+                PanelEdge::Bottom => output_height.saturating_sub(PANEL_HEIGHT),
+            };
+            let (x, y) = output_position(geometry, 0, local_y);
+            (PANEL_TITLE, x, y, output_width, PANEL_HEIGHT, false)
+        }
+        SurfaceRole::Launcher => {
+            let (x, y) = output_position(geometry, 18, output_height.saturating_sub(744));
+            (
+                LAUNCHER_TITLE,
+                x,
+                y,
+                920.min(output_width),
+                680.min(output_height.saturating_sub(PANEL_HEIGHT + 8)),
+                cfg!(not(target_os = "linux")),
+            )
+        }
+        SurfaceRole::ControlCenter => {
+            let (x, y) = output_position(
+                geometry,
+                output_width.saturating_sub(438),
+                output_height.saturating_sub(672),
+            );
+            (
+                CONTROL_CENTER_TITLE,
+                x,
+                y,
+                420.min(output_width),
+                600.min(output_height),
+                true,
+            )
+        }
+        SurfaceRole::Notification => {
+            let (x, y) = output_position(geometry, output_width.saturating_sub(438), 24);
+            (
+                NOTIFICATION_TITLE,
+                x,
+                y,
+                420.min(output_width),
+                180.min(output_height),
+                true,
+            )
+        }
+        SurfaceRole::VolumeOsd => {
+            let (x, y) = output_position(
+                geometry,
+                output_width.saturating_sub(320) / 2,
+                output_height.saturating_sub(170),
+            );
+            (
+                VOLUME_OSD_TITLE,
+                x,
+                y,
+                320.min(output_width),
+                88.min(output_height),
+                true,
+            )
+        }
+        SurfaceRole::WindowPreview => {
+            let (x, y) = output_position(
+                geometry,
+                output_width.saturating_sub(1160.min(output_width)) / 2,
+                output_height.saturating_sub(220.min(output_height)) / 2,
+            );
+            (
+                WINDOW_PREVIEW_TITLE,
+                x,
+                y,
+                1160.min(output_width),
+                220.min(output_height),
+                true,
+            )
+        }
+        SurfaceRole::WindowContextMenu => {
+            let (x, y) = output_position(geometry, 0, 0);
+            (
+                WINDOW_CONTEXT_MENU_TITLE,
+                x,
+                y,
+                220.min(output_width),
+                156.min(output_height),
+                true,
+            )
+        }
+        SurfaceRole::CodexProjectMenu => {
+            let (x, y) = output_position(
+                geometry,
+                output_width.saturating_sub(464),
+                output_height.saturating_sub(476),
+            );
+            (
+                CODEX_PROJECT_MENU_TITLE,
+                x,
+                y,
+                360.min(output_width),
+                420.min(output_height.saturating_sub(PANEL_HEIGHT)),
+                true,
+            )
+        }
+        SurfaceRole::Lock => {
+            let (x, y) = output_position(geometry, 0, 0);
+            (LOCK_TITLE, x, y, output_width, output_height, true)
+        }
+        SurfaceRole::Screenshot => {
+            let (x, y) = output_position(geometry, 0, 0);
+            (SCREENSHOT_TITLE, x, y, output_width, output_height, true)
+        }
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => unreachable!("trusted surfaces are created dynamically"),
         SurfaceRole::OnScreenKeyboard => {
             let height = nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT
-                .min(geometry.height.saturating_sub(1));
+                .min(output_height.saturating_sub(1));
+            let (x, y) = output_position(geometry, 0, output_height.saturating_sub(height));
             (
                 "On-screen keyboard — Nickel",
-                geometry.x,
-                geometry.y + geometry.height.saturating_sub(height) as i32,
-                geometry.width,
+                x,
+                y,
+                output_width,
                 height,
                 true,
             )
         }
     }
+}
+
+fn output_layout_size(geometry: DisplayGeometry) -> (u32, u32) {
+    #[cfg(target_os = "windows")]
+    {
+        scaled_layout_size(geometry.width, geometry.height, geometry.scale)
+    }
+    #[cfg(not(target_os = "windows"))]
+    (geometry.width, geometry.height)
+}
+
+fn output_position(geometry: DisplayGeometry, logical_x: u32, logical_y: u32) -> (i32, i32) {
+    #[cfg(target_os = "windows")]
+    {
+        scaled_output_position(geometry, logical_x, logical_y)
+    }
+    #[cfg(not(target_os = "windows"))]
+    (geometry.x + logical_x as i32, geometry.y + logical_y as i32)
+}
+
+fn scaled_layout_size(width: u32, height: u32, scale: f32) -> (u32, u32) {
+    let scale = scale.max(1.0);
+    (
+        ((width as f32 / scale).floor() as u32).max(1),
+        ((height as f32 / scale).floor() as u32).max(1),
+    )
+}
+
+fn scaled_output_position(geometry: DisplayGeometry, logical_x: u32, logical_y: u32) -> (i32, i32) {
+    let scale = geometry.scale.max(1.0);
+    (
+        geometry.x + (logical_x as f32 * scale).round() as i32,
+        geometry.y + (logical_y as f32 * scale).round() as i32,
+    )
+}
+
+fn set_surface_position(window: &Window, x: i32, y: i32) {
+    #[cfg(target_os = "windows")]
+    window.set_outer_position(PhysicalPosition::new(x, y));
+    #[cfg(not(target_os = "windows"))]
+    window.set_outer_position(LogicalPosition::new(x, y));
 }
 
 fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometry>, String> {
@@ -2468,11 +2534,11 @@ mod tests {
     use super::surface_is_ephemeral;
     use super::{
         DisplayGeometry, OUTPUT_CREATION_RETRY_MAX, OUTPUT_CREATION_RETRY_MIN,
-        OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry, OutputRetirementTracker, PanelEdge,
-        ShellEvent, SurfaceRole, desired_output_surfaces, durable_presenter_peak, output_name_at,
-        output_role_is_retired, panel_outputs, parse_proc_status_rss, preferred_output_index,
-        queue_shell_input, record_pump_status, require_displays, surface_geometry,
-        surface_is_borderless,
+        OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry, OutputRetirementTracker, PANEL_HEIGHT,
+        PanelEdge, ShellEvent, SurfaceRole, desired_output_surfaces, durable_presenter_peak,
+        output_name_at, output_role_is_retired, panel_outputs, parse_proc_status_rss,
+        preferred_output_index, queue_shell_input, record_pump_status, require_displays,
+        scaled_layout_size, scaled_output_position, surface_geometry, surface_is_borderless,
     };
 
     use nickel_input::{
@@ -2670,8 +2736,34 @@ mod tests {
         };
         let (_, x, y, width, height, initially_hidden) =
             surface_geometry(SurfaceRole::Screenshot, display, PanelEdge::Bottom);
-        assert_eq!((x, y, width, height), (1920, -120, 2560, 1440));
+        assert_eq!((x, y), (1920, -120));
+        assert_eq!((width, height), super::output_layout_size(display));
         assert!(initially_hidden);
+    }
+
+    #[test]
+    fn windows_scaled_output_coordinates_keep_bottom_surfaces_visible() {
+        let display = DisplayGeometry {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            scale: 1.5,
+        };
+        let (width, height) = scaled_layout_size(display.width, display.height, display.scale);
+        assert_eq!((width, height), (1706, 960));
+
+        let panel_y = height.saturating_sub(PANEL_HEIGHT);
+        let (_, panel_physical_y) = scaled_output_position(display, 0, panel_y);
+        let panel_physical_height = (PANEL_HEIGHT as f32 * display.scale).round() as i32;
+        assert_eq!(panel_physical_y + panel_physical_height, 1440);
+
+        let launcher_height = 680;
+        let launcher_y = height.saturating_sub(PANEL_HEIGHT + 8 + launcher_height);
+        let (_, launcher_physical_y) = scaled_output_position(display, 18, launcher_y);
+        let launcher_physical_height = (launcher_height as f32 * display.scale).round() as i32;
+        assert!(launcher_physical_y >= 0);
+        assert!(launcher_physical_y + launcher_physical_height < panel_physical_y);
     }
 
     #[test]
@@ -2840,17 +2932,20 @@ mod tests {
             height: 1006,
             scale: 1.5,
         };
+        let (width, height) = super::output_layout_size(display);
+        let (bottom_x, bottom_y) =
+            super::output_position(display, 0, height.saturating_sub(PANEL_HEIGHT));
         assert_eq!(
             surface_geometry(SurfaceRole::Desktop, display, PanelEdge::Bottom),
-            ("Nickel Desktop", 40, 20, 1920, 1006, false)
+            ("Nickel Desktop", 40, 20, width, height, false)
         );
         assert_eq!(
             surface_geometry(SurfaceRole::Panel, display, PanelEdge::Bottom),
-            ("Nickel Panel", 40, 970, 1920, 56, false)
+            ("Nickel Panel", bottom_x, bottom_y, width, 56, false)
         );
         assert_eq!(
             surface_geometry(SurfaceRole::Panel, display, PanelEdge::Top),
-            ("Nickel Panel", 40, 20, 1920, 56, false)
+            ("Nickel Panel", 40, 20, width, 56, false)
         );
     }
 
