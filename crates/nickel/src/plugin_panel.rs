@@ -11,10 +11,10 @@ use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, FilePlaneItem, FrameOverlay, Image, ImageFit,
-    Insets, Layer, OverlayAnchor, OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Point,
-    Row, SemanticRole, Shortcut, Size, Spacer, Text, TextField as UiTextField, TransientSurface,
-    UiId, VerticalScroll, ViewContext,
+    AnyView, Column, ComponentBuilderExt, Container, DragGesture, DragPhase, FilePlaneItem,
+    FrameOverlay, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayId, OverlayMenu,
+    OverlayMenuItem, OverlayStyle, Point, Row, SemanticRole, Shortcut, Size, Spacer, Text,
+    TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
 };
 use serde_json::Value;
 
@@ -246,6 +246,8 @@ function h(kind, props, ...children) {
     const action = typeof handler === 'function' ? __handlers.push(handler) - 1 : null;
     const contextAction = typeof props?.onContextMenu === 'function'
         ? __handlers.push(props.onContextMenu) - 1 : null;
+    const dragAction = typeof props?.onDrag === 'function'
+        ? __handlers.push(props.onDrag) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         x: props?.x, y: props?.y, width: props?.width, height: props?.height,
         background: props?.background, radius: props?.radius, color: props?.color,
@@ -257,7 +259,7 @@ function h(kind, props, ...children) {
         item: props?.item, count: props?.count,
         asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
-        showLabel: props?.showLabel, contextAction,
+        showLabel: props?.showLabel, contextAction, dragAction,
         value: props?.value, placeholder: props?.placeholder,
         percent: props?.percent,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};
@@ -433,6 +435,7 @@ enum PanelNode {
         show_label: bool,
         action: usize,
         context_action: Option<usize>,
+        drag_action: Option<usize>,
     },
     Dialog {
         id: String,
@@ -818,6 +821,10 @@ impl PanelNode {
                         .get("contextAction")
                         .and_then(Value::as_u64)
                         .and_then(|action| usize::try_from(action).ok()),
+                    drag_action: value
+                        .get("dragAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
                 })
             }
             "dialog" => Ok(Self::Dialog {
@@ -1186,6 +1193,7 @@ impl PanelNode {
                 show_label,
                 action,
                 context_action,
+                drag_action,
             } => {
                 let visual = icon
                     .as_ref()
@@ -1217,6 +1225,9 @@ impl PanelNode {
                     .radius(10.0);
                 if let Some(action) = context_action {
                     container = container.context_message(PluginMessage::Context(*action));
+                }
+                if let Some(action) = drag_action {
+                    container = container.on_drag((PluginMessage::Click(*action), map_plugin_drag));
                 }
                 AnyView::new(container.child(visual))
             }
@@ -1377,27 +1388,64 @@ pub enum PluginEffect {
     ToggleOnScreenKeyboard,
     ToggleCodexProjects,
     SetLauncherQuery(String),
-    SetLauncherPage { dashboard: bool, page: usize },
-    ActivateLauncherResult { index: usize, id: String },
-    LaunchDashboardApplication { id: String },
+    SetLauncherPage {
+        dashboard: bool,
+        page: usize,
+    },
+    ActivateLauncherResult {
+        index: usize,
+        id: String,
+    },
+    LaunchDashboardApplication {
+        id: String,
+    },
     SetLauncherView(LauncherView),
-    ToggleLauncherPin { id: String },
+    ToggleLauncherPin {
+        id: String,
+    },
     DismissLauncher,
     LauncherOpenSettings,
     LauncherOpenAccount,
-    LauncherOpenProject { id: String },
+    LauncherOpenProject {
+        id: String,
+    },
     LauncherSeeAllProjects,
     LauncherRequestLogout,
-    ActivateTaskbarItem { index: usize, id: String },
-    ContextTaskbarItem { index: usize, id: String },
-    ToggleTaskbarMenuPin { id: String },
+    ActivateTaskbarItem {
+        index: usize,
+        id: String,
+    },
+    ContextTaskbarItem {
+        index: usize,
+        id: String,
+    },
+    MoveTaskbarPin {
+        index: usize,
+        id: String,
+        direction: i8,
+    },
+    ToggleTaskbarMenuPin {
+        id: String,
+    },
     CloseTaskbarMenuWindows,
-    InvokeTaskbarWindowMenu { page: String, index: usize },
-    ActivateTrayItem { id: String },
-    ContextTrayItem { id: String },
+    InvokeTaskbarWindowMenu {
+        page: String,
+        index: usize,
+    },
+    ActivateTrayItem {
+        id: String,
+    },
+    ContextTrayItem {
+        id: String,
+    },
     ToggleControlCenter,
-    InvokeNotification { id: u32, key: String },
-    DismissNotification { id: u32 },
+    InvokeNotification {
+        id: u32,
+        key: String,
+    },
+    DismissNotification {
+        id: u32,
+    },
     CloseNotificationHistory,
     Control(ControlAction),
     Preview(PreviewAction),
@@ -1567,12 +1615,20 @@ fn control_request(effect: &Value) -> Result<(ControlAction, PluginCapability), 
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PluginMessage {
     Click(usize),
     Context(usize),
+    Drag(usize, DragGesture),
     Text(usize, String),
     Scroll,
+}
+
+fn map_plugin_drag(seed: PluginMessage, gesture: DragGesture) -> PluginMessage {
+    let PluginMessage::Click(action) = seed else {
+        unreachable!("plugin drag seed retains its handler")
+    };
+    PluginMessage::Drag(action, gesture)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2431,6 +2487,26 @@ impl nickel_ui::Application for PluginPanelApplication {
                 let encoded = serde_json::to_string(&value).expect("string serialization");
                 format!("__nickelDispatch({action}, {encoded})")
             }
+            PluginMessage::Drag(action, gesture) => {
+                let phase = match gesture.phase {
+                    DragPhase::Started => "start",
+                    DragPhase::Moved => "move",
+                    DragPhase::Ended => "end",
+                    DragPhase::Cancelled => "cancel",
+                };
+                let encoded = serde_json::json!({
+                    "phase": phase,
+                    "x": gesture.position.x,
+                    "y": gesture.position.y,
+                    "bounds": {
+                        "x": gesture.bounds.origin.x,
+                        "y": gesture.bounds.origin.y,
+                        "width": gesture.bounds.size.width,
+                        "height": gesture.bounds.size.height,
+                    },
+                });
+                format!("__nickelDispatch({action}, {encoded})")
+            }
             PluginMessage::Scroll => unreachable!(),
         };
         let rendered = evaluate_tree(&mut self.context, &expression);
@@ -2587,6 +2663,46 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::ContextTaskbarItem {
                                 index,
                                 id: id.to_owned(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("taskbar-move-pin")
+                            && self.manifest.id == taskbar_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsPin) =>
+                        {
+                            let Some(index) = effect
+                                .get("index")
+                                .and_then(Value::as_u64)
+                                .and_then(|index| usize::try_from(index).ok())
+                                .filter(|index| *index < 12)
+                            else {
+                                self.last_error = Some("taskbar pin index is invalid".into());
+                                return;
+                            };
+                            let Some(id) = effect
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.is_empty() && id.len() <= 256)
+                            else {
+                                self.last_error = Some("taskbar pin ID is invalid".into());
+                                return;
+                            };
+                            let direction = match effect.get("direction").and_then(Value::as_str) {
+                                Some("left") => -1,
+                                Some("right") => 1,
+                                _ => {
+                                    self.last_error =
+                                        Some("taskbar pin direction is invalid".into());
+                                    return;
+                                }
+                            };
+                            approved.push(PluginEffect::MoveTaskbarPin {
+                                index,
+                                id: id.to_owned(),
+                                direction,
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
@@ -3154,6 +3270,64 @@ impl nickel_ui::Application for PluginPanelApplication {
 mod tests {
     use super::*;
     use nickel_ui::Application;
+
+    #[test]
+    fn bundled_taskbar_drag_requests_validated_pin_move_without_click() {
+        let projection = TaskbarPluginProjection {
+            items: ["first", "second"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| TaskbarPluginItem {
+                    index,
+                    id: id.into(),
+                    name: id.into(),
+                    active: false,
+                    pinned: true,
+                    icon: false,
+                    badges: Vec::new(),
+                })
+                .collect(),
+            tray: Vec::new(),
+            clock: "12:00".into(),
+            keyboard_enabled: false,
+            codex_available: false,
+        };
+        let app = PluginPanelApplication::taskbar_with_projection(&projection).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 600, 56);
+        let bounds = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "first".into(),
+            })
+            .unwrap()
+            .bounds;
+        let inside = Point {
+            x: bounds.origin.x + bounds.size.width / 2.0,
+            y: bounds.origin.y + bounds.size.height / 2.0,
+        };
+        let outside = Point {
+            x: bounds.origin.x + bounds.size.width + 20.0,
+            y: inside.y,
+        };
+        for event in [
+            nickel_ui::UiEvent::PointerPressed(inside),
+            nickel_ui::UiEvent::PointerMoved(outside),
+            nickel_ui::UiEvent::PointerReleased(inside),
+        ] {
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(event)],
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::MoveTaskbarPin {
+                index: 0,
+                id: "first".into(),
+                direction: 1,
+            }]
+        );
+    }
 
     #[test]
     fn progress_component_rejects_out_of_range_geometry() {

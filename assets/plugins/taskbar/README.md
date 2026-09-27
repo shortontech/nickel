@@ -11,8 +11,10 @@ tsc --allowJs --checkJs false --jsx react --jsxFactory h --target ES2020 \
 The bundled taskbar runs by default. The host supplies bounded grouped tasks,
 tray items, icon slots, and a clock label. The plugin requests typed launcher,
 task, tray, and control-center actions; the host rechecks item IDs against live
-groups and the visible tray before acting. Pin dragging and full visual parity
-remain in the migration queue.
+groups and the visible tray before acting. The JSX task buttons use Nickel's
+captured pointer drag events to request a one-step pin move. Rust checks the
+current pinned item ID and position before persisting it. Full visual parity
+remains in the migration queue.
 Right-clicking a task now requests its host-owned application menu through a
 separate `windows-context` capability. The host checks the current group ID
 and index before showing the menu.

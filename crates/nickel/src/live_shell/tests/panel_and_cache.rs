@@ -393,6 +393,33 @@
     }
 
     #[test]
+    fn jsx_taskbar_pin_drag_reorders_only_the_current_pinned_item() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(vec![
+            crate::model::Application::new("first".into(), "First".into(), None, None, Some(vec!["first".into()])),
+            crate::model::Application::new("second".into(), "Second".into(), None, None, Some(vec!["second".into()])),
+        ]);
+        shell.launcher.set_pins(vec![("first".into(), 0), ("second".into(), 1)]);
+        shell.launcher_preferences_path = Some(directory.path().join("launcher-preferences"));
+        shell.windows.clear();
+
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::MoveTaskbarPin {
+            index: 0,
+            id: "stale".into(),
+            direction: 1,
+        }]);
+        assert_eq!(shell.panel_groups()[0].application_id.as_ref().unwrap().as_str(), "first");
+
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::MoveTaskbarPin {
+            index: 0,
+            id: "first".into(),
+            direction: 1,
+        }]);
+        assert_eq!(shell.panel_groups()[0].application_id.as_ref().unwrap().as_str(), "second");
+    }
+
+    #[test]
     fn internal_file_window_keeps_its_icon_when_titled_after_a_folder() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new(Vec::new());

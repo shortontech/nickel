@@ -4608,6 +4608,29 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::MoveTaskbarPin {
+                    index,
+                    id,
+                    direction,
+                } => {
+                    let groups = self.panel_groups();
+                    if matches!(direction, -1 | 1)
+                        && groups.get(index).is_some_and(|group| {
+                            group.pinned
+                                && group
+                                    .application_id
+                                    .as_ref()
+                                    .is_some_and(|application| application.as_str() == id)
+                        })
+                    {
+                        self.apply_panel_action(if direction < 0 {
+                            TaskbarAction::MoveTaskPinLeft(id)
+                        } else {
+                            TaskbarAction::MoveTaskPinRight(id)
+                        });
+                        changed = true;
+                    }
+                }
                 crate::plugin_panel::PluginEffect::ToggleTaskbarMenuPin { id } => {
                     self.apply_application_menu_action(ApplicationMenuAction::TogglePin(
                         crate::model::ApplicationId::new(id),

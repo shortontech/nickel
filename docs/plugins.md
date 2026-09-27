@@ -67,6 +67,9 @@ Images use a host-provided asset key and explicit `width` and `height` (1 to
 8192 logical pixels); `fit` is `contain`, `cover`, or `stretch`. `ImageButton`
 also needs an ID, an accessibility label, and an `onClick` handler. A missing
 host asset renders a placeholder without giving the plugin filesystem access.
+`Button` may also handle `onDrag({ phase, x, y, bounds })`; Nickel captures the
+pointer through start, move, end, and cancel events. The callback can request a
+typed effect, as the bundled taskbar does when moving a pinned app.
 Nickel does not embed
 React, a browser DOM, or the TypeScript compiler. The host checks declared
 capabilities and current shell state before executing a requested effect.

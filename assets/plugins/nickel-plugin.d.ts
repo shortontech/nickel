@@ -9,6 +9,12 @@ declare namespace JSX {
 type NickelChild = JSX.Element | string | number | null | false | NickelChild[];
 type NickelColor = number; // 0xAARRGGBB
 type NickelClick = () => void;
+interface NickelDragGesture {
+    phase: "start" | "move" | "end" | "cancel";
+    x: number;
+    y: number;
+    bounds: { x: number; y: number; width: number; height: number };
+}
 
 interface NickelProps {
     key?: string | number;
@@ -40,6 +46,7 @@ interface NickelButtonProps extends NickelProps {
     showLabel?: boolean;
     onClick: NickelClick;
     onContextMenu?: NickelClick;
+    onDrag?: (gesture: NickelDragGesture) => void;
 }
 interface NickelTextFieldProps extends NickelProps {
     id: string;
