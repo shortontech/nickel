@@ -518,6 +518,9 @@ enum SettingsMessage {
         id: String,
         enabled: bool,
     },
+    ReviewPluginEnable(String),
+    ConfirmPluginEnable,
+    CancelPluginEnable,
     SetOnScreenKeyboard(nickel_core::on_screen_keyboard::KeyboardPreference),
     ConfirmDisableCodex,
     CancelDisableCodex,
@@ -1036,9 +1039,46 @@ impl SettingsApp {
         }
     }
 
+    fn review_plugin_enable(&mut self, id: String) {
+        let Some(snapshot) = &self.plugin_status else {
+            self.plugin_notice = Some("Refresh plugin status before changing it.".into());
+            return;
+        };
+        if self.plugin_pending.is_some()
+            || !snapshot
+                .plugins
+                .iter()
+                .any(|plugin| plugin.id == id && !plugin.desired_enabled)
+        {
+            return;
+        }
+        self.plugin_enable_review = Some((id, snapshot.activation_generation));
+        self.plugin_notice = None;
+    }
+
+    fn confirm_plugin_enable(&mut self) {
+        let Some((id, reviewed_generation)) = self.plugin_enable_review.take() else {
+            return;
+        };
+        let still_current = self.plugin_status.as_ref().is_some_and(|snapshot| {
+            snapshot.activation_generation == reviewed_generation
+                && snapshot
+                    .plugins
+                    .iter()
+                    .any(|plugin| plugin.id == id && !plugin.desired_enabled)
+        });
+        if still_current {
+            self.request_plugin_activation(id, true);
+        } else {
+            self.plugin_notice =
+                Some("Plugin access changed. Review it again before enabling.".into());
+        }
+    }
+
     fn apply_plugin_status(&mut self, snapshot: nickel_session_protocol::PluginStatusSnapshot) {
         if snapshot.activation_generation == 0 {
             self.plugin_status = None;
+            self.plugin_enable_review = None;
             self.plugin_pending = None;
             self.plugin_pending_started = None;
             self.plugin_notice = Some("Nickel shell is unavailable.".into());
@@ -1055,8 +1095,22 @@ impl SettingsApp {
             self.plugin_pending = None;
             self.plugin_pending_started = None;
         }
+        let review_changed = self
+            .plugin_enable_review
+            .as_ref()
+            .is_some_and(|(id, generation)| {
+                *generation != snapshot.activation_generation
+                    || !snapshot
+                        .plugins
+                        .iter()
+                        .any(|plugin| plugin.id == *id && !plugin.desired_enabled)
+            });
+        if review_changed {
+            self.plugin_enable_review = None;
+        }
         self.plugin_status = Some(snapshot);
-        self.plugin_notice = None;
+        self.plugin_notice = review_changed
+            .then(|| "Plugin access changed. Review it again before enabling.".into());
         self.request_redraw();
     }
 
@@ -1068,7 +1122,6 @@ impl SettingsApp {
                     match response {
                         Ok(ServerMessage::Plugins(snapshot)) => {
                             self.apply_plugin_status(snapshot);
-                            self.plugin_notice = None;
                         }
                         Ok(ServerMessage::Ack) => self.next_plugin_refresh = now,
                         Ok(ServerMessage::Error { message, .. }) | Err(message) => {
@@ -1238,6 +1291,9 @@ impl SettingsApp {
             SettingsMessage::SetPluginEnabled { id, enabled } => {
                 self.request_plugin_activation(id, enabled);
             }
+            SettingsMessage::ReviewPluginEnable(id) => self.review_plugin_enable(id),
+            SettingsMessage::ConfirmPluginEnable => self.confirm_plugin_enable(),
+            SettingsMessage::CancelPluginEnable => self.plugin_enable_review = None,
             SettingsMessage::RefreshPlugins => self.refresh_plugins_async(),
             SettingsMessage::SetOnScreenKeyboard(preference) => {
                 if self
@@ -2745,10 +2801,9 @@ mod tests {
         });
         let host = UiHost::new(app, 1100, 800);
         assert_eq!(
-            host.semantic_targets_for_message(&SettingsMessage::SetPluginEnabled {
-                id: "org.nickel.launcher".into(),
-                enabled: true,
-            })
+            host.semantic_targets_for_message(&SettingsMessage::ReviewPluginEnable(
+                "org.nickel.launcher".into(),
+            ))
             .len(),
             1
         );
@@ -2761,6 +2816,64 @@ mod tests {
         assert!(labels.contains(&"4 KiB"));
         assert!(labels.contains(&"8 KiB"));
         assert!(labels.contains(&"Unavailable"));
+    }
+
+    #[test]
+    fn plugin_enable_review_shows_grants_and_rejects_stale_status() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
+        app.plugin_status = Some(nickel_session_protocol::PluginStatusSnapshot {
+            activation_generation: 4,
+            plugins: vec![nickel_session_protocol::PluginStatus {
+                id: "org.nickel.example".into(),
+                name: "Example".into(),
+                desired_enabled: false,
+                health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
+                capabilities: vec!["windows-read".into()],
+                surfaces: vec!["main: panel".into()],
+                memory: Default::default(),
+            }],
+        });
+        app.review_plugin_enable("org.nickel.example".into());
+        assert_eq!(
+            app.plugin_enable_review,
+            Some(("org.nickel.example".into(), 4))
+        );
+        let mut host = UiHost::new(app, 1100, 800);
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::ConfirmPluginEnable)
+                .len(),
+            1
+        );
+        let labels = host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"windows-read"));
+        assert!(labels.contains(&"main: panel"));
+
+        let app = host.application_mut();
+        app.plugin_status.as_mut().unwrap().activation_generation = 5;
+        app.confirm_plugin_enable();
+        assert!(app.plugin_pending.is_none());
+        assert!(app.plugin_enable_review.is_none());
+        assert!(
+            app.plugin_notice
+                .as_deref()
+                .unwrap()
+                .contains("Review it again")
+        );
+        app.review_plugin_enable("org.nickel.example".into());
+        let mut next = app.plugin_status.clone().unwrap();
+        next.activation_generation = 6;
+        app.apply_plugin_status(next);
+        assert!(app.plugin_enable_review.is_none());
+        assert!(
+            app.plugin_notice
+                .as_deref()
+                .unwrap()
+                .contains("Review it again")
+        );
     }
 
     #[test]

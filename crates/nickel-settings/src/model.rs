@@ -51,6 +51,7 @@ pub(super) struct SettingsApp {
     pub(super) shell_topology_generation: u64,
     pub(super) plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
     pub(super) plugin_notice: Option<String>,
+    pub(super) plugin_enable_review: Option<(String, u64)>,
     pub(super) plugin_pending: Option<(String, bool)>,
     pub(super) plugin_pending_started: Option<Instant>,
     pub(super) plugin_activation_rx:
@@ -232,6 +233,7 @@ impl Default for SettingsApp {
             shell_topology_generation,
             plugin_status: None,
             plugin_notice: None,
+            plugin_enable_review: None,
             plugin_pending: None,
             plugin_pending_started: None,
             plugin_activation_rx: None,

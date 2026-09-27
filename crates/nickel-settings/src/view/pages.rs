@@ -67,6 +67,45 @@ impl SettingsApp {
             content = content.child(SettingsCard::titled(theme, "Plugin status", notice));
         }
         if let Some(snapshot) = &self.plugin_status {
+            if let Some((review_id, generation)) = &self.plugin_enable_review
+                && *generation == snapshot.activation_generation
+                && let Some(plugin) = snapshot
+                    .plugins
+                    .iter()
+                    .find(|plugin| plugin.id == *review_id && !plugin.desired_enabled)
+            {
+                let grants = if plugin.capabilities.is_empty() {
+                    "No additional access".to_owned()
+                } else {
+                    plugin.capabilities.join(", ")
+                };
+                let surfaces = if plugin.surfaces.is_empty() {
+                    "No surfaces".to_owned()
+                } else {
+                    plugin.surfaces.join(", ")
+                };
+                content = content.child(
+                    SettingsCard::titled(theme, &format!("Enable {}?", plugin.name), &plugin.id)
+                        .child(SettingsRow::new(theme, "Access requested", grants))
+                        .child(SettingsRow::new(theme, "Surfaces affected", surfaces))
+                        .child(
+                            Row::new()
+                                .gap(12.0)
+                                .child(Button::semantic(
+                                    theme,
+                                    SettingsMessage::CancelPluginEnable,
+                                    "Cancel",
+                                    ButtonPresentation::Quiet,
+                                ))
+                                .child(Button::semantic(
+                                    theme,
+                                    SettingsMessage::ConfirmPluginEnable,
+                                    "Enable plugin",
+                                    ButtonPresentation::Primary,
+                                )),
+                        ),
+                );
+            }
             for plugin in &snapshot.plugins {
                 let health = match &plugin.health {
                     nickel_session_protocol::PluginRuntimeHealth::Disabled => "Disabled".to_owned(),
@@ -97,9 +136,15 @@ impl SettingsApp {
                 } else {
                     SwitchState::Off
                 };
-                let action = (!pending).then(|| SettingsMessage::SetPluginEnabled {
-                    id: plugin.id.clone(),
-                    enabled: !plugin.desired_enabled,
+                let action = (!pending).then(|| {
+                    if plugin.desired_enabled {
+                        SettingsMessage::SetPluginEnabled {
+                            id: plugin.id.clone(),
+                            enabled: false,
+                        }
+                    } else {
+                        SettingsMessage::ReviewPluginEnable(plugin.id.clone())
+                    }
                 });
                 let grants = if plugin.capabilities.is_empty() {
                     "None".to_owned()
