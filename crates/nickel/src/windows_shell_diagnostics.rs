@@ -149,7 +149,10 @@ fn diagnostic_role(role: SurfaceRole) -> Option<ShellDiagnosticRole> {
         SurfaceRole::WindowContextMenu => ShellDiagnosticRole::WindowContextMenu,
         SurfaceRole::Screenshot => ShellDiagnosticRole::Screenshot,
         SurfaceRole::OnScreenKeyboard => ShellDiagnosticRole::OnScreenKeyboard,
-        SurfaceRole::CodexProjectMenu | SurfaceRole::Lock | SurfaceRole::CodexChat => return None,
+        SurfaceRole::Panel
+        | SurfaceRole::CodexProjectMenu
+        | SurfaceRole::Lock
+        | SurfaceRole::CodexChat => return None,
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => return None,
     })
@@ -167,7 +170,10 @@ fn event_role(role: SurfaceRole) -> Option<ShellEventRole> {
         SurfaceRole::WindowContextMenu => ShellEventRole::WindowContextMenu,
         SurfaceRole::Screenshot => ShellEventRole::Screenshot,
         SurfaceRole::OnScreenKeyboard => ShellEventRole::OnScreenKeyboard,
-        SurfaceRole::CodexProjectMenu | SurfaceRole::Lock | SurfaceRole::CodexChat => return None,
+        SurfaceRole::Panel
+        | SurfaceRole::CodexProjectMenu
+        | SurfaceRole::Lock
+        | SurfaceRole::CodexChat => return None,
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => return None,
     })
