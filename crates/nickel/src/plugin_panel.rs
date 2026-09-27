@@ -3585,8 +3585,9 @@ mod tests {
         assert_eq!(widgets[0].label, "Unread mail");
         assert_eq!(widgets[0].percent, 60);
 
-        let mut invalid = package;
-        invalid.source = invalid.source.replace("percent: 60", "percent: 101");
+        let mut invalid = package.clone();
+        invalid.source = invalid.source.replace("Math.min(100, unread * 5)", "101");
+        assert_ne!(invalid.source, package.source);
         assert!(PluginPanelApplication::validate_package(&invalid).is_err());
     }
 
