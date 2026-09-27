@@ -717,6 +717,14 @@ pub struct LiveShell {
             crate::plugin_panel::PluginPanelApplication,
         ),
     >,
+    plugin_control_section_hosts: std::collections::BTreeMap<
+        String,
+        (
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
     plugin_desktop_widget_hosts: std::collections::BTreeMap<
         String,
         (
@@ -979,6 +987,7 @@ enum ExecutableExtensionKind {
     TaskbarBadge,
     TaskbarAction,
     DesktopWidget,
+    ControlSection,
 }
 
 fn should_auto_start_installed_plugin(desired_enabled: bool, safe_mode: bool) -> bool {
@@ -1013,6 +1022,9 @@ fn executable_extension_priority(
         }
         ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget) => {
             ExecutableExtensionKind::DesktopWidget
+        }
+        ("org.nickel.control-center", "control-section", PluginSlotContract::Section) => {
+            ExecutableExtensionKind::ControlSection
         }
         _ => return Err("this runtime cannot compose the declared extension".into()),
     };
@@ -1151,6 +1163,61 @@ fn append_taskbar_actions(
                     label: contribution.label,
                 });
             }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComposedControlSection {
+    plugin_id: String,
+    id: String,
+    label: String,
+    value: String,
+}
+
+fn compose_control_sections(
+    extensions: &std::collections::BTreeMap<
+        String,
+        (
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
+) -> Vec<ComposedControlSection> {
+    use nickel_core::plugins::PluginContributionMode;
+    let mut ordered = extensions.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
+    let mut sections = Vec::new();
+    if let Some((id, (_, _, application))) = ordered
+        .iter()
+        .rev()
+        .find(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
+    {
+        append_control_sections(&mut sections, id, application);
+    }
+    for (id, (_, mode, application)) in ordered {
+        if *mode == PluginContributionMode::Add {
+            append_control_sections(&mut sections, id, application);
+        }
+    }
+    sections.truncate(4);
+    sections
+}
+
+fn append_control_sections(
+    sections: &mut Vec<ComposedControlSection>,
+    plugin_id: &str,
+    application: &crate::plugin_panel::PluginPanelApplication,
+) {
+    if let Ok(contributions) = application.control_sections() {
+        for contribution in contributions {
+            sections.push(ComposedControlSection {
+                plugin_id: plugin_id.to_owned(),
+                id: contribution.id,
+                label: contribution.label,
+                value: contribution.value,
+            });
         }
     }
 }
@@ -1837,6 +1904,7 @@ impl LiveShell {
             plugin_taskbar_host,
             plugin_taskbar_badge_hosts: std::collections::BTreeMap::new(),
             plugin_taskbar_action_hosts: std::collections::BTreeMap::new(),
+            plugin_control_section_hosts: std::collections::BTreeMap::new(),
             plugin_desktop_widget_hosts: std::collections::BTreeMap::new(),
             plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
@@ -3531,6 +3599,12 @@ impl LiveShell {
             .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
             .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
             .map(|(id, _)| id.as_str());
+        let section_replacement = self
+            .plugin_control_section_hosts
+            .iter()
+            .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
+            .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
+            .map(|(id, _)| id.as_str());
         let widget_replacement = self
             .plugin_desktop_widget_hosts
             .iter()
@@ -3614,6 +3688,13 @@ impl LiveShell {
                                                 == crate::plugin_panel::desktop_manifest().id
                                                 && contribution.target_slot == "desktop-widget"
                                                 && widget_replacement.is_some_and(|winner| {
+                                                    winner != entry.manifest.id
+                                                }))
+                                            || (contribution.target_plugin
+                                                == crate::plugin_panel::control_center_manifest()
+                                                    .id
+                                                && contribution.target_slot == "control-section"
+                                                && section_replacement.is_some_and(|winner| {
                                                     winner != entry.manifest.id
                                                 })))
                                     {
@@ -3798,6 +3879,10 @@ impl LiveShell {
                 } else if let Some((_, _, current)) = self.plugin_desktop_widget_hosts.get_mut(id) {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
+                } else if let Some((_, _, current)) = self.plugin_control_section_hosts.get_mut(id)
+                {
+                    extension_bytes = Some(application.retained_contribution_bytes());
+                    *current = application;
                 }
             }
             if let Some(bytes) = extension_bytes {
@@ -3923,6 +4008,7 @@ impl LiveShell {
                 self.application_menu_plugin_host = None;
             }
             self.plugin_desktop_widget_hosts.remove(id);
+            self.plugin_control_section_hosts.remove(id);
             self.plugin_panel_extra_hosts
                 .retain(|key, _| key.plugin_id != id);
             self.plugin_panel_memory
@@ -3975,6 +4061,10 @@ impl LiveShell {
                 }
                 ExecutableExtensionKind::DesktopWidget => {
                     self.plugin_desktop_widget_hosts
+                        .insert(id.to_owned(), (priority, mode, application));
+                }
+                ExecutableExtensionKind::ControlSection => {
+                    self.plugin_control_section_hosts
                         .insert(id.to_owned(), (priority, mode, application));
                 }
             }
@@ -5132,6 +5222,37 @@ impl LiveShell {
                         continue;
                     };
                     let handled = extension.activate_taskbar_action(&id, target_id.unwrap_or(""));
+                    let extension_effects = extension.take_effects();
+                    let retained_bytes = extension.retained_contribution_bytes();
+                    if handled {
+                        let _ = self.plugin_registry.record_memory(
+                            &plugin_id,
+                            nickel_core::plugins::PluginMemory {
+                                native_ui_bytes: Some(retained_bytes),
+                                ..Default::default()
+                            },
+                        );
+                        changed = true;
+                        changed |= self.apply_plugin_effects(extension_effects);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::InvokeControlExtensionSection {
+                    plugin_id,
+                    id,
+                } => {
+                    if !self.control_plugin_active()
+                        || !compose_control_sections(&self.plugin_control_section_hosts)
+                            .iter()
+                            .any(|section| section.plugin_id == plugin_id && section.id == id)
+                    {
+                        continue;
+                    }
+                    let Some((_, _, extension)) =
+                        self.plugin_control_section_hosts.get_mut(&plugin_id)
+                    else {
+                        continue;
+                    };
+                    let handled = extension.activate_control_section(&id);
                     let extension_effects = extension.take_effects();
                     let retained_bytes = extension.retained_contribution_bytes();
                     if handled {
@@ -10465,6 +10586,17 @@ impl LiveShell {
     fn control_plugin_data(&self, height: u32) -> serde_json::Value {
         use nickel_core::display_projection::ProjectionMode;
         let bounded = |value: &str| value.chars().take(120).collect::<String>();
+        let sections = compose_control_sections(&self.plugin_control_section_hosts)
+            .into_iter()
+            .map(|section| {
+                serde_json::json!({
+                    "plugin": section.plugin_id,
+                    "id": section.id,
+                    "label": section.label,
+                    "value": section.value,
+                })
+            })
+            .collect::<Vec<_>>();
         let modes = supported_projection_modes(self.session_host.as_ref())
             .into_iter()
             .map(|mode| match mode {
@@ -10515,6 +10647,7 @@ impl LiveShell {
             "activeWorkspace": self.workspaces.iter().find(|item| item.active).map(|item| item.id),
             "projectionModes": modes,
             "pendingProjection": self.control_host.application().view_state().pending_projection.is_some(),
+            "sections": sections,
         })
     }
 

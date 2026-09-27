@@ -1,0 +1,16 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.example-control-section",
+  "name": "Example control section",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "surfaces": [],
+  "capabilities": ["launcher-show"],
+  "contributes": [{
+    "target_plugin": "org.nickel.control-center",
+    "target_slot": "control-section",
+    "contract": "section",
+    "mode": "add"
+  }]
+}

@@ -234,6 +234,61 @@
     }
 
     #[test]
+    fn control_section_extension_renders_and_invokes_its_own_callback() {
+        use nickel_core::plugins::{PluginPackage, PluginPackageDescriptor};
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-control-section"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell.plugin_registry.register(package.manifest.clone()).unwrap();
+        shell.external_plugin_packages.insert(
+            package.manifest.id.clone(),
+            PluginPackageDescriptor {
+                directory: directory.into(),
+                manifest: package.manifest.clone(),
+                source_digest: package.source_digest(),
+            },
+        );
+        shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
+        assert!(shell
+            .plugin_registry
+            .get(&package.manifest.id)
+            .unwrap()
+            .memory
+            .native_ui_bytes
+            .unwrap()
+            > 0);
+        shell.control_visible = true;
+        shell.scene(SurfaceRole::ControlCenter, 420, 720);
+        let button = shell
+            .plugin_control_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .unwrap();
+        assert!(shell
+            .control_host_event(
+                HostEvent::Ui(UiEvent::AccessibilityActivate(button.id)),
+                (420, 720),
+                None,
+            )
+            .changed);
+        assert!(shell.launcher_visible);
+        shell.set_plugin_enabled(&package.manifest.id, false).unwrap();
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::InvokeControlExtensionSection {
+                plugin_id: package.manifest.id,
+                id: "find-apps".into(),
+            },
+        ]));
+    }
+
+    #[test]
     fn control_center_plugin_rejects_stale_workspace_id() {
         let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
             crate::session_host::default_session_host(),

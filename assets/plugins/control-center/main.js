@@ -58,6 +58,12 @@ function App() {
                     h(Row, null,
                         h(Button, { id: "show-desktop", onClick: () => request("show-desktop") }, "Show desktop"),
                         h(Button, { id: "show-notifications", onClick: () => request("show-notifications") }, "Notifications")),
+                    data.sections.length ? h(Text, null, "Extensions") : null,
+                    data.sections.map((section, index) => h(Row, { key: `${section.plugin}:${section.id}` },
+                        h(Text, null, section.label + ": " + section.value),
+                        h(Button, { id: `control-extension-${index}`, onClick: () => nickel.request({
+                            type: "control-extension-section", plugin: section.plugin, id: section.id
+                        }) }, "Open"))),
                     h(Text, null, "Displays"),
                     data.pendingProjection ? h(Row, null,
                         h(Text, null, "Keep display settings?"),

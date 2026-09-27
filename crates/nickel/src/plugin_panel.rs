@@ -153,6 +153,7 @@ const FileTile = 'file-tile';
 const Badge = 'badge';
 const Widget = 'widget';
 const Action = 'action';
+const Section = 'section';
 const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
@@ -377,6 +378,12 @@ enum PanelNode {
         label: String,
         action: usize,
     },
+    Section {
+        id: String,
+        label: String,
+        value: String,
+        action: usize,
+    },
     FileTile {
         id: String,
         action: Option<usize>,
@@ -493,6 +500,9 @@ impl PanelNode {
             Self::Action {
                 id, item, label, ..
             } => capacity(id) + item.as_ref().map_or(0, capacity) + capacity(label),
+            Self::Section {
+                id, label, value, ..
+            } => capacity(id) + capacity(label) + capacity(value),
             Self::Row(children) | Self::Column(children) => {
                 let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
                 spare as u64 + children.iter().map(Self::contribution_bytes).sum::<u64>()
@@ -568,6 +578,29 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
+            "section" => {
+                if !children.is_empty() {
+                    return Err("section cannot have children".into());
+                }
+                let bounded = |name: &str, max: usize| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty() && text.len() <= max)
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("section {name} must be 1 to {max} bytes"))
+                };
+                Ok(Self::Section {
+                    id: bounded("id", 64)?,
+                    label: bounded("label", 120)?,
+                    value: bounded("value", 120)?,
+                    action: value
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok())
+                        .ok_or("section needs an onClick handler")?,
+                })
+            }
             "action" => {
                 if !children.is_empty() {
                     return Err("action cannot have children".into());
@@ -1112,7 +1145,7 @@ impl PanelNode {
                     ),
             ),
             Self::Widget { .. } => AnyView::new(Spacer::fixed(0.0)),
-            Self::Action { .. } => AnyView::new(Spacer::fixed(0.0)),
+            Self::Action { .. } | Self::Section { .. } => AnyView::new(Spacer::fixed(0.0)),
             Self::FileTile {
                 id,
                 action,
@@ -1588,6 +1621,39 @@ impl PanelNode {
             ),
         }
     }
+
+    fn collect_control_sections(
+        &self,
+        sections: &mut Vec<ControlPluginSection>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Section {
+                id, label, value, ..
+            } => {
+                if sections.len() >= 8 {
+                    return Err("extension has too many sections".into());
+                }
+                if sections.iter().any(|section| section.id == *id) {
+                    return Err("extension section IDs must be unique".into());
+                }
+                sections.push(ControlPluginSection {
+                    id: id.clone(),
+                    label: label.clone(),
+                    value: value.clone(),
+                });
+                Ok(())
+            }
+            Self::Row(children) | Self::Column(children) => {
+                for child in children {
+                    child.collect_control_sections(sections)?;
+                }
+                Ok(())
+            }
+            _ => Err(
+                "control section extension must return sections or a row/column of sections".into(),
+            ),
+        }
+    }
 }
 
 fn child_text(children: &[Value]) -> Result<String, String> {
@@ -1650,6 +1716,13 @@ pub struct TaskbarPluginAction {
     pub id: String,
     pub item: Option<String>,
     pub label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlPluginSection {
+    pub id: String,
+    pub label: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1716,6 +1789,10 @@ pub enum PluginEffect {
         plugin_id: String,
         id: String,
         application_id: Option<String>,
+    },
+    InvokeControlExtensionSection {
+        plugin_id: String,
+        id: String,
     },
     InvokeTaskbarWindowMenu {
         page: String,
@@ -2441,6 +2518,36 @@ impl PluginPanelApplication {
         self.node.contribution_bytes()
     }
 
+    pub fn control_sections(&self) -> Result<Vec<ControlPluginSection>, String> {
+        let mut sections = Vec::new();
+        self.node.collect_control_sections(&mut sections)?;
+        if sections.is_empty() {
+            return Err("control section extension did not return a section".into());
+        }
+        Ok(sections)
+    }
+
+    pub fn activate_control_section(&mut self, id: &str) -> bool {
+        fn find(node: &PanelNode, id: &str) -> Option<usize> {
+            match node {
+                PanelNode::Section {
+                    id: section_id,
+                    action,
+                    ..
+                } if section_id == id => Some(*action),
+                PanelNode::Row(children) | PanelNode::Column(children) => {
+                    children.iter().find_map(|child| find(child, id))
+                }
+                _ => None,
+            }
+        }
+        let Some(action) = find(&self.node, id) else {
+            return false;
+        };
+        nickel_ui::Application::update(self, PluginMessage::Click(action));
+        self.last_error.is_none()
+    }
+
     pub fn activate_taskbar_action(&mut self, id: &str, application_id: &str) -> bool {
         let Some(action) = self.find_taskbar_action(id, application_id) else {
             return false;
@@ -2483,7 +2590,7 @@ impl PluginPanelApplication {
             PluginSlotContract::Badge => self.taskbar_badges().map(|_| ()),
             PluginSlotContract::Widget => self.desktop_widgets().map(|_| ()),
             PluginSlotContract::Action => self.taskbar_actions().map(|_| ()),
-            _ => Err("this runtime does not execute that contribution contract".into()),
+            PluginSlotContract::Section => self.control_sections().map(|_| ()),
         }
     }
 
@@ -3395,6 +3502,42 @@ impl nickel_ui::Application for PluginPanelApplication {
                             }
                         }
                         _ if effect.get("type").and_then(Value::as_str)
+                            == Some("control-extension-section")
+                            && self.manifest.id == control_center_manifest().id =>
+                        {
+                            let plugin_id = effect.get("plugin").and_then(Value::as_str);
+                            let id = effect.get("id").and_then(Value::as_str);
+                            if !plugin_id
+                                .is_some_and(|value| !value.is_empty() && value.len() <= 128)
+                                || !id.is_some_and(|value| !value.is_empty() && value.len() <= 64)
+                            {
+                                self.last_error =
+                                    Some("control extension section is invalid".into());
+                                return;
+                            }
+                            let projected = self
+                                .projection_data
+                                .as_deref()
+                                .and_then(|data| serde_json::from_str::<Value>(data).ok())
+                                .and_then(|data| {
+                                    data.get("sections").and_then(Value::as_array).cloned()
+                                })
+                                .is_some_and(|sections| {
+                                    sections.iter().any(|section| {
+                                        section.get("plugin").and_then(Value::as_str) == plugin_id
+                                            && section.get("id").and_then(Value::as_str) == id
+                                    })
+                                });
+                            if !projected {
+                                self.last_error = Some("control extension section is stale".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::InvokeControlExtensionSection {
+                                plugin_id: plugin_id.unwrap().to_owned(),
+                                id: id.unwrap().to_owned(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("control-action")
                             && self.manifest.id == control_center_manifest().id =>
                         {
@@ -3965,6 +4108,22 @@ mod tests {
         assert!(application.activate_taskbar_action("find-apps", "org.nickel.mail"));
         assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
         assert!(!application.activate_taskbar_action("missing", "org.nickel.mail"));
+        assert!(application.take_effects().is_empty());
+    }
+
+    #[test]
+    fn control_section_contribution_dispatches_its_own_granted_callback() {
+        let package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-control-section"
+        ))
+        .unwrap();
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let mut application = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(application.control_sections().unwrap()[0].id, "find-apps");
+        assert!(application.activate_control_section("find-apps"));
+        assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
+        assert!(!application.activate_control_section("missing"));
         assert!(application.take_effects().is_empty());
     }
 

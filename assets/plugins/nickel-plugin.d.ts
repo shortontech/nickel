@@ -101,6 +101,12 @@ interface NickelActionProps extends NickelProps {
     label: string;
     onClick: (applicationId: string) => void;
 }
+interface NickelSectionProps extends NickelProps {
+    id: string;
+    label: string;
+    value: string;
+    onClick: () => void;
+}
 interface NickelProgressProps extends NickelProps {
     percent: number;
     width: number;
@@ -136,6 +142,7 @@ declare function FileTile(props: NickelFileTileProps): JSX.Element;
 declare function Badge(props: NickelBadgeProps): JSX.Element;
 declare function Widget(props: NickelWidgetProps): JSX.Element;
 declare function Action(props: NickelActionProps): JSX.Element;
+declare function Section(props: NickelSectionProps): JSX.Element;
 declare function Row(props: NickelProps): JSX.Element;
 declare function Column(props: NickelProps): JSX.Element;
 declare function ScrollView(props: NickelProps & { id: string; height?: number }): JSX.Element;

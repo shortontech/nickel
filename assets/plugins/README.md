@@ -22,11 +22,12 @@ cargo run -p nickel --no-default-features --features backend-winit \
 Each immediate child directory must match its manifest ID. Discovery reports
 invalid packages without hiding valid siblings. Settings can enable installed
 packages with up to 16 panel or dock surfaces, plus surface-free taskbar badge,
-taskbar action, and desktop widget extensions. Use `nickel --safe-mode` to start with installed
+taskbar action, desktop widget, and Control Center section extensions. Use
+`nickel --safe-mode` to start with installed
 packages inactive while keeping bundled shell plugins available.
 
 The component vocabulary includes `Panel`, `Row`, `Column`, `Text`, `Image`,
-`ImageButton`, `Button`, `Badge`, `Action`, `Widget`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. A
+`ImageButton`, `Button`, `Badge`, `Action`, `Widget`, `Section`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. A
 full-viewport `Surface` component is used by the bundled desktop background
 plugin. The host owns image bytes and exposes them by asset name to JSX.
 The [task badge example](example-task-badge/) shows a surface-free extension
@@ -35,3 +36,5 @@ The [desktop widget example](example-desktop-widget/) contributes a bounded
 value and progress display to the bundled desktop plugin.
 The [task action example](example-task-action/) adds a callback to the
 taskbar's JSX application menu.
+The [control section example](example-control-section/) adds a callback row
+to the bundled Control Center.

@@ -10,5 +10,8 @@
     "network-read", "network-control", "bluetooth-read", "bluetooth-control",
     "audio-read", "audio-control", "workspaces-read", "workspaces-switch",
     "desktop-control", "display-control", "notifications-read", "session-control"
+  ],
+  "provides_slots": [
+    {"id":"control-section","contract":"section","replaceable":true}
   ]
 }

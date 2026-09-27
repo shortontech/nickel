@@ -110,7 +110,14 @@ then additive priority and plugin ID. The callback runs in the contributing
 plugin's own JS host; its requested effects still require that plugin's
 declared capabilities and current host validation. The
 [example task action](../assets/plugins/example-task-action/) demonstrates this.
-The `section` contract remains unavailable.
+Control Center provides a `control-section` slot with the `section` contract.
+An extension can return
+`h(Section, { id: "find-apps", label: "Applications", value: "Search the catalog", onClick: () => nickel.request("show-launcher") })`.
+Up to four sections appear in its scrollable JSX view. Replacement selection
+and additive ordering match the taskbar slots. The callback executes in the
+contributor's JS host under its own grants. The
+[example control section](../assets/plugins/example-control-section/) is a
+working package.
 Settings measures the retained native component tree in each extension's own
 account. The target plugin's rendered UI measurement also includes contributed
 nodes, so these category totals overlap; they should not be added to estimate
