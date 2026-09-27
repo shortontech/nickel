@@ -10,7 +10,44 @@ use serde::{Deserialize, Serialize};
 
 pub const PLUGIN_API_VERSION: u16 = 1;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+pub const MAX_PLUGIN_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ACTIVATION_SETTINGS_BYTES: usize = 16 * 1024;
+
+/// A validated plugin directory ready to start in the JavaScript runtime.
+#[derive(Clone, Debug)]
+pub struct PluginPackage {
+    pub manifest: PluginManifest,
+    pub source: String,
+}
+
+impl PluginPackage {
+    pub fn load(directory: impl AsRef<Path>) -> Result<Self, String> {
+        let directory = std::fs::canonicalize(directory.as_ref())
+            .map_err(|error| format!("could not open plugin directory: {error}"))?;
+        if !directory.is_dir() {
+            return Err("plugin path is not a directory".into());
+        }
+        let manifest_bytes =
+            nickel_storage::read_regular_file(&directory.join("plugin.json"), MAX_MANIFEST_BYTES)
+                .map_err(|error| format!("could not read plugin manifest: {error}"))?
+                .ok_or("plugin manifest is missing")?;
+        let manifest_source = std::str::from_utf8(&manifest_bytes)
+            .map_err(|error| format!("plugin manifest is not UTF-8: {error}"))?;
+        let manifest = PluginManifest::from_json(manifest_source)?;
+        let entry_path = directory.join(&manifest.entry);
+        let resolved_entry = std::fs::canonicalize(&entry_path)
+            .map_err(|error| format!("could not open plugin entry: {error}"))?;
+        if !resolved_entry.starts_with(&directory) {
+            return Err("plugin entry escapes its directory".into());
+        }
+        let source = nickel_storage::read_regular_file(&entry_path, MAX_PLUGIN_ENTRY_BYTES)
+            .map_err(|error| format!("could not read plugin entry: {error}"))?
+            .ok_or("plugin entry is missing")?;
+        let source = String::from_utf8(source)
+            .map_err(|error| format!("plugin entry is not UTF-8: {error}"))?;
+        Ok(Self { manifest, source })
+    }
+}
 
 /// Explicit per-profile choices. An absent ID retains the bundled default.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -421,6 +458,44 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loads_a_bounded_plugin_package_from_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("plugin.json"), VALID).unwrap();
+        std::fs::write(
+            directory.path().join("main.js"),
+            "function App() { return null; }",
+        )
+        .unwrap();
+        let package = PluginPackage::load(directory.path()).unwrap();
+        assert_eq!(package.manifest.id, "org.nickel.hello-panel");
+        assert!(package.source.contains("function App"));
+
+        std::fs::write(
+            directory.path().join("main.js"),
+            vec![b'x'; MAX_PLUGIN_ENTRY_BYTES + 1],
+        )
+        .unwrap();
+        assert!(PluginPackage::load(directory.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_entry_link_outside_the_plugin_directory() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("plugin.json"), VALID).unwrap();
+        std::fs::write(outside.path().join("main.js"), "function App() {}").unwrap();
+        symlink(
+            outside.path().join("main.js"),
+            directory.path().join("main.js"),
+        )
+        .unwrap();
+        assert!(PluginPackage::load(directory.path()).is_err());
+    }
 
     #[test]
     fn activation_choice_survives_restart_and_rejects_corrupt_storage() {

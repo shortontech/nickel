@@ -1,8 +1,60 @@
+use nickel_core::plugins::PluginPackage;
 use nickel_shell::plugin_panel::{
     LauncherPluginProject, LauncherPluginProjection, LauncherPluginResult, LauncherView,
     PluginEffect, PluginMessage, PluginPanelApplication, TaskbarPluginItem,
     TaskbarPluginProjection, TaskbarPluginTrayItem, surface,
 };
+
+#[test]
+fn directory_package_runs_in_the_same_jsx_host() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.panel","name":"Example Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":320,"height":80}],"capabilities":["launcher-show"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("main.js"),
+        r#"function App() { return h(Panel, {},
+            h(Button, {id: 'example', onClick: () => nickel.openDialog('example-dialog')}, 'Example'),
+            h(Dialog, {id: 'example-dialog', anchor: 'example', open: true},
+                h(Button, {id: 'show-launcher', onClick: () => nickel.request('show-launcher')}, 'Show launcher'))); }"#,
+    )
+    .unwrap();
+    let package = PluginPackage::load(directory.path()).unwrap();
+    let mut host = UiHost::new(
+        PluginPanelApplication::from_package(&package).unwrap(),
+        320,
+        80,
+    );
+    let button = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Example".into(),
+        })
+        .expect("external package rendered by the native JSX host")
+        .id;
+    assert!(
+        host.perform_semantic_action(button, SemanticAction::Invoke(ActionKind::Activate))
+            .changed
+    );
+    assert!(host.inspect().open_overlay.is_some());
+    let action = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Show launcher".into(),
+        })
+        .expect("external package dialog action")
+        .id;
+    assert!(
+        host.perform_semantic_action(action, SemanticAction::Invoke(ActionKind::Activate))
+            .changed
+    );
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ShowLauncher]
+    );
+}
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     ActionKind, HostBatch, HostEvent, Point, SemanticAction, SemanticRole, SemanticSelector,

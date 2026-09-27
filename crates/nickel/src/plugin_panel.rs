@@ -7,7 +7,9 @@ use std::{
 };
 
 use boa_engine::{Context, Source};
-use nickel_core::plugins::{PluginCapability, PluginManifest, PluginSurface, PluginSurfaceKind};
+use nickel_core::plugins::{
+    PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
+};
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, Insets, OverlayAnchor,
     OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Row, SemanticRole, Shortcut, Size,
@@ -608,7 +610,7 @@ pub struct PluginPanelApplication {
     effects: Vec<PluginEffect>,
     pending_transient: Option<(OverlayId, UiId)>,
     last_error: Option<String>,
-    manifest: &'static PluginManifest,
+    manifest: PluginManifest,
     projection_data: Option<String>,
     launcher_shortcuts: Option<LauncherShortcutState>,
     overlay_open: bool,
@@ -899,6 +901,10 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, manifest(), None)
     }
 
+    pub fn from_package(package: &PluginPackage) -> Result<Self, String> {
+        Self::new_with_manifest(&package.source, &package.manifest, None)
+    }
+
     pub fn launcher(launcher: &Launcher) -> Result<Self, String> {
         Self::launcher_with_projection(&LauncherPluginProjection::from_launcher(launcher))
     }
@@ -918,7 +924,7 @@ impl PluginPanelApplication {
 
     fn new_with_manifest(
         source: &str,
-        manifest: &'static PluginManifest,
+        manifest: &PluginManifest,
         data: Option<String>,
     ) -> Result<Self, String> {
         let mut context = Context::default();
@@ -940,7 +946,7 @@ impl PluginPanelApplication {
             effects: Vec::new(),
             pending_transient: None,
             last_error: None,
-            manifest,
+            manifest: manifest.clone(),
             projection_data: data,
             launcher_shortcuts: None,
             overlay_open: false,
