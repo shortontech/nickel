@@ -133,7 +133,10 @@ mod linux {
     fn load_panel(directory: &Path) -> Result<PluginPackage, String> {
         let package = load_package(directory)?;
         let panel = package.manifest.surfaces.len() == 1
-            && package.manifest.surfaces[0].kind == PluginSurfaceKind::Panel
+            && matches!(
+                package.manifest.surfaces[0].kind,
+                PluginSurfaceKind::Panel | PluginSurfaceKind::Dock
+            )
             && package.manifest.contributes.is_empty();
         let badge = package.manifest.surfaces.is_empty()
             && matches!(package.manifest.contributes.as_slice(), [contribution]
@@ -143,7 +146,8 @@ mod linux {
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
         if !panel && !badge {
             return Err(
-                "dev currently needs one panel or one surface-free badge contribution".into(),
+                "dev currently needs one panel or dock, or one surface-free badge contribution"
+                    .into(),
             );
         }
         PluginPanelApplication::from_package(&package)
@@ -205,9 +209,10 @@ mod linux {
         }
         std::fs::write(entry, &package.source)
             .map_err(|error| format!("could not stage JavaScript: {error}"))?;
-        PluginActivationSettings::update(
+        PluginActivationSettings::update_manifest(
             root.join("nickel").join("plugin-activation.json"),
-            &package.manifest.id,
+            &package.manifest,
+            &package.source_digest(),
             true,
         )
         .map_err(|error| format!("could not enable staged plugin: {error}"))
@@ -332,6 +337,34 @@ mod linux {
             )
             .unwrap();
             assert!(activation.desired_enabled("org.example.clock", false));
+            assert!(activation.approval_current(&staged.manifest, &staged.source_digest()));
+        }
+
+        #[test]
+        fn accepts_a_translucent_dock_package() {
+            let source = tempfile::tempdir().unwrap();
+            std::fs::write(
+                source.path().join("plugin.json"),
+                r#"{"api_version":1,"id":"org.example.dock","name":"Dock","entry":"main.js","surfaces":[{"id":"main","kind":"dock","width":400,"height":72,"bottom_offset":24}]}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                source.path().join("main.js"),
+                "function App() { return h(Panel, {background: 0x80202020}, h(Text, {}, 'Dock')); }",
+            )
+            .unwrap();
+            let package = load_panel(source.path()).unwrap();
+            assert_eq!(package.manifest.surfaces[0].kind, PluginSurfaceKind::Dock);
+            let profile = tempfile::tempdir().unwrap();
+            stage(&package, source.path(), profile.path()).unwrap();
+            let staged =
+                PluginPackage::load(profile.path().join("nickel/plugins/org.example.dock"))
+                    .unwrap();
+            let activation = PluginActivationSettings::load(
+                profile.path().join("nickel/plugin-activation.json"),
+            )
+            .unwrap();
+            assert!(activation.approval_current(&staged.manifest, &staged.source_digest()));
         }
 
         #[test]

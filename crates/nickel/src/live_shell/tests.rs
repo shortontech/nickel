@@ -383,6 +383,51 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
 }
 
 #[test]
+fn installed_dock_uses_declared_offset_and_translucent_panel() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("org.example.dock");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.dock","name":"Example Dock","entry":"main.js","surfaces":[{"id":"main","kind":"dock","width":420,"height":80,"bottom_offset":32,"output":"primary"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(Panel, {height: 80, background: 0x80202020}, h(Text, {}, 'Dock')); }",
+    )
+    .unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    let descriptor = catalog.packages.remove("org.example.dock").unwrap();
+    let mut shell = LiveShell::new().unwrap();
+    shell
+        .plugin_registry
+        .register(descriptor.manifest.clone())
+        .unwrap();
+    shell
+        .external_plugin_packages
+        .insert(descriptor.manifest.id.clone(), descriptor);
+
+    assert!(shell.set_plugin_enabled("org.example.dock", true).unwrap());
+    assert_eq!(
+        shell.plugin_panel_surface().kind,
+        nickel_core::plugins::PluginSurfaceKind::Dock
+    );
+    assert_eq!(shell.plugin_panel_surface().bottom_offset, 32);
+    let commands = shell.scene(crate::winit_shell::SurfaceRole::Panel, 420, 80);
+    assert!(commands.iter().any(|command| matches!(command,
+        nickel_ui::backend::PaintCommand::Text { text, .. } if text == "Dock"
+    )));
+    assert!(commands.iter().any(|command| matches!(command,
+        nickel_ui::backend::PaintCommand::Fill { color, .. }
+        | nickel_ui::backend::PaintCommand::RoundedFill { color, .. }
+        if *color == 0x80202020
+    )));
+    assert!(shell.set_plugin_enabled("org.example.dock", false).unwrap());
+    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+}
+
+#[test]
 fn installed_panel_start_failure_is_visible_until_disabled() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.broken");

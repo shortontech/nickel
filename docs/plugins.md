@@ -1,4 +1,4 @@
-# Developing a Nickel panel plugin
+# Developing a Nickel panel or dock plugin
 
 Nickel loads a compiled JavaScript entry from a directory containing
 `plugin.json`. The [bundled hello panel](../assets/plugins/hello-panel/) is a
@@ -18,9 +18,13 @@ temporary Nickel profile, and launches `nickel-nested`. Saving `plugin.json`,
 the declared JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the nested session. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
-profile. The developer command supports one panel surface or one surface-free
+profile. The developer command supports one panel or dock surface, or one surface-free
 taskbar badge contribution; `nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
+For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
+`height`, and set `bottom_offset` for the gap above the output edge. The
+`Panel` component's ARGB `background` can be translucent. The current runtime
+allows one active external panel or dock at a time.
 
 The installed entry is plain JavaScript. If `main.jsx` or `main.tsx` exists
 beside a declared `main.js` entry, both commands run a local

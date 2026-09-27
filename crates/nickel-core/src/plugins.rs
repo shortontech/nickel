@@ -124,6 +124,10 @@ pub struct PluginPackage {
 }
 
 impl PluginPackage {
+    pub fn source_digest(&self) -> String {
+        digest_source(&self.source)
+    }
+
     pub fn load(directory: impl AsRef<Path>) -> Result<Self, String> {
         let directory = std::fs::canonicalize(directory.as_ref())
             .map_err(|error| format!("could not open plugin directory: {error}"))?;

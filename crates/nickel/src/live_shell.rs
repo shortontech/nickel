@@ -3383,7 +3383,11 @@ impl LiveShell {
             if let Some(descriptor) = self.external_plugin_packages.get(id) {
                 let surfaces = &descriptor.manifest.surfaces;
                 if surfaces.len() == 1
-                    && surfaces[0].kind == nickel_core::plugins::PluginSurfaceKind::Panel
+                    && matches!(
+                        surfaces[0].kind,
+                        nickel_core::plugins::PluginSurfaceKind::Panel
+                            | nickel_core::plugins::PluginSurfaceKind::Dock
+                    )
                     && self.plugin_panel_host.is_some()
                 {
                     return Err(format!(
@@ -3393,7 +3397,11 @@ impl LiveShell {
                 }
                 Some(
                     if surfaces.len() == 1
-                        && surfaces[0].kind == nickel_core::plugins::PluginSurfaceKind::Panel
+                        && matches!(
+                            surfaces[0].kind,
+                            nickel_core::plugins::PluginSurfaceKind::Panel
+                                | nickel_core::plugins::PluginSurfaceKind::Dock
+                        )
                     {
                         descriptor.load().and_then(|package| {
                             let settings = self
@@ -3409,7 +3417,7 @@ impl LiveShell {
                         })
                     } else {
                         Err(
-                            "installed plugin needs exactly one panel surface in this runtime"
+                            "installed plugin needs exactly one panel or dock surface in this runtime"
                                 .into(),
                         )
                     },
