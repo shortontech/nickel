@@ -175,6 +175,7 @@ fn desired_output_surfaces(
     create_desktops: bool,
     bar_on_all_displays: bool,
     primary_output: Option<&str>,
+    plugin_panel_enabled: bool,
 ) -> HashSet<(String, SurfaceRole)> {
     let panel_outputs = panel_outputs(output_names, bar_on_all_displays, primary_output)
         .into_iter()
@@ -194,7 +195,7 @@ fn desired_output_surfaces(
                     && (*role != SurfaceRole::Taskbar || panel_outputs.contains(output))
                     && (*role != SurfaceRole::Panel
                         || (cfg!(target_os = "windows")
-                            && crate::plugin_panel::enabled()
+                            && plugin_panel_enabled
                             && (crate::plugin_panel::surface().output
                                 == nickel_core::plugins::PluginOutputScope::All
                                 || output_names.first() == Some(output))))
@@ -530,6 +531,7 @@ pub struct WinitShell {
     options: ShellOptions,
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
+    plugin_panel_enabled: bool,
     #[cfg(target_os = "windows")]
     launcher_surface_size: Option<(u32, u32)>,
     next_surface_diagnostic_generation: u64,
@@ -590,6 +592,7 @@ impl WinitShell {
             options,
             primary_output_name: None,
             active_output_name: None,
+            plugin_panel_enabled: crate::plugin_panel::enabled(),
             #[cfg(target_os = "windows")]
             launcher_surface_size: None,
             next_surface_diagnostic_generation: 0,
@@ -693,6 +696,7 @@ impl WinitShell {
             create_desktops,
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
+            self.plugin_panel_enabled,
         );
         let mut output_creation_failed = false;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
@@ -771,6 +775,7 @@ impl WinitShell {
             create_desktops,
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
+            self.plugin_panel_enabled,
         );
         // A settings policy change is authoritative immediately. Missing outputs remain
         // dormant for the retirement grace period so a transient topology snapshot or a
@@ -934,6 +939,15 @@ impl WinitShell {
             return Ok(false);
         }
         self.options.bar_on_all_displays = enabled;
+        self.sync_display_geometry()?;
+        Ok(true)
+    }
+
+    pub fn set_plugin_panel_enabled(&mut self, enabled: bool) -> Result<bool, String> {
+        if self.plugin_panel_enabled == enabled {
+            return Ok(false);
+        }
+        self.plugin_panel_enabled = enabled;
         self.sync_display_geometry()?;
         Ok(true)
     }
@@ -2793,7 +2807,7 @@ mod tests {
     #[test]
     fn every_enabled_output_requires_its_own_wallpaper_bar_and_lock() {
         let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
-        let desired = desired_output_surfaces(&outputs, true, true, None);
+        let desired = desired_output_surfaces(&outputs, true, true, None, false);
         assert_eq!(desired.len(), 6);
         for output in outputs {
             for role in [
@@ -2811,12 +2825,13 @@ mod tests {
 
     #[test]
     fn hotplug_requires_output_chrome_even_when_the_existing_panel_is_healthy() {
-        let before = desired_output_surfaces(&["DP-1".to_owned()], true, false, None);
+        let before = desired_output_surfaces(&["DP-1".to_owned()], true, false, None, false);
         let after = desired_output_surfaces(
             &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
             true,
             false,
             None,
+            false,
         );
         let added = after.difference(&before).cloned().collect::<HashSet<_>>();
         assert_eq!(
@@ -2837,12 +2852,14 @@ mod tests {
             true,
             true,
             None,
+            false,
         );
         let reversed = desired_output_surfaces(
             &["HDMI-A-1".to_owned(), "DP-1".to_owned()],
             true,
             true,
             None,
+            false,
         );
         assert_eq!(forward, reversed);
     }
@@ -2854,6 +2871,7 @@ mod tests {
             false,
             true,
             None,
+            false,
         );
         assert_eq!(desired.len(), 4);
         assert!(

@@ -69,6 +69,7 @@ pub enum Query {
     ShellRuntimeDiagnostics,
     Workspaces,
     ShellBehavior,
+    Plugins,
     RemoteControl,
     Preview {
         window: WindowId,
@@ -118,6 +119,14 @@ pub enum Command {
     ReloadShellSettings,
     ApplyShellBehavior {
         transaction: ShellBehaviorTransaction,
+    },
+    PublishPluginStatus {
+        snapshot: PluginStatusSnapshot,
+    },
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+        observed_generation: u64,
     },
     ApplyRemoteControl {
         requested_enabled: bool,
@@ -569,6 +578,7 @@ pub enum ServerMessage {
     ShellRuntimeDiagnostics(ShellRuntimeDiagnostics),
     Workspaces(WorkspaceState),
     ShellBehavior(ShellBehaviorSnapshot),
+    Plugins(PluginStatusSnapshot),
     RemoteControl(RemoteControlSnapshot),
     RemotePairing(RemotePairingSnapshot),
     Preview(PreviewFrame),
@@ -1027,6 +1037,12 @@ pub enum Event {
     },
     ShellSettingsChanged,
     ShellBehaviorChanged(ShellBehaviorSnapshot),
+    PluginsChanged(PluginStatusSnapshot),
+    PluginActivationRequested {
+        id: String,
+        enabled: bool,
+        observed_generation: u64,
+    },
     Snapshot(Snapshot),
     LauncherVisibility {
         visible: bool,
@@ -1089,6 +1105,43 @@ pub struct ShellBehaviorSnapshot {
     pub all_windows_on_every_bar: bool,
     pub desktop_count: u8,
     pub topology_generation: u64,
+}
+
+/// Bounded status for the trusted local Settings plugin page. Shared process
+/// memory is deliberately absent because it cannot be attributed to a plugin.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginStatusSnapshot {
+    pub activation_generation: u64,
+    pub plugins: Vec<PluginStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginStatus {
+    pub id: String,
+    pub name: String,
+    pub desired_enabled: bool,
+    pub health: PluginRuntimeHealth,
+    pub capabilities: Vec<String>,
+    pub surfaces: Vec<String>,
+    pub memory: PluginMemorySnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
+pub enum PluginRuntimeHealth {
+    Disabled,
+    Starting,
+    Running,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMemorySnapshot {
+    pub js_heap_bytes: Option<u64>,
+    pub native_ui_bytes: Option<u64>,
+    pub texture_bytes: Option<u64>,
+    pub timers: u32,
+    pub subscriptions: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1839,6 +1892,50 @@ impl PreviewFrame {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plugin_status_and_activation_round_trip_over_local_protocol() {
+        use super::*;
+        let snapshot = PluginStatusSnapshot {
+            activation_generation: 7,
+            plugins: vec![PluginStatus {
+                id: "org.nickel.launcher".into(),
+                name: "Nickel Launcher".into(),
+                desired_enabled: true,
+                health: PluginRuntimeHealth::Running,
+                capabilities: vec!["applications-read".into()],
+                surfaces: vec!["main: window".into()],
+                memory: PluginMemorySnapshot {
+                    js_heap_bytes: None,
+                    native_ui_bytes: Some(4096),
+                    texture_bytes: None,
+                    timers: 0,
+                    subscriptions: 0,
+                },
+            }],
+        };
+        let response = ServerEnvelope {
+            request_id: 10,
+            message: ServerMessage::Plugins(snapshot.clone()),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&response).unwrap()).unwrap(),
+            response
+        );
+        let request = ClientEnvelope {
+            token: "local".into(),
+            request_id: 11,
+            request: Request::Command(Command::SetPluginEnabled {
+                id: "org.nickel.launcher".into(),
+                enabled: false,
+                observed_generation: snapshot.activation_generation,
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+    }
+
     #[test]
     fn lease_management_uses_the_protocols_snake_case_wire_actions() {
         use super::*;

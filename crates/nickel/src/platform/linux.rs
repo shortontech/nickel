@@ -1299,6 +1299,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::CacheDiagnostics => "query-cache-diagnostics",
             SessionQuery::Workspaces => "query-workspaces",
             SessionQuery::ShellBehavior => "query-shell-behavior",
+            SessionQuery::Plugins => "query-plugins",
             SessionQuery::RemoteControl => "query-remote-control",
             SessionQuery::Preview { .. } => "query-preview",
             SessionQuery::ShellSemanticTarget { .. } => "query-shell-semantic-target",
@@ -1313,6 +1314,8 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::OnScreenKeyboardInput { .. } => "on-screen-keyboard-input",
             SessionCommand::ReloadShellSettings => "reload-shell-settings",
             SessionCommand::ApplyShellBehavior { .. } => "apply-shell-behavior",
+            SessionCommand::PublishPluginStatus { .. } => "publish-plugin-status",
+            SessionCommand::SetPluginEnabled { .. } => "set-plugin-enabled",
             SessionCommand::ApplyRemoteControl { .. } => "apply-remote-control",
             SessionCommand::StartRemotePairing { .. } => "start-remote-pairing",
             SessionCommand::CancelRemotePairing => "cancel-remote-pairing",
@@ -1494,6 +1497,9 @@ fn command_response(response: ServerMessage) -> Result<(), SessionRequestError> 
 
 pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
     match command {
+        ShellCommand::PublishPluginStatus { snapshot } => {
+            SessionCommand::PublishPluginStatus { snapshot }
+        }
         ShellCommand::Show => SessionCommand::SetLauncherVisible { visible: true },
         ShellCommand::ShowFromController => {
             SessionCommand::SetLauncherVisibleFromController { visible: true }
@@ -2136,6 +2142,15 @@ fn subscription_shortcut(
         ServerMessage::Event(
             SessionEvent::ShellSettingsChanged | SessionEvent::ShellBehaviorChanged(_),
         ) => Some(GlobalShortcut::ReloadShellSettings),
+        ServerMessage::Event(SessionEvent::PluginActivationRequested {
+            id,
+            enabled,
+            observed_generation,
+        }) => Some(GlobalShortcut::SetPluginEnabled {
+            id,
+            enabled,
+            observed_generation,
+        }),
         ServerMessage::Event(SessionEvent::LauncherVisibility { visible })
         | ServerMessage::LauncherVisibility { visible } => {
             if state.launcher_visible.replace(visible) == Some(visible) {

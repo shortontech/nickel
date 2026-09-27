@@ -691,6 +691,11 @@ pub enum ScreenshotAction {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum GlobalShortcut {
     ReloadShellSettings,
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+        observed_generation: u64,
+    },
     ToggleLauncher,
     ShowLauncher,
     HideLauncher,
@@ -782,6 +787,10 @@ pub enum ShellCommand {
     FocusScreenshot,
     #[cfg(target_os = "linux")]
     RestoreApplicationFocus,
+    #[cfg(target_os = "linux")]
+    PublishPluginStatus {
+        snapshot: nickel_session_protocol::PluginStatusSnapshot,
+    },
     #[cfg(target_os = "linux")]
     SetShellRoleVisible {
         role: nickel_session_protocol::ShellRole,

@@ -419,6 +419,7 @@ enum SettingsPage {
     BluetoothPair,
     DefaultApps,
     OptionalFeatures,
+    Plugins,
     KeyboardShortcuts,
     About,
 }
@@ -434,6 +435,7 @@ impl std::fmt::Display for SettingsPage {
             Self::BluetoothPair => "bluetooth-pair",
             Self::DefaultApps => "default-apps",
             Self::OptionalFeatures => "optional-features",
+            Self::Plugins => "plugins",
             Self::KeyboardShortcuts => "keyboard-shortcuts",
             Self::About => "about",
         })
@@ -497,6 +499,8 @@ enum SettingsMessage {
     WifiNetwork(usize),
     NetworkScroll,
     OptionalFeaturesScroll,
+    PluginsScroll,
+    RefreshPlugins,
     DefaultAppsPageScroll,
     DefaultAppsScroll(u32),
     DefaultAppTargetChanged(String),
@@ -510,6 +514,10 @@ enum SettingsMessage {
         handler_id: String,
     },
     SetCodexEnabled(bool),
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+    },
     SetOnScreenKeyboard(nickel_core::on_screen_keyboard::KeyboardPreference),
     ConfirmDisableCodex,
     CancelDisableCodex,
@@ -969,6 +977,159 @@ impl SettingsApp {
         semantic_theme(self.palette())
     }
 
+    fn refresh_plugins_async(&mut self) {
+        if self.plugin_refresh_rx.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        if std::thread::Builder::new()
+            .name("nickel-settings-plugins".into())
+            .spawn(move || {
+                let response = session_request(SessionRequest::Query(SessionQuery::Plugins))
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(response);
+            })
+            .is_ok()
+        {
+            self.plugin_refresh_rx = Some(receiver);
+        } else {
+            self.plugin_notice = Some("Could not start plugin status request.".into());
+        }
+        self.next_plugin_refresh = Instant::now() + Duration::from_secs(1);
+    }
+
+    fn request_plugin_activation(&mut self, id: String, enabled: bool) {
+        if self.plugin_pending.is_some() {
+            return;
+        }
+        let Some(snapshot) = &self.plugin_status else {
+            self.plugin_notice = Some("Refresh plugin status before changing it.".into());
+            return;
+        };
+        if !snapshot.plugins.iter().any(|plugin| plugin.id == id) {
+            self.plugin_notice = Some("That plugin is no longer installed.".into());
+            return;
+        }
+        let generation = snapshot.activation_generation;
+        let (sender, receiver) = mpsc::channel();
+        let request_id = id.clone();
+        if std::thread::Builder::new()
+            .name("nickel-settings-plugin-activation".into())
+            .spawn(move || {
+                let response =
+                    session_request(SessionRequest::Command(SessionCommand::SetPluginEnabled {
+                        id: request_id,
+                        enabled,
+                        observed_generation: generation,
+                    }))
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(response);
+            })
+            .is_ok()
+        {
+            self.plugin_pending = Some((id, enabled));
+            self.plugin_pending_started = Some(Instant::now());
+            self.plugin_activation_rx = Some(receiver);
+            self.plugin_notice = None;
+        } else {
+            self.plugin_notice = Some("Could not start plugin activation request.".into());
+        }
+    }
+
+    fn apply_plugin_status(&mut self, snapshot: nickel_session_protocol::PluginStatusSnapshot) {
+        if snapshot.activation_generation == 0 {
+            self.plugin_status = None;
+            self.plugin_pending = None;
+            self.plugin_pending_started = None;
+            self.plugin_notice = Some("Nickel shell is unavailable.".into());
+            self.next_plugin_refresh = Instant::now();
+            self.request_redraw();
+            return;
+        }
+        if let Some((id, enabled)) = &self.plugin_pending
+            && snapshot
+                .plugins
+                .iter()
+                .any(|plugin| plugin.id == *id && plugin.desired_enabled == *enabled)
+        {
+            self.plugin_pending = None;
+            self.plugin_pending_started = None;
+        }
+        self.plugin_status = Some(snapshot);
+        self.plugin_notice = None;
+        self.request_redraw();
+    }
+
+    fn poll_plugin_requests(&mut self, now: Instant) {
+        if let Some(receiver) = &self.plugin_activation_rx {
+            match receiver.try_recv() {
+                Ok(response) => {
+                    self.plugin_activation_rx = None;
+                    match response {
+                        Ok(ServerMessage::Plugins(snapshot)) => {
+                            self.apply_plugin_status(snapshot);
+                            self.plugin_notice = None;
+                        }
+                        Ok(ServerMessage::Ack) => self.next_plugin_refresh = now,
+                        Ok(ServerMessage::Error { message, .. }) | Err(message) => {
+                            self.plugin_pending = None;
+                            self.plugin_pending_started = None;
+                            self.plugin_notice = Some(message);
+                        }
+                        Ok(_) => {
+                            self.plugin_pending = None;
+                            self.plugin_pending_started = None;
+                            self.plugin_notice = Some("Unexpected plugin response.".into());
+                        }
+                    }
+                    self.request_redraw();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.plugin_activation_rx = None;
+                    self.plugin_pending = None;
+                    self.plugin_pending_started = None;
+                    self.plugin_notice = Some("Plugin activation stopped.".into());
+                    self.request_redraw();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(receiver) = &self.plugin_refresh_rx {
+            match receiver.try_recv() {
+                Ok(response) => {
+                    self.plugin_refresh_rx = None;
+                    match response {
+                        Ok(ServerMessage::Plugins(snapshot))
+                            if snapshot.activation_generation > 0 =>
+                        {
+                            self.apply_plugin_status(snapshot);
+                        }
+                        Ok(ServerMessage::Error { message, .. }) | Err(message) => {
+                            self.plugin_notice = Some(message);
+                        }
+                        _ => self.plugin_notice = Some("Live plugin status is unavailable.".into()),
+                    }
+                    self.request_redraw();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.plugin_refresh_rx = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if self
+            .plugin_pending_started
+            .is_some_and(|started| now.duration_since(started) > Duration::from_secs(3))
+        {
+            self.plugin_pending = None;
+            self.plugin_pending_started = None;
+            self.plugin_notice = Some("Nickel did not confirm the plugin change.".into());
+            self.next_plugin_refresh = now;
+            self.request_redraw();
+        }
+        if self.page == SettingsPage::Plugins && now >= self.next_plugin_refresh {
+            self.refresh_plugins_async();
+        }
+    }
+
     fn handle_settings_message(&mut self, message: SettingsMessage) {
         match message {
             SettingsMessage::Navigate(page) => {
@@ -983,6 +1144,7 @@ impl SettingsApp {
                         self.refresh_optional_feature_state();
                         self.start_codex_probe();
                     }
+                    SettingsPage::Plugins => self.refresh_plugins_async(),
                     _ => {}
                 }
             }
@@ -1001,6 +1163,7 @@ impl SettingsApp {
                         self.refresh_optional_feature_state();
                         self.start_codex_probe();
                     }
+                    SettingsPage::Plugins => self.refresh_plugins_async(),
                     _ => {}
                 }
             }
@@ -1072,6 +1235,10 @@ impl SettingsApp {
             SettingsMessage::SetCodexEnabled(enabled) => {
                 self.request_codex_enabled(enabled, false);
             }
+            SettingsMessage::SetPluginEnabled { id, enabled } => {
+                self.request_plugin_activation(id, enabled);
+            }
+            SettingsMessage::RefreshPlugins => self.refresh_plugins_async(),
             SettingsMessage::SetOnScreenKeyboard(preference) => {
                 if self
                     .keyboard_runtime
@@ -1353,6 +1520,7 @@ impl SettingsApp {
             | SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
             | SettingsMessage::OptionalFeaturesScroll
+            | SettingsMessage::PluginsScroll
             | SettingsMessage::DefaultAppsPageScroll
             | SettingsMessage::AppearanceScroll => {}
             SettingsMessage::DefaultAppsScroll(offset) => {
@@ -1786,6 +1954,7 @@ impl SettingsApp {
             self.request_redraw();
         }
         let now = Instant::now();
+        self.poll_plugin_requests(now);
         if self
             .pending_display_revert
             .as_ref()
@@ -1814,6 +1983,9 @@ impl SettingsApp {
                     }
                     self.refresh_workspace_state();
                     self.request_redraw();
+                }
+                nickel_session_protocol::Event::PluginsChanged(snapshot) => {
+                    self.apply_plugin_status(snapshot);
                 }
                 nickel_session_protocol::Event::Workspaces(workspaces) => {
                     self.apply_workspace_state(&workspaces);
@@ -2262,6 +2434,16 @@ impl Application for SettingsApp {
         if self.page == SettingsPage::Network {
             deadlines.push(self.next_network_refresh);
         }
+        if self.page == SettingsPage::Plugins {
+            deadlines.push(self.next_plugin_refresh);
+        }
+        if self.plugin_activation_rx.is_some() || self.plugin_refresh_rx.is_some() {
+            deadlines.push(now + Duration::from_millis(50));
+        }
+        deadlines.extend(
+            self.plugin_pending_started
+                .map(|started| started + Duration::from_secs(3)),
+        );
         if self.page == SettingsPage::DefaultApps {
             deadlines.push(if self.default_apps_discovery_rx.is_some() {
                 now + Duration::from_millis(16)
@@ -2541,6 +2723,76 @@ mod tests {
     };
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
+
+    #[test]
+    fn plugins_page_shows_grants_memory_and_activation_control() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
+        app.plugin_status = Some(nickel_session_protocol::PluginStatusSnapshot {
+            activation_generation: 4,
+            plugins: vec![nickel_session_protocol::PluginStatus {
+                id: "org.nickel.launcher".into(),
+                name: "Nickel Launcher".into(),
+                desired_enabled: false,
+                health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
+                capabilities: vec!["applications-read".into(), "applications-launch".into()],
+                surfaces: vec!["main: window".into()],
+                memory: nickel_session_protocol::PluginMemorySnapshot {
+                    native_ui_bytes: Some(4096),
+                    ..Default::default()
+                },
+            }],
+        });
+        let host = UiHost::new(app, 1100, 800);
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::SetPluginEnabled {
+                id: "org.nickel.launcher".into(),
+                enabled: true,
+            })
+            .len(),
+            1
+        );
+        let labels = host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"applications-read, applications-launch"));
+        assert!(labels.contains(&"4 KiB"));
+        assert!(labels.contains(&"Unavailable"));
+    }
+
+    #[test]
+    fn plugin_activation_waits_for_confirmed_status() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
+        app.page = SettingsPage::Display;
+        app.plugin_status = Some(nickel_session_protocol::PluginStatusSnapshot {
+            activation_generation: 2,
+            plugins: vec![nickel_session_protocol::PluginStatus {
+                id: "org.nickel.launcher".into(),
+                name: "Nickel Launcher".into(),
+                desired_enabled: false,
+                health: nickel_session_protocol::PluginRuntimeHealth::Disabled,
+                capabilities: Vec::new(),
+                surfaces: Vec::new(),
+                memory: Default::default(),
+            }],
+        });
+        let (sender, receiver) = mpsc::channel();
+        app.plugin_pending = Some(("org.nickel.launcher".into(), true));
+        app.plugin_pending_started = Some(std::time::Instant::now());
+        app.plugin_activation_rx = Some(receiver);
+        sender
+            .send(Ok(nickel_session_protocol::ServerMessage::Ack))
+            .unwrap();
+        app.poll_plugin_requests(std::time::Instant::now());
+        assert!(app.plugin_pending.is_some());
+        let mut confirmed = app.plugin_status.clone().unwrap();
+        confirmed.activation_generation = 3;
+        confirmed.plugins[0].desired_enabled = true;
+        confirmed.plugins[0].health = nickel_session_protocol::PluginRuntimeHealth::Running;
+        app.apply_plugin_status(confirmed);
+        assert!(app.plugin_pending.is_none());
+    }
 
     #[test]
     fn display_settings_polls_for_external_toolkit_changes() {

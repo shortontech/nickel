@@ -719,6 +719,9 @@ impl NickelSession {
                     }
                     self.launcher_subscribers.push(path.to_path_buf());
                 }
+                if control.authenticated_shell_pids.contains(&peer_pid) {
+                    self.plugin_shell_subscriber = Some(path.to_path_buf());
+                }
                 ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot()))
             }
             Request::ControllerHost(request) => {
@@ -965,6 +968,16 @@ impl NickelSession {
                 let _ = self.refresh_output_topology_generation();
                 ServerMessage::ShellBehavior(self.protocol_shell_behavior())
             }
+            Query::Plugins => ServerMessage::Plugins(
+                self.internal_shell
+                    .as_ref()
+                    .map(|coordinator| coordinator.plugin_status_snapshot())
+                    .or_else(|| self.plugin_status.clone())
+                    .unwrap_or_else(|| nickel_session_protocol::PluginStatusSnapshot {
+                        activation_generation: 0,
+                        plugins: Vec::new(),
+                    }),
+            ),
             Query::RemoteControl => self.remote_control_snapshot(),
             Query::Preview { window } => {
                 let id = WindowId(window.0);
@@ -1146,6 +1159,72 @@ impl NickelSession {
             }
             SessionCommand::ApplyShellBehavior { transaction } => {
                 return self.apply_shell_behavior_transaction(transaction);
+            }
+            SessionCommand::PublishPluginStatus { snapshot } => {
+                if snapshot.plugins.len() > 64
+                    || snapshot.plugins.iter().any(|plugin| {
+                        plugin.id.len() > 96
+                            || plugin.name.len() > 120
+                            || plugin.capabilities.len() > 32
+                            || plugin.surfaces.len() > 32
+                    })
+                {
+                    return protocol_error(
+                        ErrorCode::ResourceLimit,
+                        "plugin status exceeds limits",
+                    );
+                }
+                self.plugin_status = Some(snapshot.clone());
+                self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot));
+            }
+            SessionCommand::SetPluginEnabled {
+                id,
+                enabled,
+                observed_generation,
+            } => {
+                if let Some(coordinator) = self.internal_shell.as_mut() {
+                    if coordinator.plugin_status_snapshot().activation_generation
+                        != observed_generation
+                    {
+                        return protocol_error(
+                            ErrorCode::InvalidRequest,
+                            "plugin status changed; refresh Settings",
+                        );
+                    }
+                    let changed = coordinator.set_plugin_enabled(&id, enabled);
+                    let snapshot = coordinator.plugin_status_snapshot();
+                    self.plugin_status = Some(snapshot.clone());
+                    self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot.clone()));
+                    if changed.is_ok() {
+                        self.reconcile_internal_shell_outputs();
+                    }
+                    return changed.map_or_else(
+                        |reason| protocol_error(ErrorCode::InvalidRequest, reason),
+                        |_| ServerMessage::Plugins(snapshot),
+                    );
+                }
+                let Some(status) = &self.plugin_status else {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin status is unavailable",
+                    );
+                };
+                if status.activation_generation != observed_generation {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin status changed; refresh Settings",
+                    );
+                }
+                if !status.plugins.iter().any(|plugin| plugin.id == id) {
+                    return protocol_error(ErrorCode::InvalidRequest, "unknown plugin");
+                }
+                if !self.request_plugin_activation(SessionEvent::PluginActivationRequested {
+                    id,
+                    enabled,
+                    observed_generation,
+                }) {
+                    return protocol_error(ErrorCode::Internal, "shell subscriber is unavailable");
+                }
             }
             SessionCommand::ApplyRemoteControl {
                 requested_enabled,

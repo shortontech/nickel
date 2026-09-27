@@ -57,6 +57,118 @@ pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
 }
 
 impl SettingsApp {
+    pub(super) fn plugins_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+        let theme = self.ui_theme();
+        let mut content = Column::new()
+            .fill_width()
+            .gap(16.0)
+            .padding(Insets::all(20.0));
+        if let Some(notice) = &self.plugin_notice {
+            content = content.child(SettingsCard::titled(theme, "Plugin status", notice));
+        }
+        if let Some(snapshot) = &self.plugin_status {
+            for plugin in &snapshot.plugins {
+                let health = match &plugin.health {
+                    nickel_session_protocol::PluginRuntimeHealth::Disabled => "Disabled".to_owned(),
+                    nickel_session_protocol::PluginRuntimeHealth::Starting => "Starting".to_owned(),
+                    nickel_session_protocol::PluginRuntimeHealth::Running => "Running".to_owned(),
+                    nickel_session_protocol::PluginRuntimeHealth::Failed(reason) => {
+                        format!("Failed: {reason}")
+                    }
+                };
+                let pending = self
+                    .plugin_pending
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &plugin.id);
+                let switch_state = if pending {
+                    if plugin.desired_enabled {
+                        SwitchState::DisabledOn
+                    } else {
+                        SwitchState::DisabledOff
+                    }
+                } else if plugin.desired_enabled {
+                    match &plugin.health {
+                        nickel_session_protocol::PluginRuntimeHealth::Running => SwitchState::On,
+                        nickel_session_protocol::PluginRuntimeHealth::Starting => {
+                            SwitchState::DisabledOn
+                        }
+                        _ => SwitchState::Mixed,
+                    }
+                } else {
+                    SwitchState::Off
+                };
+                let action = (!pending).then(|| SettingsMessage::SetPluginEnabled {
+                    id: plugin.id.clone(),
+                    enabled: !plugin.desired_enabled,
+                });
+                let grants = if plugin.capabilities.is_empty() {
+                    "None".to_owned()
+                } else {
+                    plugin.capabilities.join(", ")
+                };
+                let surfaces = if plugin.surfaces.is_empty() {
+                    "None".to_owned()
+                } else {
+                    plugin.surfaces.join(", ")
+                };
+                let card = SettingsCard::titled(theme, &plugin.name, &plugin.id)
+                    .child(
+                        SettingsRow::new(theme, "Enabled", health).trailing(
+                            Switch::with_state_action(switch_state, action, theme)
+                                .id(format!("plugin-enable-{}", plugin.id))
+                                .accessibility_label(format!("Enable {}", plugin.name)),
+                        ),
+                    )
+                    .child(SettingsRow::new(theme, "Access", grants))
+                    .child(SettingsRow::new(theme, "Surfaces", surfaces))
+                    .child(SettingsRow::new(
+                        theme,
+                        "Tracked memory (lower bound)",
+                        plugin_tracked_memory_label(&plugin.memory),
+                    ))
+                    .child(SettingsRow::new(
+                        theme,
+                        "JavaScript heap",
+                        plugin_memory_label(plugin.memory.js_heap_bytes),
+                    ))
+                    .child(SettingsRow::new(
+                        theme,
+                        "Native UI (lower bound)",
+                        plugin_memory_label(plugin.memory.native_ui_bytes),
+                    ))
+                    .child(SettingsRow::new(
+                        theme,
+                        "Textures",
+                        plugin_memory_label(plugin.memory.texture_bytes),
+                    ))
+                    .child(SettingsRow::new(
+                        theme,
+                        "Timers and subscriptions",
+                        format!("{} / {}", plugin.memory.timers, plugin.memory.subscriptions),
+                    ));
+                content = content.child(card);
+            }
+        } else {
+            content = content.child(
+                SettingsCard::titled(
+                    theme,
+                    "Waiting for Nickel",
+                    "Live plugin status is unavailable.",
+                )
+                .child(Button::semantic(
+                    theme,
+                    SettingsMessage::RefreshPlugins,
+                    "Refresh",
+                    ButtonPresentation::Secondary,
+                )),
+            );
+        }
+        nickel_ui::VerticalScroll::new(SettingsMessage::PluginsScroll, 0.0)
+            .grow(1.0)
+            .theme(theme)
+            .child(content)
+    }
+
     pub(super) fn optional_features_components(
         &self,
     ) -> impl nickel_ui::Component<SettingsMessage> {
@@ -1724,4 +1836,29 @@ impl SettingsApp {
             platform,
         ))
     }
+}
+
+fn plugin_memory_label(bytes: Option<u64>) -> String {
+    match bytes {
+        None => "Unavailable".into(),
+        Some(bytes) if bytes < 1024 => format!("{bytes} B"),
+        Some(bytes) => format!("{} KiB", bytes.div_ceil(1024)),
+    }
+}
+
+fn plugin_tracked_memory_label(memory: &nickel_session_protocol::PluginMemorySnapshot) -> String {
+    let measured = [
+        memory.js_heap_bytes,
+        memory.native_ui_bytes,
+        memory.texture_bytes,
+    ];
+    if measured.iter().all(Option::is_none) {
+        return "Unavailable".into();
+    }
+    plugin_memory_label(Some(
+        measured
+            .into_iter()
+            .flatten()
+            .fold(0_u64, u64::saturating_add),
+    ))
 }

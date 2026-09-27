@@ -79,6 +79,7 @@ fn parse_screen(value: &str) -> Result<SettingsPage, String> {
         "bluetooth-pair" => Ok(SettingsPage::BluetoothPair),
         "default-apps" => Ok(SettingsPage::DefaultApps),
         "optional-features" | "features" => Ok(SettingsPage::OptionalFeatures),
+        "plugins" => Ok(SettingsPage::Plugins),
         "keyboard" | "keyboard-shortcuts" => Ok(SettingsPage::KeyboardShortcuts),
         "about" => Ok(SettingsPage::About),
         _ => Err(format!(

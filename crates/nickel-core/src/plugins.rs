@@ -47,6 +47,19 @@ pub enum PluginSurfaceKind {
     Overlay,
 }
 
+impl PluginSurfaceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Panel => "panel",
+            Self::Dock => "dock",
+            Self::Desktop => "desktop",
+            Self::Window => "window",
+            Self::Dialog => "dialog",
+            Self::Overlay => "overlay",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginOutputScope {
@@ -69,6 +82,24 @@ pub enum PluginCapability {
     NotificationsAct,
     SettingsRead,
     SettingsWrite,
+}
+
+impl PluginCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LauncherShow => "launcher-show",
+            Self::ApplicationsRead => "applications-read",
+            Self::ApplicationsLaunch => "applications-launch",
+            Self::WindowsRead => "windows-read",
+            Self::WindowsFocus => "windows-focus",
+            Self::WorkspacesRead => "workspaces-read",
+            Self::WorkspacesSwitch => "workspaces-switch",
+            Self::NotificationsRead => "notifications-read",
+            Self::NotificationsAct => "notifications-act",
+            Self::SettingsRead => "settings-read",
+            Self::SettingsWrite => "settings-write",
+        }
+    }
 }
 
 impl PluginManifest {

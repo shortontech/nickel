@@ -5181,7 +5181,51 @@ impl WindowsRemoteControl {
                     {
                         continue;
                     }
-                    let result = self.handle(request.envelope.request);
+                    let result = match request.envelope.request {
+                        Request::Query(Query::Plugins) => shell.as_ref().map_or_else(
+                            || error("Windows shell is unavailable"),
+                            |(_, state)| ServerMessage::Plugins(state.plugin_status_snapshot()),
+                        ),
+                        Request::Command(Command::SetPluginEnabled {
+                            id,
+                            enabled,
+                            observed_generation,
+                        }) => shell.as_mut().map_or_else(
+                            || error("Windows shell is unavailable"),
+                            |(shell, state)| {
+                                if state.plugin_status_snapshot().activation_generation
+                                    != observed_generation
+                                {
+                                    return error("plugin status changed; refresh Settings");
+                                }
+                                match state.set_plugin_enabled(&id, enabled) {
+                                    Ok(changed) => {
+                                        if changed
+                                            && let Err(reason) = shell.set_plugin_panel_enabled(
+                                                state.surface_visible(
+                                                    crate::winit_shell::SurfaceRole::Panel,
+                                                ),
+                                            )
+                                        {
+                                            return error(reason);
+                                        }
+                                        if changed
+                                            && let Err(reason) = crate::render_role(
+                                                shell,
+                                                state,
+                                                crate::winit_shell::SurfaceRole::Panel,
+                                            )
+                                        {
+                                            return error(reason);
+                                        }
+                                        ServerMessage::Plugins(state.plugin_status_snapshot())
+                                    }
+                                    Err(reason) => error(reason),
+                                }
+                            },
+                        ),
+                        request => self.handle(request),
+                    };
                     let _ = request.reply.try_send(result);
                 }
                 OwnerRequest::Connection {

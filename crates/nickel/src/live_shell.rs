@@ -676,6 +676,9 @@ pub struct LiveShell {
     panel_hover_output: Option<String>,
     panel_host: nickel_ui::UiHost<TaskbarUi>,
     plugin_registry: nickel_core::plugins::PluginRegistry,
+    plugin_activation_generation: u64,
+    #[cfg(target_os = "linux")]
+    last_published_plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
     plugin_panel_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_launcher_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     panel_hosts: HashMap<Option<String>, nickel_ui::UiHost<TaskbarUi>>,
@@ -1204,7 +1207,7 @@ impl LiveShell {
         } else {
             None
         };
-        Ok(Self {
+        let mut shell = Self {
             session_host: session_host.clone(),
             screenshot_capture_pending: false,
             screenshot_output: None,
@@ -1281,6 +1284,9 @@ impl LiveShell {
             panel_hover_output: None,
             panel_host,
             plugin_registry,
+            plugin_activation_generation: 1,
+            #[cfg(target_os = "linux")]
+            last_published_plugin_status: None,
             plugin_panel_host,
             plugin_launcher_host,
             panel_hosts: HashMap::new(),
@@ -1359,7 +1365,9 @@ impl LiveShell {
             keyboard_gesture_leases: HashMap::new(),
             keyboard_override,
             keyboard_recipient: None,
-        })
+        };
+        shell.maybe_publish_plugin_status();
+        Ok(shell)
     }
 
     pub fn refresh(&mut self) -> bool {
@@ -1986,7 +1994,7 @@ impl LiveShell {
     }
 
     pub fn scene(&mut self, role: SurfaceRole, width: u32, height: u32) -> Vec<PaintCommand> {
-        match role {
+        let commands = match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Taskbar => self.panel_scene(width, height),
             SurfaceRole::Panel => {
@@ -2036,7 +2044,9 @@ impl LiveShell {
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
             #[cfg(target_os = "windows")]
             SurfaceRole::TrustedControl => Vec::new(),
-        }
+        };
+        self.maybe_publish_plugin_status();
+        commands
     }
 
     pub fn set_desktop_outputs(&mut self, outputs: Vec<DesktopOutput>) {
@@ -2567,18 +2577,86 @@ impl LiveShell {
         &self.plugin_registry
     }
 
+    pub fn plugin_status_snapshot(&self) -> nickel_session_protocol::PluginStatusSnapshot {
+        use nickel_core::plugins::PluginHealth;
+        use nickel_session_protocol::{
+            PluginMemorySnapshot, PluginRuntimeHealth, PluginStatus, PluginStatusSnapshot,
+        };
+
+        PluginStatusSnapshot {
+            activation_generation: self.plugin_activation_generation,
+            plugins: self
+                .plugin_registry
+                .entries()
+                .map(|entry| PluginStatus {
+                    id: entry.manifest.id.clone(),
+                    name: entry.manifest.name.clone(),
+                    desired_enabled: entry.desired_enabled,
+                    health: match &entry.health {
+                        PluginHealth::Disabled => PluginRuntimeHealth::Disabled,
+                        PluginHealth::Starting => PluginRuntimeHealth::Starting,
+                        PluginHealth::Running => PluginRuntimeHealth::Running,
+                        PluginHealth::Failed(error) => {
+                            PluginRuntimeHealth::Failed(error.chars().take(256).collect())
+                        }
+                    },
+                    capabilities: entry
+                        .manifest
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.as_str().to_owned())
+                        .collect(),
+                    surfaces: entry
+                        .manifest
+                        .surfaces
+                        .iter()
+                        .map(|surface| format!("{}: {}", surface.id, surface.kind.as_str()))
+                        .collect(),
+                    memory: PluginMemorySnapshot {
+                        js_heap_bytes: entry.memory.js_heap_bytes,
+                        native_ui_bytes: entry.memory.native_ui_bytes,
+                        texture_bytes: entry.memory.texture_bytes,
+                        timers: entry.memory.timers,
+                        subscriptions: entry.memory.subscriptions,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    fn maybe_publish_plugin_status(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            let snapshot = self.plugin_status_snapshot();
+            if self.last_published_plugin_status.as_ref() == Some(&snapshot) {
+                return;
+            }
+            if self.send_session_command(
+                "publish-plugin-status",
+                ShellCommand::PublishPluginStatus {
+                    snapshot: snapshot.clone(),
+                },
+            ) {
+                self.last_published_plugin_status = Some(snapshot);
+            }
+        }
+    }
+
     /// Starts or retires a bundled plugin instance. Settings can call this
     /// after reviewing its manifest and grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         if !self.plugin_registry.set_enabled(id, enabled)? {
             return Ok(false);
         }
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
         if !enabled {
             if id == crate::plugin_panel::manifest().id {
                 self.plugin_panel_host = None;
             } else if id == crate::plugin_panel::launcher_manifest().id {
                 self.plugin_launcher_host = None;
             }
+            self.maybe_publish_plugin_status();
             return Ok(true);
         }
         let started = if id == crate::plugin_panel::manifest().id {
@@ -2598,13 +2676,15 @@ impl LiveShell {
         } else {
             Err(format!("plugin {id:?} has no runtime host"))
         };
-        match started {
+        let result = match started {
             Ok(()) => self.plugin_registry.mark_running(id).map(|()| true),
             Err(error) => {
                 self.plugin_registry.mark_failed(id, error.clone())?;
                 Err(error)
             }
-        }
+        };
+        self.maybe_publish_plugin_status();
+        result
     }
 
     pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
@@ -4808,6 +4888,22 @@ impl LiveShell {
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
         match shortcut {
             platform::GlobalShortcut::ReloadShellSettings => self.refresh_system(),
+            platform::GlobalShortcut::SetPluginEnabled {
+                id,
+                enabled,
+                observed_generation,
+            } => {
+                if observed_generation != self.plugin_activation_generation {
+                    return false;
+                }
+                match self.set_plugin_enabled(&id, enabled) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        tracing::warn!(plugin = id, %error, "plugin activation failed");
+                        true
+                    }
+                }
+            }
             platform::GlobalShortcut::ToggleLauncher => {
                 self.apply_launcher_signal(!self.launcher_visible);
                 true

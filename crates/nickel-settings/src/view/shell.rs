@@ -59,6 +59,10 @@ impl SettingsApp {
                     "Optional Features".into(),
                     "Enable integrations and inspect their availability".into(),
                 ),
+                SettingsPage::Plugins => (
+                    "Plugins".into(),
+                    "Review access, memory, and installed shell components".into(),
+                ),
                 SettingsPage::KeyboardShortcuts => (
                     self.localizer.text("settings-keyboard-title"),
                     self.localizer.text("settings-keyboard-subtitle"),
@@ -97,6 +101,7 @@ impl SettingsApp {
         let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
         let default_apps_label = self.localizer.text("settings-nav-default-apps");
         let optional_features_label = "Optional Features".to_owned();
+        let plugins_label = "Plugins".to_owned();
         let keyboard_label = self.localizer.text("settings-nav-keyboard");
         let about_label = self.localizer.text("settings-nav-about");
         let palette = self.palette();
@@ -233,6 +238,13 @@ impl SettingsApp {
                         SettingsPage::OptionalFeatures,
                         "on-screen-keyboard-mode".into(),
                     ),
+                ),
+                SettingsSearchEntry::new(
+                    &plugins_label,
+                    "Plugin memory and permissions",
+                    "Enable or disable shell plugins and review their access",
+                    "plugins-page",
+                    SettingsMessage::Navigate(SettingsPage::Plugins),
                 ),
             ];
             let results = search_settings(&query, &entries);
@@ -400,6 +412,15 @@ impl SettingsApp {
                 self.optional_features_components(),
             )
             .header(destination_header(SettingsPage::OptionalFeatures))
+            .leading(sidebar_icon(SidebarIconKind::OptionalFeatures))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
+                SettingsPage::Plugins,
+                plugins_label,
+                SettingsMessage::Navigate(SettingsPage::Plugins),
+                self.plugins_components(),
+            )
+            .header(destination_header(SettingsPage::Plugins))
             .leading(sidebar_icon(SidebarIconKind::OptionalFeatures))
             .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(

@@ -49,6 +49,14 @@ pub(super) struct SettingsApp {
     pub(super) next_optional_feature_refresh: Instant,
     pub(super) shell_settings: ShellSettings,
     pub(super) shell_topology_generation: u64,
+    pub(super) plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
+    pub(super) plugin_notice: Option<String>,
+    pub(super) plugin_pending: Option<(String, bool)>,
+    pub(super) plugin_pending_started: Option<Instant>,
+    pub(super) plugin_activation_rx:
+        Option<std::sync::mpsc::Receiver<Result<ServerMessage, String>>>,
+    pub(super) plugin_refresh_rx: Option<std::sync::mpsc::Receiver<Result<ServerMessage, String>>>,
+    pub(super) next_plugin_refresh: Instant,
     pub(super) wallpaper_settings: WallpaperSettings,
     pub(super) wallpaper_preview: Option<Arc<image::RgbaImage>>,
     pub(super) wallpaper_dimensions: Option<(u32, u32)>,
@@ -222,6 +230,13 @@ impl Default for SettingsApp {
             next_optional_feature_refresh: Instant::now(),
             shell_settings,
             shell_topology_generation,
+            plugin_status: None,
+            plugin_notice: None,
+            plugin_pending: None,
+            plugin_pending_started: None,
+            plugin_activation_rx: None,
+            plugin_refresh_rx: None,
+            next_plugin_refresh: Instant::now(),
             wallpaper_settings,
             wallpaper_preview,
             wallpaper_dimensions,
@@ -277,6 +292,8 @@ impl SettingsApp {
             app.start_codex_probe();
         } else if page == SettingsPage::Bar {
             app.refresh_workspace_state();
+        } else if page == SettingsPage::Plugins && !cfg!(test) {
+            app.refresh_plugins_async();
         }
         app
     }

@@ -275,7 +275,7 @@ impl InternalShellCoordinator {
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, Some(output.name.clone()), size));
             }
-            if crate::plugin_panel::enabled()
+            if self.shell.surface_visible(SurfaceRole::Panel)
                 && (crate::plugin_panel::surface().output
                     == nickel_core::plugins::PluginOutputScope::All
                     || index == 0)
@@ -1223,6 +1223,14 @@ impl InternalShellCoordinator {
     #[cfg(test)]
     pub(crate) fn shell_mut(&mut self) -> &mut LiveShell {
         &mut self.shell
+    }
+
+    pub(crate) fn plugin_status_snapshot(&self) -> nickel_session_protocol::PluginStatusSnapshot {
+        self.shell.plugin_status_snapshot()
+    }
+
+    pub(crate) fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
+        self.shell.set_plugin_enabled(id, enabled)
     }
 }
 

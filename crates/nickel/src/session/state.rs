@@ -2333,6 +2333,7 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
             | SessionCommand::ConfigureOnScreenKeyboard { .. }
             | SessionCommand::OnScreenKeyboardInput { .. }
             | SessionCommand::RegisterShellSurface { .. }
+            | SessionCommand::PublishPluginStatus { .. }
     )
 }
 
@@ -2774,6 +2775,8 @@ pub struct NickelSession {
     seat_focus_security_epoch: u64,
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
+    plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
+    plugin_shell_subscriber: Option<PathBuf>,
     controller_broker: ControllerBroker<ControllerEnvelopePayload>,
     controller_internal_connection: ControllerConnectionGeneration,
     pending_launch_observations: Vec<PendingLaunchObservation>,
@@ -8632,6 +8635,8 @@ impl NickelSession {
             seat_focus_security_epoch: 0,
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
+            plugin_status: None,
+            plugin_shell_subscriber: None,
             controller_broker,
             controller_internal_connection,
             pending_launch_observations: Vec::new(),
@@ -10305,6 +10310,44 @@ impl NickelSession {
             .retain(|path| socket.send_to(&event, path).is_ok());
     }
 
+    fn notify_plugin_event(&mut self, event: SessionEvent) -> usize {
+        let Ok(frame) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(event),
+        }) else {
+            return 0;
+        };
+        let Ok(socket) = notification_socket() else {
+            return 0;
+        };
+        let mut delivered = 0;
+        self.launcher_subscribers.retain(|path| {
+            let sent = socket.send_to(&frame, path).is_ok();
+            delivered += usize::from(sent);
+            sent
+        });
+        delivered
+    }
+
+    fn request_plugin_activation(&mut self, event: SessionEvent) -> bool {
+        let Some(path) = self.plugin_shell_subscriber.as_ref() else {
+            return false;
+        };
+        let Ok(frame) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(event),
+        }) else {
+            return false;
+        };
+        let sent = notification_socket()
+            .and_then(|socket| socket.send_to(&frame, path))
+            .is_ok();
+        if !sent {
+            self.plugin_shell_subscriber = None;
+        }
+        sent
+    }
+
     fn refresh_output_topology_generation(&mut self) -> bool {
         let outputs = self.protocol_outputs();
         if outputs != self.last_protocol_outputs {
@@ -10893,6 +10936,14 @@ impl NickelSession {
         self.preview_window = None;
         self.registered_shell_role_slots.clear();
         self.clear_all_previews();
+        self.plugin_status = None;
+        self.plugin_shell_subscriber = None;
+        self.notify_plugin_event(SessionEvent::PluginsChanged(
+            nickel_session_protocol::PluginStatusSnapshot {
+                activation_generation: 0,
+                plugins: Vec::new(),
+            },
+        ));
     }
 
     /// Remove every derived reference owned for a surface/window identity.
