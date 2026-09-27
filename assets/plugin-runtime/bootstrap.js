@@ -120,7 +120,7 @@ function h(kind, props, ...children) {
         complement: props?.complement,
         item: props?.item, count: props?.count,
         asset: props?.asset, fit: props?.fit,
-        accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
+        accessibilityLabel: props?.accessibilityLabel, state: props?.state, icon: props?.icon,
         showLabel: props?.showLabel, contextAction, dragAction, selectAction, moveAction, closeAction,
         value: props?.value, placeholder: props?.placeholder,
         percent: props?.percent,

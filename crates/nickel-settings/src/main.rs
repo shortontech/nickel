@@ -5,6 +5,7 @@ mod cli;
 mod effects;
 mod model;
 mod navigation_plugin;
+mod network_plugin;
 mod optional_features_plugin;
 mod persistence;
 mod platform;
@@ -502,6 +503,7 @@ enum SettingsMessage {
     BluetoothScroll,
     SetWifiPower(bool),
     WifiNetwork(usize),
+    NetworkJsxAction(usize),
     NetworkScroll,
     OptionalFeaturesScroll,
     PluginsScroll,
@@ -1288,6 +1290,9 @@ impl SettingsApp {
         if page != SettingsPage::OptionalFeatures {
             self.optional_features_page.get_mut().take();
         }
+        if page != SettingsPage::Network {
+            self.network_page.get_mut().take();
+        }
         if !matches!(page, SettingsPage::KeyboardShortcuts | SettingsPage::About) {
             self.ordinary_pages.get_mut().take();
         }
@@ -1726,6 +1731,7 @@ impl SettingsApp {
             }
             SettingsMessage::DisplayRevert => self.revert_display_layout(),
             SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
+            SettingsMessage::NetworkJsxAction(index) => self.handle_network_jsx_action(index),
             SettingsMessage::DisplayScroll
             | SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
@@ -2946,6 +2952,14 @@ mod tests {
             .expect("optional feature control has a JSX action")
     }
 
+    fn network_action(app: &SettingsApp, id: &str) -> Option<usize> {
+        app.network_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id(id))
+    }
+
     #[test]
     fn plugins_page_shows_grants_memory_and_activation_control() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
@@ -3164,12 +3178,14 @@ mod tests {
         assert!(app.ordinary_pages.borrow().is_none());
         assert!(app.bar_page.borrow().is_none());
         assert!(app.optional_features_page.borrow().is_none());
+        assert!(app.network_page.borrow().is_none());
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.navigation_plugin.borrow().is_some());
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
         assert!(app.bar_page.borrow().is_none());
         assert!(app.optional_features_page.borrow().is_none());
+        assert!(app.network_page.borrow().is_none());
 
         app.page = SettingsPage::Plugins;
         let _ = app.build_ui(1100.0, 800.0);
@@ -3193,9 +3209,28 @@ mod tests {
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.optional_features_page.borrow().is_some());
 
-        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Network));
         assert!(app.optional_features_page.borrow().is_none());
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.network_page.borrow().is_some());
+
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
+        assert!(app.network_page.borrow().is_none());
         assert!(app.navigation_plugin.borrow().is_some());
+    }
+
+    #[test]
+    fn failed_network_jsx_keeps_native_wifi_switch_available() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
+        app.network_available = true;
+        app.wifi_enabled = false;
+        *app.network_page.borrow_mut() = Some(Err("JSX failed".into()));
+        let host = UiHost::new(app, 850, 580);
+        assert_eq!(
+            host.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -3970,17 +4005,17 @@ mod tests {
         app.wifi_enabled = false;
         app.wifi_status = "Wi-Fi is disabled".to_owned();
         let tree = app.build_ui(850.0, 900.0);
+        let action = network_action(&app, "network-wifi-power").expect("Wi-Fi JSX action");
 
         assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
+            tree.semantic_targets_for_message(&SettingsMessage::NetworkJsxAction(action))
                 .len(),
             1,
             "one activation must issue exactly one typed power request"
         );
-        assert!(
-            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(false))
-                .is_empty(),
-            "the rendered switch must request the opposite confirmed state"
+        assert_eq!(
+            crate::network_plugin::projection(&app)["wifiEnabled"],
+            false
         );
         let wifi = tree
             .accessibility_nodes()
@@ -3999,6 +4034,7 @@ mod tests {
         app.network_available = false;
         app.wifi_enabled = false;
         let tree = app.build_ui(850.0, 900.0);
+        assert!(network_action(&app, "network-wifi-power").is_none());
 
         assert!(
             tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
@@ -4021,6 +4057,7 @@ mod tests {
         app.network_available = true;
         app.wifi_enabled = false;
         let tree = app.build_ui(850.0, 900.0);
+        assert!(network_action(&app, "network-wifi-power").is_none());
 
         assert!(
             tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
@@ -4043,6 +4080,7 @@ mod tests {
         let (_sender, receiver) = std::sync::mpsc::channel();
         app.wifi_power_rx = Some(receiver);
         let tree = app.build_ui(850.0, 900.0);
+        assert!(network_action(&app, "network-wifi-power").is_none());
 
         assert!(
             tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(false))
@@ -4074,8 +4112,9 @@ mod tests {
         assert!(app.wifi_power_rx.is_none());
         assert!(app.wifi_status.contains("permission denied"));
         let tree = app.build_ui(850.0, 900.0);
+        let action = network_action(&app, "network-wifi-power").expect("rollback JSX action");
         assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
+            tree.semantic_targets_for_message(&SettingsMessage::NetworkJsxAction(action))
                 .len(),
             1,
             "rollback leaves the confirmed opposite request available"

@@ -2329,6 +2329,16 @@ impl<Message> Button<Message> {
         self
     }
 
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_label(label);
+        self
+    }
+
+    pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_state(state);
+        self
+    }
+
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.0 = self.0.focus_background_tint(color);
         self

@@ -16,6 +16,8 @@ pub(super) struct SettingsApp {
     pub(super) optional_features_page: std::cell::RefCell<
         Option<Result<crate::optional_features_plugin::OptionalFeaturesPage, String>>,
     >,
+    pub(super) network_page:
+        std::cell::RefCell<Option<Result<crate::network_plugin::NetworkPage, String>>>,
     pub(super) redraw_requested: Cell<bool>,
     pub(super) displays: Vec<DisplayCard>,
     pub(super) selected: usize,
@@ -207,6 +209,7 @@ impl Default for SettingsApp {
             navigation_plugin: std::cell::RefCell::new(None),
             bar_page: std::cell::RefCell::new(None),
             optional_features_page: std::cell::RefCell::new(None),
+            network_page: std::cell::RefCell::new(None),
             redraw_requested: Cell::new(true),
             displays: displays.clone(),
             selected: 1,

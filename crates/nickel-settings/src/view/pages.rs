@@ -990,7 +990,21 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn network_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+    pub(super) fn network_components(&self) -> AnyView<SettingsMessage> {
+        if self.page != SettingsPage::Network {
+            return AnyView::new(Container::new());
+        }
+        let data = crate::network_plugin::projection(self);
+        let plugin_view = self
+            .network_page
+            .borrow_mut()
+            .get_or_insert_with(crate::network_plugin::NetworkPage::new)
+            .as_mut()
+            .map_err(|error| error.clone())
+            .and_then(|page| page.render(&data, self.ui_theme()));
+        if let Ok(view) = plugin_view {
+            return view;
+        }
         let palette = self.palette();
         let theme = self.ui_theme();
         let wifi_cards = self
@@ -1123,14 +1137,14 @@ impl SettingsApp {
             </Column>
         };
 
-        ui! {
+        AnyView::new(ui! {
             <Column grow={1.0} padding={Insets {
                 top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
             }}>
                 <VerticalScroll id={"network-list"} on_scroll={SettingsMessage::NetworkScroll}
                     offset={0.0} theme={theme}>{content}</VerticalScroll>
             </Column>
-        }
+        })
     }
 
     pub(super) fn bluetooth_components(&self) -> AnyView<SettingsMessage> {

@@ -69,6 +69,7 @@ settings-plugin-status = Plugin status
 settings-plugin-waiting = Waiting for Nickel
 settings-plugin-status-unavailable = Live plugin status is unavailable.
 settings-plugin-refresh = Refresh
+settings-network-connect = Connect
 settings-nav-section-system = System
 settings-search-placeholder = Search settings...
 settings-search-no-results = No matching settings

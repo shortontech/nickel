@@ -32,6 +32,8 @@ pub(super) enum Node {
     Button {
         id: Option<String>,
         label: String,
+        accessibility_label: Option<String>,
+        state: Option<String>,
         style: String,
         action: Option<usize>,
     },
@@ -125,6 +127,14 @@ impl Node {
                     .map(|_| text(value, "id", 256))
                     .transpose()?,
                 label: text(value, "label", 256)?,
+                accessibility_label: value
+                    .get("accessibilityLabel")
+                    .map(|_| text(value, "accessibilityLabel", 512))
+                    .transpose()?,
+                state: value
+                    .get("state")
+                    .map(|_| text(value, "state", 64))
+                    .transpose()?,
                 style: text(value, "value", 24)?,
                 action: action()?,
             },
@@ -255,6 +265,8 @@ impl Node {
             Self::Button {
                 id,
                 label,
+                accessibility_label,
+                state,
                 style,
                 action,
             } => {
@@ -274,8 +286,18 @@ impl Node {
                         ButtonPresentation::Disabled
                     },
                 );
-                AnyView::new(if let Some(id) = id {
+                let button = if let Some(id) = id {
                     button.id(id.as_str())
+                } else {
+                    button
+                };
+                let button = if let Some(label) = accessibility_label {
+                    button.accessibility_label(label)
+                } else {
+                    button
+                };
+                AnyView::new(if let Some(state) = state {
+                    button.accessibility_state(state)
                 } else {
                     button
                 })
