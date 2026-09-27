@@ -2,13 +2,99 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    path::Component,
+    io,
+    path::{Component, Path},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const PLUGIN_API_VERSION: u16 = 1;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+const MAX_ACTIVATION_SETTINGS_BYTES: usize = 16 * 1024;
+
+/// Explicit per-profile choices. An absent ID retains the bundled default.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginActivationSettings {
+    version: u8,
+    enabled: BTreeMap<String, bool>,
+}
+
+impl Default for PluginActivationSettings {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            enabled: BTreeMap::new(),
+        }
+    }
+}
+
+impl PluginActivationSettings {
+    pub fn load_default() -> io::Result<Self> {
+        Self::load(nickel_storage::config_path("plugin-activation.json")?)
+    }
+
+    pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
+        let bytes =
+            nickel_storage::read_regular_file(path.as_ref(), MAX_ACTIVATION_SETTINGS_BYTES)?
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let settings: Self = serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if settings.version != 1
+            || settings.enabled.len() > 64
+            || settings.enabled.keys().any(|id| !valid_identifier(id))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid plugin activation settings",
+            ));
+        }
+        Ok(settings)
+    }
+
+    pub fn desired_enabled(&self, id: &str, bundled_default: bool) -> bool {
+        self.enabled.get(id).copied().unwrap_or(bundled_default)
+    }
+
+    pub fn update_default(id: &str, enabled: bool) -> io::Result<()> {
+        Self::update(
+            nickel_storage::config_path("plugin-activation.json")?,
+            id,
+            enabled,
+        )
+    }
+
+    pub fn update(path: impl AsRef<Path>, id: &str, enabled: bool) -> io::Result<()> {
+        if !valid_identifier(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid plugin ID",
+            ));
+        }
+        let path = path.as_ref();
+        let _lock = nickel_storage::TransactionLock::try_acquire(path)?;
+        let mut settings = match Self::load(path) {
+            Ok(settings) => settings,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
+            Err(error) => return Err(error),
+        };
+        settings.enabled.insert(id.to_owned(), enabled);
+        if settings.enabled.len() > 64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many plugins",
+            ));
+        }
+        let bytes = serde_json::to_vec(&settings).map_err(io::Error::other)?;
+        if bytes.len() > MAX_ACTIVATION_SETTINGS_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "plugin activation settings exceed 16 KiB",
+            ));
+        }
+        nickel_storage::stage_write(path, bytes)?.commit(|| Ok(()))
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -296,6 +382,27 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_choice_survives_restart_and_rejects_corrupt_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plugin-activation.json");
+        let id = "org.nickel.hello-panel";
+        PluginActivationSettings::update(&path, id, true).unwrap();
+        let loaded = PluginActivationSettings::load(&path).unwrap();
+        assert!(loaded.desired_enabled(id, false));
+        assert!(!loaded.desired_enabled("org.nickel.launcher", false));
+        PluginActivationSettings::update(&path, id, false).unwrap();
+        assert!(
+            !PluginActivationSettings::load(&path)
+                .unwrap()
+                .desired_enabled(id, true)
+        );
+
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(PluginActivationSettings::update(&path, id, true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    }
 
     const VALID: &str = r#"{
         "api_version": 1,

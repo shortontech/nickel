@@ -1169,7 +1169,17 @@ impl LiveShell {
         let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
         plugin_registry.register(crate::plugin_panel::manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::launcher_manifest().clone())?;
-        let plugin_panel_host = if crate::plugin_panel::enabled() {
+        let plugin_activation = nickel_core::plugins::PluginActivationSettings::load_default()
+            .unwrap_or_else(|error| {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(%error, "could not read plugin activation settings");
+                }
+                nickel_core::plugins::PluginActivationSettings::default()
+            });
+        let plugin_panel_host = if plugin_activation.desired_enabled(
+            &crate::plugin_panel::manifest().id,
+            crate::plugin_panel::enabled(),
+        ) {
             let id = &crate::plugin_panel::manifest().id;
             plugin_registry.set_enabled(id, true)?;
             match crate::plugin_panel::PluginPanelApplication::bundled() {
@@ -1190,7 +1200,10 @@ impl LiveShell {
         } else {
             None
         };
-        let plugin_launcher_host = if crate::plugin_panel::launcher_enabled() {
+        let plugin_launcher_host = if plugin_activation.desired_enabled(
+            &crate::plugin_panel::launcher_manifest().id,
+            crate::plugin_panel::launcher_enabled(),
+        ) {
             let id = &crate::plugin_panel::launcher_manifest().id;
             plugin_registry.set_enabled(id, true)?;
             match crate::plugin_panel::PluginPanelApplication::launcher(&launcher) {
@@ -2645,9 +2658,15 @@ impl LiveShell {
     /// Starts or retires a bundled plugin instance. Settings can call this
     /// after reviewing its manifest and grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
-        if !self.plugin_registry.set_enabled(id, enabled)? {
+        let Some(entry) = self.plugin_registry.get(id) else {
+            return Err(format!("unknown plugin {id:?}"));
+        };
+        if entry.desired_enabled == enabled {
             return Ok(false);
         }
+        nickel_core::plugins::PluginActivationSettings::update_default(id, enabled)
+            .map_err(|error| format!("could not save plugin activation: {error}"))?;
+        self.plugin_registry.set_enabled(id, enabled)?;
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
         if !enabled {
