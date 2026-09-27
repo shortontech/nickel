@@ -49,14 +49,13 @@ to catch an unbounded redraw loop without imposing a benchmark-grade threshold.
 
 ## Recorded plugin run, 2026-09-27
 
-On the Wayland host display, the Mesa software command above passed. The nested
-compositor ran bundled plugin UI and an installed panel, changed a live plugin
-setting, measured plugin UI memory, disabled and re-enabled the launcher with
-its native fallback, accepted scoped test input, and shut down cleanly. The two-second
-idle sample used 13 compositor CPU ticks.
-
-That recorded run predates removal of the uinput controller sequence. The
-current default harness does not exercise native controller ingress.
+On the Wayland host display, the Mesa software command above passed after the
+shared JSX evaluator extraction. The nested compositor ran bundled plugin UI
+and an installed panel, changed a live plugin setting, measured plugin UI
+memory, disabled and re-enabled the launcher with its native fallback, accepted
+Meta input through the private test-control socket, and shut down cleanly. The
+two-second idle sample used 14 compositor CPU ticks. The harness did not create
+a uinput controller or send a Guide button to the host.
 
 The X11 host command reached the nested test-control listener but the host X
 server returned an XIO error. Readiness then failed with `WouldBlock`, so this
