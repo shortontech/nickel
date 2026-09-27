@@ -330,6 +330,9 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
     assert_eq!(shell.plugin_panel_surface().width, 360);
     let commands = shell.scene(crate::winit_shell::SurfaceRole::Panel, 360, 96);
     assert!(!commands.is_empty());
+    assert!(commands.iter().any(|command| matches!(command,
+        nickel_ui::backend::PaintCommand::Text { text, .. } if text == "External panel"
+    )));
     let status = shell.plugin_status_snapshot();
     let panel = status
         .plugins
@@ -366,6 +369,10 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
         .unwrap();
     assert_eq!(panel.settings[0].value, serde_json::json!(false));
     assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+    let commands = shell.scene(crate::winit_shell::SurfaceRole::Panel, 360, 96);
+    assert!(commands.iter().any(|command| matches!(command,
+        nickel_ui::backend::PaintCommand::Text { text, .. } if text == "Hidden"
+    )));
 
     assert!(
         shell

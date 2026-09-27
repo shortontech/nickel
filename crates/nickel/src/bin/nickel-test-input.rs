@@ -22,6 +22,7 @@ Usage:
   nickel-test-input surfaces
   nickel-test-input plugins
   nickel-test-input plugin-set ID enabled|disabled
+  nickel-test-input plugin-setting ID KEY JSON_VALUE
   nickel-test-input readiness
   nickel-test-input keyboard-status
   nickel-test-input semantic keyboard KEY_ID
@@ -80,6 +81,11 @@ enum Parsed {
     PluginSet {
         id: String,
         enabled: bool,
+    },
+    PluginSetting {
+        id: String,
+        key: String,
+        value: serde_json::Value,
     },
     Readiness,
     OutputConnect {
@@ -149,6 +155,12 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 "disabled" => false,
                 _ => return Err(format!("unknown plugin state {state:?}")),
             },
+        }),
+        [command, id, key, value] if command == "plugin-setting" => Ok(Parsed::PluginSetting {
+            id: id.clone(),
+            key: key.clone(),
+            value: serde_json::from_str(value)
+                .map_err(|error| format!("invalid JSON value: {error}"))?,
         }),
         [command] if command == "readiness" => Ok(Parsed::Readiness),
         [command] if command == "keyboard-status" => Ok(Parsed::KeyboardStatus),
@@ -766,6 +778,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Parsed::PluginSet { id, enabled } => Some((id.clone(), *enabled)),
         _ => None,
     };
+    let plugin_setting = match &parsed {
+        Parsed::PluginSetting { id, key, value } => Some((id.clone(), key.clone(), value.clone())),
+        _ => None,
+    };
     if let Parsed::GroupedWindowsScenario(application_id) = &parsed {
         return run_grouped_windows_scenario(application_id);
     }
@@ -810,6 +826,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
         ),
         Parsed::PluginSet { .. } => (
+            Some(Request::Query(nickel_session_protocol::Query::Plugins)),
+            None,
+        ),
+        Parsed::PluginSetting { .. } => (
             Some(Request::Query(nickel_session_protocol::Query::Plugins)),
             None,
         ),
@@ -1047,6 +1067,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("plugin update response has the wrong request ID".into());
         }
     }
+    if let Some((id, key, value)) = plugin_setting {
+        let ServerMessage::Plugins(snapshot) = response_envelope.message.clone() else {
+            return Err("plugin query returned the wrong response".into());
+        };
+        if !snapshot.plugins.iter().any(|plugin| {
+            plugin.id == id && plugin.settings.iter().any(|setting| setting.id == key)
+        }) {
+            return Err(format!("unknown plugin setting {id:?}/{key:?}").into());
+        }
+        request_id += 1;
+        socket.send_to(
+            &encode(&ClientEnvelope {
+                token: token.clone(),
+                request_id,
+                request: Request::Command(Command::SetPluginSetting {
+                    id,
+                    key,
+                    value,
+                    observed_generation: snapshot.activation_generation,
+                }),
+            })?,
+            &control,
+        )?;
+        length = socket.recv(&mut response)?;
+        response_envelope = decode::<ServerEnvelope>(&response[..length])?;
+        if response_envelope.request_id != request_id {
+            return Err("plugin setting response has the wrong request ID".into());
+        }
+    }
     if let ServerMessage::ShellSemanticTarget(target) = response_envelope.message.clone() {
         request_id += 1;
         socket.send_to(
@@ -1250,6 +1299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::Surfaces
         | Parsed::Plugins
         | Parsed::PluginSet { .. }
+        | Parsed::PluginSetting { .. }
         | Parsed::Readiness
         | Parsed::OutputConnect { .. }
         | Parsed::OutputDisconnect(_)
@@ -1307,6 +1357,18 @@ mod tests {
         ));
         assert!(matches!(parse(["readiness".into()]), Ok(Parsed::Readiness)));
         assert!(matches!(parse(["plugins".into()]), Ok(Parsed::Plugins)));
+        assert!(matches!(
+            parse([
+                "plugin-setting".into(),
+                "org.example.panel".into(),
+                "show-label".into(),
+                "false".into(),
+            ]),
+            Ok(Parsed::PluginSetting {
+                value: serde_json::Value::Bool(false),
+                ..
+            })
+        ));
         assert!(matches!(
             parse(["plugin-set".into(), "org.nickel.launcher".into(), "disabled".into()]),
             Ok(Parsed::PluginSet { id, enabled: false }) if id == "org.nickel.launcher"

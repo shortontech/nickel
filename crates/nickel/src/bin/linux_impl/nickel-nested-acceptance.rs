@@ -54,6 +54,19 @@ fn run() -> Result<(), String> {
     fs::create_dir(&runtime).map_err(|error| error.to_string())?;
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
         .map_err(|error| error.to_string())?;
+    let plugin = runtime
+        .join("config/nickel/plugins/org.example.acceptance-panel");
+    fs::create_dir_all(&plugin).map_err(|error| error.to_string())?;
+    fs::write(
+        plugin.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.acceptance-panel","name":"Acceptance Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"primary"}],"settings":[{"id":"show-label","label":"Show label","kind":"boolean","default":true}]}"#,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        plugin.join("main.js"),
+        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-label'] ? 'On' : 'Off')); }",
+    )
+    .map_err(|error| error.to_string())?;
     let capability_file = runtime.join("shell-environment");
 
     let mut command = Command::new(&nickel);
@@ -126,7 +139,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-            "PASS: nested compositor became ready, ran eight bundled UI plugins, measured and cleared launcher UI memory across disable, confirmed native fallback and plugin restart, accepted keyboard and kernel-uinput controller ingress across reconnect, reported idle diagnostics, and shut down cleanly"
+            "PASS: nested compositor ran bundled UI and an installed panel, changed a live plugin setting, measured plugin UI memory, confirmed launcher fallback and restart, accepted native input, and shut down cleanly"
     );
     Ok(())
 }
@@ -262,6 +275,53 @@ fn exercise(
         || launcher_status.health != nickel_session_protocol::PluginRuntimeHealth::Running
     {
         return Err("launcher did not resume after re-enable".into());
+    }
+    let panel_id = "org.example.acceptance-panel";
+    let activated = checked(test_input, &environment, &["plugin-set", panel_id, "enabled"])?;
+    let activated: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&activated).map_err(|error| error.to_string())?;
+    let panel = activated
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == panel_id)
+        .ok_or("installed panel missing after enable")?;
+    if !panel.desired_enabled
+        || panel.health != nickel_session_protocol::PluginRuntimeHealth::Running
+        || panel.settings.first().map(|setting| &setting.value) != Some(&serde_json::json!(true))
+    {
+        return Err("installed panel did not start with its declared setting".into());
+    }
+    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(2))?;
+    let changed = checked(
+        test_input,
+        &environment,
+        &["plugin-setting", panel_id, "show-label", "false"],
+    )?;
+    let changed: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&changed).map_err(|error| error.to_string())?;
+    let panel = changed
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == panel_id)
+        .ok_or("installed panel missing after setting change")?;
+    if !panel.desired_enabled
+        || panel.health != nickel_session_protocol::PluginRuntimeHealth::Running
+        || panel.settings.first().map(|setting| &setting.value) != Some(&serde_json::json!(false))
+        || changed.activation_generation <= activated.activation_generation
+    {
+        return Err("installed panel setting was not applied to the running plugin".into());
+    }
+    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(2))?;
+    let disabled = checked(test_input, &environment, &["plugin-set", panel_id, "disabled"])?;
+    let disabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
+    let panel = disabled
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == panel_id)
+        .ok_or("installed panel missing after disable")?;
+    if panel.desired_enabled || panel.memory.native_ui_bytes.is_some() {
+        return Err("installed panel did not release its reported UI memory".into());
     }
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
