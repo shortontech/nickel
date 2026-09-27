@@ -28,6 +28,9 @@ pub(super) struct SettingsApp {
         std::cell::RefCell<Option<Result<crate::appearance_plugin::AppearancePage, String>>>,
     pub(super) default_apps_page:
         std::cell::RefCell<Option<Result<crate::default_apps_plugin::DefaultAppsPage, String>>>,
+    pub(super) default_app_picker_page: std::cell::RefCell<
+        Option<Result<crate::default_app_picker_plugin::DefaultAppPickerPage, String>>,
+    >,
     pub(super) redraw_requested: Cell<bool>,
     pub(super) displays: Vec<DisplayCard>,
     pub(super) selected: usize,
@@ -54,6 +57,7 @@ pub(super) struct SettingsApp {
     pub(super) animation_select_expanded: bool,
     pub(super) file_icon_provider_select_expanded: bool,
     pub(super) default_app_handler_query: String,
+    pub(super) default_app_picker_row: Cell<Option<usize>>,
     pub(super) default_app_handler_scroll_offset: f32,
     pub(super) default_apps: Vec<DefaultAppRow>,
     pub(super) default_app_targets: Vec<nickel_platform::AssociationTarget>,
@@ -236,6 +240,7 @@ impl Default for SettingsApp {
             bluetooth_page: std::cell::RefCell::new(None),
             appearance_page: std::cell::RefCell::new(None),
             default_apps_page: std::cell::RefCell::new(None),
+            default_app_picker_page: std::cell::RefCell::new(None),
             redraw_requested: Cell::new(true),
             displays: displays.clone(),
             selected: 1,
@@ -262,6 +267,7 @@ impl Default for SettingsApp {
             animation_select_expanded: false,
             file_icon_provider_select_expanded: false,
             default_app_handler_query: String::new(),
+            default_app_picker_row: Cell::new(None),
             default_app_handler_scroll_offset: 0.0,
             default_apps: default_app_categories(),
             default_app_targets: Vec::new(),

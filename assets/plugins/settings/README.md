@@ -79,3 +79,10 @@ scroll geometry and projects only its current bounded window into JavaScript.
 Typed chooser requests carry the projected target identity and are checked
 before Rust opens the host-owned handler picker. Build it with the same command
 and its source filename.
+
+`settings-default-app-picker.jsx` owns the open handler picker's search and
+visible candidate rows. Rust owns its popover placement, focus return, virtual
+scroll range, association capability, and operating-system consent path. The
+host checks the row, target, candidate, and current capability before applying
+a JSX selection. The native picker remains available if this component fails.
+Build it with the same command and its source filename.

@@ -4,6 +4,7 @@ mod appearance_plugin;
 mod bar_plugin;
 mod bluetooth_plugin;
 mod cli;
+mod default_app_picker_plugin;
 mod default_apps_plugin;
 mod effects;
 mod model;
@@ -520,6 +521,9 @@ enum SettingsMessage {
     DefaultAppTargetFamily(Option<nickel_platform::AssociationFamily>),
     DefaultAppsJsxAction(usize),
     DefaultAppsJsxInput(usize, String),
+    DefaultAppPickerJsxAction(usize),
+    DefaultAppPickerJsxInput(usize, String),
+    DefaultAppPickerDismissed,
     DefaultAppHandlerSearchChanged(String),
     DefaultAppHandlerScroll(u32),
     BrowseDefaultAppTarget(nickel_platform::AssociationTarget),
@@ -1121,6 +1125,8 @@ impl SettingsApp {
         self.bluetooth_page.get_mut().take();
         self.appearance_page.get_mut().take();
         self.default_apps_page.get_mut().take();
+        self.default_app_picker_page.get_mut().take();
+        self.default_app_picker_row.set(None);
         if self.custom_hue_open {
             self.pending_transient_dismissal = Some(OverlayId::new("appearance-custom-hue-dialog"));
         }
@@ -1205,7 +1211,16 @@ impl SettingsApp {
                 .borrow()
                 .as_ref()
                 .and_then(|page| page.as_ref().ok())
-                .map_or(0, default_apps_plugin::DefaultAppsPage::retained_bytes);
+                .map_or(0, default_apps_plugin::DefaultAppsPage::retained_bytes)
+            + self
+                .default_app_picker_page
+                .borrow()
+                .as_ref()
+                .and_then(|page| page.as_ref().ok())
+                .map_or(
+                    0,
+                    default_app_picker_plugin::DefaultAppPickerPage::retained_bytes,
+                );
         let total = u64::try_from(total).unwrap_or(u64::MAX);
         self.settings_jsx_peak_bytes
             .set(self.settings_jsx_peak_bytes.get().max(total));
@@ -1467,6 +1482,8 @@ impl SettingsApp {
         }
         if page != SettingsPage::DefaultApps {
             self.default_apps_page.get_mut().take();
+            self.default_app_picker_page.get_mut().take();
+            self.default_app_picker_row.set(None);
         }
         if !matches!(page, SettingsPage::KeyboardShortcuts | SettingsPage::About) {
             self.ordinary_pages.get_mut().take();
@@ -1997,6 +2014,16 @@ impl SettingsApp {
             SettingsMessage::DefaultAppsJsxInput(index, value) => {
                 self.handle_default_apps_jsx_action(index, serde_json::Value::String(value));
             }
+            SettingsMessage::DefaultAppPickerJsxAction(index) => {
+                self.handle_default_app_picker_jsx_action(index, serde_json::Value::Null);
+            }
+            SettingsMessage::DefaultAppPickerJsxInput(index, value) => {
+                self.handle_default_app_picker_jsx_action(index, serde_json::Value::String(value));
+            }
+            SettingsMessage::DefaultAppPickerDismissed => {
+                self.default_app_picker_row.set(None);
+                self.default_app_picker_page.get_mut().take();
+            }
             SettingsMessage::DefaultAppHandlerSearchChanged(value) => {
                 self.default_app_handler_query = value;
                 self.default_app_handler_scroll_offset = 0.0;
@@ -2008,13 +2035,16 @@ impl SettingsApp {
                 self.add_default_app_target(target);
             }
             SettingsMessage::ToggleDefaultAppSelect(index) => {
-                let _ = index;
+                self.default_app_picker_row.set(Some(index));
+                self.default_app_picker_page.get_mut().take();
                 self.default_app_handler_query.clear();
                 self.default_app_handler_scroll_offset = 0.0;
             }
             SettingsMessage::SetDefaultApp { row, handler_id } => {
                 self.change_default_app(row, &handler_id);
                 self.default_app_handler_query.clear();
+                self.default_app_picker_row.set(None);
+                self.default_app_picker_page.get_mut().take();
             }
         }
         self.request_redraw();
@@ -2861,8 +2891,13 @@ impl Application for SettingsApp {
     }
 
     fn transient_dismissed(&self, id: &OverlayId) -> Option<Self::Message> {
-        (id == &OverlayId::new("appearance-custom-hue-dialog"))
-            .then_some(SettingsMessage::CancelCustomHue)
+        if id == &OverlayId::new("appearance-custom-hue-dialog") {
+            Some(SettingsMessage::CancelCustomHue)
+        } else if id.as_ui_id().as_str().starts_with("default-app-picker-") {
+            Some(SettingsMessage::DefaultAppPickerDismissed)
+        } else {
+            None
+        }
     }
 
     fn take_clipboard_write(&mut self) -> Option<String> {
@@ -3468,6 +3503,7 @@ mod tests {
         assert!(app.bar_page.borrow().is_none());
         assert!(app.optional_features_page.borrow().is_none());
         assert!(app.network_page.borrow().is_none());
+        assert!(app.default_apps_page.borrow().is_none());
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.navigation_plugin.borrow().is_some());
         assert!(app.plugin_list.borrow().is_none());
@@ -3475,6 +3511,7 @@ mod tests {
         assert!(app.bar_page.borrow().is_none());
         assert!(app.optional_features_page.borrow().is_none());
         assert!(app.network_page.borrow().is_none());
+        assert!(app.default_apps_page.borrow().is_none());
 
         app.page = SettingsPage::Plugins;
         let _ = app.build_ui(1100.0, 800.0);
@@ -3506,6 +3543,12 @@ mod tests {
         app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
         assert!(app.network_page.borrow().is_none());
         assert!(app.navigation_plugin.borrow().is_some());
+
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::DefaultApps));
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(app.default_apps_page.borrow().is_some());
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
+        assert!(app.default_apps_page.borrow().is_none());
     }
 
     #[test]
@@ -4414,6 +4457,33 @@ mod tests {
         );
         assert!(opened.changed);
         assert!(host.inspect().open_overlay.is_some());
+        let picker_action = host
+            .application_mut()
+            .default_app_picker_page
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.as_ref().ok())
+            .and_then(|page| page.action_for_id("default-app-handler-other.desktop"))
+            .expect("open picker renders the candidate through JSX");
+        assert!(
+            !host
+                .semantic_targets_for_message(&SettingsMessage::DefaultAppPickerJsxAction(
+                    picker_action,
+                ))
+                .is_empty()
+        );
+        let search = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/default-app-handler-search-0"))
+            .expect("picker search is a JSX text field");
+        host.perform_semantic_action(
+            search.id,
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                "Other".into(),
+            )),
+        );
+        assert_eq!(host.application_mut().default_app_handler_query, "Other");
         let overlay_names = host
             .semantic_nodes()
             .into_iter()
@@ -4583,6 +4653,115 @@ mod tests {
         );
         assert!(host.inspect().open_overlay.is_none());
         assert_eq!(host.inspect().keyboard_focus, Some(anchor.id));
+        assert!(
+            host.application_mut()
+                .default_app_picker_page
+                .borrow()
+                .is_none()
+        );
+        assert!(
+            host.application_mut()
+                .default_app_picker_row
+                .get()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn disabled_settings_plugin_keeps_the_native_default_app_picker() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
+        app.settings_jsx_enabled = false;
+        app.default_apps[0].snapshot = Some(nickel_platform::AssociationSnapshot {
+            target: app.default_apps[0].target.clone(),
+            effective: None,
+            handlers: vec![nickel_platform::ApplicationHandler {
+                id: "fixture.desktop".into(),
+                name: "Fixture Browser".into(),
+                icon: None,
+                source: "fixture".into(),
+            }],
+            capability: nickel_platform::AssociationCapability::DirectUserChange,
+            scope: nickel_platform::AssociationScope::User,
+            detail: "User association".into(),
+        });
+        let mut host = UiHost::new(app, 850, 900);
+        let chooser = host
+            .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
+            .into_iter()
+            .next()
+            .expect("native chooser remains available");
+        host.perform_semantic_action(
+            chooser.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(
+            host.application_mut()
+                .default_app_picker_page
+                .borrow()
+                .is_none()
+        );
+        assert!(
+            !host
+                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
+                    row: 0,
+                    handler_id: "fixture.desktop".into(),
+                })
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_jsx_picker_restores_native_candidate_actions() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
+        app.default_apps[0].snapshot = Some(nickel_platform::AssociationSnapshot {
+            target: app.default_apps[0].target.clone(),
+            effective: None,
+            handlers: vec![nickel_platform::ApplicationHandler {
+                id: "fixture.desktop".into(),
+                name: "Fixture Browser".into(),
+                icon: None,
+                source: "fixture".into(),
+            }],
+            capability: nickel_platform::AssociationCapability::DirectUserChange,
+            scope: nickel_platform::AssociationScope::User,
+            detail: "User association".into(),
+        });
+        let mut host = UiHost::new(app, 850, 900);
+        let action = default_app_action(host.application_mut(), 0);
+        let chooser = host
+            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(action))
+            .into_iter()
+            .next()
+            .unwrap();
+        host.perform_semantic_action(
+            chooser.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(
+            host.application_mut()
+                .default_app_picker_page
+                .borrow()
+                .is_some()
+        );
+        *host.application_mut().default_app_picker_page.borrow_mut() =
+            Some(Err("fixture failure".into()));
+        host.application_mut()
+            .update(SettingsMessage::DefaultAppHandlerSearchChanged(
+                String::new(),
+            ));
+        host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        assert!(host.inspect().open_overlay.is_some());
+        assert!(
+            !host
+                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
+                    row: 0,
+                    handler_id: "fixture.desktop".into(),
+                })
+                .is_empty()
+        );
     }
 
     #[test]

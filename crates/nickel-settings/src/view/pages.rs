@@ -398,7 +398,10 @@ impl SettingsApp {
         )
     }
 
-    pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+    pub(super) fn default_apps_components(&self) -> AnyView<SettingsMessage> {
+        if self.page != SettingsPage::DefaultApps {
+            return AnyView::new(Container::new());
+        }
         let theme = self.ui_theme();
         let palette = self.palette();
         let rows = self.default_apps.iter().enumerate().map(|(index, row)| {
@@ -578,19 +581,28 @@ impl SettingsApp {
                 .child(family_filters)
                 .child(target_results)
         };
-        ui! {
+        AnyView::new(ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
                 <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsPageScroll} offset={0.0} theme={theme}>
                     {content}
                 </VerticalScroll>
             </Column>
-        }
+        })
     }
 
     pub(crate) fn default_app_overlays(
         &self,
         context: ViewContext,
     ) -> Vec<FrameOverlay<SettingsMessage>> {
+        let open_row = context.open_overlay.as_ref().and_then(|overlay| {
+            self.default_apps.iter().enumerate().find_map(|(index, _)| {
+                (overlay == &OverlayId::new(format!("default-app-picker-{index}"))).then_some(index)
+            })
+        });
+        self.default_app_picker_row.set(open_row);
+        if open_row.is_none() {
+            self.default_app_picker_page.borrow_mut().take();
+        }
         let theme = self.ui_theme();
         let palette = self.palette();
         let query = self.default_app_handler_query.trim().to_lowercase();
@@ -664,37 +676,74 @@ impl SettingsApp {
                         })
                     }),
                 };
+                let picker_id = format!("default-app-picker-{row_index}");
+                let plugin_picker = if self.settings_jsx_enabled
+                    && self.default_app_picker_row.get() == Some(row_index)
+                    && context.open_overlay.as_ref() == Some(&OverlayId::new(picker_id.as_str()))
+                {
+                    let data = crate::default_app_picker_plugin::projection(
+                        self,
+                        row_index,
+                        &state,
+                        can_change,
+                        discovery_status.as_deref().unwrap_or_default(),
+                    );
+                    self.default_app_picker_page
+                        .borrow_mut()
+                        .get_or_insert_with(
+                            crate::default_app_picker_plugin::DefaultAppPickerPage::new,
+                        )
+                        .as_mut()
+                        .map_err(|error| error.clone())
+                        .and_then(|page| page.render(&data, theme))
+                        .ok()
+                } else {
+                    None
+                };
+                let (plugin_header, plugin_nodes) = plugin_picker.map_or_else(
+                    || (None, std::collections::BTreeMap::new()),
+                    |(header, nodes)| (Some(header), nodes),
+                );
                 let current = effective_id.clone();
                 let collection = Collection::try_new(
                     state,
                     |handler: &nickel_platform::ApplicationHandler| handler.id.clone(),
                     move |handler: nickel_platform::ApplicationHandler| {
-                        let is_current = current.as_ref() == Some(&handler.id);
-                        SettingsRow::new(
-                            theme,
-                            handler.name.clone(),
-                            if is_current {
-                                format!("Current • {}", handler.id)
-                            } else {
-                                handler.id.clone()
-                            },
-                        )
-                        .trailing(
-                            Button::semantic(
+                        if let Some(node) = plugin_nodes.get(&handler.id) {
+                            return node.view(
                                 theme,
-                                SettingsMessage::SetDefaultApp {
-                                    row: row_index,
-                                    handler_id: handler.id,
-                                },
-                                if is_current { "Current" } else { "Choose" },
-                                if is_current || !can_change {
-                                    ButtonPresentation::Disabled
+                                "",
+                                SettingsMessage::DefaultAppPickerJsxAction,
+                            );
+                        }
+                        let is_current = current.as_ref() == Some(&handler.id);
+                        AnyView::new(
+                            SettingsRow::new(
+                                theme,
+                                handler.name.clone(),
+                                if is_current {
+                                    format!("Current • {}", handler.id)
                                 } else {
-                                    ButtonPresentation::Quiet
+                                    handler.id.clone()
                                 },
                             )
-                            .width(88.0)
-                            .enabled(can_change && !is_current),
+                            .trailing(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::SetDefaultApp {
+                                        row: row_index,
+                                        handler_id: handler.id,
+                                    },
+                                    if is_current { "Current" } else { "Choose" },
+                                    if is_current || !can_change {
+                                        ButtonPresentation::Disabled
+                                    } else {
+                                        ButtonPresentation::Quiet
+                                    },
+                                )
+                                .width(88.0)
+                                .enabled(can_change && !is_current),
+                            ),
                         )
                     },
                 )
@@ -727,24 +776,29 @@ impl SettingsApp {
                 .navigation_scope(NavigationScope::group())
                 .theme(theme)
                 .child(collection);
-                let mut content = Column::new()
+                let base = Column::new()
                     .gap(8.0)
                     .padding(Insets::all(10.0))
                     .background(palette.surface);
-                if let Some(status) = discovery_status {
-                    content = content.child(Text::new(status).color(palette.muted));
-                }
-                let content = content
-                    .child(SettingsSearchField::new(
+                let content = if let Some(header) = plugin_header {
+                    base.child(header).child(results)
+                } else {
+                    let base = if let Some(status) = discovery_status {
+                        base.child(Text::new(status).color(palette.muted))
+                    } else {
+                        base
+                    };
+                    base.child(SettingsSearchField::new(
                         theme,
                         format!("default-app-handler-search-{row_index}"),
                         &self.default_app_handler_query,
                         "Search installed applications",
                         default_app_handler_search_message,
                     ))
-                    .child(results);
+                    .child(results)
+                };
                 Popover::new(
-                    format!("default-app-picker-{row_index}"),
+                    picker_id,
                     OverlayAnchor::Node(UiId::from(format!("default-app-{row_index}"))),
                     format!("Choose an application for {}", row.label),
                     Size::new(520.0, 392.0),
