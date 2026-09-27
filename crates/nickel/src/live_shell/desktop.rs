@@ -46,6 +46,7 @@ pub struct DesktopApplication {
     pub(super) last_click: Option<(DesktopEntryId, Instant)>,
     pub(super) pending_plugin_open: Option<DesktopEntryId>,
     pub(super) pending_plugin_select: Option<(DesktopEntryId, SelectionModifiers)>,
+    pub(super) pending_plugin_move: Option<(DesktopEntryId, DesktopPoint)>,
     pub(super) modifiers: SelectionModifiers,
     pub(super) context_menu: Option<DesktopMenuContext>,
     #[cfg(target_os = "windows")]
@@ -224,6 +225,7 @@ impl DesktopApplication {
             last_click: None,
             pending_plugin_open: None,
             pending_plugin_select: None,
+            pending_plugin_move: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             #[cfg(target_os = "windows")]
@@ -524,6 +526,7 @@ impl DesktopApplication {
         self.pointer_position = local;
         self.pointer_seen = true;
         self.pending_plugin_select = None;
+        self.pending_plugin_move = None;
         let hit = self.hit(local);
         if secondary {
             self.replacing_context_menu();
@@ -609,6 +612,20 @@ impl DesktopApplication {
     }
 
     pub(super) fn pointer_release(&mut self, local: DesktopPoint, now: Instant) -> bool {
+        self.pointer_release_with_move(local, now, false)
+    }
+
+    pub(super) fn pointer_release_for_plugin(&mut self, local: DesktopPoint, now: Instant) -> bool {
+        self.pointer_release_with_move(local, now, true)
+    }
+
+    fn pointer_release_with_move(
+        &mut self,
+        local: DesktopPoint,
+        now: Instant,
+        defer_move: bool,
+    ) -> bool {
+        self.pending_plugin_move = None;
         if self.selection_start.take().is_some() {
             return true;
         }
@@ -629,16 +646,16 @@ impl DesktopApplication {
             .is_some();
         self.pointer_dragged = false;
         if moved {
-            self.layout.move_group(
-                id,
-                DesktopPoint {
-                    x: local.x - pressed.x,
-                    y: local.y - pressed.y,
-                },
-                &self.active_output,
-            );
+            let delta = DesktopPoint {
+                x: local.x - pressed.x,
+                y: local.y - pressed.y,
+            };
+            if defer_move {
+                self.pending_plugin_move = Some((id, delta));
+            } else {
+                self.commit_move(id, delta);
+            }
             self.last_click = None;
-            self.save_layout();
         } else if self.last_click.is_some_and(|(last, at)| {
             last == id && now.duration_since(at) <= Duration::from_millis(500)
         }) {
@@ -650,10 +667,16 @@ impl DesktopApplication {
         true
     }
 
+    pub(super) fn commit_move(&mut self, id: DesktopEntryId, delta: DesktopPoint) {
+        self.layout.move_group(id, delta, &self.active_output);
+        self.save_layout();
+    }
+
     pub(super) fn cancel_pointer_transaction(&mut self) -> bool {
         let changed = self.pointer_down.take().is_some() || self.selection_start.take().is_some();
         self.pointer_dragged = false;
         self.pending_plugin_select = None;
+        self.pending_plugin_move = None;
         changed
     }
 
@@ -1938,6 +1961,7 @@ impl DesktopApplication {
             last_click: None,
             pending_plugin_open: None,
             pending_plugin_select: None,
+            pending_plugin_move: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             #[cfg(target_os = "windows")]

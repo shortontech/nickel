@@ -3049,7 +3049,11 @@ impl LiveShell {
                         application.pointer_press(point, false, application.modifiers)
                     }
                 } else if button == nickel_input::PointerButton::Primary {
-                    application.pointer_release(point, Instant::now())
+                    if plugin_desktop_active {
+                        application.pointer_release_for_plugin(point, Instant::now())
+                    } else {
+                        application.pointer_release(point, Instant::now())
+                    }
                 } else {
                     false
                 }
@@ -3079,6 +3083,7 @@ impl LiveShell {
             _ => false,
         };
         let changed = changed | self.dispatch_desktop_plugin_select();
+        let changed = changed | self.dispatch_desktop_plugin_move();
         let changed =
             changed | (reveal_selection && self.desktop_host.application_mut().reveal_active());
         let changed = changed | self.dispatch_desktop_plugin_open();
@@ -3158,6 +3163,42 @@ impl LiveShell {
                 .application_mut()
                 .layout
                 .select(entry, modifiers);
+            true
+        }
+    }
+
+    fn dispatch_desktop_plugin_move(&mut self) -> bool {
+        let Some((entry, delta)) = self
+            .desktop_host
+            .application_mut()
+            .pending_plugin_move
+            .take()
+        else {
+            return false;
+        };
+        let id = format!("{}:{}", entry.0.0, entry.0.1);
+        let (handled, effects) =
+            self.plugin_desktop_host
+                .as_mut()
+                .map_or((false, Vec::new()), |host| {
+                    let handled = host
+                        .application_mut()
+                        .move_desktop_tile(&id, delta.x, delta.y);
+                    let effects = host.application_mut().take_effects();
+                    if handled {
+                        host.step(HostBatch {
+                            application_changed: true,
+                            ..HostBatch::default()
+                        });
+                    }
+                    (handled, effects)
+                });
+        if handled {
+            self.apply_plugin_effects(effects)
+        } else {
+            self.desktop_host
+                .application_mut()
+                .commit_move(entry, delta);
             true
         }
     }
@@ -4812,6 +4853,31 @@ impl LiveShell {
                         if visible {
                             let desktop = self.desktop_host.application_mut();
                             desktop.layout.select(entry, desktop.modifiers);
+                            changed = true;
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::DesktopMove { id, dx, dy } => {
+                    let entry = id.split_once(':').and_then(|(first, second)| {
+                        Some(nickel_file::desktop::DesktopEntryId(
+                            nickel_file::FileIdentity(first.parse().ok()?, second.parse().ok()?),
+                        ))
+                    });
+                    if let Some(entry) = entry.filter(|_| self.plugin_desktop_host.is_some()) {
+                        let desktop = self.desktop_host.application();
+                        let visible =
+                            desktop.layout.items().iter().any(|item| {
+                                item.id == entry && item.output == desktop.active_output
+                            });
+                        if visible
+                            && dx.is_finite()
+                            && dy.is_finite()
+                            && (-8192.0..=8192.0).contains(&dx)
+                            && (-8192.0..=8192.0).contains(&dy)
+                        {
+                            self.desktop_host
+                                .application_mut()
+                                .commit_move(entry, DesktopPoint { x: dx, y: dy });
                             changed = true;
                         }
                     }

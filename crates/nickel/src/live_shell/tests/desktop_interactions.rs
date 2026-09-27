@@ -234,6 +234,11 @@
         assert!(!shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::DesktopSelect { id: "7:9".into() },
         ]));
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::DesktopMove {
+                id: "7:9".into(), dx: 96.0, dy: 0.0,
+            },
+        ]));
         assert!(requests.try_recv().is_err());
 
         shell.desktop_host.application_mut().layout.reconcile(vec![(
@@ -246,6 +251,11 @@
         ]));
         assert!(!shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::DesktopSelect { id: "7:9".into() },
+        ]));
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::DesktopMove {
+                id: "7:9".into(), dx: 96.0, dy: 0.0,
+            },
         ]));
         for click in 0..2 {
             assert!(shell.desktop_host.application_mut().pointer_press(point, false, Default::default()));
@@ -1322,6 +1332,67 @@
         ));
         assert_eq!(desktop.layout.items()[0].position.x,
             item.position.x + desktop.layout.grid().0 * 2.0);
+    }
+
+    #[test]
+    fn desktop_live_drag_commits_through_the_plugin_move_request() {
+        use std::{ffi::OsString, path::PathBuf};
+
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            primary: true,
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0, y: 0.0, width: 400.0, height: 300.0,
+            },
+            scale: 1.0,
+        }]);
+        desktop.layout.reconcile(vec![(
+            nickel_file::FileIdentity(73, 4),
+            nickel_file::FileEntry {
+                display_name_override: None,
+                name: OsString::from("drag.txt"),
+                path: PathBuf::from("/desktop/drag.txt"),
+                is_directory: false,
+                size: None,
+                modified: None,
+            },
+        )]);
+        let start = desktop.layout.items()[0].position;
+        let cell_width = desktop.layout.grid().0;
+        let mut shell = LiveShell::new().unwrap();
+        shell.desktop_host = UiHost::new(desktop, 400, 300);
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(shell.desktop_host.application().plugin_background);
+
+        let x = f64::from(start.x + 4.0);
+        let y = f64::from(start.y + 4.0);
+        let input = |order, edge, x| nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(order),
+                button: nickel_input::PointerButton::Primary,
+                edge,
+                position: Some(nickel_input::Point { x, y }),
+            },
+        );
+        assert!(shell.desktop_input(input(1, nickel_input::KeyEdge::Pressed, x)));
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Motion {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(2),
+                position: nickel_input::Point { x: x + 145.0, y },
+                delta: None,
+            },
+        )));
+        assert_eq!(shell.desktop_host.application().layout.items()[0].position.x, start.x);
+        assert!(shell.desktop_input(input(3, nickel_input::KeyEdge::Released, x + 145.0)));
+        assert_eq!(
+            shell.desktop_host.application().layout.items()[0].position.x,
+            start.x + cell_width * 2.0,
+        );
+        assert!(shell.desktop_host.application().pending_plugin_move.is_none());
     }
 
     #[test]

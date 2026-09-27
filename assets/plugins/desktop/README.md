@@ -21,7 +21,10 @@ transparent hit targets for accessibility and context-menu anchors. A tile's
 the current projected file ID before applying its native selection policy.
 The `onClick` handler requests `desktop-open` with its projected file ID for
 double-click, Enter, controller Confirm, and semantic tile activation; Nickel
-checks that ID against the current desktop before opening it. Modifier
-interpretation, group selection, dragging, and menus remain Rust-owned.
+checks that ID against the current desktop before opening it. On drag release,
+`onMove({ dx, dy })` requests `desktop-move` under the `desktop-arrange` grant.
+Nickel validates the current tile and bounded delta, then applies its snap,
+collision, group movement, and persistence policy. Drag preview, modifier
+interpretation, group selection, and menus remain Rust-owned.
 Settings can disable the
 plugin to restore native painting and shows its measured retained UI memory.
