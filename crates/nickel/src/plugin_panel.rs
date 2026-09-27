@@ -12,7 +12,7 @@ use nickel_core::plugins::{
 };
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, FrameOverlay, Image, ImageFit, Insets, Layer,
-    OverlayAnchor, OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Row, SemanticRole,
+    OverlayAnchor, OverlayId, OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Row, SemanticRole,
     Shortcut, Size, Spacer, Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll,
     ViewContext,
 };
@@ -148,6 +148,7 @@ pub fn enabled() -> bool {
 const BOOTSTRAP: &str = r#"
 const Panel = 'panel';
 const Surface = 'surface';
+const Box = 'box';
 const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
@@ -243,7 +244,8 @@ function h(kind, props, ...children) {
     const contextAction = typeof props?.onContextMenu === 'function'
         ? __handlers.push(props.onContextMenu) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
-        width: props?.width, height: props?.height, background: props?.background,
+        x: props?.x, y: props?.y, width: props?.width, height: props?.height,
+        background: props?.background, radius: props?.radius, color: props?.color,
         asset: props?.asset, fit: props?.fit,
         accessibilityLabel: props?.accessibilityLabel, icon: props?.icon,
         showLabel: props?.showLabel, contextAction,
@@ -305,6 +307,15 @@ function __nickelDispatch(action, value) {
 
 #[derive(Clone, Debug, PartialEq)]
 enum PanelNode {
+    Box {
+        children: Vec<Self>,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        background: u32,
+        radius: u32,
+    },
     Surface {
         children: Vec<Self>,
         background: u32,
@@ -323,7 +334,10 @@ enum PanelNode {
         height: u32,
         children: Vec<Self>,
     },
-    Text(String),
+    Text {
+        value: String,
+        color: u32,
+    },
     Image {
         id: Option<String>,
         asset: String,
@@ -387,6 +401,44 @@ impl PanelNode {
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
         match kind {
+            "box" => {
+                let coordinate = |name| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_i64)
+                        .filter(|position| (-8192..=8192).contains(position))
+                        .map(|position| position as i32)
+                        .ok_or_else(|| format!("box {name} must be -8192 to 8192"))
+                };
+                let dimension = |name| {
+                    value
+                        .get(name)
+                        .and_then(Value::as_u64)
+                        .filter(|size| (1..=8192).contains(size))
+                        .map(|size| size as u32)
+                        .ok_or_else(|| format!("box {name} must be 1 to 8192"))
+                };
+                Ok(Self::Box {
+                    children: children
+                        .iter()
+                        .filter(|child| !child.is_null())
+                        .map(Self::parse)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    x: coordinate("x")?,
+                    y: coordinate("y")?,
+                    width: dimension("width")?,
+                    height: dimension("height")?,
+                    background: value
+                        .get("background")
+                        .and_then(Value::as_u64)
+                        .map_or(0, |color| color as u32),
+                    radius: value
+                        .get("radius")
+                        .and_then(Value::as_u64)
+                        .filter(|radius| *radius <= 256)
+                        .unwrap_or(0) as u32,
+                })
+            }
             "surface" => {
                 let dimension = |name| {
                     value
@@ -454,7 +506,13 @@ impl PanelNode {
                     Ok(Self::Column(children))
                 }
             }
-            "text" => Ok(Self::Text(child_text(children)?)),
+            "text" => Ok(Self::Text {
+                value: child_text(children)?,
+                color: value
+                    .get("color")
+                    .and_then(Value::as_u64)
+                    .map_or(0xfff4f6fa, |color| color as u32),
+            }),
             "image" | "image-button" => {
                 if !children.is_empty() {
                     return Err("image cannot have children".into());
@@ -693,6 +751,32 @@ impl PanelNode {
 
     fn view(&self, images: &PluginImages) -> AnyView<PluginMessage> {
         match self {
+            Self::Box {
+                children,
+                x,
+                y,
+                width,
+                height,
+                background,
+                radius,
+            } => {
+                let mut column = Column::new().fill_width();
+                for child in children {
+                    column = column.child(child.view(images));
+                }
+                AnyView::new(
+                    Container::new()
+                        .position(Point {
+                            x: *x as f32,
+                            y: *y as f32,
+                        })
+                        .width(*width as f32)
+                        .height(*height as f32)
+                        .background(*background)
+                        .radius(*radius as f32)
+                        .child(column),
+                )
+            }
             Self::Surface {
                 children,
                 background,
@@ -765,13 +849,13 @@ impl PanelNode {
                         .child(column),
                 )
             }
-            Self::Text(text) => AnyView::new(
+            Self::Text { value, color } => AnyView::new(
                 Container::new()
                     .semantic_role(SemanticRole::Text)
-                    .accessibility_label(text.clone())
+                    .accessibility_label(value.clone())
                     .height(48.0)
                     .padding(Insets::all(10.0))
-                    .child(Text::new(text).color(0xf4f6fa).scale(1.0)),
+                    .child(Text::new(value).color(*color).scale(1.0)),
             ),
             Self::Image {
                 id,
@@ -914,7 +998,8 @@ impl PanelNode {
     fn dialog(&self, requested_id: &str) -> Option<&Self> {
         match self {
             Self::Dialog { id, .. } if id == requested_id => Some(self),
-            Self::Surface { children, .. }
+            Self::Box { children, .. }
+            | Self::Surface { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -928,7 +1013,8 @@ impl PanelNode {
     fn menu(&self, requested_id: &str) -> Option<&Self> {
         match self {
             Self::Menu { id, .. } if id == requested_id => Some(self),
-            Self::Surface { children, .. }
+            Self::Box { children, .. }
+            | Self::Surface { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -942,7 +1028,8 @@ impl PanelNode {
     fn transients<'a>(&'a self, output: &mut Vec<&'a Self>) {
         match self {
             Self::Dialog { .. } | Self::Menu { .. } => output.push(self),
-            Self::Surface { children, .. }
+            Self::Box { children, .. }
+            | Self::Surface { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -963,7 +1050,8 @@ impl PanelNode {
                 action: Some(action),
                 ..
             } if id == requested_id => Some(*action),
-            Self::Surface { children, .. }
+            Self::Box { children, .. }
+            | Self::Surface { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)

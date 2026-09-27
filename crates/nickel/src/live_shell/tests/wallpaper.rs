@@ -158,6 +158,26 @@
     }
 
     #[test]
+    fn desktop_error_banner_is_drawn_by_plugin_and_native_fallback() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.desktop_host.application_mut().error = Some("Desktop files unavailable".into());
+        let plugin_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        let banner_count = |commands: &[nickel_ui::backend::PaintCommand]| {
+            commands.iter().filter(|command| matches!(
+                command,
+                nickel_ui::backend::PaintCommand::Text { text, .. }
+                    if text == "Desktop files unavailable"
+            )).count()
+        };
+        assert_eq!(banner_count(&plugin_scene), 1);
+        assert!(shell.desktop_host.application().plugin_background);
+
+        shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
+        let native_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        assert_eq!(banner_count(&native_scene), 1);
+    }
+
+    #[test]
     fn failed_wallpaper_decode_preserves_the_last_presentable_image() {
         let directory = tempfile::tempdir().expect("wallpaper fixture directory");
         let valid_path = directory.path().join("valid.png");

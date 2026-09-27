@@ -7558,6 +7558,9 @@ impl LiveShell {
                 "height": height.clamp(1, 8192),
                 "background": self.palette.background,
                 "wallpaper": self.wallpaper.is_some(),
+                "surface": self.palette.surface,
+                "text": self.palette.text,
+                "error": self.desktop_host.application().error,
             });
             match host.application_mut().sync_desktop_data(&data) {
                 Ok(data_changed) => {

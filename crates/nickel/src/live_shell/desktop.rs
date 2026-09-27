@@ -1675,7 +1675,9 @@ impl nickel_ui::Application for DesktopApplication {
             }
             layer = layer.child(tile);
         }
-        if let Some(error) = &self.error {
+        if !self.plugin_background
+            && let Some(error) = &self.error
+        {
             layer = layer.child(
                 Container::new()
                     .position(Point { x: 20.0, y: 20.0 })
