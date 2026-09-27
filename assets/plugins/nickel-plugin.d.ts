@@ -128,7 +128,9 @@ declare function useState<T>(initial: T | (() => T)): [T, (next: T | ((previous:
 declare function useRef<T>(initial: T): { current: T };
 
 declare const nickel: Readonly<{
-    readonly data: Readonly<Record<string, unknown>>;
+    readonly data: Readonly<Record<string, unknown> & {
+        settings?: Readonly<Record<string, boolean | number | string>>;
+    }>;
     request(effect: string): void;
     openDialog(id: string): void;
     openMenu(id: string): void;

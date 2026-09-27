@@ -3780,6 +3780,7 @@ dependencies = [
  "nickel-ui",
  "nickel-ui-testkit",
  "resvg",
+ "serde_json",
  "tracing",
  "windows",
  "winit 0.30.13",

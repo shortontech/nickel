@@ -1167,6 +1167,18 @@ impl NickelSession {
                             || plugin.name.len() > 120
                             || plugin.capabilities.len() > 32
                             || plugin.surfaces.len() > 32
+                            || plugin.settings.len() > 32
+                            || plugin.settings.iter().any(|setting| {
+                                setting.id.len() > 96
+                                    || setting.label.len() > 80
+                                    || setting.description.len() > 256
+                                    || !matches!(
+                                        setting.value,
+                                        serde_json::Value::Bool(_)
+                                            | serde_json::Value::Number(_)
+                                            | serde_json::Value::String(_)
+                                    )
+                            })
                     })
                 {
                     return protocol_error(

@@ -680,6 +680,8 @@ pub struct LiveShell {
     panel_hover_output: Option<String>,
     panel_host: nickel_ui::UiHost<TaskbarUi>,
     plugin_registry: nickel_core::plugins::PluginRegistry,
+    plugin_settings:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
     external_plugin_packages:
         std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageDescriptor>,
     plugin_panel_owner: String,
@@ -976,6 +978,20 @@ fn taskbar_badge_extension_priority(
         return Err("badge target does not allow replacement".into());
     }
     Ok((contribution.priority, contribution.mode))
+}
+
+fn external_plugin_settings(
+    manifest: &nickel_core::plugins::PluginManifest,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, String> {
+    if manifest.settings.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    #[cfg(test)]
+    let stored = nickel_core::plugins::PluginPreferences::default();
+    #[cfg(not(test))]
+    let stored = nickel_core::plugins::PluginPreferences::load_default(manifest)
+        .map_err(|error| format!("could not load plugin settings: {error}"))?;
+    Ok(stored.effective(manifest))
 }
 
 fn compose_taskbar_badges(
@@ -1404,6 +1420,18 @@ impl LiveShell {
                 }
             }
         }
+        let plugin_settings = plugin_registry
+            .entries()
+            .filter(|entry| !entry.manifest.settings.is_empty())
+            .map(|entry| {
+                let values = external_plugin_settings(&entry.manifest).unwrap_or_else(|error| {
+                    tracing::warn!(plugin = %entry.manifest.id, %error, "could not load plugin settings");
+                    nickel_core::plugins::PluginPreferences::default()
+                        .effective(&entry.manifest)
+                });
+                (entry.manifest.id.clone(), values)
+            })
+            .collect();
         // Unit tests exercise activation in parallel; core storage tests cover
         // persistence without sharing the user's activation file.
         #[cfg(test)]
@@ -1639,6 +1667,7 @@ impl LiveShell {
             panel_hover_output: None,
             panel_host,
             plugin_registry,
+            plugin_settings,
             external_plugin_packages,
             plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
             plugin_panel_surface: crate::plugin_panel::surface().clone(),
@@ -3081,7 +3110,8 @@ impl LiveShell {
         use nickel_core::plugins::PluginContributionMode;
         use nickel_core::plugins::PluginHealth;
         use nickel_session_protocol::{
-            PluginMemorySnapshot, PluginRuntimeHealth, PluginStatus, PluginStatusSnapshot,
+            PluginMemorySnapshot, PluginRuntimeHealth, PluginSettingKind, PluginSettingStatus,
+            PluginStatus, PluginStatusSnapshot,
         };
 
         let badge_replacement = self
@@ -3166,6 +3196,46 @@ impl LiveShell {
                             )
                         }))
                         .collect(),
+                    settings: entry
+                        .manifest
+                        .settings
+                        .iter()
+                        .map(|setting| PluginSettingStatus {
+                            id: setting.id.clone(),
+                            label: setting.label.clone(),
+                            description: setting.description.clone(),
+                            kind: match &setting.kind {
+                                nickel_core::plugins::PluginSettingKind::Boolean { .. } => {
+                                    PluginSettingKind::Boolean
+                                }
+                                nickel_core::plugins::PluginSettingKind::Integer {
+                                    min,
+                                    max,
+                                    ..
+                                } => PluginSettingKind::Integer {
+                                    min: *min,
+                                    max: *max,
+                                },
+                                nickel_core::plugins::PluginSettingKind::Text {
+                                    max_length,
+                                    ..
+                                } => PluginSettingKind::Text {
+                                    max_length: *max_length,
+                                },
+                                nickel_core::plugins::PluginSettingKind::Choice {
+                                    options, ..
+                                } => PluginSettingKind::Choice {
+                                    options: options.clone(),
+                                },
+                            },
+                            value: self
+                                .plugin_settings
+                                .get(&entry.manifest.id)
+                                .and_then(|values| values.get(&setting.id))
+                                .cloned()
+                                .unwrap_or_else(|| setting.kind.default_value()),
+                        })
+                        .collect(),
                     memory: PluginMemorySnapshot {
                         js_heap_bytes: entry.memory.js_heap_bytes,
                         native_ui_bytes: entry.memory.native_ui_bytes,
@@ -3213,7 +3283,16 @@ impl LiveShell {
                 .get(id)
                 .ok_or("badge extension is not an installed package")?;
             let package = descriptor.load()?;
-            let application = crate::plugin_panel::PluginPanelApplication::from_package(&package)?;
+            let settings = self
+                .plugin_settings
+                .get(id)
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
+            let application =
+                crate::plugin_panel::PluginPanelApplication::from_package_with_settings(
+                    &package, &settings,
+                )?;
             application.taskbar_badges()?;
             Some((priority, mode, application))
         } else {
@@ -3236,8 +3315,16 @@ impl LiveShell {
                         && surfaces[0].kind == nickel_core::plugins::PluginSurfaceKind::Panel
                     {
                         descriptor.load().and_then(|package| {
-                            crate::plugin_panel::PluginPanelApplication::from_package(&package)
-                                .map(|application| (application, surfaces[0].clone()))
+                            let settings = self
+                                .plugin_settings
+                                .get(id)
+                                .cloned()
+                                .map(Ok)
+                                .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
+                            crate::plugin_panel::PluginPanelApplication::from_package_with_settings(
+                                &package, &settings,
+                            )
+                            .map(|application| (application, surfaces[0].clone()))
                         })
                     } else {
                         Err(

@@ -13,6 +13,7 @@ pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_PLUGIN_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PLUGIN_DIRECTORIES: usize = 64;
 const MAX_ACTIVATION_SETTINGS_BYTES: usize = 16 * 1024;
+const MAX_PLUGIN_PREFERENCES_BYTES: usize = 16 * 1024;
 
 /// Installed packages and package errors found immediately below one root.
 #[derive(Default)]
@@ -225,6 +226,118 @@ impl PluginActivationSettings {
     }
 }
 
+/// Per-plugin values. The manifest remains the authority for keys, types, and
+/// defaults, so a plugin never gains access to another plugin's preferences.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginPreferences {
+    version: u8,
+    values: BTreeMap<String, serde_json::Value>,
+}
+
+impl PluginPreferences {
+    pub fn load_default(manifest: &PluginManifest) -> io::Result<Self> {
+        Self::load(Self::default_path(manifest)?)
+    }
+
+    pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
+        let Some(bytes) =
+            nickel_storage::read_regular_file(path.as_ref(), MAX_PLUGIN_PREFERENCES_BYTES)?
+        else {
+            return Ok(Self::default());
+        };
+        let settings: Self = serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if settings.version != 1
+            || settings.values.len() > 32
+            || settings.values.iter().any(|(key, value)| {
+                !valid_identifier(key)
+                    || !matches!(
+                        value,
+                        serde_json::Value::Bool(_)
+                            | serde_json::Value::Number(_)
+                            | serde_json::Value::String(_)
+                    )
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid plugin preferences",
+            ));
+        }
+        Ok(settings)
+    }
+
+    pub fn effective(&self, manifest: &PluginManifest) -> BTreeMap<String, serde_json::Value> {
+        manifest
+            .settings
+            .iter()
+            .map(|setting| {
+                let value = self
+                    .values
+                    .get(&setting.id)
+                    .filter(|value| setting.kind.accepts(value))
+                    .cloned()
+                    .unwrap_or_else(|| setting.kind.default_value());
+                (setting.id.clone(), value)
+            })
+            .collect()
+    }
+
+    pub fn update_default(
+        manifest: &PluginManifest,
+        key: &str,
+        value: serde_json::Value,
+    ) -> io::Result<()> {
+        Self::update(Self::default_path(manifest)?, manifest, key, value)
+    }
+
+    pub fn update(
+        path: impl AsRef<Path>,
+        manifest: &PluginManifest,
+        key: &str,
+        value: serde_json::Value,
+    ) -> io::Result<()> {
+        let setting = manifest
+            .settings
+            .iter()
+            .find(|setting| setting.id == key)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unknown plugin setting"))?;
+        if !setting.kind.accepts(&value) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "plugin setting value is outside its declared type or bounds",
+            ));
+        }
+        let path = path.as_ref();
+        let _lock = nickel_storage::TransactionLock::try_acquire(path)?;
+        let current = Self::load(path)?;
+        let mut values = current.effective(manifest);
+        values.insert(key.to_owned(), value);
+        let bytes = serde_json::to_vec(&Self { version: 1, values }).map_err(io::Error::other)?;
+        if bytes.len() > MAX_PLUGIN_PREFERENCES_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "plugin preferences exceed 16 KiB",
+            ));
+        }
+        nickel_storage::stage_write(path, bytes)?.commit(|| Ok(()))
+    }
+
+    fn default_path(manifest: &PluginManifest) -> io::Result<std::path::PathBuf> {
+        nickel_storage::config_path(&format!("plugin-settings/{}.json", manifest.id))
+    }
+}
+
+impl Default for PluginPreferences {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            values: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
@@ -240,6 +353,66 @@ pub struct PluginManifest {
     pub provides_slots: Vec<PluginProvidedSlot>,
     #[serde(default)]
     pub contributes: Vec<PluginContribution>,
+    #[serde(default)]
+    pub settings: Vec<PluginSetting>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct PluginSetting {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(flatten)]
+    pub kind: PluginSettingKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PluginSettingKind {
+    Boolean {
+        default: bool,
+    },
+    Integer {
+        default: i64,
+        min: i64,
+        max: i64,
+    },
+    Text {
+        default: String,
+        max_length: u16,
+    },
+    Choice {
+        default: String,
+        options: Vec<String>,
+    },
+}
+
+impl PluginSettingKind {
+    pub fn default_value(&self) -> serde_json::Value {
+        match self {
+            Self::Boolean { default } => serde_json::Value::Bool(*default),
+            Self::Integer { default, .. } => serde_json::Value::from(*default),
+            Self::Text { default, .. } | Self::Choice { default, .. } => {
+                serde_json::Value::String(default.clone())
+            }
+        }
+    }
+
+    pub fn accepts(&self, value: &serde_json::Value) -> bool {
+        match self {
+            Self::Boolean { .. } => value.is_boolean(),
+            Self::Integer { min, max, .. } => value
+                .as_i64()
+                .is_some_and(|number| (*min..=*max).contains(&number)),
+            Self::Text { max_length, .. } => value
+                .as_str()
+                .is_some_and(|text| text.len() <= usize::from(*max_length)),
+            Self::Choice { options, .. } => value
+                .as_str()
+                .is_some_and(|selection| options.iter().any(|option| option == selection)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -496,6 +669,51 @@ impl PluginManifest {
                 .insert((&contribution.target_plugin, &contribution.target_slot))
             {
                 return Err("duplicate contribution target".into());
+            }
+        }
+        if self.settings.len() > 32 {
+            return Err("plugin declares too many settings".into());
+        }
+        let mut setting_ids = HashSet::new();
+        for setting in &self.settings {
+            if !valid_identifier(&setting.id) || !setting_ids.insert(&setting.id) {
+                return Err(format!("invalid or duplicate setting ID {:?}", setting.id));
+            }
+            if setting.label.trim().is_empty()
+                || setting.label.len() > 80
+                || setting.description.len() > 256
+            {
+                return Err(format!(
+                    "setting {:?} has an invalid label or description",
+                    setting.id
+                ));
+            }
+            let valid = match &setting.kind {
+                PluginSettingKind::Boolean { .. } => true,
+                PluginSettingKind::Integer { default, min, max } => {
+                    *min >= -1_000_000_000
+                        && *max <= 1_000_000_000
+                        && min <= default
+                        && default <= max
+                }
+                PluginSettingKind::Text {
+                    default,
+                    max_length,
+                } => (1..=1024).contains(max_length) && default.len() <= usize::from(*max_length),
+                PluginSettingKind::Choice { default, options } => {
+                    (1..=32).contains(&options.len())
+                        && options
+                            .iter()
+                            .all(|option| !option.is_empty() && option.len() <= 120)
+                        && options.iter().collect::<HashSet<_>>().len() == options.len()
+                        && options.contains(default)
+                }
+            };
+            if !valid {
+                return Err(format!(
+                    "setting {:?} has an invalid default or bounds",
+                    setting.id
+                ));
             }
         }
         Ok(())
@@ -852,6 +1070,80 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn validates_bounded_plugin_setting_declarations() {
+        let source = VALID.replace(
+            "\"capabilities\": []",
+            r#""capabilities": [], "settings": [
+                {"id":"show-count","label":"Show count","kind":"boolean","default":true},
+                {"id":"refresh-minutes","label":"Refresh interval","kind":"integer","default":5,"min":1,"max":60},
+                {"id":"account","label":"Account","kind":"text","default":"","max_length":120},
+                {"id":"style","label":"Style","kind":"choice","default":"compact","options":["compact","wide"]}
+            ]"#,
+        );
+        let manifest = PluginManifest::from_json(&source).unwrap();
+        assert_eq!(manifest.settings.len(), 4);
+        assert_eq!(
+            manifest.settings[0].kind.default_value(),
+            serde_json::json!(true)
+        );
+        assert!(manifest.settings[1].kind.accepts(&serde_json::json!(30)));
+        assert!(!manifest.settings[1].kind.accepts(&serde_json::json!(61)));
+        assert!(!manifest.settings[2].kind.accepts(&serde_json::json!(42)));
+        assert!(
+            !manifest.settings[3]
+                .kind
+                .accepts(&serde_json::json!("unknown"))
+        );
+        assert!(PluginManifest::from_json(&source.replace("\"max\":60", "\"max\":2")).is_err());
+        assert!(
+            PluginManifest::from_json(
+                &source.replace("\"compact\",\"wide\"", "\"compact\",\"compact\"")
+            )
+            .is_err()
+        );
+        assert!(
+            PluginManifest::from_json(&source.replace("\"id\":\"account\"", "\"id\":\"style\""))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn plugin_preferences_persist_valid_values_and_preserve_corrupt_files() {
+        let manifest = PluginManifest::from_json(&VALID.replace(
+            "\"capabilities\": []",
+            r#""capabilities": [], "settings": [
+                {"id":"show-count","label":"Show count","kind":"boolean","default":true},
+                {"id":"refresh-minutes","label":"Refresh interval","kind":"integer","default":5,"min":1,"max":60}
+            ]"#,
+        ))
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("plugin-settings.json");
+        let defaults = PluginPreferences::load(&path).unwrap().effective(&manifest);
+        assert_eq!(defaults["show-count"], serde_json::json!(true));
+        assert_eq!(defaults["refresh-minutes"], serde_json::json!(5));
+        assert!(
+            PluginPreferences::update(&path, &manifest, "refresh-minutes", serde_json::json!(61))
+                .is_err()
+        );
+        assert!(!path.exists());
+        PluginPreferences::update(&path, &manifest, "show-count", serde_json::json!(false))
+            .unwrap();
+        let loaded = PluginPreferences::load(&path).unwrap().effective(&manifest);
+        assert_eq!(loaded["show-count"], serde_json::json!(false));
+        assert_eq!(loaded["refresh-minutes"], serde_json::json!(5));
+        assert!(
+            PluginPreferences::update(&path, &manifest, "other", serde_json::json!(true)).is_err()
+        );
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(
+            PluginPreferences::update(&path, &manifest, "show-count", serde_json::json!(true))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
     }
 
     #[test]

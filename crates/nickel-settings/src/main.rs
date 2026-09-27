@@ -2793,6 +2793,13 @@ mod tests {
                 capabilities: vec!["applications-read".into(), "applications-launch".into()],
                 surfaces: vec!["main: window".into()],
                 composition: Vec::new(),
+                settings: vec![nickel_session_protocol::PluginSettingStatus {
+                    id: "show-count".into(),
+                    label: "Show count".into(),
+                    description: "Display unread count".into(),
+                    kind: nickel_session_protocol::PluginSettingKind::Boolean,
+                    value: serde_json::json!(true),
+                }],
                 memory: nickel_session_protocol::PluginMemorySnapshot {
                     native_ui_bytes: Some(4096),
                     tracked_peak_bytes: Some(8192),
@@ -2817,6 +2824,8 @@ mod tests {
         assert!(labels.contains(&"4 KiB"));
         assert!(labels.contains(&"8 KiB"));
         assert!(labels.contains(&"Unavailable"));
+        assert!(labels.contains(&"Setting: Show count"));
+        assert!(labels.contains(&"On"));
     }
 
     #[test]
@@ -2832,6 +2841,7 @@ mod tests {
                 capabilities: vec!["windows-read".into()],
                 surfaces: vec!["main: panel".into()],
                 composition: vec!["add org.nickel.taskbar/task-badge (badge)".into()],
+                settings: Vec::new(),
                 memory: Default::default(),
             }],
         });
@@ -2893,6 +2903,7 @@ mod tests {
                 capabilities: Vec::new(),
                 surfaces: Vec::new(),
                 composition: Vec::new(),
+                settings: Vec::new(),
                 memory: Default::default(),
             }],
         });

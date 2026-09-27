@@ -16,6 +16,7 @@ nickel-platform = { path = "../nickel-platform" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 image.workspace = true
 resvg.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 winit.workspace = true
 

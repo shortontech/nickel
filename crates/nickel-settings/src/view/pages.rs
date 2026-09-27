@@ -167,7 +167,7 @@ impl SettingsApp {
                 } else {
                     plugin.composition.join(", ")
                 };
-                let card = SettingsCard::titled(theme, &plugin.name, &plugin.id)
+                let mut card = SettingsCard::titled(theme, &plugin.name, &plugin.id)
                     .child(
                         SettingsRow::new(theme, "Enabled", health).trailing(
                             Switch::with_state_action(switch_state, action, theme)
@@ -208,6 +208,25 @@ impl SettingsApp {
                         "Timers and subscriptions",
                         format!("{} / {}", plugin.memory.timers, plugin.memory.subscriptions),
                     ));
+                for setting in &plugin.settings {
+                    let value = match &setting.value {
+                        serde_json::Value::Bool(value) => {
+                            if *value {
+                                "On".to_owned()
+                            } else {
+                                "Off".to_owned()
+                            }
+                        }
+                        serde_json::Value::Number(value) => value.to_string(),
+                        serde_json::Value::String(value) => value.clone(),
+                        _ => "Unavailable".to_owned(),
+                    };
+                    card = card.child(SettingsRow::new(
+                        theme,
+                        &format!("Setting: {}", setting.label),
+                        value,
+                    ));
+                }
                 content = content.child(card);
             }
         } else {

@@ -7,6 +7,8 @@ its own JavaScript handler. The JavaScript runtime provides `h`, `useState`,
 and `useRef`;
 React is not loaded. `plugin.json` declares the entry, surface geometry,
 output scope, and granted shell actions.
+Its `show-count` setting is declared in `plugin.json`, exposed to JSX as
+`nickel.data.settings["show-count"]`, and listed on the Plugins page.
 
 `nickel-plugin dev assets/plugins/hello-panel` compiles `main.jsx`
 automatically into its isolated profile and reloads the nested shell on edits.

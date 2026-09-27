@@ -13,5 +13,8 @@
       "output": "all"
     }
   ],
-  "capabilities": ["launcher-show"]
+  "capabilities": ["launcher-show"],
+  "settings": [
+    {"id":"show-count","label":"Show count","description":"Display the click counter","kind":"boolean","default":true}
+  ]
 }

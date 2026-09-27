@@ -305,12 +305,12 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
     std::fs::create_dir(&directory).unwrap();
     std::fs::write(
         directory.join("plugin.json"),
-        r#"{"api_version":1,"id":"org.example.panel","name":"External Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"primary"}]}"#,
+        r#"{"api_version":1,"id":"org.example.panel","name":"External Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"primary"}],"settings":[{"id":"show-label","label":"Show label","kind":"boolean","default":true}]}"#,
     )
     .unwrap();
     std::fs::write(
         directory.join("main.js"),
-        "function App() { return h(Panel, {}, h(Text, {}, 'External panel')); }",
+        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-label'] ? 'External panel' : 'Hidden')); }",
     )
     .unwrap();
     let mut shell = LiveShell::new().unwrap();
@@ -338,6 +338,8 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
         .unwrap();
     assert!(panel.desired_enabled);
     assert!(panel.memory.native_ui_bytes.unwrap_or(0) > 0);
+    assert_eq!(panel.settings.len(), 1);
+    assert_eq!(panel.settings[0].value, serde_json::json!(true));
 
     assert!(
         shell

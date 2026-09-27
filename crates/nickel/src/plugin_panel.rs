@@ -1969,6 +1969,14 @@ impl PluginPanelApplication {
         Self::new_with_manifest(&package.source, &package.manifest, None)
     }
 
+    pub fn from_package_with_settings(
+        package: &PluginPackage,
+        settings: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<Self, String> {
+        let data = serde_json::json!({ "settings": settings }).to_string();
+        Self::new_with_manifest(&package.source, &package.manifest, Some(data))
+    }
+
     pub fn taskbar_badges(&self) -> Result<Vec<(String, String, u16, u32)>, String> {
         let mut badges = Vec::new();
         self.node.collect_taskbar_badges(&mut badges)?;
@@ -3267,6 +3275,20 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowLauncher]
         );
+    }
+
+    #[test]
+    fn installed_package_renders_declared_settings_data() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.settings-panel".into();
+        let package = PluginPackage {
+            manifest: external_manifest,
+            source: "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-count'] ? 'Shown' : 'Hidden')); }".into(),
+        };
+        let settings =
+            std::collections::BTreeMap::from([("show-count".to_owned(), serde_json::json!(false))]);
+        let app = PluginPanelApplication::from_package_with_settings(&package, &settings).unwrap();
+        assert!(format!("{:?}", app.node).contains("Hidden"));
     }
 
     #[test]

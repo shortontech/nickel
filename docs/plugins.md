@@ -73,3 +73,11 @@ unavailable in this runtime.
 The taskbar's retained UI measurement currently includes contributed badge
 nodes; Nickel cannot yet split those bytes by extension. Each extension's
 JavaScript heap measurement remains unavailable in Settings.
+
+Plugins may declare up to 32 bounded settings in `plugin.json`: `boolean`,
+`integer` with `min`/`max`, `text` with `max_length`, or `choice` with an
+`options` list. Each setting has an ID, label, and default. Nickel validates
+the schema and stores values separately per plugin. An installed plugin reads
+its effective values through `nickel.data.settings`, and the Plugins page
+shows the registered values. Editing these values in Settings is still being
+implemented.

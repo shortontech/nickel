@@ -1125,7 +1125,27 @@ pub struct PluginStatus {
     pub surfaces: Vec<String>,
     #[serde(default)]
     pub composition: Vec<String>,
+    #[serde(default)]
+    pub settings: Vec<PluginSettingStatus>,
     pub memory: PluginMemorySnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSettingStatus {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub kind: PluginSettingKind,
+    pub value: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PluginSettingKind {
+    Boolean,
+    Integer { min: i64, max: i64 },
+    Text { max_length: u16 },
+    Choice { options: Vec<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1909,6 +1929,7 @@ mod tests {
                 capabilities: vec!["applications-read".into()],
                 surfaces: vec!["main: window".into()],
                 composition: Vec::new(),
+                settings: Vec::new(),
                 memory: PluginMemorySnapshot {
                     js_heap_bytes: None,
                     native_ui_bytes: Some(4096),
