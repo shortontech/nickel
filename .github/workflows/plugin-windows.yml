@@ -187,7 +187,7 @@ jobs:
       - name: Validate shipped extension examples
         shell: pwsh
         run: |
-          foreach ($package in @("hello-panel", "taskbar", "launcher", "desktop", "notification", "run", "control-center", "window-preview", "volume-osd")) {
+          foreach ($package in @("hello-panel", "taskbar", "launcher", "desktop", "notification", "run", "control-center", "codex-projects", "window-preview", "volume-osd")) {
             cargo run --locked -p nickel --bin nickel-plugin -- validate "assets/plugins/$package"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -245,7 +245,7 @@ jobs:
                 try { $snapshot = $json | ConvertFrom-Json } catch { $snapshot = $null }
                 if ($snapshot -and $snapshot.plugins) {
                   $ready = $true
-                  foreach ($id in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop")) {
+                  foreach ($id in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects")) {
                     $plugin = $snapshot.plugins | Where-Object { $_.id -eq $id } | Select-Object -First 1
                     if (-not $plugin -or $plugin.health.state -ne "running") { $ready = $false }
                   }
@@ -255,7 +255,7 @@ jobs:
             }
             if (-not $snapshot) { throw "Nickel Settings could not query the live shell plugin status (last exit $lastExit)" }
             if (-not $ready) {
-              $states = $snapshot.plugins | Where-Object { $_.id -in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop") } | ForEach-Object { "$($_.id)=$($_.health.state)" }
+              $states = $snapshot.plugins | Where-Object { $_.id -in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects") } | ForEach-Object { "$($_.id)=$($_.health.state)" }
               throw "Windows shell plugins did not reach running: $($states -join ', ')"
             }
             $taskbar = $snapshot.plugins | Where-Object { $_.id -eq "org.nickel.taskbar" } | Select-Object -First 1
@@ -264,7 +264,7 @@ jobs:
             if ($taskbarBytes -le 0 -or $taskbarPeak -lt $taskbarBytes) {
               throw "Windows taskbar plugin has no valid retained UI memory report"
             }
-            Write-Host "Live Windows launcher, taskbar, and desktop plugins are running."
+            Write-Host "Live Windows launcher, taskbar, desktop, and Codex project plugins are running."
             Write-Host "Taskbar retained UI: $taskbarBytes bytes; peak: $taskbarPeak bytes."
           } finally {
             $shell.Refresh()
