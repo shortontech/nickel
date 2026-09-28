@@ -3754,6 +3754,11 @@ impl LiveShell {
                     desired_enabled: entry.desired_enabled,
                     health: match &entry.health {
                         PluginHealth::Disabled => PluginRuntimeHealth::Disabled,
+                        PluginHealth::Starting
+                            if entry.manifest.id == crate::settings_plugin_report::ID =>
+                        {
+                            PluginRuntimeHealth::Idle
+                        }
                         PluginHealth::Starting => PluginRuntimeHealth::Starting,
                         PluginHealth::Running => PluginRuntimeHealth::Running,
                         PluginHealth::Failed(error) => {

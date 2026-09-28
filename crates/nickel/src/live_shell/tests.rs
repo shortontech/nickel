@@ -39,6 +39,57 @@ fn safe_mode_suppresses_installed_autostart_without_discarding_saved_choice() {
 }
 
 #[test]
+fn settings_status_is_idle_until_the_separate_process_reports_memory() {
+    let shell = LiveShell::new().unwrap();
+    let snapshot = shell.plugin_status_snapshot();
+    let settings = snapshot
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == crate::settings_plugin_report::ID)
+        .unwrap();
+    assert!(settings.desired_enabled);
+    assert_eq!(
+        settings.health,
+        nickel_session_protocol::PluginRuntimeHealth::Idle
+    );
+    assert!(settings.memory.native_ui_bytes.is_none());
+    let reported_at = Instant::now();
+    let report = crate::settings_plugin_report::SettingsPluginReport::new(
+        true,
+        nickel_session_protocol::PluginMemorySnapshot {
+            native_ui_bytes: Some(4096),
+            ..Default::default()
+        },
+        reported_at,
+    )
+    .unwrap();
+    let mut running = snapshot.clone();
+    report.append_to(&mut running, reported_at);
+    let settings = running
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == crate::settings_plugin_report::ID)
+        .unwrap();
+    assert_eq!(
+        settings.health,
+        nickel_session_protocol::PluginRuntimeHealth::Running
+    );
+    assert_eq!(settings.memory.native_ui_bytes, Some(4096));
+    let mut closed = snapshot;
+    report.append_to(&mut closed, reported_at + Duration::from_secs(6));
+    let settings = closed
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == crate::settings_plugin_report::ID)
+        .unwrap();
+    assert_eq!(
+        settings.health,
+        nickel_session_protocol::PluginRuntimeHealth::Idle
+    );
+    assert!(settings.memory.native_ui_bytes.is_none());
+}
+
+#[test]
 fn jsx_taskbar_projection_does_not_read_native_task_groups_or_icons() {
     let mut shell = LiveShell::new().unwrap();
     let (clock, _) = super::panel_clock_text();

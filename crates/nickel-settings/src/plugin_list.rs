@@ -137,6 +137,7 @@ pub(super) fn projection(
         let pending = pending.is_some_and(|(id, _)| id == &plugin.id);
         let health = match &plugin.health {
             PluginRuntimeHealth::Disabled => "Disabled".to_owned(),
+            PluginRuntimeHealth::Idle => "Enabled, closed".to_owned(),
             PluginRuntimeHealth::Starting => "Starting".to_owned(),
             PluginRuntimeHealth::Running => "Running".to_owned(),
             PluginRuntimeHealth::Failed(reason) => format!("Failed: {reason}"),
@@ -144,7 +145,7 @@ pub(super) fn projection(
         let switch_state = if pending {
             if plugin.desired_enabled { "disabled-on" } else { "disabled-off" }
         } else if plugin.desired_enabled {
-            match &plugin.health { PluginRuntimeHealth::Running => "on", PluginRuntimeHealth::Starting => "disabled-on", _ => "mixed" }
+            match &plugin.health { PluginRuntimeHealth::Running | PluginRuntimeHealth::Idle => "on", PluginRuntimeHealth::Starting => "disabled-on", _ => "mixed" }
         } else { "off" };
         let settings = plugin.settings.iter().map(|setting| {
             let display_value = match &setting.value {
@@ -434,6 +435,25 @@ mod tests {
                 memory: PluginMemorySnapshot::default(),
             }],
         }
+    }
+
+    #[test]
+    fn idle_settings_plugin_remains_enabled_in_the_list() {
+        let mut snapshot = snapshot();
+        snapshot.plugins[0].id = "org.nickel.settings".into();
+        snapshot.plugins[0].desired_enabled = true;
+        snapshot.plugins[0].health = PluginRuntimeHealth::Idle;
+        let data = projection(
+            &Localizer::system(),
+            Some(&snapshot),
+            None,
+            None,
+            None,
+            None,
+        );
+        let plugin = &data["plugins"][0];
+        assert_eq!(plugin["health"], "Enabled, closed");
+        assert_eq!(plugin["switchState"], "on");
     }
 
     #[test]

@@ -1201,6 +1201,7 @@ impl PluginSettingKind {
 #[serde(tag = "state", content = "reason", rename_all = "snake_case")]
 pub enum PluginRuntimeHealth {
     Disabled,
+    Idle,
     Starting,
     Running,
     Failed(String),
