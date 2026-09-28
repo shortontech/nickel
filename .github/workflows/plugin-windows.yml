@@ -251,9 +251,9 @@ jobs:
               if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
               try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
               $plugin = $snapshot.plugins | Where-Object { $_.id -eq "org.example.component-window" } | Select-Object -First 1
-              if ($plugin -and $plugin.health.state -eq "running"
-                  -and [long]$plugin.memory.native_ui_bytes -gt 0
-                  -and [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window")) {
+              $pluginReady = $plugin -and $plugin.health.state -eq "running" -and [long]$plugin.memory.native_ui_bytes -gt 0
+              $windowReady = [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window")
+              if ($pluginReady -and $windowReady) {
                 $ready = $true
                 Write-Host "Installed component window is visible with $($plugin.memory.native_ui_bytes) retained UI bytes."
                 break
