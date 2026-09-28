@@ -31,6 +31,11 @@ interface NickelSurfaceProps extends NickelProps {
     height: number;
     background?: NickelColor;
 }
+interface NickelViewportProps extends NickelProps {
+    background?: NickelColor;
+    /** Inset from every edge, from 0 to 256 logical pixels. */
+    padding?: number;
+}
 interface NickelBoxProps extends NickelProps {
     x: number;
     y: number;
@@ -147,6 +152,7 @@ interface NickelFileTileProps extends NickelProps {
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
 declare function Panel(props: NickelPanelProps): JSX.Element;
 declare function Surface(props: NickelSurfaceProps): JSX.Element;
+declare function Viewport(props: NickelViewportProps): JSX.Element;
 declare function Box(props: NickelBoxProps): JSX.Element;
 declare function FileTile(props: NickelFileTileProps): JSX.Element;
 declare function Badge(props: NickelBadgeProps): JSX.Element;

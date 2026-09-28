@@ -332,6 +332,11 @@ enum PanelNode {
         width: u32,
         height: u32,
     },
+    Viewport {
+        children: Vec<Self>,
+        background: u32,
+        padding: u32,
+    },
     Panel {
         children: Vec<Self>,
         background: u32,
@@ -421,7 +426,7 @@ impl PanelNode {
             Self::Section {
                 id, label, value, ..
             } => capacity(id) + capacity(label) + capacity(value),
-            Self::Row(children) | Self::Column(children) => {
+            Self::Row(children) | Self::Column(children) | Self::Viewport { children, .. } => {
                 let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
                 spare as u64 + children.iter().map(Self::contribution_bytes).sum::<u64>()
             }
@@ -438,6 +443,7 @@ impl PanelNode {
             } if tile_id == id => *action,
             Self::Box { children, .. }
             | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -457,6 +463,7 @@ impl PanelNode {
             } if tile_id == id => *select_action,
             Self::Box { children, .. }
             | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -476,6 +483,7 @@ impl PanelNode {
             } if tile_id == id => *move_action,
             Self::Box { children, .. }
             | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -495,6 +503,7 @@ impl PanelNode {
             } if tile_id == id => *file_action,
             Self::Box { children, .. }
             | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -771,13 +780,26 @@ impl PanelNode {
                     height: dimension("height")?,
                 })
             }
-            "panel" | "row" | "column" | "scroll-view" => {
+            "viewport" | "panel" | "row" | "column" | "scroll-view" => {
                 let children = children
                     .iter()
                     .filter(|value| !value.is_null())
                     .map(Self::parse)
                     .collect::<Result<Vec<_>, _>>()?;
-                if kind == "panel" {
+                if kind == "viewport" {
+                    let padding = value.get("padding").and_then(Value::as_u64).unwrap_or(0);
+                    if padding > 256 {
+                        return Err("viewport padding must be 0 to 256".into());
+                    }
+                    Ok(Self::Viewport {
+                        children,
+                        background: value
+                            .get("background")
+                            .and_then(Value::as_u64)
+                            .map_or(0, |color| color as u32),
+                        padding: padding as u32,
+                    })
+                } else if kind == "panel" {
                     let background = value
                         .get("background")
                         .and_then(Value::as_u64)
@@ -1326,6 +1348,24 @@ impl PanelNode {
                 }
                 AnyView::new(container)
             }
+            Self::Viewport {
+                children,
+                background,
+                padding,
+            } => {
+                let mut column = Column::new().fill_width();
+                for child in children {
+                    column = column.child(child.view(images));
+                }
+                AnyView::new(
+                    Container::new()
+                        .fill_width()
+                        .fill_height()
+                        .padding(Insets::all(*padding as f32))
+                        .background(*background)
+                        .child(column),
+                )
+            }
             Self::Panel {
                 children,
                 background,
@@ -1555,6 +1595,7 @@ impl PanelNode {
             Self::Dialog { id, .. } if id == requested_id => Some(self),
             Self::Box { children, .. }
             | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -1570,6 +1611,7 @@ impl PanelNode {
             Self::Menu { id, .. } if id == requested_id => Some(self),
             Self::Box { children, .. }
             | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -1585,6 +1627,7 @@ impl PanelNode {
             Self::Dialog { .. } | Self::Menu { .. } => output.push(self),
             Self::Box { children, .. }
             | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -1607,6 +1650,7 @@ impl PanelNode {
             } if id == requested_id => Some(*action),
             Self::Box { children, .. }
             | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row(children)
             | Self::Column(children)
@@ -4460,16 +4504,8 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        if self.manifest.id == launcher_manifest().id {
-            AnyView::new(
-                Container::new()
-                    .fill_width()
-                    .height(680.0)
-                    .padding(Insets::all(20.0))
-                    .background(0xf12b_303c)
-                    .child(self.node.view(&self.images)),
-            )
-        } else if self.manifest.id == taskbar_manifest().id
+        if matches!(&self.node, PanelNode::Viewport { .. })
+            || self.manifest.id == taskbar_manifest().id
             || self.manifest.id == notification_manifest().id
             || self.manifest.id == run_manifest().id
             || self.manifest.id == window_preview_manifest().id
@@ -5801,6 +5837,22 @@ mod tests {
                 .unwrap()
         );
         assert!(!format!("{:?}", panel.node).contains("Could not launch Demo"));
+    }
+
+    #[test]
+    fn launcher_plugin_owns_viewport_and_keeps_nested_controls_reachable() {
+        let launcher = Launcher::new(Vec::new());
+        let panel = PluginPanelApplication::launcher(&launcher).unwrap();
+        assert!(matches!(
+            &panel.node,
+            PanelNode::Viewport {
+                background: 0xf12b_303c,
+                padding: 20,
+                ..
+            }
+        ));
+        assert!(panel.node.button_action("launcher-settings").is_some());
+        assert!(panel.node.dialog("launcher-logout-dialog").is_some());
     }
 
     #[test]

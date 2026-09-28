@@ -18,9 +18,11 @@ NICKEL_DEV_PLUGIN_LAUNCHER=1 cargo run -p nickel --no-default-features \
 The host supplies `nickel.data.query`, up to 12 ranked search results, a
 bounded pinned and recent app list, and Places. The plugin renders dashboard
 and search buttons inside native scroll views. The dashboard also shows recent
-projects, account, Settings, and a component logout dialog. Actions go through
-typed `nickel.request` calls. The host checks declared capabilities and current
-launcher state, including app and project IDs, before acting. Search ranking,
+projects, account, Settings, and a component logout dialog. The root
+`Viewport` declares the launcher's background and padding and fills the host
+window at its current output size. Actions go through typed `nickel.request`
+calls. The host checks declared capabilities and current launcher state,
+including app and project IDs, before acting. Search ranking,
 favorite state, application execution, and session authority remain Rust
 services. View switching and pin buttons request those Rust state changes.
 Enter submits the leading host result while search is active. Escape clears a

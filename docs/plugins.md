@@ -154,8 +154,12 @@ DOM library's `Text` and `Image` globals conflict with Nickel's components.
 The `dev` command transpiles with `--noCheck` so an editor type error does not
 prevent testing; `tsc -p` gives the stricter check before packaging.
 
-The runtime provides `h`, `Panel`, `Row`, `Column`, `Text`, `Button`, `Dialog`,
-`Image`, `ImageButton`, `useState`, `useRef`, and other small native components.
+The runtime provides `h`, `Panel`, `Viewport`, `Row`, `Column`, `Text`, `Button`,
+`Dialog`, `Image`, `ImageButton`, `useState`, `useRef`, and other small native
+components.
+`Viewport` fills its host window and accepts an ARGB `background` and `padding`
+from 0 to 256 logical pixels. Use it as the root for a full-window layout such
+as the bundled launcher; its size follows the declared surface and output.
 JavaScript execution has a 100,000-iteration limit per call frame. A loop that
 exceeds it returns an error to the plugin host; a failed event rolls back its
 component state so the next input can still run.

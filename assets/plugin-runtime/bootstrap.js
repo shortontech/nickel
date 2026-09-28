@@ -1,6 +1,7 @@
 
 const Panel = 'panel';
 const Surface = 'surface';
+const Viewport = 'viewport';
 const Box = 'box';
 const FileTile = 'file-tile';
 const Badge = 'badge';
@@ -114,7 +115,7 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onClose) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
         x: props?.x, y: props?.y, width: props?.width, height: props?.height,
-        background: props?.background, radius: props?.radius, color: props?.color,
+        background: props?.background, padding: props?.padding, radius: props?.radius, color: props?.color,
         label: props?.label, disabledReason: props?.disabledReason,
         shortcut: props?.shortcut, separatorBefore: props?.separatorBefore,
         selected: props?.selected, hovered: props?.hovered,

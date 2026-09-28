@@ -8,7 +8,7 @@ function App() {
         setMenuTarget({id: item.id, index: item.index, pinned: item.pinned, kind, anchor});
         nickel.openMenu("launcher-app-actions");
     };
-    return <Column>
+    return <Viewport background={0xf12b303c} padding={20}><Column>
         <Text>Nickel Launcher</Text>
         {data.status ? <Text>{data.status}</Text> : null}
         <TextField id="launcher-query" value={data.query} placeholder="Search applications"
@@ -132,5 +132,5 @@ function App() {
                 {menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"}
             </MenuItem>
         </Menu> : null}
-    </Column>;
+    </Column></Viewport>;
 }
