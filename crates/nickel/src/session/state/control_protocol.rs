@@ -15,8 +15,15 @@ fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurface
         && identity.application_id.len() <= nickel_session_protocol::MAX_WINDOW_APP_ID_BYTES
         && identity.output.is_some() == output_scoped
         && (identity.role != ShellRole::PluginSurface || identity.plugin_surface.is_some())
-        && (matches!(identity.role, ShellRole::PluginSurface | ShellRole::Panel)
-            || identity.plugin_surface.is_none())
+        && (matches!(
+            identity.role,
+            ShellRole::Desktop | ShellRole::PluginSurface | ShellRole::Panel
+        ) || identity.plugin_surface.is_none())
+        && (identity.role != ShellRole::Desktop
+            || identity.plugin_surface.as_ref().is_none_or(|surface| {
+                surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Desktop
+                    && surface.bottom_offset == 0
+            }))
         && (identity.role != ShellRole::Panel
             || identity.plugin_surface.as_ref().is_none_or(|surface| {
                 surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Panel
@@ -71,6 +78,33 @@ mod shell_surface_identity_tests {
         assert!(!shell_surface_identity_valid(&identity));
         identity.role = ShellRole::PluginSurface;
         assert!(shell_surface_identity_valid(&identity));
+    }
+
+    #[test]
+    fn desktop_accepts_only_desktop_plugin_placement() {
+        let key = crate::plugin_panel::desktop_surface_key();
+        let surface = crate::plugin_panel::desktop_surface();
+        let mut identity = ShellSurfaceIdentity {
+            application_id: "io.nickel.shell.surface.42.10".into(),
+            role: ShellRole::Desktop,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: key.plugin_id,
+                surface_id: key.surface_id,
+                kind: PluginSurfacePlacementKind::Desktop,
+                width: surface.width,
+                height: surface.height,
+                bottom_offset: 0,
+            }),
+        };
+        assert!(shell_surface_identity_valid(&identity));
+
+        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Overlay;
+        assert!(!shell_surface_identity_valid(&identity));
+        let placement = identity.plugin_surface.as_mut().unwrap();
+        placement.kind = PluginSurfacePlacementKind::Desktop;
+        placement.bottom_offset = 24;
+        assert!(!shell_surface_identity_valid(&identity));
     }
 }
 
