@@ -1,8 +1,8 @@
 # Developing a Nickel plugin
 
-On Linux, panel, dock, and window plugins register their own shell surface
+On Linux, panel, dock, window, and dialog plugins register their own shell surface
 identity. Panels and docks use their declared size and bottom offset; windows
-are centered on the selected output. They do not replace the built-in taskbar
+and dialogs are centered on the selected output. They do not replace the built-in taskbar
 readiness surface.
 
 Nickel loads a compiled JavaScript entry from a directory containing
@@ -18,12 +18,17 @@ window retires that surface and leaves its siblings running. Disable and
 re-enable the package to reopen all its declared surfaces. A running sibling
 can reopen one declared window with
 `nickel.request({ type: "show-plugin-surface", surfaceId: "details" })`. The
-host accepts only a window ID from that plugin's own manifest and ignores a
-request for a window that is already open. The
+host accepts only a window or dialog ID from that plugin's own manifest and
+ignores a request for a surface that is already open. The
 [two-window example](../assets/plugins/example-two-windows/) shows the request
 in a working package.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
+The [separate dialog example](../assets/plugins/example-surface-dialog/) declares
+an initially closed `dialog` surface beside a home window. It opens the dialog
+with `show-plugin-surface` and dismisses it with
+`nickel.request({ type: "hide-plugin-surface", surfaceId: "confirm" })`.
+Closing the package's last ordinary window also retires its open dialogs.
 
 Build the Rust development tools, then start an isolated nested session on
 Linux:
@@ -74,7 +79,7 @@ The developer command runs edited JavaScript in the isolated shell without
 installing a second copy of that plugin. Keep its shipped `plugin.json`
 unchanged while developing it. Saving a sibling `.js` source such as the
 taskbar's `menu.js` also restarts the session. For external plugins, the
-developer command supports up to 16 panel, dock, or window surfaces in one package, or
+developer command supports up to 16 panel, dock, window, or dialog surfaces in one package, or
 one surface-free taskbar badge, taskbar action, desktop widget, or Control
 Center section contribution;
 `nickel-plugin validate <directory>` runs the same

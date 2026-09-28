@@ -3732,13 +3732,13 @@ impl LiveShell {
         }) {
             return Ok(false);
         }
-        if self
-            .plugin_panels()
-            .iter()
-            .filter(|(surface, _)| surface.plugin_id == key.plugin_id)
-            .count()
-            == 1
-        {
+        // A dialog depends on an ordinary surface to open it. Retire the
+        // package when closing this surface would leave only dialogs alive.
+        if !self.plugin_panels().iter().any(|(surface, placement)| {
+            surface.plugin_id == key.plugin_id
+                && surface != key
+                && placement.kind != nickel_core::plugins::PluginSurfaceKind::Dialog
+        }) {
             return self.set_plugin_enabled(&key.plugin_id, false);
         }
         if self.plugin_panel_owner == key.plugin_id

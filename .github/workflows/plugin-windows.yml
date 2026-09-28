@@ -515,7 +515,40 @@ jobs:
               }
             }
             if (-not $dismissed) { throw "Dismissing the dialog did not preserve home and retire dialog memory" }
-            Write-Host "Native Windows dialog opened and dismissed independently; home retained $homeBytes UI bytes."
+            if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Window", 210, 77)) {
+              throw "Could not reopen the dialog from its home window"
+            }
+            $reopened = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              if ([NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Dialog")) {
+                $reopened = $true
+                break
+              }
+            }
+            if (-not $reopened) { throw "Declared dialog did not reopen" }
+            if (-not [NickelWindowProbe]::CloseVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window")) {
+              throw "Could not close the dialog's last ordinary window"
+            }
+            $retired = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              if (-not (Get-Process -Id $shell.ProcessId -ErrorAction SilentlyContinue)) { throw "Closing the plugin home exited Nickel" }
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $plugin = $snapshot.plugins | Where-Object { $_.id -eq "org.example.surface-dialog" } | Select-Object -First 1
+              if ($plugin -and -not $plugin.desired_enabled -and $plugin.health.state -eq "disabled" -and
+                  $null -eq $plugin.memory.native_ui_bytes -and
+                  -not [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window") -and
+                  -not [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Dialog")) {
+                $retired = $true
+                break
+              }
+            }
+            if (-not $retired) { throw "Closing the last ordinary window left an orphaned dialog" }
+            Write-Host "Native Windows dialog opened and dismissed independently, then retired with its last ordinary window."
           } finally {
             if ($dev) {
               Get-CimInstance Win32_Process -Filter "ParentProcessId=$($dev.Id)" | Where-Object { $_.Name -eq "nickel.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }

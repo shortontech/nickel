@@ -733,6 +733,15 @@ fn declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin() {
     assert!(status.desired_enabled);
     assert_eq!(status.health, nickel_core::plugins::PluginHealth::Running);
     assert_eq!(status.memory.native_ui_bytes, Some(home_bytes));
+
+    assert!(shell.show_plugin_window(&id, "confirm").unwrap());
+    assert_eq!(shell.plugin_panels().len(), 2);
+    assert!(shell.close_plugin_window(&home[0].0).unwrap());
+    assert!(shell.plugin_panels().is_empty());
+    let status = shell.plugin_registry.get(&id).unwrap();
+    assert!(!status.desired_enabled);
+    assert_eq!(status.health, nickel_core::plugins::PluginHealth::Disabled);
+    assert_eq!(status.memory.native_ui_bytes, None);
 }
 
 #[test]
