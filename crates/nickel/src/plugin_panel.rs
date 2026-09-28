@@ -2415,6 +2415,70 @@ fn launcher_plugin_result(
     })
 }
 
+/// Minimal host-owned data for validating a surface without a running shell.
+/// These fixtures exercise the same component parser as the live projection;
+/// they contain no user windows, files, or device state.
+fn validation_surface_projection(
+    package: &PluginPackage,
+    surface: &PluginSurface,
+) -> Option<Value> {
+    let id = package.manifest.id.as_str();
+    if surface.kind == PluginSurfaceKind::Desktop || id == desktop_manifest().id {
+        return Some(serde_json::json!({
+            "width": surface.width,
+            "height": surface.height,
+            "background": 0xff202124_u32,
+            "wallpaper": false,
+            "surfaceColor": 0xff30343a_u32,
+            "text": 0xffffffff_u32,
+            "error": null,
+            "tiles": [],
+            "widgets": [],
+            "context": null,
+        }));
+    }
+    if id == launcher_manifest().id {
+        return Some(serde_json::json!({
+            "query": "",
+            "status": null,
+            "dashboardVisible": false,
+            "view": "favorites",
+            "resultPage": 0,
+            "resultPageCount": 1,
+            "dashboardPage": 0,
+            "dashboardPageCount": 1,
+            "results": [],
+            "dashboard": [],
+            "places": [],
+            "projects": [],
+            "codexAvailable": false,
+            "accountName": "User",
+            "logoutAvailable": false,
+        }));
+    }
+    if id == control_center_manifest().id {
+        return Some(serde_json::json!({
+            "height": surface.height,
+            "scrollHeight": surface.height.saturating_sub(48).max(1),
+            "network": {"available": false, "enabled": false, "networks": []},
+            "bluetooth": {"available": false, "powered": false, "discovering": false, "devices": []},
+            "audio": {"muted": false, "percent": 50, "devices": []},
+            "workspaces": [],
+            "activeWorkspace": 0,
+            "sections": [],
+            "pendingProjection": false,
+            "projectionModes": [],
+        }));
+    }
+    if id == window_preview_manifest().id {
+        return Some(serde_json::json!({ "windows": [] }));
+    }
+    if id == volume_osd_manifest().id {
+        return Some(serde_json::json!({ "label": "Volume", "percent": 50 }));
+    }
+    None
+}
+
 impl PluginPanelApplication {
     pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
         self.node.button_action(id).map(PluginMessage::Click)
@@ -2486,7 +2550,26 @@ impl PluginPanelApplication {
             }
         } else {
             for surface in &package.manifest.surfaces {
-                Self::from_package_surface(package, &settings, surface)
+                let mut data = serde_json::json!({
+                    "settings": settings,
+                    "surface": {
+                        "id": surface.id,
+                        "kind": surface.kind.as_str(),
+                        "width": surface.width,
+                        "height": surface.height,
+                    },
+                });
+                if let Some(projection) = validation_surface_projection(package, surface) {
+                    data.as_object_mut()
+                        .expect("validation data is an object")
+                        .extend(
+                            projection
+                                .as_object()
+                                .expect("projection is an object")
+                                .clone(),
+                        );
+                }
+                Self::new_with_manifest(&package.source, &package.manifest, Some(data.to_string()))
                     .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
             }
         }
@@ -4047,6 +4130,26 @@ impl nickel_ui::Application for PluginPanelApplication {
 mod tests {
     use super::*;
     use nickel_ui::Application;
+
+    #[test]
+    fn bundled_plugin_packages_validate_with_surface_projection_fixtures() {
+        for name in [
+            "hello-panel",
+            "taskbar",
+            "launcher",
+            "desktop",
+            "notification",
+            "run",
+            "control-center",
+            "window-preview",
+            "volume-osd",
+        ] {
+            let directory = format!("{}/../../assets/plugins/{name}", env!("CARGO_MANIFEST_DIR"));
+            let package = PluginPackage::load(directory).unwrap();
+            PluginPanelApplication::validate_package(&package)
+                .unwrap_or_else(|error| panic!("{name} validation failed: {error}"));
+        }
+    }
 
     #[test]
     fn jsx_menu_items_preserve_submenus_disabled_reasons_and_shortcuts() {

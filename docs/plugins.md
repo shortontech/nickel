@@ -34,6 +34,10 @@ package, or one surface-free taskbar badge, taskbar action, desktop widget,
 or Control Center section contribution;
 `nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
+For bundled launcher, desktop, Control Center, preview, and volume surfaces,
+validation supplies bounded synthetic host data so their initial JSX tree can
+render without a live session. It checks the initial tree and manifest; use
+`dev` to exercise input, requested actions, and live state changes.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `Panel` component's ARGB `background` can be translucent. Several installed

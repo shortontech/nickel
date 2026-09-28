@@ -11,6 +11,10 @@ cargo run -p nickel --no-default-features --features backend-winit \
   --bin nickel-plugin -- validate /path/to/plugin
 ```
 
+The validator supplies bounded synthetic data for Nickel's bundled shell
+surfaces, including launcher and desktop, so their initial trees can be checked
+without starting the shell. Live interactions still need `nickel-plugin dev`.
+
 The [first-party Settings package](settings/) uses the same manifest format
 but has a separate native Settings component adapter. Its package and page
 scripts are validated by the `nickel-settings` test suite; the shell plugin
