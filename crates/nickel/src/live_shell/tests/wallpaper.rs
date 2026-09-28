@@ -157,6 +157,15 @@
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
         );
+
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        let resumed_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        assert!(resumed_scene.iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. }
+        )));
+        assert!(shell.desktop_host.application().plugin_background);
+        assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.unwrap() > 0);
     }
 
     #[test]

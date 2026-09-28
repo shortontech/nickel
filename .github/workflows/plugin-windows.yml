@@ -129,6 +129,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::desktop_plugin_background_action_rejects_unavailable_and_stale_commands
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib desktop_background_plugin_reports_memory_and_retires_wallpaper_when_disabled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib desktop_secondary_press_opens_overlay_without_hiding_items_on_release_or_motion
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::notification_plugin_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib pending_remote_lease_becomes_persistent_shell_notification

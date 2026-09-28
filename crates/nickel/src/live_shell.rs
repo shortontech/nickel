@@ -4371,22 +4371,7 @@ impl LiveShell {
                     self.preview_frame = None;
                 }
             } else if id == crate::plugin_panel::desktop_manifest().id {
-                self.plugin_desktop_host = None;
-                self.wallpaper = None;
-                self.wallpaper_size = (0, 0);
-                self.wallpaper_loaded_source_fingerprint = None;
-                let desktop = self.desktop_host.application_mut();
-                desktop.watch = None;
-                desktop.wallpaper = None;
-                desktop.icon_cache.clear();
-                desktop.dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
-                desktop.cancel_pointer_transaction();
-                desktop.pending_plugin_open = None;
-                desktop.pending_plugin_select = None;
-                desktop.pending_plugin_move = None;
-                desktop.pending_plugin_file_action = None;
-                self.desktop_overlay_pointer_capture = None;
-                self.desktop_application_dirty = true;
+                self.retire_desktop_plugin_state();
             }
             if let Some((target, _)) = &extension_target {
                 self.refresh_plugin_slot_hosts(target);
@@ -8906,6 +8891,26 @@ impl LiveShell {
         }
     }
 
+    fn retire_desktop_plugin_state(&mut self) {
+        self.plugin_desktop_host = None;
+        self.wallpaper = None;
+        self.wallpaper_size = (0, 0);
+        self.wallpaper_loaded_source_fingerprint = None;
+        let desktop = self.desktop_host.application_mut();
+        desktop.plugin_background = false;
+        desktop.watch = None;
+        desktop.wallpaper = None;
+        desktop.icon_cache.clear();
+        desktop.dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
+        desktop.cancel_pointer_transaction();
+        desktop.pending_plugin_open = None;
+        desktop.pending_plugin_select = None;
+        desktop.pending_plugin_move = None;
+        desktop.pending_plugin_file_action = None;
+        self.desktop_overlay_pointer_capture = None;
+        self.desktop_application_dirty = true;
+    }
+
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         if self.plugin_desktop_host.is_some() {
             self.load_wallpaper_for(width, height);
@@ -9052,7 +9057,7 @@ impl LiveShell {
                     let _ = self
                         .plugin_registry
                         .mark_failed(&crate::plugin_panel::desktop_manifest().id, error);
-                    self.plugin_desktop_host = None;
+                    self.retire_desktop_plugin_state();
                     None
                 }
             }
