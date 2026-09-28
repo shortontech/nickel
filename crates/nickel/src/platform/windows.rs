@@ -90,18 +90,20 @@ use windows::{
                 HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON, IsIconic,
                 IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
                 NID_INTEGRATED_TOUCH, NID_READY, PostMessageW, RegisterClassW,
-                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON, SM_CYICON,
-                SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+                RegisterShellHookWindow, RegisterWindowMessageW, SEND_MESSAGE_TIMEOUT_FLAGS,
+                SM_CXICON, SM_CYICON, SM_DIGITIZER, SMTO_ABORTIFHUNG, SPI_GETWORKAREA,
+                SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW,
+                SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, ShowWindowAsync,
                 SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
                 WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE,
-                WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
-                WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
+                WM_CONTEXTMENU, WM_COPYDATA, WM_GETICON, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
+                WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
+                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+                WindowFromPoint,
             },
         },
     },
@@ -5612,10 +5614,7 @@ impl WindowFeed {
 
     pub fn icon(&self, window: WindowId) -> Option<image::RgbaImage> {
         let hwnd = hwnd(window);
-        executable_path(hwnd)
-            .as_deref()
-            .and_then(executable_icon)
-            .or_else(|| window_icon(hwnd))
+        window_icon(hwnd).or_else(|| executable_path(hwnd).as_deref().and_then(executable_icon))
     }
 }
 
@@ -5936,15 +5935,35 @@ fn executable_icon(path: &std::path::Path) -> Option<image::RgbaImage> {
 }
 
 fn window_icon(hwnd: HWND) -> Option<image::RgbaImage> {
+    // Installers and other frameworks commonly assign an icon to the HWND with
+    // WM_SETICON while leaving the registered class icon empty. Bound each
+    // cross-process query so a hung window cannot stall the shell.
+    let handle = [1_usize, 2, 0].into_iter().find_map(|size| {
+        let mut handle = 0_usize;
+        // SAFETY: The enumerated HWND is valid at the start of the query. USER32
+        // owns the returned borrowed HICON, and the timeout bounds a hung peer.
+        let completed = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                WM_GETICON,
+                WPARAM(size),
+                LPARAM(0),
+                SEND_MESSAGE_TIMEOUT_FLAGS(SMTO_ABORTIFHUNG.0),
+                25,
+                Some(&mut handle),
+            )
+        };
+        (completed.0 != 0 && handle != 0).then_some(handle)
+    });
     // SAFETY: These class icon handles are owned by the window class and remain borrowed here.
-    let handle = unsafe {
+    let handle = handle.unwrap_or_else(|| unsafe {
         let large = GetClassLongPtrW(hwnd, GCLP_HICON);
         if large != 0 {
             large
         } else {
             GetClassLongPtrW(hwnd, GCLP_HICONSM)
         }
-    };
+    });
     (handle != 0)
         .then_some(HICON(handle as *mut c_void))
         .and_then(render_icon)
@@ -6170,6 +6189,11 @@ mod tests {
     use std::collections::{HashSet, VecDeque};
 
     use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, IDI_APPLICATION, LoadIconW, SendMessageW, WINDOW_EX_STYLE,
+        WM_SETICON, WS_POPUP,
+    };
+    use windows::core::w;
 
     use nickel_core::{
         geometry::LogicalRect,
@@ -6192,9 +6216,44 @@ mod tests {
         native_system_drag_hit, parse_windows_command, permits_contested_workflow,
         pointer_drag_rectangle, project_native_preview_diagnostics, project_windows_shortcuts,
         rectangle_covers, restore_legacy_icon_alpha, should_observe_tokenless_geometry,
-        should_restore_on_activation, unknown_suspension_within_bound, windows_pid_descends_from,
-        work_area_above_panel,
+        should_restore_on_activation, unknown_suspension_within_bound, window_icon,
+        windows_pid_descends_from, work_area_above_panel,
     };
+
+    #[test]
+    fn window_specific_icon_is_available_without_a_class_icon() {
+        // SAFETY: STATIC is a system class. The test owns and destroys its
+        // hidden window; LoadIconW returns a shared system icon.
+        unsafe {
+            let window = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("Nickel window icon test"),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("create icon test window");
+            let icon = LoadIconW(None, IDI_APPLICATION).expect("load shared application icon");
+            SendMessageW(
+                window,
+                WM_SETICON,
+                Some(windows::Win32::Foundation::WPARAM(1)),
+                Some(windows::Win32::Foundation::LPARAM(icon.0 as isize)),
+            );
+
+            let image = window_icon(window).expect("resolve HWND-specific icon");
+            assert!(image.pixels().any(|pixel| pixel.0[3] != 0));
+
+            let _ = DestroyWindow(window);
+        }
+    }
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
         NativeWindowFingerprint {
