@@ -179,7 +179,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, an installed panel, component and standalone dialogs, and sibling plugin windows; checked activation, memory retirement, launcher fallback, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, an installed panel, component and standalone dialogs, and sibling plugin windows; checked owner-close retirement, memory, launcher fallback, and clean shutdown"
     );
     Ok(())
 }
@@ -729,19 +729,22 @@ fn verify_separate_plugin_dialog(
     let id = "org.example.surface-dialog";
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
     let deadline = Instant::now() + Duration::from_secs(5);
-    let (home_x, home_y) = loop {
+    let (home_id, home_x, home_y) = loop {
         let windows = checked(test_input, environment, &["windows"])?;
         let home = windows.lines().find(|line| {
             line.contains("\torg.example.surface-dialog\tSurface Dialog Example\t")
                 && line.ends_with("420x280")
         });
-        if let Some(location) = home
+        if let Some(window_id) = home
+            .and_then(|line| line.split('\t').next())
+            .and_then(|field| field.parse::<u64>().ok())
+            && let Some(location) = home
             .and_then(|line| line.rsplit('\t').next())
             .and_then(|field| field.split_whitespace().next())
             && let Some((x, y)) = location.split_once(',')
             && let (Ok(x), Ok(y)) = (x.parse::<i32>(), y.parse::<i32>())
         {
-            break (x, y);
+            break (window_id, x, y);
         }
         if Instant::now() >= deadline {
             return Err(format!("plugin dialog home window did not map: {windows}"));
@@ -803,7 +806,46 @@ fn verify_separate_plugin_dialog(
             plugin.memory.native_ui_bytes
         ));
     }
-    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    click_at(test_input, environment, home_x + 210, home_y + 77)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        if dialog_surface_line(&surfaces).is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("plugin dialog did not reopen: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
+    checked(
+        test_input,
+        environment,
+        &["window", "close", &home_id.to_string()],
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = checked(test_input, environment, &["plugins"])?;
+        let status: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&status).map_err(|error| error.to_string())?;
+        let plugin = status
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .ok_or("dialog plugin disappeared after owner close")?;
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        if !plugin.desired_enabled
+            && plugin.health == nickel_session_protocol::PluginRuntimeHealth::Disabled
+            && plugin.memory.native_ui_bytes.is_none()
+            && !surfaces.contains("org.example.surface-dialog/")
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("closing dialog owner left plugin surfaces alive: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
     Ok(())
 }
 
