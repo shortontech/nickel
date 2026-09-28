@@ -2595,7 +2595,7 @@ impl PluginPanelApplication {
         package: &PluginPackage,
         settings: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> Result<Self, String> {
-        let data = serde_json::json!({ "settings": settings }).to_string();
+        let data = serde_json::json!({ "settings": settings, "slots": {} }).to_string();
         let mut application =
             Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
         application.sync_images(package_images(package)?);
@@ -2618,6 +2618,7 @@ impl PluginPanelApplication {
     ) -> Result<Self, String> {
         let data = serde_json::json!({
             "settings": settings,
+            "slots": {},
             "surface": {
                 "id": surface.id,
                 "kind": surface.kind.as_str(),
@@ -2649,6 +2650,7 @@ impl PluginPanelApplication {
             for surface in &package.manifest.surfaces {
                 let mut data = serde_json::json!({
                     "settings": settings,
+                    "slots": {},
                     "surface": {
                         "id": surface.id,
                         "kind": surface.kind.as_str(),
@@ -2974,6 +2976,25 @@ impl PluginPanelApplication {
             .values()
             .map(|(_, image)| image.as_raw().len() as u64)
             .fold(0_u64, u64::saturating_add)
+    }
+
+    pub(crate) fn sync_external_slots(&mut self, slots: &Value) -> Result<bool, String> {
+        let Some(data) = self.projection_data.as_deref() else {
+            return Err("plugin has no external projection".into());
+        };
+        let mut data: Value = serde_json::from_str(data)
+            .map_err(|error| format!("invalid external plugin projection: {error}"))?;
+        data.as_object_mut()
+            .ok_or("external plugin projection must be an object")?
+            .insert("slots".into(), slots.clone());
+        let data = data.to_string();
+        if self.projection_data.as_deref() == Some(data.as_str()) {
+            return Ok(false);
+        }
+        self.runtime.set_data(&data)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.projection_data = Some(data);
+        Ok(true)
     }
 
     pub fn sync_launcher(&mut self, launcher: &Launcher) -> Result<bool, String> {

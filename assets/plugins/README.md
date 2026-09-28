@@ -43,6 +43,9 @@ The [task badge example](example-task-badge/) shows a surface-free extension
 that contributes UI to the bundled taskbar's declared slot.
 The [desktop widget example](example-desktop-widget/) contributes a bounded
 value and progress display to the bundled desktop plugin.
+The [widget host](example-widget-host/) declares a slot that another installed
+plugin can fill. Run it with the [widget contributor](example-widget-contributor/)
+using `nickel-plugin dev assets/plugins/example-widget-host assets/plugins/example-widget-contributor`.
 The [dialog example](example-dialog/) opens a component dialog and requests
 Settings through a declared capability.
 The [separate dialog example](example-surface-dialog/) opens an owned native

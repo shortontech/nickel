@@ -121,7 +121,7 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod platform {
     use std::{
-        collections::hash_map::DefaultHasher,
+        collections::{HashSet, hash_map::DefaultHasher},
         hash::{Hash, Hasher},
         path::{Path, PathBuf},
         process::{Child, Command},
@@ -203,7 +203,8 @@ mod platform {
                     ("org.nickel.taskbar", "task-badge", PluginSlotContract::Badge)
                     | ("org.nickel.taskbar", "task-action", PluginSlotContract::Action)
                     | ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget)
-                    | ("org.nickel.control-center", "control-section", PluginSlotContract::Section))
+                    | ("org.nickel.control-center", "control-section", PluginSlotContract::Section)
+                    | (_, _, PluginSlotContract::Widget))
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
         if !bundled && !panel && !extension {
             return Err(
@@ -418,10 +419,53 @@ mod platform {
             .map_err(|error| format!("could not start Nickel test shell: {error}"))
     }
 
-    pub(super) fn run(directory: PathBuf) -> Result<(), String> {
-        let directory = std::fs::canonicalize(directory)
-            .map_err(|error| format!("could not open plugin directory: {error}"))?;
-        let mut package = load_dev_package(&directory)?;
+    fn load_dev_packages(directories: &[PathBuf]) -> Result<Vec<PluginPackage>, String> {
+        let packages = directories
+            .iter()
+            .map(|directory| load_dev_package(directory))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ids = packages
+            .iter()
+            .map(|package| package.manifest.id.as_str())
+            .collect::<HashSet<_>>();
+        if ids.len() != packages.len() {
+            return Err("dev package IDs must be distinct".into());
+        }
+        for package in &packages {
+            for contribution in &package.manifest.contributes {
+                if bundled_manifest(&contribution.target_plugin).is_none()
+                    && !ids.contains(contribution.target_plugin.as_str())
+                {
+                    return Err(format!(
+                        "dev needs the target package directory for {}",
+                        contribution.target_plugin
+                    ));
+                }
+            }
+        }
+        Ok(packages)
+    }
+
+    fn stage_all(
+        packages: &[PluginPackage],
+        directories: &[PathBuf],
+        root: &Path,
+    ) -> Result<(), String> {
+        for (package, directory) in packages.iter().zip(directories) {
+            stage(package, directory, root)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn run(directories: Vec<PathBuf>) -> Result<(), String> {
+        let directories = directories
+            .into_iter()
+            .map(|directory| {
+                std::fs::canonicalize(directory)
+                    .map_err(|error| format!("could not open plugin directory: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut packages = load_dev_packages(&directories)?;
         let shell = std::env::current_exe()
             .map_err(|error| format!("could not locate nickel-plugin: {error}"))?
             .with_file_name(if cfg!(target_os = "windows") {
@@ -437,15 +481,23 @@ mod platform {
         }
         let config = tempfile::tempdir()
             .map_err(|error| format!("could not create isolated plugin profile: {error}"))?;
-        stage(&package, &directory, config.path())?;
-        let mut current_fingerprint = source_fingerprint(&directory, &package.manifest.entry)?;
+        stage_all(&packages, &directories, config.path())?;
+        let mut current_fingerprints = packages
+            .iter()
+            .zip(&directories)
+            .map(|(package, directory)| source_fingerprint(directory, &package.manifest.entry))
+            .collect::<Result<Vec<_>, _>>()?;
         let running = Arc::new(AtomicBool::new(true));
         let signal = running.clone();
         ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))
             .map_err(|error| format!("could not install interrupt handler: {error}"))?;
         println!(
-            "Testing {} in isolated Nickel. Save plugin.json, JSX source, or {} to reload; Ctrl+C stops.",
-            package.manifest.id, package.manifest.entry
+            "Testing {} in isolated Nickel. Save a plugin manifest, source, or image to reload; Ctrl+C stops.",
+            packages
+                .iter()
+                .map(|package| package.manifest.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         #[cfg(target_os = "linux")]
         println!(
@@ -457,7 +509,9 @@ mod platform {
         let mut child = launch(
             &shell,
             config.path(),
-            bundled_manifest(&package.manifest.id).is_some(),
+            packages
+                .iter()
+                .any(|package| bundled_manifest(&package.manifest.id).is_some()),
         )?;
         let mut child_exited = false;
         while running.load(Ordering::SeqCst) {
@@ -475,39 +529,61 @@ mod platform {
                 }
             }
             std::thread::sleep(Duration::from_millis(500));
-            let observed = match source_fingerprint(&directory, &package.manifest.entry) {
+            let observed = match packages
+                .iter()
+                .zip(&directories)
+                .map(|(package, directory)| source_fingerprint(directory, &package.manifest.entry))
+                .collect::<Result<Vec<_>, _>>()
+            {
                 Ok(observed) => observed,
                 Err(error) => {
                     eprintln!("plugin edit: {error}");
                     continue;
                 }
             };
-            if observed == current_fingerprint {
+            if observed == current_fingerprints {
                 continue;
             }
-            current_fingerprint = observed;
-            let next = match load_dev_package(&directory) {
+            current_fingerprints = observed;
+            let next = match load_dev_packages(&directories) {
                 Ok(next) => next,
                 Err(error) => {
                     eprintln!("plugin edit: {error}");
                     continue;
                 }
             };
-            if next.manifest.id != package.manifest.id {
+            if next
+                .iter()
+                .zip(&packages)
+                .any(|(next, old)| next.manifest.id != old.manifest.id)
+            {
                 eprintln!("plugin ID changed; restart nickel-plugin dev for a new identity");
                 continue;
             }
             stop(&mut child);
-            stage(&next, &directory, config.path())?;
-            package = next;
-            current_fingerprint = source_fingerprint(&directory, &package.manifest.entry)?;
+            stage_all(&next, &directories, config.path())?;
+            packages = next;
+            current_fingerprints = packages
+                .iter()
+                .zip(&directories)
+                .map(|(package, directory)| source_fingerprint(directory, &package.manifest.entry))
+                .collect::<Result<Vec<_>, _>>()?;
             child = launch(
                 &shell,
                 config.path(),
-                bundled_manifest(&package.manifest.id).is_some(),
+                packages
+                    .iter()
+                    .any(|package| bundled_manifest(&package.manifest.id).is_some()),
             )?;
             child_exited = false;
-            println!("Reloaded {}", package.manifest.id);
+            println!(
+                "Reloaded {}",
+                packages
+                    .iter()
+                    .map(|package| package.manifest.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         stop(&mut child);
         Ok(())
@@ -529,6 +605,36 @@ mod platform {
                 let package = load_dev_package(&root.join(name)).unwrap();
                 assert!(package.manifest.surfaces.is_empty());
                 assert_eq!(package.manifest.contributes.len(), 1);
+            }
+        }
+
+        #[test]
+        fn stages_a_widget_provider_and_contributor_together() {
+            let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
+            let host = root.join("example-widget-host");
+            let contributor = root.join("example-widget-contributor");
+            assert!(
+                load_dev_packages(&[contributor.clone()])
+                    .unwrap_err()
+                    .contains("target package directory")
+            );
+            let directories = vec![host, contributor];
+            let packages = load_dev_packages(&directories).unwrap();
+            let profile = tempfile::tempdir().unwrap();
+            stage_all(&packages, &directories, profile.path()).unwrap();
+            for package in packages {
+                let staged = PluginPackage::load(
+                    staged_config_directory(profile.path())
+                        .join("plugins")
+                        .join(&package.manifest.id),
+                )
+                .unwrap();
+                let activation = PluginActivationSettings::load(
+                    staged_config_directory(profile.path()).join("plugin-activation.json"),
+                )
+                .unwrap();
+                assert!(activation.approval_current(&staged.manifest, &staged.source_digest()));
+                assert!(activation.desired_enabled(&staged.manifest.id, false));
             }
         }
 
@@ -777,11 +883,11 @@ mod platform {
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-pub(super) fn run(directory: std::path::PathBuf) -> Result<(), String> {
-    platform::run(directory)
+pub(super) fn run(directories: Vec<std::path::PathBuf>) -> Result<(), String> {
+    platform::run(directories)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub(super) fn run(_directory: std::path::PathBuf) -> Result<(), String> {
+pub(super) fn run(_directories: Vec<std::path::PathBuf>) -> Result<(), String> {
     Err("nickel-plugin dev currently requires Linux or Windows".into())
 }

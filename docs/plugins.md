@@ -207,6 +207,22 @@ The [example desktop widget](../assets/plugins/example-desktop-widget/) is a
 working package. Widgets appear in a bounded stack on the desktop; at most
 three are visible. Replacement selection and additive ordering follow the
 same rules as badges.
+Installed plugins can also provide their own `widget` slots. The provider's
+JSX reads `nickel.data.slots[slotId]`, an array of bounded objects with
+`pluginId`, `label`, `value`, `percent`, and `color`. Nickel refreshes this data
+when a contributor is enabled, disabled, or changes a setting. The provider
+chooses where and how to render it. A replacement contribution wins by priority
+and plugin ID; additive contributions follow, with at most eight widgets per
+slot. The [widget host](../assets/plugins/example-widget-host/) and
+[widget contributor](../assets/plugins/example-widget-contributor/) demonstrate
+the relationship. Run both in one isolated session:
+
+```sh
+nickel-plugin dev assets/plugins/example-widget-host assets/plugins/example-widget-contributor
+```
+
+Saving either package restarts that session. For an installed plugin, Settings
+shows the declared target and slot before enablement.
 The taskbar also provides a `task-action` slot with the `action` contract. A
 surface-free extension can return
 `h(Action, { id: "find-apps", item: "org.example.app", label: "Find apps", onClick: applicationId => nickel.request("show-launcher") })`.

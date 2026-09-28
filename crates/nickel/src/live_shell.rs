@@ -739,6 +739,16 @@ pub struct LiveShell {
             crate::plugin_panel::PluginPanelApplication,
         ),
     >,
+    plugin_widget_slot_hosts: std::collections::BTreeMap<
+        String,
+        (
+            String,
+            String,
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
     plugin_notification_host:
         Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_hosts:
@@ -1022,6 +1032,7 @@ enum ExecutableExtensionKind {
     TaskbarAction,
     DesktopWidget,
     ControlSection,
+    PluginWidget,
 }
 
 fn should_auto_start_installed_plugin(desired_enabled: bool, safe_mode: bool) -> bool {
@@ -1060,6 +1071,7 @@ fn executable_extension_priority(
         ("org.nickel.control-center", "control-section", PluginSlotContract::Section) => {
             ExecutableExtensionKind::ControlSection
         }
+        (_, _, PluginSlotContract::Widget) => ExecutableExtensionKind::PluginWidget,
         _ => return Err("this runtime cannot compose the declared extension".into()),
     };
     if !manifest.surfaces.is_empty() {
@@ -1946,6 +1958,7 @@ impl LiveShell {
             plugin_taskbar_action_hosts: std::collections::BTreeMap::new(),
             plugin_control_section_hosts: std::collections::BTreeMap::new(),
             plugin_desktop_widget_hosts: std::collections::BTreeMap::new(),
+            plugin_widget_slot_hosts: std::collections::BTreeMap::new(),
             plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
             plugin_taskbar_memory: HashMap::new(),
@@ -2785,10 +2798,21 @@ impl LiveShell {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Taskbar => self.panel_scene(width, height),
             SurfaceRole::Panel => {
+                let slots = self.plugin_widget_slot_projection(&self.plugin_panel_owner);
                 let Some(host) = self.plugin_panel_host.as_mut() else {
                     return Vec::new();
                 };
+                let slots_changed = slots.is_some_and(|slots| {
+                    match host.application_mut().sync_external_slots(&slots) {
+                        Ok(changed) => changed,
+                        Err(error) => {
+                            tracing::warn!(plugin = self.plugin_panel_owner, %error, "plugin slot projection failed");
+                            false
+                        }
+                    }
+                });
                 let outcome = host.step(HostBatch {
+                    application_changed: slots_changed,
                     surface_size: Some((width, height)),
                     ..HostBatch::default()
                 });
@@ -3677,6 +3701,92 @@ impl LiveShell {
         })
     }
 
+    fn plugin_widget_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
+        use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
+
+        let target = self.plugin_registry.get(target_id)?;
+        let mut slots = serde_json::Map::new();
+        for slot in target
+            .manifest
+            .provides_slots
+            .iter()
+            .filter(|slot| slot.contract == PluginSlotContract::Widget)
+        {
+            let mut contributors = self
+                .plugin_widget_slot_hosts
+                .iter()
+                .filter(|(_, (plugin, name, _, _, _))| plugin == target_id && name == &slot.id)
+                .collect::<Vec<_>>();
+            contributors.sort_by_key(|(id, (_, _, priority, _, _))| (*priority, id.as_str()));
+            let replacement = contributors
+                .iter()
+                .rev()
+                .find(|(_, (_, _, _, mode, _))| *mode == PluginContributionMode::Replace)
+                .copied();
+            let mut ordered = replacement.into_iter().collect::<Vec<_>>();
+            ordered.extend(
+                contributors
+                    .into_iter()
+                    .filter(|(_, (_, _, _, mode, _))| *mode == PluginContributionMode::Add),
+            );
+            let mut widgets = Vec::new();
+            for (id, (_, _, _, _, application)) in ordered {
+                if let Ok(items) = application.desktop_widgets() {
+                    for item in items.into_iter().take(8 - widgets.len()) {
+                        widgets.push(serde_json::json!({
+                            "pluginId": id,
+                            "label": item.label,
+                            "value": item.value,
+                            "percent": item.percent,
+                            "color": item.color,
+                        }));
+                    }
+                }
+                if widgets.len() == 8 {
+                    break;
+                }
+            }
+            slots.insert(slot.id.clone(), serde_json::Value::Array(widgets));
+        }
+        (!slots.is_empty()).then_some(serde_json::Value::Object(slots))
+    }
+
+    fn refresh_plugin_widget_slot_hosts(&mut self, target_id: &str) {
+        let Some(slots) = self.plugin_widget_slot_projection(target_id) else {
+            return;
+        };
+        let keys = self
+            .plugin_panels()
+            .into_iter()
+            .filter(|(key, _)| key.plugin_id == target_id)
+            .map(|(key, _)| key)
+            .collect::<Vec<_>>();
+        for key in keys {
+            let Some(host) = self.plugin_panel_host_for(&key) else {
+                continue;
+            };
+            let changed = match host.application_mut().sync_external_slots(&slots) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    tracing::warn!(plugin = key.plugin_id, %error, "plugin slot projection failed");
+                    continue;
+                }
+            };
+            if !changed {
+                continue;
+            }
+            let outcome = host.step(HostBatch {
+                application_changed: true,
+                ..HostBatch::default()
+            });
+            let image_bytes = host.application_mut().retained_image_bytes();
+            self.record_plugin_panel_memory(
+                &key,
+                (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
+            );
+        }
+    }
+
     pub(crate) fn plugin_panel_scene(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -3689,8 +3799,19 @@ impl LiveShell {
         {
             return Some(self.scene(SurfaceRole::Panel, width, height));
         }
+        let slots = self.plugin_widget_slot_projection(&key.plugin_id);
         let (_, host) = self.plugin_panel_extra_hosts.get_mut(key)?;
+        let slots_changed = slots.is_some_and(|slots| {
+            match host.application_mut().sync_external_slots(&slots) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    tracing::warn!(plugin = key.plugin_id, %error, "plugin slot projection failed");
+                    false
+                }
+            }
+        });
         let outcome = host.step(HostBatch {
+            application_changed: slots_changed,
             surface_size: Some((width, height)),
             ..HostBatch::default()
         });
@@ -4001,7 +4122,21 @@ impl LiveShell {
                                                 && contribution.target_slot == "control-section"
                                                 && section_replacement.is_some_and(|winner| {
                                                     winner != entry.manifest.id
-                                                })))
+                                                }))
+                                            || self
+                                                .plugin_widget_slot_hosts
+                                                .iter()
+                                                .filter(|(_, (target, slot, _, mode, _))| {
+                                                    target == &contribution.target_plugin
+                                                        && slot == &contribution.target_slot
+                                                        && *mode == PluginContributionMode::Replace
+                                                })
+                                                .max_by_key(|(id, (_, _, priority, _, _))| {
+                                                    (*priority, id.as_str())
+                                                })
+                                                .is_some_and(|(winner, _)| {
+                                                    winner != &entry.manifest.id
+                                                }))
                                     {
                                         " (superseded by another replacement)"
                                     } else {
@@ -4184,6 +4319,11 @@ impl LiveShell {
                 } else if let Some((_, _, current)) = self.plugin_desktop_widget_hosts.get_mut(id) {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
+                } else if let Some((_, _, _, _, current)) =
+                    self.plugin_widget_slot_hosts.get_mut(id)
+                {
+                    extension_bytes = Some(application.retained_contribution_bytes());
+                    *current = application;
                 } else if let Some((_, _, current)) = self.plugin_control_section_hosts.get_mut(id)
                 {
                     extension_bytes = Some(application.retained_contribution_bytes());
@@ -4211,6 +4351,10 @@ impl LiveShell {
                 );
             }
         }
+        if let Some((target, _, _, _, _)) = self.plugin_widget_slot_hosts.get(id) {
+            let target = target.clone();
+            self.refresh_plugin_widget_slot_hosts(&target);
+        }
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
         self.maybe_publish_plugin_status();
@@ -4225,6 +4369,12 @@ impl LiveShell {
         if entry.desired_enabled == enabled {
             return Ok(false);
         }
+        let extension_target = entry.manifest.contributes.first().map(|contribution| {
+            (
+                contribution.target_plugin.clone(),
+                contribution.target_slot.clone(),
+            )
+        });
         let external_extension = if enabled && !entry.manifest.contributes.is_empty() {
             let (kind, priority, mode) =
                 executable_extension_priority(&entry.manifest, &self.plugin_registry)?;
@@ -4338,6 +4488,7 @@ impl LiveShell {
                 self.application_menu_plugin_host = None;
             }
             self.plugin_desktop_widget_hosts.remove(id);
+            self.plugin_widget_slot_hosts.remove(id);
             self.plugin_control_section_hosts.remove(id);
             self.plugin_panel_extra_hosts
                 .retain(|key, _| key.plugin_id != id);
@@ -4373,6 +4524,9 @@ impl LiveShell {
                 self.plugin_desktop_host = None;
                 self.desktop_application_dirty = true;
             }
+            if let Some((target, _)) = &extension_target {
+                self.refresh_plugin_widget_slot_hosts(target);
+            }
             self.maybe_publish_plugin_status();
             return Ok(true);
         }
@@ -4397,6 +4551,15 @@ impl LiveShell {
                 ExecutableExtensionKind::ControlSection => {
                     self.plugin_control_section_hosts
                         .insert(id.to_owned(), (priority, mode, application));
+                }
+                ExecutableExtensionKind::PluginWidget => {
+                    let (target_plugin, target_slot) = extension_target
+                        .clone()
+                        .expect("validated extension has a target");
+                    self.plugin_widget_slot_hosts.insert(
+                        id.to_owned(),
+                        (target_plugin, target_slot, priority, mode, application),
+                    );
                 }
             }
             Ok(())
@@ -4522,6 +4685,12 @@ impl LiveShell {
                 Err(error)
             }
         };
+        if result.is_ok() {
+            if let Some((target, _)) = &extension_target {
+                self.refresh_plugin_widget_slot_hosts(target);
+            }
+            self.refresh_plugin_widget_slot_hosts(id);
+        }
         self.maybe_publish_plugin_status();
         result
     }

@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.example.widget-contributor",
+  "name": "Widget Contributor Example",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "contributes": [{"target_plugin":"org.example.widget-host","target_slot":"metrics","contract":"widget","mode":"add","priority":0}],
+  "settings": [{"id":"unread-count","label":"Unread count","kind":"integer","default":5,"min":0,"max":99999}]
+}

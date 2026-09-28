@@ -124,6 +124,23 @@ fn run() -> Result<(), String> {
         include_str!("../../../../../assets/plugins/example-overlay/main.js"),
     )
     .map_err(|error| error.to_string())?;
+    for (id, manifest, source) in [
+        (
+            "org.example.widget-host",
+            include_str!("../../../../../assets/plugins/example-widget-host/plugin.json"),
+            include_str!("../../../../../assets/plugins/example-widget-host/main.js"),
+        ),
+        (
+            "org.example.widget-contributor",
+            include_str!("../../../../../assets/plugins/example-widget-contributor/plugin.json"),
+            include_str!("../../../../../assets/plugins/example-widget-contributor/main.js"),
+        ),
+    ] {
+        let directory = runtime.join("config/nickel/plugins").join(id);
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        fs::write(directory.join("plugin.json"), manifest).map_err(|error| error.to_string())?;
+        fs::write(directory.join("main.js"), source).map_err(|error| error.to_string())?;
+    }
     let capability_file = runtime.join("shell-environment");
 
     let mut command = Command::new(&nickel);
@@ -423,6 +440,7 @@ fn exercise(
         return Err("installed panel did not release its reported UI memory".into());
     }
     verify_component_window(test_input, &environment)?;
+    verify_generic_widget_slot(test_input, &environment)?;
     verify_sibling_windows(test_input, &environment)?;
     verify_separate_plugin_dialog(test_input, &environment)?;
     verify_separate_plugin_overlay(test_input, &environment)?;
@@ -457,6 +475,80 @@ fn exercise(
         ));
     }
     verify_settings_memory_report(settings, test_input, &environment)?;
+    Ok(())
+}
+
+fn verify_generic_widget_slot(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let host = "org.example.widget-host";
+    let contributor = "org.example.widget-contributor";
+    checked(test_input, environment, &["plugin-set", host, "enabled"])?;
+    let base = wait_for_plugin_native_memory(test_input, environment, host, Duration::from_secs(5))?;
+    checked(test_input, environment, &["plugin-set", contributor, "enabled"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let contributed = loop {
+        let status = checked(test_input, environment, &["plugins"])?;
+        let status: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&status).map_err(|error| error.to_string())?;
+        let provider = status.plugins.iter().find(|plugin| plugin.id == host);
+        let extension = status.plugins.iter().find(|plugin| plugin.id == contributor);
+        if let (Some(provider), Some(extension)) = (provider, extension)
+            && let Some(bytes) = provider.memory.native_ui_bytes
+            && bytes > base
+            && extension.health == nickel_session_protocol::PluginRuntimeHealth::Running
+            && extension.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0)
+        {
+            break bytes;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("generic widget did not enter its provider: {status:?}"));
+        }
+        thread::sleep(POLL);
+    };
+    checked(
+        test_input,
+        environment,
+        &["plugin-setting", contributor, "unread-count", "12345"],
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let contributed = loop {
+        let status = checked(test_input, environment, &["plugins"])?;
+        let status: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&status).map_err(|error| error.to_string())?;
+        let provider = status.plugins.iter().find(|plugin| plugin.id == host);
+        if let Some(bytes) = provider.and_then(|plugin| plugin.memory.native_ui_bytes)
+            && bytes > contributed
+        {
+            break bytes;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("generic widget setting did not refresh its provider: {status:?}"));
+        }
+        thread::sleep(POLL);
+    };
+    checked(test_input, environment, &["plugin-set", contributor, "disabled"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = checked(test_input, environment, &["plugins"])?;
+        let status: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&status).map_err(|error| error.to_string())?;
+        let provider = status.plugins.iter().find(|plugin| plugin.id == host);
+        let extension = status.plugins.iter().find(|plugin| plugin.id == contributor);
+        if let (Some(provider), Some(extension)) = (provider, extension)
+            && provider.memory.native_ui_bytes.is_some_and(|bytes| bytes < contributed)
+            && !extension.desired_enabled
+            && extension.memory.native_ui_bytes.is_none()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("generic widget did not retire from its provider: {status:?}"));
+        }
+        thread::sleep(POLL);
+    }
+    checked(test_input, environment, &["plugin-set", host, "disabled"])?;
     Ok(())
 }
 
