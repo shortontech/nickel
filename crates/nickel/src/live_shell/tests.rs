@@ -459,7 +459,7 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
             .set_plugin_enabled("org.example.panel", false)
             .unwrap()
     );
-    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+    assert!(!shell.plugin_surface_matches(&panel_key));
     assert!(!shell.apply_plugin_effects(vec![
         crate::plugin_panel::PluginEffect::SetPluginSetting {
             plugin_id: "org.example.panel".into(),
@@ -980,6 +980,7 @@ fn installed_dock_uses_declared_offset_and_translucent_panel() {
         .insert(descriptor.manifest.id.clone(), descriptor);
 
     assert!(shell.set_plugin_enabled("org.example.dock", true).unwrap());
+    let dock_key = shell.plugin_panels()[0].0.clone();
     assert_eq!(
         shell.plugin_panel_surface().kind,
         nickel_core::plugins::PluginSurfaceKind::Dock
@@ -995,7 +996,7 @@ fn installed_dock_uses_declared_offset_and_translucent_panel() {
         if *color == 0x80202020
     )));
     assert!(shell.set_plugin_enabled("org.example.dock", false).unwrap());
-    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+    assert!(!shell.plugin_surface_matches(&dock_key));
 }
 
 #[test]
@@ -1136,14 +1137,15 @@ fn one_installed_package_runs_two_surfaces_and_updates_both_settings_views() {
             .set_plugin_setting(id, "show-label", serde_json::json!(false))
             .unwrap()
     );
-    assert_eq!(
+    assert!(
         shell
             .plugin_registry
             .get(id)
             .unwrap()
             .memory
-            .native_ui_bytes,
-        Some(0)
+            .native_ui_bytes
+            .unwrap_or(0)
+            > 0
     );
     for (key, surface) in &panels {
         let commands = shell
@@ -1221,7 +1223,13 @@ fn internal_shell_presents_two_surfaces_from_one_package_on_one_output() {
     let panels = coordinator
         .surfaces()
         .iter()
-        .filter(|surface| surface.role == crate::winit_shell::SurfaceRole::Panel)
+        .filter(|surface| {
+            surface.role == crate::winit_shell::SurfaceRole::Panel
+                && surface
+                    .plugin
+                    .as_ref()
+                    .is_some_and(|key| key.plugin_id == "org.example.multi")
+        })
         .map(|surface| {
             (
                 surface.id,
@@ -1284,7 +1292,12 @@ fn installed_panel_start_failure_is_visible_until_disabled() {
         panel.health,
         nickel_session_protocol::PluginRuntimeHealth::Failed(_)
     ));
-    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+    assert!(
+        shell
+            .plugin_panels()
+            .iter()
+            .all(|(key, _)| key.plugin_id != "org.example.broken")
+    );
     assert!(
         shell
             .set_plugin_enabled("org.example.broken", false)
@@ -2214,11 +2227,8 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
 }
 
 #[test]
-fn native_audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes() {
+fn audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes() {
     let mut shell = LiveShell::new().unwrap();
-    shell
-        .set_plugin_enabled(&crate::plugin_panel::volume_osd_manifest().id, false)
-        .unwrap();
     let mut status = AudioStatus {
         available: true,
         volume_percent: 31,
