@@ -129,7 +129,6 @@
         );
         assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
         assert!(shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
-        assert!(shell.preview_frame.is_none());
         shell.open_window_preview(0);
         assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
 
@@ -137,7 +136,6 @@
         shell.open_window_preview(0);
         assert!(shell.preview_plugin_active());
         assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
-        assert!(shell.preview_frame.is_none());
     }
 
     #[test]
@@ -172,7 +170,6 @@
         shell.rebuild_task_switcher_preview();
         assert!(!shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
         assert!(shell.preview_plugin_active());
-        assert!(shell.preview_frame.is_none());
         let group = shell.task_switcher_group.clone().unwrap();
         let (projection, _) = shell.preview_plugin_projection(&group);
         assert_eq!(projection["taskSwitcher"], true);
@@ -217,7 +214,6 @@
         assert!(shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
         assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
         assert!(!shell.preview_plugin_active());
-        assert!(shell.preview_frame.is_none());
     }
 
     #[test]

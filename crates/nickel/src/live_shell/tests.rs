@@ -2518,7 +2518,6 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
         shell.plugin_preview_host.is_some(),
         "consecutive switch steps must retain the JSX preview host so its presentation token advances"
     );
-    assert!(shell.preview_frame.is_none());
     let _ = shell.scene(preview_role, 640, 240);
     assert_ne!(
         shell.scene_change_token(preview_role),

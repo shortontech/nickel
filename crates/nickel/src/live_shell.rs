@@ -137,8 +137,8 @@ use crate::{
     session_host::{SessionHost, default_session_host},
     window_preview::{
         ApplicationMenuAction, ApplicationMenuTarget, MENU_WIDTH, MenuAction, PreviewAction,
-        TaskbarPreviewAnchor, WindowPreviewFrame, application_menu_entries, display_menu_entries,
-        menu_height, menu_height_for_rows, preview_dimensions, semantic_theme_from_palette,
+        TaskbarPreviewAnchor, application_menu_entries, display_menu_entries, menu_height,
+        menu_height_for_rows, preview_dimensions, semantic_theme_from_palette,
         task_switcher_dimensions, validated_application_close_targets,
         window_menu_action_is_current, window_menu_entries, window_menu_max_rows,
         workspace_menu_entries,
@@ -594,7 +594,6 @@ pub struct LiveShell {
     preview_hovered: Option<crate::model::WindowId>,
     preview_images: HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
     preview_refresh_deadline: Option<Instant>,
-    preview_frame: Option<WindowPreviewFrame>,
     plugin_preview_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     window_menu: Option<crate::model::WindowId>,
     window_menu_snapshot: Option<OpenWindow>,
@@ -1752,7 +1751,6 @@ impl LiveShell {
             preview_hovered: None,
             preview_images: HashMap::new(),
             preview_refresh_deadline: None,
-            preview_frame: None,
             plugin_preview_host: None,
             window_menu: None,
             window_menu_snapshot: None,
@@ -2513,9 +2511,9 @@ impl LiveShell {
             SurfaceRole::WindowPreview => {
                 self.preview_plugin_active()
                     || self
-                        .preview_frame
+                        .plugin_preview_host
                         .as_ref()
-                        .is_none_or(WindowPreviewFrame::remote_access_protected)
+                        .is_none_or(|host| host.remote_access_protected())
             }
             SurfaceRole::WindowContextMenu => {
                 if let Some(host) = self.window_menu_plugin_host.as_ref() {
@@ -4462,7 +4460,6 @@ impl LiveShell {
                     self.close_window_preview();
                 } else {
                     self.preview_pending = None;
-                    self.preview_frame = None;
                 }
             } else if id == crate::plugin_panel::desktop_manifest().id {
                 self.retire_desktop_plugin_state();
@@ -4714,12 +4711,7 @@ impl LiveShell {
             self.plugin_preview_host
                 .as_ref()
                 .filter(|_| self.preview_plugin_active())
-                .and_then(|host| host.next_deadline())
-                .or_else(|| {
-                    self.preview_frame
-                        .as_ref()
-                        .and_then(WindowPreviewFrame::next_deadline)
-                }),
+                .and_then(|host| host.next_deadline()),
         );
         push(
             "window-preview-open",
@@ -4767,8 +4759,7 @@ impl LiveShell {
                 .map(|host| host_token(host.inspect())),
             SurfaceRole::WindowPreview => self
                 .preview_plugin_active()
-                .then(|| host_token(self.plugin_preview_host.as_ref().unwrap().inspect()))
-                .or_else(|| self.preview_frame.as_ref().map(|host| host.change_token())),
+                .then(|| host_token(self.plugin_preview_host.as_ref().unwrap().inspect())),
             SurfaceRole::WindowContextMenu => self
                 .window_menu_plugin_host
                 .as_ref()
@@ -5031,22 +5022,6 @@ impl LiveShell {
             if control_changed {
                 changed.push(SurfaceRole::ControlCenter);
             }
-        }
-        if self
-            .preview_frame
-            .as_ref()
-            .and_then(WindowPreviewFrame::next_deadline)
-            .is_some_and(|deadline| now >= deadline)
-            && let Some(frame) = self.preview_frame.as_mut()
-            && frame
-                .step(HostBatch {
-                    now: Some(now),
-                    events: vec![HostEvent::Poll],
-                    ..HostBatch::default()
-                })
-                .changed
-        {
-            changed.push(SurfaceRole::WindowPreview);
         }
         changed
     }
@@ -6165,24 +6140,10 @@ impl LiveShell {
                 outcome.changed | self.apply_notification_effects()
             }
             SurfaceRole::WindowPreview => {
-                if self.preview_plugin_active() {
-                    return self
+                self.preview_plugin_active()
+                    && self
                         .preview_plugin_event(HostEvent::Ui(event), (width, height), None)
-                        .changed;
-                }
-                let Some(frame) = self.preview_frame.as_mut() else {
-                    return false;
-                };
-                let outcome = frame.step(HostBatch {
-                    surface_size: Some((width, height)),
-                    events: vec![HostEvent::Ui(event)],
-                    ..HostBatch::default()
-                });
-                let actions = frame.take_actions();
-                for action in actions {
-                    self.apply_preview_action(action);
-                }
-                outcome.changed
+                        .changed
             }
             SurfaceRole::WindowContextMenu => {
                 if !self.surface_visible(SurfaceRole::WindowContextMenu) {
@@ -6598,13 +6559,7 @@ impl LiveShell {
                     PreviewTargetAction::Close => PreviewAction::Close(window),
                     PreviewTargetAction::OpenMenu => PreviewAction::OpenMenu(window),
                 };
-                let bounds = if self.preview_plugin_active() {
-                    self.preview_plugin_bounds(preview_action)?
-                } else {
-                    self.preview_frame
-                        .as_ref()?
-                        .semantic_bounds(preview_action)?
-                };
+                let bounds = self.preview_plugin_bounds(preview_action)?;
                 let point = Point {
                     x: bounds.origin.x + bounds.size.width / 2.0,
                     y: bounds.origin.y + bounds.size.height / 2.0,
@@ -6919,19 +6874,7 @@ impl LiveShell {
                 .preview_plugin_event(HostEvent::Controller(action), size, None)
                 .changed;
         }
-        let Some(frame) = self.preview_frame.as_mut() else {
-            return false;
-        };
-        let primed = action != ControllerAction::Cancel && frame.ensure_controller_selection();
-        let outcome = frame.step(HostBatch {
-            events: vec![HostEvent::Controller(action)],
-            ..HostBatch::default()
-        });
-        let actions = frame.take_actions();
-        for action in actions {
-            self.apply_preview_action(action);
-        }
-        outcome.changed || primed
+        false
     }
 
     pub fn panel_pointer_entered(&mut self) -> bool {
@@ -6996,20 +6939,7 @@ impl LiveShell {
             let _ = self.send_session_command("highlight-preview-window", command);
             return true;
         }
-        let hovered = self
-            .preview_frame
-            .as_mut()
-            .and_then(|frame| frame.transition_pointer_hover(Point { x, y }));
-        if hovered == self.preview_hovered {
-            return false;
-        }
-        self.preview_hovered = hovered;
-        let command = hovered.map_or(
-            ShellCommand::ClearWindowHighlight,
-            ShellCommand::HighlightWindow,
-        );
-        let _ = self.send_session_command("highlight-preview-window", command);
-        true
+        false
     }
 
     pub fn preview_click(&mut self, x: f32, y: f32, right_click: bool) -> bool {
@@ -7031,15 +6961,7 @@ impl LiveShell {
                 .changed;
             return pressed || released;
         }
-        let Some(action) = self
-            .preview_frame
-            .as_mut()
-            .and_then(|frame| frame.transition_pointer(Point { x, y }, right_click))
-        else {
-            return false;
-        };
-        self.apply_preview_action(action);
-        true
+        false
     }
 
     pub fn preview_host_input(
@@ -7054,12 +6976,7 @@ impl LiveShell {
                 internal_normalized_ingress(input, None, "window-preview", host.inspect(), None);
             return self.preview_host_event_authorized(ingress, Some(authority));
         }
-        let Some(frame) = self.preview_frame.as_ref() else {
-            return nickel_ui::HostEventOutcome::default();
-        };
-        let (ingress, authority) =
-            internal_normalized_ingress(input, None, "window-preview", frame.inspect(), None);
-        self.preview_host_event_authorized(ingress, Some(authority))
+        Default::default()
     }
 
     pub(crate) fn preview_host_event_authorized(
@@ -7073,19 +6990,7 @@ impl LiveShell {
             };
             return self.preview_plugin_event(ingress, size, authority);
         }
-        let Some(frame) = self.preview_frame.as_mut() else {
-            return nickel_ui::HostEventOutcome::default();
-        };
-        let outcome = frame.step(HostBatch {
-            events: vec![ingress],
-            normalized_authorities: authority.into_iter().collect(),
-            ..HostBatch::default()
-        });
-        let actions = frame.take_actions();
-        for action in actions {
-            self.apply_preview_action(action);
-        }
-        outcome
+        Default::default()
     }
 
     fn apply_preview_action(&mut self, action: PreviewAction) {
@@ -7112,13 +7017,7 @@ impl LiveShell {
                         let group = groups.get(index)?;
                         let (width, _) = preview_dimensions(group.windows.len());
                         let preview_origin = self.preview_origin_x(index, width);
-                        let card = if self.preview_plugin_active() {
-                            self.preview_plugin_bounds(PreviewAction::Activate(window))?
-                        } else {
-                            self.preview_frame
-                                .as_ref()?
-                                .semantic_bounds(PreviewAction::Activate(window))?
-                        };
+                        let card = self.preview_plugin_bounds(PreviewAction::Activate(window))?;
                         Some(preview_origin + card.origin.x.round() as i32)
                     })
                     .unwrap_or(self.panel_origin_x);
@@ -7237,78 +7136,7 @@ impl LiveShell {
                 _ => return false,
             }
         }
-        let Some(frame) = self.preview_frame.as_mut() else {
-            return false;
-        };
-        if !matches!(key, Some(KeyCode::Escape) | None) {
-            let _ = frame.ensure_controller_selection();
-        }
-        match key {
-            Some(KeyCode::Escape) => {
-                frame.step(HostBatch {
-                    events: vec![HostEvent::Shortcut(Shortcut::Escape)],
-                    ..HostBatch::default()
-                });
-                let dismissed = frame.take_actions().contains(&PreviewAction::Dismiss);
-                if dismissed {
-                    self.close_window_preview();
-                }
-                #[cfg(target_os = "linux")]
-                let _ = self.send_session_command(
-                    "restore-application-focus",
-                    ShellCommand::RestoreApplicationFocus,
-                );
-            }
-            Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
-                frame.step(HostBatch {
-                    events: vec![HostEvent::Controller(ControllerAction::Left)],
-                    ..HostBatch::default()
-                });
-                self.preview_hovered = frame.controller_selected_window();
-                if let Some(window) = self.preview_hovered {
-                    let _ = self.send_session_command(
-                        "highlight-preview-window",
-                        ShellCommand::HighlightWindow(window),
-                    );
-                }
-            }
-            Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
-                frame.step(HostBatch {
-                    events: vec![HostEvent::Controller(ControllerAction::Right)],
-                    ..HostBatch::default()
-                });
-                self.preview_hovered = frame.controller_selected_window();
-                if let Some(window) = self.preview_hovered {
-                    let _ = self.send_session_command(
-                        "highlight-preview-window",
-                        ShellCommand::HighlightWindow(window),
-                    );
-                }
-            }
-            Some(KeyCode::Delete) => {
-                if !frame.close_controller_selected() {
-                    return false;
-                }
-                for action in frame.take_actions() {
-                    self.apply_preview_action(action);
-                }
-            }
-            Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
-                frame.step(HostBatch {
-                    events: vec![HostEvent::Controller(ControllerAction::Confirm)],
-                    ..HostBatch::default()
-                });
-                let actions = frame.take_actions();
-                for action in actions {
-                    if let PreviewAction::Activate(window) = action {
-                        self.send_window_action(window, WindowAction::Activate);
-                        self.close_window_preview();
-                    }
-                }
-            }
-            _ => return false,
-        }
-        true
+        false
     }
 
     fn apply_window_menu_action(&mut self, action: MenuAction) {
@@ -7772,7 +7600,6 @@ impl LiveShell {
         self.preview_hovered = None;
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
-        self.preview_frame = None;
         self.clear_preview_plugin_payload();
         self.window_menu = None;
         self.window_menu_snapshot = None;
@@ -8108,7 +7935,6 @@ impl LiveShell {
                         ShellCommand::ShowTaskSwitcherPeek { window: None },
                     );
                     self.task_switcher_group = None;
-                    self.preview_frame = None;
                     self.preview_images.clear();
                     self.clear_preview_plugin_payload();
                 }
@@ -9941,7 +9767,6 @@ impl LiveShell {
             })
         });
         let Some(group) = group else {
-            self.preview_frame = None;
             return Vec::new();
         };
         if self.preview_plugin_active() {
@@ -9966,7 +9791,6 @@ impl LiveShell {
                 events: vec![HostEvent::Poll],
                 ..HostBatch::default()
             });
-            self.preview_frame = None;
             let commands = host.commands().to_vec();
             let image_bytes = host.application().retained_image_bytes();
             let _ = self.plugin_registry.record_memory(
