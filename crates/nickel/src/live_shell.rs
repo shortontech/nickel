@@ -3335,7 +3335,9 @@ impl LiveShell {
             SurfaceRole::Desktop => true,
             SurfaceRole::Taskbar => self.plugin_taskbar_host.is_some(),
             SurfaceRole::Panel => {
-                self.plugin_panel_host.is_some() || !self.plugin_panel_extra_hosts.is_empty()
+                self.plugin_taskbar_host.is_some()
+                    || self.plugin_panel_host.is_some()
+                    || !self.plugin_panel_extra_hosts.is_empty()
             }
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible && self.control_surface_available(),

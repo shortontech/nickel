@@ -1268,20 +1268,21 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
             (
                 surface.id(),
                 surface.role(),
+                surface.is_taskbar_plugin(),
                 surface.output_name().to_owned(),
                 logical_width,
                 logical_height,
             )
         })
         .collect::<Vec<_>>();
-    for (id, role, output, logical_width, logical_height) in surfaces {
+    for (id, role, taskbar, output, logical_width, logical_height) in surfaces {
         if matches!(role, SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat) {
             continue;
         }
         if !state.surface_visible(role) {
             continue;
         }
-        if role == SurfaceRole::Taskbar {
+        if taskbar {
             state.set_panel_output(output);
         } else if role == SurfaceRole::Desktop
             && let Some((origin, scale)) = state.desktop_output_projection(&output)
@@ -1312,23 +1313,27 @@ fn render_role(
     }
     let surfaces = shell
         .surfaces()
-        .filter(|surface| surface.role() == wanted)
+        .filter(|surface| {
+            surface.role() == wanted
+                || (wanted == SurfaceRole::Taskbar && surface.is_taskbar_plugin())
+        })
         .map(|surface| {
             let (logical_width, logical_height) = surface.window().size();
             (
                 surface.id(),
                 surface.role(),
+                surface.is_taskbar_plugin(),
                 surface.output_name().to_owned(),
                 logical_width,
                 logical_height,
             )
         })
         .collect::<Vec<_>>();
-    for (id, role, output, logical_width, logical_height) in surfaces {
+    for (id, role, taskbar, output, logical_width, logical_height) in surfaces {
         if !state.surface_visible(role) {
             continue;
         }
-        if role == SurfaceRole::Taskbar {
+        if taskbar {
             state.set_panel_output(output);
         } else if role == SurfaceRole::Desktop
             && let Some((origin, scale)) = state.desktop_output_projection(&output)
@@ -1354,7 +1359,7 @@ fn sync_desktop_outputs(shell: &WinitShell, state: &mut LiveShell) {
     let reserved_outputs = if state.taskbar_reservation_height() > 0 {
         shell
             .surfaces()
-            .filter(|surface| surface.role() == SurfaceRole::Taskbar)
+            .filter(|surface| surface.is_taskbar_plugin())
             .map(|surface| surface.output_name().to_owned())
             .collect()
     } else {
@@ -1822,7 +1827,9 @@ fn handle_shell_input(
     let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
         return Ok(());
     };
-    if role == SurfaceRole::Taskbar
+    if shell
+        .surface(surface)
+        .is_some_and(|entry| entry.is_taskbar_plugin())
         && let Some(output) = shell
             .surface(surface)
             .map(|entry| entry.output_name().to_owned())
@@ -1918,7 +1925,7 @@ fn handle_shell_input(
         }
         let (width, height) = entry.window().size();
         let key = entry.plugin_key().unwrap().clone();
-        let taskbar = role == SurfaceRole::Taskbar;
+        let taskbar = entry.is_taskbar_plugin();
         let taskbar_motion =
             taskbar && matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
         if taskbar {
@@ -2292,10 +2299,11 @@ fn handle_controller_action(
         return Ok(());
     }
     let (width, height) = entry.window().size();
+    let taskbar = entry.is_taskbar_plugin();
     if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar)
         && let Some(key) = entry.plugin_key().cloned()
     {
-        if role == SurfaceRole::Taskbar {
+        if taskbar {
             state.set_panel_output(entry.output_name().to_owned());
             if let Some(display) = shell.surface_display_geometry(surface) {
                 state.set_panel_origin_x(display.x);
@@ -2303,13 +2311,13 @@ fn handle_controller_action(
             }
         }
         if state.plugin_panel_host_controller_for(&key, action, width, height) {
-            if role == SurfaceRole::Taskbar {
+            if taskbar {
                 sync_panel_popover_anchor(shell, state);
                 state.sync_transient_overlays();
             }
             sync_visibility(shell, state);
             render_role(shell, state, role)?;
-            if role == SurfaceRole::Taskbar {
+            if taskbar {
                 focus_visible_overlay(shell, state);
                 render_role(shell, state, SurfaceRole::ControlCenter)?;
                 render_role(shell, state, SurfaceRole::WindowPreview)?;
@@ -2331,7 +2339,7 @@ fn handle_controller_action(
         _ => false,
     };
     if changed {
-        if role == SurfaceRole::Taskbar {
+        if taskbar {
             sync_panel_popover_anchor(shell, state);
         }
         sync_visibility(shell, state);
@@ -2910,7 +2918,6 @@ pub fn run() -> Result<(), String> {
                     state.sync_transient_overlays();
                     focus_visible_overlay(&mut shell, &state);
                     render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
-                    render_role(&mut shell, &mut state, SurfaceRole::Taskbar)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                     render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
@@ -3040,7 +3047,7 @@ pub fn run() -> Result<(), String> {
                 entered: false,
             }) if shell
                 .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Taskbar) =>
+                .is_some_and(|entry| entry.is_taskbar_plugin()) =>
             {
                 if let Some(output) = shell
                     .surface(surface)
@@ -3049,7 +3056,7 @@ pub fn run() -> Result<(), String> {
                     state.set_panel_output(output);
                 }
                 if state.panel_pointer_left() {
-                    render_role(&mut shell, &mut state, SurfaceRole::Taskbar)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                 }
             }
             Some(ShellEvent::PointerEntered {
@@ -3057,7 +3064,7 @@ pub fn run() -> Result<(), String> {
                 entered: true,
             }) if shell
                 .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Taskbar) =>
+                .is_some_and(|entry| entry.is_taskbar_plugin()) =>
             {
                 state.panel_pointer_entered();
             }
@@ -3339,7 +3346,7 @@ pub fn run() -> Result<(), String> {
                 }
                 if keyboard_changed {
                     sync_visibility(&mut shell, &state);
-                    render_role(&mut shell, &mut state, SurfaceRole::Taskbar)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                     render_role(&mut shell, &mut state, SurfaceRole::OnScreenKeyboard)?;
                 }
             }
@@ -3756,12 +3763,12 @@ mod tests {
     #[test]
     fn visible_launcher_owns_controller_input_without_window_focus() {
         assert_eq!(
-            super::controller_target_role(true, Some(super::SurfaceRole::Taskbar)),
+            super::controller_target_role(true, Some(super::SurfaceRole::Panel)),
             Some(super::SurfaceRole::Launcher)
         );
         assert_eq!(
-            super::controller_target_role(false, Some(super::SurfaceRole::Taskbar)),
-            Some(super::SurfaceRole::Taskbar)
+            super::controller_target_role(false, Some(super::SurfaceRole::Panel)),
+            Some(super::SurfaceRole::Panel)
         );
     }
 

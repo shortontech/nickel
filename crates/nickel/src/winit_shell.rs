@@ -488,12 +488,20 @@ impl ShellSurface {
     }
 
     pub fn role(&self) -> SurfaceRole {
-        if self.role == SurfaceRole::Panel
-            && self.plugin.as_ref() == Some(&crate::plugin_panel::taskbar_surface_key())
-        {
-            return SurfaceRole::Taskbar;
-        }
         self.role
+    }
+
+    pub fn is_taskbar_plugin(&self) -> bool {
+        self.role == SurfaceRole::Panel
+            && self.plugin.as_ref() == Some(&crate::plugin_panel::taskbar_surface_key())
+    }
+
+    fn diagnostic_role(&self) -> SurfaceRole {
+        if self.is_taskbar_plugin() {
+            SurfaceRole::Taskbar
+        } else {
+            self.role
+        }
     }
 
     pub fn plugin_key(&self) -> Option<&nickel_core::plugins::PluginSurfaceKey> {
@@ -1500,7 +1508,7 @@ impl WinitShell {
                 i64::from(size.height),
             ]
         });
-        let role = surface.role();
+        let role = surface.diagnostic_role();
         let scene = if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
             surface
                 .plugin_key()
@@ -1817,7 +1825,12 @@ impl WinitShell {
     pub fn presenter_roles(&self) -> Vec<SurfaceRole> {
         self.surfaces
             .iter()
-            .filter_map(|surface| surface.presenter.as_ref().map(|_| surface.role()))
+            .filter_map(|surface| {
+                surface
+                    .presenter
+                    .as_ref()
+                    .map(|_| surface.diagnostic_role())
+            })
             .collect()
     }
 
