@@ -15717,7 +15717,12 @@ fn adjust_internal_plugin_surface_placement(
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
 ) {
     if shell.plugin_panel_reserves_work_area(key) {
-        place_reserved_plugin_panel(placement, shell.panel_edge(), outputs);
+        let offset = placement
+            .output
+            .as_deref()
+            .and_then(|output| shell.reserved_panel_offset(key, output))
+            .unwrap_or(0);
+        place_reserved_plugin_panel(placement, shell.panel_edge(), offset, outputs);
         return;
     }
     let Some((kind, bottom_offset)) = shell.plugin_panel_placement(key) else {
@@ -15729,6 +15734,7 @@ fn adjust_internal_plugin_surface_placement(
 fn place_reserved_plugin_panel(
     placement: &mut crate::session::InternalSurfacePlacement,
     edge: crate::winit_shell::PanelEdge,
+    offset: u32,
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
 ) {
     let Some((output, x, y)) = outputs
@@ -15741,9 +15747,11 @@ fn place_reserved_plugin_panel(
     placement.geometry.0 = *x;
     placement.geometry.1 = *y
         + if edge == crate::winit_shell::PanelEdge::Top {
-            0
+            offset as i32
         } else {
-            output.height.saturating_sub(placement.geometry.3) as i32
+            output
+                .height
+                .saturating_sub(placement.geometry.3.saturating_add(offset)) as i32
         };
 }
 

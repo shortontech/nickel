@@ -69,6 +69,32 @@ pub(crate) struct InternalShellSurface {
     pub commands_copied: u64,
 }
 
+fn reserved_panel_measure(
+    entries: &[InternalShellSurface],
+    output: &str,
+    is_reserved: impl Fn(&nickel_core::plugins::PluginSurfaceKey) -> bool,
+    target: Option<&nickel_core::plugins::PluginSurfaceKey>,
+) -> (u32, Option<u32>) {
+    let mut height = 0u32;
+    let mut target_offset = None;
+    for entry in entries {
+        if entry.role != SurfaceRole::Panel || entry.output.as_deref() != Some(output) {
+            continue;
+        }
+        let Some(key) = entry.plugin.as_ref() else {
+            continue;
+        };
+        if !is_reserved(key) {
+            continue;
+        }
+        if target == Some(key) && target_offset.is_none() {
+            target_offset = Some(height);
+        }
+        height = height.saturating_add(entry.size.1);
+    }
+    (height, target_offset)
+}
+
 /// A presentation slot in [`InternalSurfaceSet`].
 ///
 /// Shell state remains coordinated by `LiveShell` while it is being sliced
@@ -256,44 +282,6 @@ impl InternalShellCoordinator {
         self.shell.retain_panel_outputs(outputs);
         let panel_surfaces = self.shell.shell_panel_surfaces();
         let taskbar_key = self.shell.taskbar_surface_key();
-        let taskbar_height = panel_surfaces
-            .iter()
-            .find(|(key, surface)| taskbar_key.as_ref() == Some(key) && surface.reserve_work_area)
-            .map_or(0, |(_, surface)| surface.height);
-        // Reconcile file placement before any surface can render. Creating a desktop
-        // slot alone leaves newly enumerated files without a live output assignment.
-        self.shell.set_desktop_outputs(
-            outputs
-                .iter()
-                .enumerate()
-                .map(|(index, output)| {
-                    // Match panel slot ownership below; an output without a panel
-                    // must retain its full usable desktop height.
-                    let reservation =
-                        if taskbar_height > 0 && (self.bar_on_all_displays || index == 0) {
-                            taskbar_height.min(output.height)
-                        } else {
-                            0
-                        };
-                    nickel_file::desktop::DesktopOutput {
-                        id: output.name.clone(),
-                        primary: index == 0,
-                        work_area: nickel_file::desktop::Rect {
-                            x: output.x as f32,
-                            y: output.y as f32
-                                + if self.panel_edge == PanelEdge::Top {
-                                    reservation as f32
-                                } else {
-                                    0.0
-                                },
-                            width: output.width as f32,
-                            height: output.height.saturating_sub(reservation) as f32,
-                        },
-                        scale: output.scale,
-                    }
-                })
-                .collect(),
-        );
         let mut desired = Vec::new();
         for (index, output) in outputs.iter().enumerate() {
             for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
@@ -311,7 +299,7 @@ impl InternalShellCoordinator {
                     continue;
                 }
                 let size = (
-                    if taskbar {
+                    if surface.reserve_work_area {
                         output.width
                     } else {
                         surface.width.min(output.width)
@@ -378,6 +366,32 @@ impl InternalShellCoordinator {
         for surface in existing.into_values() {
             self.surfaces.remove(surface.id);
         }
+        // Reconcile file placement before any surface can render. The work area
+        // follows every live reserved panel instance on this output.
+        let desktop_outputs = outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| {
+                let reservation = self.reserved_panel_height(&output.name).min(output.height);
+                nickel_file::desktop::DesktopOutput {
+                    id: output.name.clone(),
+                    primary: index == 0,
+                    work_area: nickel_file::desktop::Rect {
+                        x: output.x as f32,
+                        y: output.y as f32
+                            + if self.panel_edge == PanelEdge::Top {
+                                reservation as f32
+                            } else {
+                                0.0
+                            },
+                        width: output.width as f32,
+                        height: output.height.saturating_sub(reservation) as f32,
+                    },
+                    scale: output.scale,
+                }
+            })
+            .collect();
+        self.shell.set_desktop_outputs(desktop_outputs);
     }
 
     pub fn set_bar_on_all_displays(&mut self, enabled: bool) -> bool {
@@ -610,16 +624,10 @@ impl InternalShellCoordinator {
             }
             let output = entry.output.as_deref()?;
             let (origin, scale) = self.shell.desktop_output_projection(output)?;
-            // Layout reports the usable area's origin, but this surface covers the
-            // whole output. Undo only the top reservation so it stays visible in
-            // local icon coordinates rather than being subtracted a second time.
-            let top_reservation = if self.panel_edge == PanelEdge::Top
-                && let Some(panel) = self
-                    .shell
-                    .taskbar_surface_key()
-                    .and_then(|key| self.plugin_surface(&key, output))
-            {
-                panel.size.1.min(entry.size.1) as f32
+            // Layout reports the usable area's origin, but this surface covers
+            // the whole output. Undo the complete top panel reservation.
+            let top_reservation = if self.panel_edge == PanelEdge::Top {
+                self.reserved_panel_height(output).min(entry.size.1) as f32
             } else {
                 0.0
             };
@@ -1472,6 +1480,30 @@ impl InternalShellCoordinator {
             .any(|(candidate, surface)| candidate == key && surface.reserve_work_area)
     }
 
+    pub(crate) fn reserved_panel_offset(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: &str,
+    ) -> Option<u32> {
+        reserved_panel_measure(
+            &self.entries,
+            output,
+            |candidate| self.plugin_panel_reserves_work_area(candidate),
+            Some(key),
+        )
+        .1
+    }
+
+    fn reserved_panel_height(&self, output: &str) -> u32 {
+        reserved_panel_measure(
+            &self.entries,
+            output,
+            |candidate| self.plugin_panel_reserves_work_area(candidate),
+            None,
+        )
+        .0
+    }
+
     pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
         self.shell.plugin_panel_surface()
     }
@@ -2149,6 +2181,97 @@ mod tests {
         );
         assert!(coordinator.visible(panel.id));
         assert!(!coordinator.visible(coordinator.surface(SurfaceRole::Launcher, None).unwrap().id));
+    }
+
+    #[test]
+    fn reserved_panels_stack_per_output_without_counting_floating_panels() {
+        let mut coordinator = coordinator();
+        let key = |plugin_id: &str| nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: plugin_id.into(),
+            surface_id: "main".into(),
+        };
+        let taskbar = key("taskbar");
+        let floating = key("floating");
+        let extension = key("extension");
+        coordinator.insert(
+            SurfaceRole::Panel,
+            Some(taskbar.clone()),
+            Some("left".into()),
+            (800, 56),
+        );
+        coordinator.insert(
+            SurfaceRole::Panel,
+            Some(floating),
+            Some("left".into()),
+            (400, 90),
+        );
+        coordinator.insert(
+            SurfaceRole::Panel,
+            Some(extension.clone()),
+            Some("left".into()),
+            (800, 36),
+        );
+        coordinator.insert(
+            SurfaceRole::Panel,
+            Some(taskbar),
+            Some("right".into()),
+            (800, 56),
+        );
+        let is_reserved =
+            |key: &nickel_core::plugins::PluginSurfaceKey| key.plugin_id != "floating";
+        assert_eq!(
+            reserved_panel_measure(&coordinator.entries, "left", is_reserved, Some(&extension)),
+            (92, Some(56))
+        );
+        assert_eq!(
+            reserved_panel_measure(&coordinator.entries, "right", is_reserved, Some(&extension)),
+            (56, None)
+        );
+    }
+
+    #[test]
+    fn disabling_top_taskbar_releases_desktop_work_area() {
+        let mut coordinator = InternalShellCoordinator::new(Arc::new(TestHost), PanelEdge::Top)
+            .expect("headless shell coordinator");
+        let output = InternalOutput {
+            x: 0,
+            y: 100,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        };
+        coordinator.set_outputs(&[output.clone()]);
+        assert_eq!(
+            coordinator
+                .shell
+                .desktop_output_projection("nested")
+                .unwrap()
+                .0
+                .y,
+            100.0 + PANEL_HEIGHT as f32
+        );
+        let desktop = coordinator
+            .surface(SurfaceRole::Desktop, Some("nested"))
+            .unwrap()
+            .id;
+        assert!(coordinator.select_desktop_viewport(desktop).is_some());
+
+        coordinator
+            .shell
+            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+            .unwrap();
+        coordinator.set_outputs(&[output]);
+        assert_eq!(
+            coordinator
+                .shell
+                .desktop_output_projection("nested")
+                .unwrap()
+                .0
+                .y,
+            100.0
+        );
+        assert!(coordinator.select_desktop_viewport(desktop).is_some());
     }
 
     #[test]

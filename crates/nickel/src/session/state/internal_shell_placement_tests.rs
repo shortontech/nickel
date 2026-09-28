@@ -65,7 +65,12 @@ fn taskbar_placement_uses_its_plugin_surface_height() {
 #[test]
 fn reserved_plugin_panel_uses_taskbar_layer_and_output_edge() {
     let outputs = outputs();
-    for (edge, expected_y) in [(PanelEdge::Bottom, 1600), (PanelEdge::Top, 240)] {
+    for (edge, offset, expected_y) in [
+        (PanelEdge::Bottom, 0, 1600),
+        (PanelEdge::Bottom, 64, 1536),
+        (PanelEdge::Top, 0, 240),
+        (PanelEdge::Top, 64, 304),
+    ] {
         let mut placement = internal_shell_surface_placement(
             SurfaceRole::Panel,
             Some("right"),
@@ -74,7 +79,7 @@ fn reserved_plugin_panel_uses_taskbar_layer_and_output_edge() {
             None,
             edge,
         );
-        place_reserved_plugin_panel(&mut placement, edge, &outputs);
+        place_reserved_plugin_panel(&mut placement, edge, offset, &outputs);
         assert_eq!(placement.geometry, (0, expected_y, 2560, 80));
         assert_eq!(placement.role, crate::session::InternalSurfaceRole::Taskbar);
     }
