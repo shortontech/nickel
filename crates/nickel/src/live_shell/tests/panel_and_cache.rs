@@ -193,6 +193,60 @@
     }
 
     #[test]
+    fn taskbar_memory_counts_shared_images_once_across_outputs() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.set_panel_output("left");
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        shell.panel_scene_for_output(Some("right"), 1280, 56);
+
+        let allocations = shell
+            .plugin_taskbar_host
+            .iter()
+            .chain(shell.plugin_taskbar_hosts.values())
+            .flat_map(|host| host.application().retained_image_allocations())
+            .collect::<Vec<_>>();
+        let mut seen = std::collections::HashSet::new();
+        let unique_image_bytes = allocations
+            .iter()
+            .filter(|(address, _)| seen.insert(*address))
+            .map(|(_, bytes)| *bytes)
+            .sum::<u64>();
+        assert!(allocations.iter().map(|(_, bytes)| bytes).sum::<u64>() > unique_image_bytes);
+        let frame_bytes = shell.plugin_taskbar_memory.values().copied().sum::<u64>();
+        assert_eq!(
+            shell
+                .plugin_registry()
+                .get(&crate::plugin_panel::taskbar_manifest().id)
+                .unwrap()
+                .memory
+                .native_ui_bytes,
+            Some(frame_bytes + unique_image_bytes)
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            shell.retain_panel_outputs(&[crate::internal_shell::InternalOutput {
+                x: 0,
+                y: 0,
+                name: "left".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            }]);
+            assert!(!shell.plugin_taskbar_hosts.contains_key(&Some("right".into())));
+            assert_eq!(
+                shell
+                    .plugin_registry()
+                    .get(&crate::plugin_panel::taskbar_manifest().id)
+                    .unwrap()
+                    .memory
+                    .native_ui_bytes,
+                Some(shell.plugin_taskbar_memory.values().copied().sum::<u64>() + unique_image_bytes)
+            );
+        }
+    }
+
+    #[test]
     fn right_panel_cluster_is_compact_and_grouped() {
         let layout = panel_status_layout(1920, 3, true);
         assert_eq!(layout.control_start, 1816.0);

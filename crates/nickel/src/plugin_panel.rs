@@ -3002,10 +3002,15 @@ impl PluginPanelApplication {
     }
 
     pub fn retained_image_bytes(&self) -> u64 {
+        self.retained_image_allocations()
+            .map(|(_, bytes)| bytes)
+            .fold(0_u64, u64::saturating_add)
+    }
+
+    pub fn retained_image_allocations(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
         self.images
             .values()
-            .map(|(_, image)| image.as_raw().len() as u64)
-            .fold(0_u64, u64::saturating_add)
+            .map(|(_, image)| (Arc::as_ptr(image) as usize, image.as_raw().len() as u64))
     }
 
     pub(crate) fn sync_external_slots(&mut self, slots: &Value) -> Result<bool, String> {

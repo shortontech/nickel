@@ -1494,12 +1494,18 @@
             &format!("taskbar-item-{index}"),
         )
         .unwrap();
+        let taskbar_only = shell
+            .plugin_registry
+            .get(&crate::plugin_panel::taskbar_manifest().id)
+            .unwrap()
+            .memory
+            .native_ui_bytes
+            .unwrap();
         assert!(shell.panel_click(bounds.origin.x + bounds.size.width / 2.0, 1_280, true));
         let menu_height = shell.window_context_menu_height() as u32;
         assert!(!shell
             .scene(SurfaceRole::WindowContextMenu, super::MENU_WIDTH as u32, menu_height)
             .is_empty());
-        let taskbar_only = shell.plugin_taskbar_memory.values().copied().sum::<u64>();
         assert!(
             shell
                 .plugin_registry

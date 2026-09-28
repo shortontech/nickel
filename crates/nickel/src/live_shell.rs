@@ -7632,7 +7632,7 @@ impl LiveShell {
         self.application_menu_plugin_host = None;
         self.plugin_taskbar_menu_memory = 0;
         if self.plugin_taskbar_host.is_some() {
-            self.record_taskbar_menu_memory();
+            self.record_taskbar_memory();
         }
         let _ =
             self.send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
@@ -10034,16 +10034,25 @@ impl LiveShell {
         }
     }
 
-    fn record_taskbar_menu_memory(&mut self) {
-        let retained_ui = self
+    fn record_taskbar_memory(&mut self) {
+        let retained_frames = self
             .plugin_taskbar_memory
             .values()
             .copied()
             .fold(self.plugin_taskbar_menu_memory, u64::saturating_add);
+        let mut seen_images = std::collections::HashSet::new();
+        let retained_images = self
+            .plugin_taskbar_host
+            .iter()
+            .chain(self.plugin_taskbar_hosts.values())
+            .flat_map(|host| host.application().retained_image_allocations())
+            .filter(|(address, _)| seen_images.insert(*address))
+            .map(|(_, bytes)| bytes)
+            .fold(0_u64, u64::saturating_add);
         let _ = self.plugin_registry.record_memory(
             &crate::plugin_panel::taskbar_manifest().id,
             nickel_core::plugins::PluginMemory {
-                native_ui_bytes: Some(retained_ui),
+                native_ui_bytes: Some(retained_frames.saturating_add(retained_images)),
                 ..nickel_core::plugins::PluginMemory::default()
             },
         );
@@ -10109,7 +10118,7 @@ impl LiveShell {
                 });
                 let commands = host.commands().to_vec();
                 self.plugin_taskbar_menu_memory = outcome.telemetry.retained_frame_bytes as u64;
-                self.record_taskbar_menu_memory();
+                self.record_taskbar_memory();
                 return commands;
             }
         }
@@ -10170,7 +10179,7 @@ impl LiveShell {
                 });
                 let commands = host.commands().to_vec();
                 self.plugin_taskbar_menu_memory = outcome.telemetry.retained_frame_bytes as u64;
-                self.record_taskbar_menu_memory();
+                self.record_taskbar_memory();
                 return commands;
             }
         }
@@ -10285,18 +10294,7 @@ impl LiveShell {
             self.panel_output.clone(),
             outcome.telemetry.retained_frame_bytes as u64,
         );
-        let retained_ui = self
-            .plugin_taskbar_memory
-            .values()
-            .copied()
-            .fold(self.plugin_taskbar_menu_memory, u64::saturating_add);
-        let _ = self.plugin_registry.record_memory(
-            &crate::plugin_panel::taskbar_manifest().id,
-            nickel_core::plugins::PluginMemory {
-                native_ui_bytes: Some(retained_ui),
-                ..nickel_core::plugins::PluginMemory::default()
-            },
-        );
+        self.record_taskbar_memory();
         self.panel_change_token = outcome.change_token;
         self.panel_deadline = outcome
             .next_deadline
@@ -10319,7 +10317,6 @@ impl LiveShell {
             self.panel_pet_deadline = None;
         }
         outcome.changed |= self.apply_plugin_effects(effects);
-        self.maybe_publish_plugin_status();
         Some(outcome)
     }
 
@@ -10361,6 +10358,8 @@ impl LiveShell {
         &mut self,
         outputs: &[crate::internal_shell::InternalOutput],
     ) {
+        let previous_host_count = self.plugin_taskbar_hosts.len();
+        let previous_memory_count = self.plugin_taskbar_memory.len();
         if self
             .panel_output
             .as_ref()
@@ -10383,6 +10382,12 @@ impl LiveShell {
                 .as_ref()
                 .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
         });
+        if self.plugin_taskbar_host.is_some()
+            && (self.plugin_taskbar_hosts.len() != previous_host_count
+                || self.plugin_taskbar_memory.len() != previous_memory_count)
+        {
+            self.record_taskbar_memory();
+        }
     }
 
     fn resolve_task_icons(
