@@ -788,7 +788,7 @@ impl WinitShell {
             let output_name = output_names.get(display_index).ok_or_else(|| {
                 "winit output identity count changed during shell startup".to_string()
             })?;
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
                 if !desired.contains(&(output_name.clone(), role)) {
                     continue;
                 }
@@ -804,27 +804,52 @@ impl WinitShell {
                 }
             }
         }
+        let taskbar_key = crate::plugin_panel::taskbar_surface_key();
+        let mut panels = self.extra_plugin_panels.clone();
+        let primary_key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: self.plugin_panel_owner.clone(),
+            surface_id: self.plugin_panel_surface.id.clone(),
+        };
+        if self.plugin_panel_enabled {
+            panels.insert(primary_key.clone(), self.plugin_panel_surface.clone());
+        }
         if self.taskbar_panel_enabled {
-            let key = crate::plugin_panel::taskbar_surface_key();
-            let panel = crate::plugin_panel::taskbar_surface().clone();
-            let outputs = panel_outputs(
-                &output_names,
-                self.options.bar_on_all_displays,
-                self.primary_output_name.as_deref(),
+            panels.insert(
+                taskbar_key.clone(),
+                crate::plugin_panel::taskbar_surface().clone(),
             );
+        }
+        let mut desired_panels = desired_plugin_surfaces(&output_names, &panels);
+        let taskbar_outputs = panel_outputs(
+            &output_names,
+            self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
+        );
+        desired_panels
+            .retain(|(output, key)| key != &taskbar_key || taskbar_outputs.contains(output));
+        let mut panels = panels.into_iter().collect::<Vec<_>>();
+        // An owned dialog needs its ordinary panel window created first.
+        panels.sort_by_key(|(key, surface)| {
+            (
+                surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog,
+                key != &primary_key && key != &taskbar_key,
+            )
+        });
+        for (key, panel) in panels {
             for (display_index, geometry) in displays.iter().copied().enumerate() {
                 let output_name = &output_names[display_index];
-                if outputs.contains(output_name)
-                    && let Err(error) = self.create_surface_with_plugin(
-                        SurfaceRole::Panel,
-                        display_index,
-                        geometry,
-                        output_name,
-                        Some((&key, &panel)),
-                    )
-                {
+                if !desired_panels.contains(&(output_name.clone(), key.clone())) {
+                    continue;
+                }
+                if let Err(error) = self.create_surface_with_plugin(
+                    SurfaceRole::Panel,
+                    display_index,
+                    geometry,
+                    output_name,
+                    Some((&key, &panel)),
+                ) {
                     output_creation_failed = true;
-                    tracing::warn!(output = output_name, %error, "failed to create bundled taskbar panel");
+                    tracing::warn!(plugin = %key.plugin_id, output = output_name, %error, "failed to create startup plugin panel surface; retry scheduled");
                 }
             }
         }
