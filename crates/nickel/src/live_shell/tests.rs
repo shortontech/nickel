@@ -512,6 +512,33 @@ fn keyed_panel_controller_opens_a_component_dialog() {
 }
 
 #[test]
+fn taskbar_declaration_joins_active_shell_panel_surfaces() {
+    let mut shell = LiveShell::new().unwrap();
+    let key = shell.taskbar_surface_key().unwrap();
+    let surfaces = shell.shell_panel_surfaces();
+    assert_eq!(surfaces[0].0, key);
+    let (_, declaration) = surfaces
+        .iter()
+        .find(|(candidate, _)| candidate == &key)
+        .unwrap();
+    assert!(declaration.reserve_work_area);
+    assert_eq!(
+        declaration.output,
+        nickel_core::plugins::PluginOutputScope::All
+    );
+
+    shell
+        .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+        .unwrap();
+    assert!(
+        shell
+            .shell_panel_surfaces()
+            .iter()
+            .all(|(candidate, _)| candidate != &key)
+    );
+}
+
+#[test]
 fn installed_component_window_activates_and_retires_with_its_plugin() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/plugins/example-window");

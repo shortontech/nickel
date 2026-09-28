@@ -3366,19 +3366,13 @@ impl LiveShell {
     }
 
     pub(crate) fn taskbar_reservation_height(&self) -> u32 {
-        if self.plugin_taskbar_host.is_none() {
-            return 0;
-        }
-        self.plugin_registry
-            .get(&crate::plugin_panel::taskbar_manifest().id)
-            .and_then(|entry| {
-                entry
-                    .manifest
-                    .surfaces
-                    .iter()
-                    .find(|surface| surface.reserve_work_area)
+        let key = self.taskbar_surface_key();
+        self.shell_panel_surfaces()
+            .into_iter()
+            .find(|(candidate, surface)| {
+                key.as_ref() == Some(candidate) && surface.reserve_work_area
             })
-            .map_or(0, |surface| surface.height)
+            .map_or(0, |(_, surface)| surface.height)
     }
 
     pub(crate) fn taskbar_surface_key(&self) -> Option<nickel_core::plugins::PluginSurfaceKey> {
@@ -3437,6 +3431,31 @@ impl LiveShell {
                 .iter()
                 .map(|(key, (surface, _))| (key.clone(), surface.clone())),
         );
+        panels
+    }
+
+    /// Active panel declarations for compositor-owned output surfaces. The
+    /// public package panel list excludes the bundled taskbar because its
+    /// activation is managed with the other first-party shell plugins.
+    pub(crate) fn shell_panel_surfaces(
+        &self,
+    ) -> Vec<(
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    )> {
+        let mut panels = Vec::new();
+        if let Some(key) = self.taskbar_surface_key()
+            && let Some(surface) = self.plugin_registry.get(&key.plugin_id).and_then(|entry| {
+                entry
+                    .manifest
+                    .surfaces
+                    .iter()
+                    .find(|surface| surface.id == key.surface_id)
+            })
+        {
+            panels.push((key, surface.clone()));
+        }
+        panels.extend(self.plugin_panels());
         panels
     }
 

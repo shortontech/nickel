@@ -254,9 +254,12 @@ impl InternalShellCoordinator {
         // from their former geometry must not activate the replacement keyboard.
         self.shell.cancel_keyboard_gestures();
         self.shell.retain_panel_outputs(outputs);
-        let taskbar_height = self.shell.taskbar_reservation_height();
+        let panel_surfaces = self.shell.shell_panel_surfaces();
         let taskbar_key = self.shell.taskbar_surface_key();
-        let taskbar_active = taskbar_height > 0 && taskbar_key.is_some();
+        let taskbar_height = panel_surfaces
+            .iter()
+            .find(|(key, surface)| taskbar_key.as_ref() == Some(key) && surface.reserve_work_area)
+            .map_or(0, |(_, surface)| surface.height);
         // Reconcile file placement before any surface can render. Creating a desktop
         // slot alone leaves newly enumerated files without a live output assignment.
         self.shell.set_desktop_outputs(
@@ -266,12 +269,12 @@ impl InternalShellCoordinator {
                 .map(|(index, output)| {
                     // Match panel slot ownership below; an output without a panel
                     // must retain its full usable desktop height.
-                    let reservation = if taskbar_active && (self.bar_on_all_displays || index == 0)
-                    {
-                        taskbar_height.min(output.height)
-                    } else {
-                        0
-                    };
+                    let reservation =
+                        if taskbar_height > 0 && (self.bar_on_all_displays || index == 0) {
+                            taskbar_height.min(output.height)
+                        } else {
+                            0
+                        };
                     nickel_file::desktop::DesktopOutput {
                         id: output.name.clone(),
                         primary: index == 0,
@@ -297,22 +300,29 @@ impl InternalShellCoordinator {
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, None, Some(output.name.clone()), size));
             }
-            if taskbar_active && (self.bar_on_all_displays || index == 0) {
-                let role = SurfaceRole::Taskbar;
-                let size = (output.width, taskbar_height.min(output.height));
-                desired.push((role, taskbar_key.clone(), Some(output.name.clone()), size));
-            }
-            for (key, surface) in self.shell.plugin_panels() {
+            for (key, surface) in &panel_surfaces {
+                let taskbar = taskbar_key.as_ref() == Some(key);
+                if taskbar && (!self.bar_on_all_displays && index != 0) {
+                    continue;
+                }
                 if surface.output != nickel_core::plugins::PluginOutputScope::All && index != 0 {
                     continue;
                 }
                 let size = (
-                    surface.width.min(output.width),
+                    if taskbar {
+                        output.width
+                    } else {
+                        surface.width.min(output.width)
+                    },
                     surface.height.min(output.height),
                 );
                 desired.push((
-                    SurfaceRole::Panel,
-                    Some(key),
+                    if taskbar {
+                        SurfaceRole::Taskbar
+                    } else {
+                        SurfaceRole::Panel
+                    },
+                    Some(key.clone()),
                     Some(output.name.clone()),
                     size,
                 ));
@@ -571,9 +581,9 @@ impl InternalShellCoordinator {
             // whole output. Undo only the top reservation so it stays visible in
             // local icon coordinates rather than being subtracted a second time.
             let top_reservation = if self.panel_edge == PanelEdge::Top
-                && self.surface(SurfaceRole::Taskbar, Some(output)).is_some()
+                && let Some(panel) = self.surface(SurfaceRole::Taskbar, Some(output))
             {
-                self.shell.taskbar_reservation_height().min(entry.size.1) as f32
+                panel.size.1.min(entry.size.1) as f32
             } else {
                 0.0
             };
