@@ -2504,9 +2504,11 @@ impl LiveShell {
                         .any(|viewport| viewport.host.remote_access_protected())
             }
             SurfaceRole::Taskbar => {
-                self.panel_host.remote_access_protected()
+                self.plugin_taskbar_host
+                    .as_ref()
+                    .is_none_or(|host| host.remote_access_protected())
                     || self
-                        .panel_hosts
+                        .plugin_taskbar_hosts
                         .values()
                         .any(|host| host.remote_access_protected())
             }
@@ -5262,58 +5264,18 @@ impl LiveShell {
                 HostEvent::Ui(UiEvent::PointerReleased(Point { x, y: 28.0 })),
             ]
         };
-        if self.plugin_taskbar_host.is_some() {
-            return self
-                .step_taskbar_plugin(events, width)
-                .is_some_and(|outcome| outcome.changed);
-        }
-        let application_changed = self.sync_panel_host();
-        let outcome = self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, 56)),
-            events,
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        self.apply_panel_effects()
+        self.step_taskbar_plugin(events, width)
+            .is_some_and(|outcome| outcome.changed)
     }
 
     pub fn panel_controller(&mut self, action: ControllerAction, width: u32) -> bool {
-        if self.plugin_taskbar_host.is_some() {
-            return self
-                .step_taskbar_plugin(vec![HostEvent::Controller(action)], width)
-                .is_some_and(|outcome| outcome.changed);
-        }
-        let application_changed = self.sync_panel_host();
-        let outcome = self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, 56)),
-            events: vec![HostEvent::Controller(action)],
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        self.apply_panel_effects();
-        outcome.changed
+        self.step_taskbar_plugin(vec![HostEvent::Controller(action)], width)
+            .is_some_and(|outcome| outcome.changed)
     }
 
     pub(crate) fn panel_host_ui(&mut self, event: UiEvent, width: u32) -> bool {
-        if self.plugin_taskbar_host.is_some() {
-            return self
-                .step_taskbar_plugin(vec![HostEvent::Ui(event)], width)
-                .is_some_and(|outcome| outcome.changed);
-        }
-        let application_changed = self.sync_panel_host();
-        let outcome = self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, 56)),
-            events: vec![HostEvent::Ui(event)],
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        outcome.changed | self.apply_panel_effects()
+        self.step_taskbar_plugin(vec![HostEvent::Ui(event)], width)
+            .is_some_and(|outcome| outcome.changed)
     }
 
     fn plugin_panel_host_for(
@@ -6462,26 +6424,13 @@ impl LiveShell {
                 })
             }
             ShellSemanticTarget::OnScreenKeyboardToggle => {
-                if let Some(host) = self.plugin_taskbar_host.as_ref() {
-                    let bounds = taskbar_plugin_control_bounds(host, "taskbar-keyboard")?;
-                    return Some(ResolvedShellTarget {
-                        role: ShellRole::Panel,
-                        output: self.panel_output.clone(),
-                        x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
-                        y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
-                        interaction: PointerInteraction::LeftClick,
-                    });
-                }
-                let target = self
-                    .panel_host
-                    .semantic_targets_for_message(&TaskbarAction::OnScreenKeyboard)
-                    .into_iter()
-                    .next()?;
+                let host = self.plugin_taskbar_host.as_ref()?;
+                let bounds = taskbar_plugin_control_bounds(host, "taskbar-keyboard")?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
                     output: self.panel_output.clone(),
-                    x: (target.bounds.origin.x + target.bounds.size.width / 2.0).round() as i32,
-                    y: (target.bounds.origin.y + target.bounds.size.height / 2.0).round() as i32,
+                    x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                    y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
                     interaction: PointerInteraction::LeftClick,
                 })
             }
@@ -6495,61 +6444,34 @@ impl LiveShell {
                 } else {
                     self.plugin_taskbar_hosts.get(output)
                 };
-                let bounds = if let Some(plugin_host) = plugin_host {
-                    let windows = self
-                        .windows
-                        .iter()
-                        .filter(|window| {
-                            window_belongs_to_panel(
-                                self.all_windows_on_every_bar,
-                                output.as_deref().or(self.panel_output.as_deref()),
-                                window.state.output.as_deref(),
-                            )
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let groups = self.launcher.taskbar_applications(&windows);
-                    let index = groups.iter().take(12).position(|group| {
-                        group
-                            .application_id
-                            .as_ref()
-                            .is_some_and(|id| id.as_str() == application_id)
-                    })?;
-                    if !plugin_host
-                        .application()
-                        .rendered_taskbar_item_matches(index, application_id)
-                    {
-                        return None;
-                    }
-                    taskbar_plugin_control_bounds(plugin_host, &format!("taskbar-item-{index}"))?
-                } else {
-                    let host = if output.is_none() || output == &self.panel_output {
-                        &self.panel_host
-                    } else if let Some(host) = self.panel_hosts.get(output) {
-                        host
-                    } else if self.panel_output.is_none() && self.panel_hosts.is_empty() {
-                        // The legacy single-panel presenter has no named output
-                        // host. Its requested output is a native routing hint.
-                        &self.panel_host
-                    } else {
-                        return None;
-                    };
-                    let index = host
-                        .application()
-                        .groups
-                        .iter()
-                        .take(12)
-                        .position(|group| {
-                            group
-                                .application_id
-                                .as_ref()
-                                .is_some_and(|id| id.as_str() == application_id)
-                        })?;
-                    host.semantic_targets_for_message(&TaskbarAction::Task(index))
-                        .into_iter()
-                        .next()?
-                        .bounds
-                };
+                let plugin_host = plugin_host?;
+                let windows = self
+                    .windows
+                    .iter()
+                    .filter(|window| {
+                        window_belongs_to_panel(
+                            self.all_windows_on_every_bar,
+                            output.as_deref().or(self.panel_output.as_deref()),
+                            window.state.output.as_deref(),
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let groups = self.launcher.taskbar_applications(&windows);
+                let index = groups.iter().take(12).position(|group| {
+                    group
+                        .application_id
+                        .as_ref()
+                        .is_some_and(|id| id.as_str() == application_id)
+                })?;
+                if !plugin_host
+                    .application()
+                    .rendered_taskbar_item_matches(index, application_id)
+                {
+                    return None;
+                }
+                let bounds =
+                    taskbar_plugin_control_bounds(plugin_host, &format!("taskbar-item-{index}"))?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
                     output: output.clone(),
@@ -6559,30 +6481,12 @@ impl LiveShell {
                 })
             }
             ShellSemanticTarget::PanelControlCenter { output } => {
-                if let Some(plugin_host) = if output.is_none() || output == &self.panel_output {
+                let plugin_host = if output.is_none() || output == &self.panel_output {
                     self.plugin_taskbar_host.as_ref()
                 } else {
                     self.plugin_taskbar_hosts.get(output)
-                } {
-                    let bounds = taskbar_plugin_control_bounds(plugin_host, "taskbar-control")?;
-                    return Some(ResolvedShellTarget {
-                        role: ShellRole::Panel,
-                        output: output.clone(),
-                        x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
-                        y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
-                        interaction: PointerInteraction::LeftClick,
-                    });
-                }
-                let host = if output.is_none() || output == &self.panel_output {
-                    &self.panel_host
-                } else {
-                    self.panel_hosts.get(output)?
-                };
-                let bounds = host
-                    .semantic_targets_for_message(&TaskbarAction::Control)
-                    .into_iter()
-                    .next()?
-                    .bounds;
+                }?;
+                let bounds = taskbar_plugin_control_bounds(plugin_host, "taskbar-control")?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
                     output: output.clone(),
@@ -6701,53 +6605,34 @@ impl LiveShell {
     }
 
     pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
-        let hovered = if self.plugin_taskbar_host.is_some() {
-            self.step_taskbar_plugin(
-                vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
-                width,
-            );
-            self.plugin_taskbar_host
-                .as_ref()
-                .and_then(|host| host.inspect().pointer_hover)
-                .and_then(|id| {
-                    let id = id.as_str().rsplit('/').next()?;
-                    if id == "taskbar-launcher" {
-                        Some(TaskbarHover::Launcher)
-                    } else if id == "taskbar-control" {
-                        Some(TaskbarHover::Control)
-                    } else if let Some(tray_id) = id.strip_prefix("taskbar-tray-") {
-                        self.tray
-                            .iter()
-                            .rev()
-                            .take(4)
-                            .rev()
-                            .position(|item| item.id == tray_id)
-                            .map(TaskbarHover::Tray)
-                    } else {
-                        id.strip_prefix("taskbar-item-")
-                            .and_then(|index| index.parse().ok())
-                            .map(TaskbarHover::Task)
-                    }
-                })
-        } else {
-            let application_changed = self.sync_panel_host();
-            self.panel_host.step(HostBatch {
-                application_changed,
-                surface_size: Some((width, 56)),
-                events: vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
-                ..HostBatch::default()
+        self.step_taskbar_plugin(
+            vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
+            width,
+        );
+        let hovered = self
+            .plugin_taskbar_host
+            .as_ref()
+            .and_then(|host| host.inspect().pointer_hover)
+            .and_then(|id| {
+                let id = id.as_str().rsplit('/').next()?;
+                if id == "taskbar-launcher" {
+                    Some(TaskbarHover::Launcher)
+                } else if id == "taskbar-control" {
+                    Some(TaskbarHover::Control)
+                } else if let Some(tray_id) = id.strip_prefix("taskbar-tray-") {
+                    self.tray
+                        .iter()
+                        .rev()
+                        .take(4)
+                        .rev()
+                        .position(|item| item.id == tray_id)
+                        .map(TaskbarHover::Tray)
+                } else {
+                    id.strip_prefix("taskbar-item-")
+                        .and_then(|index| index.parse().ok())
+                        .map(TaskbarHover::Task)
+                }
             });
-            let hovered_action = self
-                .panel_host
-                .inspect()
-                .pointer_hover
-                .as_ref()
-                .and_then(|target| self.panel_host.message_for_semantic_target(target))
-                .cloned();
-            hovered_action
-                .as_ref()
-                .and_then(|action| self.panel_hover_for_action(action))
-        };
         let changed = hovered != self.panel_hover;
         self.panel_hover = hovered;
         self.panel_hover_output.clone_from(&self.panel_output);
@@ -6765,30 +6650,6 @@ impl LiveShell {
             }
         }
         changed
-    }
-
-    fn panel_hover_for_action(&self, action: &TaskbarAction) -> Option<TaskbarHover> {
-        Some(match action {
-            TaskbarAction::OnScreenKeyboard => TaskbarHover::OnScreenKeyboard,
-            TaskbarAction::Launcher => TaskbarHover::Launcher,
-            TaskbarAction::Task(index)
-            | TaskbarAction::TaskContext(index)
-            | TaskbarAction::TaskDrag(index, _) => TaskbarHover::Task(*index),
-            TaskbarAction::ToggleTaskPin(_)
-            | TaskbarAction::MoveTaskPinLeft(_)
-            | TaskbarAction::MoveTaskPinRight(_) => return None,
-            TaskbarAction::Codex => TaskbarHover::Codex,
-            TaskbarAction::Tray(id) | TaskbarAction::TrayContext(id) => self
-                .tray
-                .iter()
-                .rev()
-                .take(4)
-                .rev()
-                .position(|item| item.id == id.as_str())
-                .map(TaskbarHover::Tray)
-                .unwrap_or(TaskbarHover::Tray(0)),
-            TaskbarAction::Control => TaskbarHover::Control,
-        })
     }
 
     pub fn set_panel_origin_x(&mut self, origin_x: i32) {
@@ -10480,56 +10341,12 @@ impl LiveShell {
         self.shortcut_capability_status = shortcut_capability_status(capability);
     }
 
-    fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        if self.plugin_taskbar_host.is_some() {
-            self.step_taskbar_plugin(vec![HostEvent::Poll], width);
-            return self
-                .plugin_taskbar_host
-                .as_ref()
-                .map(|host| host.commands().to_vec())
-                .unwrap_or_default();
-        }
-        let had_project_pet = self
-            .panel_host
-            .application()
-            .groups
-            .iter()
-            .take(12)
-            .any(|group| {
-                group
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-            });
-        let application_changed = self.sync_panel_host();
-        let has_project_pet = self
-            .panel_host
-            .application()
-            .groups
-            .iter()
-            .take(12)
-            .any(|group| {
-                group
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-            });
-        let outcome = self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, height)),
-            // A previously minute-based clock deadline must be replaced with the
-            // animation cadence as soon as the first Codex project appears.
-            events: if has_project_pet && !had_project_pet {
-                vec![HostEvent::Poll]
-            } else {
-                Vec::new()
-            },
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        self.apply_panel_effects();
-        self.panel_host.commands().to_vec()
+    fn panel_scene(&mut self, width: u32, _height: u32) -> Vec<PaintCommand> {
+        self.step_taskbar_plugin(vec![HostEvent::Poll], width);
+        self.plugin_taskbar_host
+            .as_ref()
+            .map(|host| host.commands().to_vec())
+            .unwrap_or_default()
     }
 
     fn step_taskbar_plugin(

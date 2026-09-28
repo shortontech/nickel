@@ -111,23 +111,6 @@ fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
     }
 }
 
-fn panel_activate(action: &TaskbarAction) -> RemoteActionDisposition {
-    match action {
-        TaskbarAction::Launcher
-        | TaskbarAction::ToggleTaskPin(_)
-        | TaskbarAction::MoveTaskPinLeft(_)
-        | TaskbarAction::MoveTaskPinRight(_)
-        | TaskbarAction::Control => RemoteActionDisposition::Guarded,
-        TaskbarAction::OnScreenKeyboard
-        | TaskbarAction::Task(_)
-        | TaskbarAction::TaskContext(_)
-        | TaskbarAction::TaskDrag(_, _)
-        | TaskbarAction::Codex
-        | TaskbarAction::Tray(_)
-        | TaskbarAction::TrayContext(_) => RemoteActionDisposition::Unavailable,
-    }
-}
-
 impl LiveShell {
     pub(crate) fn bounded_shell_semantics(
         &self,
@@ -156,29 +139,16 @@ impl LiveShell {
                 }
             }
             SurfaceRole::Taskbar => {
-                if self.plugin_taskbar_host.is_some() {
-                    let host = if output == self.panel_output.as_deref() {
-                        self.plugin_taskbar_host.as_ref()
-                    } else {
-                        self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
-                    }
-                    .ok_or("panel plugin viewport is unavailable")?;
-                    return plugin_projection(host, |leaf, action| {
-                        matches!(action, nickel_ui::ActionKind::Activate)
-                            && matches!(leaf, "taskbar-launcher" | "taskbar-control")
-                    });
-                }
-                if output == self.panel_output.as_deref() {
-                    project(&self.panel_host, panel_activate)
+                let host = if output == self.panel_output.as_deref() {
+                    self.plugin_taskbar_host.as_ref()
                 } else {
-                    let key = output.map(str::to_owned);
-                    project(
-                        self.panel_hosts
-                            .get(&key)
-                            .ok_or("panel viewport is unavailable")?,
-                        panel_activate,
-                    )
+                    self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
                 }
+                .ok_or("panel plugin viewport is unavailable")?;
+                plugin_projection(host, |leaf, action| {
+                    matches!(action, nickel_ui::ActionKind::Activate)
+                        && matches!(leaf, "taskbar-launcher" | "taskbar-control")
+                })
             }
             SurfaceRole::Launcher if self.run_visible => {
                 if let Some(host) = self.plugin_run_host.as_ref() {
@@ -396,7 +366,7 @@ impl LiveShell {
                 );
                 outcome
             }
-            SurfaceRole::Taskbar if self.plugin_taskbar_host.is_some() => {
+            SurfaceRole::Taskbar => {
                 let previous = self.panel_output.clone();
                 let token = self.panel_change_token;
                 self.switch_panel_output(output.map(str::to_owned));
@@ -426,30 +396,6 @@ impl LiveShell {
                     output.map(str::to_owned),
                 ));
                 outcome
-            }
-            SurfaceRole::Taskbar => {
-                let previous = self.panel_output.clone();
-                let token = self.panel_change_token;
-                self.switch_panel_output(output.map(str::to_owned));
-                let result = mutate(
-                    &mut self.panel_host,
-                    generation,
-                    node,
-                    action,
-                    clipboard_limit,
-                );
-                if result.is_ok() {
-                    effects.extend(
-                        std::mem::take(&mut self.panel_host.application_mut().effects)
-                            .into_iter()
-                            .map(|action| {
-                                RemoteShellEffect::Panel(action, output.map(str::to_owned))
-                            }),
-                    );
-                }
-                self.switch_panel_output(previous);
-                self.panel_change_token = token;
-                result?
             }
             SurfaceRole::VolumeOsd => {
                 return Err("volume overlay has no remote actions".into());
@@ -582,6 +528,13 @@ mod tests {
             outcome.effects.as_slice(),
             [RemoteShellEffect::Panel(TaskbarAction::Launcher, None)]
         ));
+        let id = &crate::plugin_panel::taskbar_manifest().id;
+        shell.set_plugin_enabled(id, false).unwrap();
+        assert!(
+            shell
+                .bounded_shell_semantics(SurfaceRole::Taskbar, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -646,7 +599,6 @@ mod tests {
         let shell = LiveShell::new().expect("live shell");
 
         assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
-        assert_advertised_actions_are_guarded(&shell.panel_host, panel_activate);
     }
 
     #[test]

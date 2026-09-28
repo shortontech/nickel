@@ -658,6 +658,14 @@
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(!shell.surface_visible(SurfaceRole::Taskbar));
         assert_eq!(shell.taskbar_reservation_height(), 0);
+        assert!(shell.scene(SurfaceRole::Taskbar, 800, 56).is_empty());
+        assert!(!shell.panel_click(20.0, 800, false));
+        assert!(shell
+            .resolve_semantic_target(&ShellSemanticTarget::OnScreenKeyboardToggle)
+            .is_none());
+        assert!(shell
+            .resolve_semantic_target(&ShellSemanticTarget::PanelControlCenter { output: None })
+            .is_none());
         assert!(!shell.surface_visible(SurfaceRole::WindowContextMenu));
         assert!(shell.window_menu_scene().is_empty());
         assert!(shell.window_menu_plugin_host.is_none());
