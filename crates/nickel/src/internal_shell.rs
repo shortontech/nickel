@@ -121,6 +121,10 @@ pub(crate) struct InternalShellCoordinator {
 }
 
 impl InternalShellCoordinator {
+    pub(crate) fn panel_edge(&self) -> PanelEdge {
+        self.panel_edge
+    }
+
     pub fn new(session_host: Arc<dyn SessionHost>, panel_edge: PanelEdge) -> Result<Self, String> {
         Self::new_with_safe_mode(session_host, panel_edge, false)
     }

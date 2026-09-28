@@ -5424,6 +5424,7 @@ impl NickelSession {
                 surface.size,
                 &outputs,
                 self.launcher_output_name.as_deref(),
+                shell.panel_edge(),
             );
             if let Some(key) = surface.plugin.as_ref() {
                 adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
@@ -7263,6 +7264,7 @@ impl NickelSession {
                 surface.size,
                 &outputs,
                 self.launcher_output_name.as_deref(),
+                shell.panel_edge(),
             );
             if let Some(key) = surface.plugin.as_ref() {
                 adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
@@ -15596,6 +15598,7 @@ fn internal_keyboard_surface_placement(
         size,
         outputs,
         None,
+        crate::winit_shell::PanelEdge::Bottom,
     );
     placement.geometry = (geometry.x, geometry.y, size.0, size.1);
     Some(placement)
@@ -15619,6 +15622,7 @@ fn internal_shell_surface_placement(
     surface_size: (u32, u32),
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
     launcher_output: Option<&str>,
+    panel_edge: crate::winit_shell::PanelEdge,
 ) -> crate::session::InternalSurfacePlacement {
     use crate::{session::InternalSurfaceRole, winit_shell::SurfaceRole};
 
@@ -15651,7 +15655,12 @@ fn internal_shell_surface_placement(
     let (x, y) = match surface_role {
         SurfaceRole::Taskbar => (
             origin_x,
-            origin_y + output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT) as i32,
+            origin_y
+                + if panel_edge == crate::winit_shell::PanelEdge::Top {
+                    0
+                } else {
+                    output_height.saturating_sub(surface_size.1) as i32
+                },
         ),
         SurfaceRole::Panel => (
             origin_x + output_width.saturating_sub(surface_size.0) as i32 / 2,

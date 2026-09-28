@@ -3,7 +3,10 @@ use super::{
     internal_codex_chat_placement, internal_codex_project_menu_placement,
     internal_shell_surface_placement,
 };
-use crate::{internal_shell::InternalOutput, winit_shell::SurfaceRole};
+use crate::{
+    internal_shell::InternalOutput,
+    winit_shell::{PanelEdge, SurfaceRole},
+};
 use nickel_core::plugins::PluginSurfaceKind;
 use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 
@@ -37,6 +40,29 @@ fn outputs() -> Vec<(InternalOutput, i32, i32)> {
 }
 
 #[test]
+fn taskbar_placement_uses_its_plugin_surface_height() {
+    let placement = internal_shell_surface_placement(
+        SurfaceRole::Taskbar,
+        Some("right"),
+        (2560, 80),
+        &outputs(),
+        None,
+        PanelEdge::Bottom,
+    );
+    assert_eq!(placement.geometry, (0, 1600, 2560, 80));
+    assert_eq!(placement.output.as_deref(), Some("right"));
+    let top = internal_shell_surface_placement(
+        SurfaceRole::Taskbar,
+        Some("right"),
+        (2560, 80),
+        &outputs(),
+        None,
+        PanelEdge::Top,
+    );
+    assert_eq!(top.geometry, (0, 240, 2560, 80));
+}
+
+#[test]
 fn internal_plugin_window_centers_while_dock_uses_bottom_offset() {
     let outputs = outputs();
     let mut window = internal_shell_surface_placement(
@@ -45,6 +71,7 @@ fn internal_plugin_window_centers_while_dock_uses_bottom_offset() {
         (520, 340),
         &outputs,
         None,
+        PanelEdge::Bottom,
     );
     apply_internal_plugin_surface_placement(&mut window, PluginSurfaceKind::Window, 0, &outputs);
     assert_eq!(window.geometry, (1020, 790, 520, 340));
@@ -59,6 +86,7 @@ fn internal_plugin_window_centers_while_dock_uses_bottom_offset() {
         (520, 340),
         &outputs,
         None,
+        PanelEdge::Bottom,
     );
     apply_internal_plugin_surface_placement(&mut dock, PluginSurfaceKind::Dock, 36, &outputs);
     assert_eq!(dock.geometry, (1020, 1304, 520, 340));
@@ -1289,6 +1317,7 @@ fn launcher_uses_active_output_global_origin() {
         (960, 720),
         &outputs(),
         Some("right"),
+        PanelEdge::Bottom,
     );
 
     assert_eq!(placement.output.as_deref(), Some("right"));
@@ -1303,6 +1332,7 @@ fn launcher_placement_anchors_the_actual_content_sized_surface() {
         (640, 600),
         &outputs(),
         Some("right"),
+        PanelEdge::Bottom,
     );
 
     assert_eq!(placement.geometry, (18, 1016, 640, 600));
@@ -1352,6 +1382,7 @@ fn volume_osd_uses_requested_interaction_output_without_launcher_affinity() {
         (320, 88),
         &outputs(),
         Some("left"),
+        PanelEdge::Bottom,
     );
     assert_eq!(placement.output.as_deref(), Some("right"));
     assert_eq!(placement.geometry, (0, 240, 320, 88));
@@ -1361,6 +1392,7 @@ fn volume_osd_uses_requested_interaction_output_without_launcher_affinity() {
         (320, 88),
         &outputs(),
         None,
+        PanelEdge::Bottom,
     );
     assert_eq!(fallback.output.as_deref(), Some("left"));
 }
@@ -1373,6 +1405,7 @@ fn switching_active_output_relocates_one_launcher_to_negative_origin() {
         (960, 720),
         &outputs(),
         Some("right"),
+        PanelEdge::Bottom,
     );
     let left = internal_shell_surface_placement(
         SurfaceRole::Launcher,
@@ -1380,6 +1413,7 @@ fn switching_active_output_relocates_one_launcher_to_negative_origin() {
         (960, 720),
         &outputs(),
         Some("left"),
+        PanelEdge::Bottom,
     );
 
     assert_eq!(right.output.as_deref(), Some("right"));
