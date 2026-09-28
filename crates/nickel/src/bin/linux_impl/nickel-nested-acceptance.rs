@@ -153,7 +153,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, an installed panel, and a component window; checked plugin activation, memory retirement, launcher fallback, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, an installed panel, and a component window with a dialog; checked plugin activation, memory retirement, launcher fallback, and clean shutdown"
     );
     Ok(())
 }
@@ -432,8 +432,13 @@ fn verify_component_window(
     {
         return Err("component window plugin did not start".into());
     }
-    wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    let initial_bytes =
+        wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
     let first_window = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
+    click_at(test_input, environment, first_window.1 + 260, first_window.2 + 77)?;
+    wait_for_component_dialog_memory(test_input, environment, initial_bytes)?;
+    checked(test_input, environment, &["key", "escape", "pressed"])?;
+    checked(test_input, environment, &["key", "escape", "released"])?;
     let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
     let disabled: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
@@ -454,7 +459,7 @@ fn verify_component_window(
     }
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
     let reopened = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
-    if reopened == first_window {
+    if reopened.0 == first_window.0 {
         return Err("component window reused its retired window identity".into());
     }
     checked(test_input, environment, &["plugin-set", id, "disabled"])?;
@@ -465,21 +470,66 @@ fn wait_for_component_window(
     test_input: &Path,
     environment: &[(String, String)],
     timeout: Duration,
-) -> Result<u64, String> {
+) -> Result<(u64, i32, i32), String> {
     let deadline = Instant::now() + timeout;
     loop {
         let windows = checked(test_input, environment, &["windows"])?;
-        if let Some(id) = windows.lines().find_map(|line| {
+        if let Some(window) = windows.lines().find_map(|line| {
             (line.contains("\torg.example.component-window\tComponent Window Example\t")
                 && line.contains("\tshown\t")
                 && !line.ends_with("\tunmapped"))
-            .then(|| line.split('\t').next()?.parse::<u64>().ok())
+            .then(|| {
+                let id = line.split('\t').next()?.parse::<u64>().ok()?;
+                let location = line.rsplit('\t').next()?.split_whitespace().next()?;
+                let (x, y) = location.split_once(',')?;
+                Some((id, x.parse::<i32>().ok()?, y.parse::<i32>().ok()?))
+            })
             .flatten()
         }) {
-            return Ok(id);
+            return Ok(window);
         }
         if Instant::now() >= deadline {
             return Err(format!("component window did not enter the window registry: {windows}"));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn click_at(
+    test_input: &Path,
+    environment: &[(String, String)],
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    checked(test_input, environment, &["move", &x.to_string(), &y.to_string()])?;
+    checked(test_input, environment, &["button", "left", "pressed"])?;
+    checked(test_input, environment, &["button", "left", "released"])?;
+    Ok(())
+}
+
+fn wait_for_component_dialog_memory(
+    test_input: &Path,
+    environment: &[(String, String)],
+    initial_bytes: u64,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = checked(test_input, environment, &["plugins"])?;
+        let snapshot: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&output).map_err(|error| error.to_string())?;
+        let bytes = snapshot
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == "org.example.component-window")
+            .and_then(|plugin| plugin.memory.native_ui_bytes)
+            .ok_or("component window has no native UI memory after dialog click")?;
+        if bytes > initial_bytes {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "component dialog did not increase retained UI memory: initial={initial_bytes}, current={bytes}"
+            ));
         }
         thread::sleep(POLL);
     }
