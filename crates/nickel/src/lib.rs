@@ -3802,13 +3802,22 @@ mod tests {
             .expect("controller handler remains inspectable");
 
         assert!(!handler.contains("KeyCode"));
-        assert!(!handler.contains("_key("));
+        for key_translation in [
+            "control_key(",
+            "preview_key(",
+            "window_menu_key(",
+            "notification_key(",
+            "panel_key(",
+            "screenshot_key(",
+        ] {
+            assert!(!handler.contains(key_translation));
+        }
         for direct_dispatch in [
             "control_controller(action, width, height)",
             "preview_controller(action)",
             "window_menu_host_controller(action)",
             "notification_controller(action)",
-            "panel_controller(action, width)",
+            "plugin_panel_host_controller_for(&key, action, width, height)",
             "screenshot_controller(action)",
         ] {
             assert!(

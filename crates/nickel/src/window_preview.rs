@@ -794,9 +794,7 @@ mod tests {
     use super::*;
     use crate::model::OpenWindow;
     use nickel_core::theme::{Appearance, ThemeMode};
-    use nickel_ui::{
-        ActionKind, ResolvedAppearance, ResolvedThemePreferences, SemanticAction, Size,
-    };
+    use nickel_ui::{ResolvedAppearance, ResolvedThemePreferences, Size};
 
     #[test]
     fn native_thumbnails_follow_card_geometry() {

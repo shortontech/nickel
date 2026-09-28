@@ -420,12 +420,17 @@ impl InternalShellCoordinator {
             .iter()
             .find(|entry| entry.id == id)
             .is_none_or(|entry| {
+                let role = if self.is_taskbar_surface(entry) {
+                    SurfaceRole::Taskbar
+                } else {
+                    entry.role
+                };
                 entry
                     .plugin
                     .as_ref()
                     .is_some_and(|key| !self.shell.plugin_surface_matches(key))
-                    || !self.shell.surface_visible(entry.role)
-                    || self.shell.surface_remote_access_protected(entry.role)
+                    || !self.shell.surface_visible(role)
+                    || self.shell.surface_remote_access_protected(role)
             })
     }
 

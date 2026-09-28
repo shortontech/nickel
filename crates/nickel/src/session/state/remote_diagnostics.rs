@@ -1290,6 +1290,9 @@ impl NickelSession {
             let role = match entry.role {
                 SurfaceRole::Desktop => ShellDiagnosticRole::Desktop,
                 SurfaceRole::Taskbar => ShellDiagnosticRole::Panel,
+                SurfaceRole::Panel if shell.is_taskbar_surface_id(entry.id) => {
+                    ShellDiagnosticRole::Panel
+                }
                 SurfaceRole::Launcher => ShellDiagnosticRole::Launcher,
                 SurfaceRole::ControlCenter => ShellDiagnosticRole::ControlCenter,
                 SurfaceRole::Notification => ShellDiagnosticRole::Notification,

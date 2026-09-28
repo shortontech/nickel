@@ -7505,7 +7505,9 @@ fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
     assert!(
         records
             .iter()
-            .any(|record| matches!(record.role, ShellDiagnosticRole::Panel))
+            .any(|record| matches!(record.role, ShellDiagnosticRole::Panel)),
+        "diagnostics={records:?}, surfaces={:?}",
+        session.internal_shell.as_ref().unwrap().surfaces()
     );
     assert!(
         !records
