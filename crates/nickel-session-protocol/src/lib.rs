@@ -2387,6 +2387,27 @@ mod tests {
     }
 
     #[test]
+    fn reserved_panel_identity_carries_its_plugin_surface_key() {
+        let identity = ShellSurfaceIdentity {
+            application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.9"),
+            role: ShellRole::Panel,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.nickel.taskbar".into(),
+                surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Panel,
+                width: 1920,
+                height: 56,
+                bottom_offset: 0,
+            }),
+        };
+        assert_eq!(
+            decode::<ShellSurfaceIdentity>(&encode(&identity).unwrap()).unwrap(),
+            identity
+        );
+    }
+
+    #[test]
     fn nested_test_input_commands_round_trip() {
         for input in [
             TestInput::ControllerConnect,

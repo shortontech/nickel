@@ -250,7 +250,18 @@ fn exercise(
     // pending instead of failing the acceptance run on a transient EAGAIN.
     let readiness = loop {
         match checked(test_input, &environment, &["readiness"]) {
-            Ok(readiness) => break readiness,
+            Ok(readiness)
+                if readiness.contains("panels=1")
+                    && readiness.contains("output_roles_ready=true") =>
+            {
+                break readiness;
+            }
+            Ok(readiness) if Instant::now() >= deadline => {
+                let surfaces = checked(test_input, &environment, &["surfaces"])
+                    .unwrap_or_else(|error| format!("surface inventory unavailable: {error}"));
+                return Err(format!("panel readiness did not settle: {readiness}; {surfaces}"));
+            }
+            Ok(_) => thread::sleep(POLL),
             Err(error) if Instant::now() < deadline => {
                 if let Some(status) = compositor.try_wait().map_err(|error| error.to_string())? {
                     return Err(format!(
@@ -276,7 +287,7 @@ fn exercise(
         }
     }
     if !surfaces.lines().any(|line| {
-        line.starts_with("PluginSurface\twinit\t")
+        line.starts_with("Panel\twinit\t")
             && line.ends_with("org.nickel.taskbar/main")
     }) {
         return Err(format!("taskbar plugin surface is missing: {surfaces:?}"));
@@ -671,7 +682,7 @@ fn wait_for_taskbar_presence(
     loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
         let present = surfaces.lines().any(|line| {
-            line.starts_with("PluginSurface\t")
+            line.starts_with("Panel\t")
                 && line.ends_with("org.nickel.taskbar/main")
         });
         if present == expected {

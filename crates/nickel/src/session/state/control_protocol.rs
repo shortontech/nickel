@@ -4,6 +4,76 @@ use crate::session::SessionAuthorityRequest;
 static CONTROL_SOCKET_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurfaceIdentity) -> bool {
+    let output_scoped = matches!(
+        identity.role,
+        ShellRole::Desktop | ShellRole::Panel | ShellRole::PluginSurface | ShellRole::Lock
+    );
+    identity
+        .application_id
+        .starts_with(nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX)
+        && identity.application_id.len() <= nickel_session_protocol::MAX_WINDOW_APP_ID_BYTES
+        && identity.output.is_some() == output_scoped
+        && (identity.role != ShellRole::PluginSurface || identity.plugin_surface.is_some())
+        && (matches!(identity.role, ShellRole::PluginSurface | ShellRole::Panel)
+            || identity.plugin_surface.is_none())
+        && (identity.role != ShellRole::Panel
+            || identity.plugin_surface.as_ref().is_none_or(|surface| {
+                surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Panel
+                    && surface.bottom_offset == 0
+            }))
+        && identity.plugin_surface.as_ref().is_none_or(|surface| {
+            !surface.plugin_id.is_empty()
+                && surface.plugin_id.len() <= 128
+                && !surface.surface_id.is_empty()
+                && surface.surface_id.len() <= 128
+                && (1..=8192).contains(&surface.width)
+                && (1..=8192).contains(&surface.height)
+                && surface.bottom_offset <= 8192
+                && (matches!(
+                    surface.kind,
+                    nickel_session_protocol::PluginSurfacePlacementKind::Panel
+                        | nickel_session_protocol::PluginSurfacePlacementKind::Dock
+                ) || surface.bottom_offset == 0)
+        })
+}
+
+#[cfg(test)]
+mod shell_surface_identity_tests {
+    use super::shell_surface_identity_valid;
+    use nickel_session_protocol::{
+        PluginSurfacePlacement, PluginSurfacePlacementKind, ShellRole, ShellSurfaceIdentity,
+    };
+
+    #[test]
+    fn reserved_panel_accepts_keyed_identity_and_rejects_dock_placement() {
+        let mut identity = ShellSurfaceIdentity {
+            application_id: "io.nickel.shell.surface.42.9".into(),
+            role: ShellRole::Panel,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.nickel.taskbar".into(),
+                surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Panel,
+                width: 1920,
+                height: 56,
+                bottom_offset: 0,
+            }),
+        };
+        assert!(shell_surface_identity_valid(&identity));
+
+        let placement = identity.plugin_surface.as_mut().unwrap();
+        placement.kind = PluginSurfacePlacementKind::Dock;
+        assert!(!shell_surface_identity_valid(&identity));
+        let placement = identity.plugin_surface.as_mut().unwrap();
+        placement.kind = PluginSurfacePlacementKind::Panel;
+        placement.bottom_offset = 24;
+        assert!(!shell_surface_identity_valid(&identity));
+        identity.role = ShellRole::PluginSurface;
+        assert!(shell_surface_identity_valid(&identity));
+    }
+}
+
 fn remote_capability(
     capability: nickel_remote_control::Capability,
 ) -> nickel_session_protocol::RemoteCapability {
@@ -1110,38 +1180,7 @@ impl NickelSession {
                     .retain(|pending| pending.generation != generation);
             }
             SessionCommand::RegisterShellSurface { mut identity } => {
-                let output_scoped = matches!(
-                    identity.role,
-                    ShellRole::Desktop
-                        | ShellRole::Panel
-                        | ShellRole::PluginSurface
-                        | ShellRole::Lock
-                );
-                if !identity
-                    .application_id
-                    .starts_with(nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX)
-                    || identity.application_id.len()
-                        > nickel_session_protocol::MAX_WINDOW_APP_ID_BYTES
-                    || identity.output.is_some() != output_scoped
-                    || (identity.role == ShellRole::PluginSurface)
-                        != identity.plugin_surface.is_some()
-                    || identity.plugin_surface.as_ref().is_some_and(|surface| {
-                        surface.plugin_id.is_empty()
-                            || surface.plugin_id.len() > 128
-                            || surface.surface_id.is_empty()
-                            || surface.surface_id.len() > 128
-                            || surface.width == 0
-                            || surface.width > 8192
-                            || surface.height == 0
-                            || surface.height > 8192
-                            || surface.bottom_offset > 8192
-                            || (!matches!(
-                                surface.kind,
-                                nickel_session_protocol::PluginSurfacePlacementKind::Panel
-                                    | nickel_session_protocol::PluginSurfacePlacementKind::Dock
-                            ) && surface.bottom_offset != 0)
-                    })
-                {
+                if !shell_surface_identity_valid(&identity) {
                     return protocol_error(
                         ErrorCode::InvalidRequest,
                         "invalid shell surface identity",
@@ -1163,7 +1202,7 @@ impl NickelSession {
                 }
                 self.shell_surface_identities
                     .insert(identity.application_id.clone(), identity.clone());
-                if identity.role == ShellRole::PluginSurface {
+                if matches!(identity.role, ShellRole::PluginSurface | ShellRole::Panel) {
                     for registration in &mut self.registered_shell_role_slots {
                         if registration.application_id.as_deref()
                             == Some(identity.application_id.as_str())
@@ -2277,6 +2316,11 @@ impl NickelSession {
                     let role = match surface.role {
                         crate::winit_shell::SurfaceRole::Desktop => ShellRole::Desktop,
                         crate::winit_shell::SurfaceRole::Taskbar => ShellRole::Panel,
+                        crate::winit_shell::SurfaceRole::Panel
+                            if shell.is_reserved_panel_surface_id(surface.id) =>
+                        {
+                            ShellRole::Panel
+                        }
                         crate::winit_shell::SurfaceRole::Panel => ShellRole::PluginSurface,
                         crate::winit_shell::SurfaceRole::Launcher => ShellRole::Launcher,
                         crate::winit_shell::SurfaceRole::ControlCenter => ShellRole::ControlCenter,
@@ -2452,7 +2496,14 @@ impl NickelSession {
                 .unwrap_or(u16::MAX)
             };
             let desktops = count(crate::winit_shell::SurfaceRole::Desktop);
-            let panels = count(crate::winit_shell::SurfaceRole::Taskbar);
+            let panels = u16::try_from(
+                shell
+                    .surfaces()
+                    .iter()
+                    .filter(|surface| shell.is_reserved_panel_surface_id(surface.id))
+                    .count(),
+            )
+            .unwrap_or(u16::MAX);
             let locks = count(crate::winit_shell::SurfaceRole::Lock);
             let launchers = count(crate::winit_shell::SurfaceRole::Launcher);
             return nickel_session_protocol::ShellReadinessSnapshot {
@@ -2491,7 +2542,7 @@ impl NickelSession {
             use crate::winit_shell::SurfaceRole;
             Some(match role {
                 ShellRole::Desktop => SurfaceRole::Desktop,
-                ShellRole::Panel => SurfaceRole::Taskbar,
+                ShellRole::Panel => SurfaceRole::Panel,
                 ShellRole::PluginSurface => SurfaceRole::Panel,
                 ShellRole::Launcher => SurfaceRole::Launcher,
                 ShellRole::ControlCenter => SurfaceRole::ControlCenter,
@@ -2508,12 +2559,23 @@ impl NickelSession {
         };
         let internal_role_count = |role| {
             self.internal_shell.as_ref().and_then(|shell| {
-                let role = internal_surface_role(role)?;
+                let surface_role = internal_surface_role(role)?;
                 Some(
                     shell
                         .surfaces()
                         .iter()
-                        .filter(|surface| surface.role == role)
+                        .filter(|surface| {
+                            surface.role == surface_role
+                                && match role {
+                                    ShellRole::Panel => {
+                                        shell.is_reserved_panel_surface_id(surface.id)
+                                    }
+                                    ShellRole::PluginSurface => {
+                                        !shell.is_reserved_panel_surface_id(surface.id)
+                                    }
+                                    _ => true,
+                                }
+                        })
                         .count(),
                 )
             })
@@ -2593,13 +2655,22 @@ impl NickelSession {
         let expected_panels = u16::try_from(expected_panel_outputs.len()).unwrap_or(u16::MAX);
         let registered_role_outputs = |role| {
             if let Some(shell) = &self.internal_shell {
-                let Some(role) = internal_surface_role(role) else {
+                let Some(surface_role) = internal_surface_role(role) else {
                     return HashSet::new();
                 };
                 shell
                     .surfaces()
                     .iter()
-                    .filter(|surface| surface.role == role)
+                    .filter(|surface| {
+                        surface.role == surface_role
+                            && match role {
+                                ShellRole::Panel => shell.is_reserved_panel_surface_id(surface.id),
+                                ShellRole::PluginSurface => {
+                                    !shell.is_reserved_panel_surface_id(surface.id)
+                                }
+                                _ => true,
+                            }
+                    })
                     .filter_map(|surface| surface.output.clone())
                     .collect::<HashSet<_>>()
             } else {

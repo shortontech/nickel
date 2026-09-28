@@ -1397,6 +1397,14 @@ impl InternalShellCoordinator {
             .is_some_and(|surface| self.is_taskbar_surface(surface))
     }
 
+    pub(crate) fn is_reserved_panel_surface_id(&self, id: InternalSurfaceId) -> bool {
+        self.entries
+            .iter()
+            .find(|surface| surface.id == id)
+            .and_then(|surface| surface.plugin.as_ref())
+            .is_some_and(|key| self.plugin_panel_reserves_work_area(key))
+    }
+
     pub(crate) fn plugin_panel_reserves_work_area(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -2059,6 +2067,7 @@ mod tests {
             .unwrap();
         assert_eq!(panel.size, (1280, PANEL_HEIGHT));
         assert_eq!(panel.role, SurfaceRole::Panel);
+        assert!(coordinator.is_reserved_panel_surface_id(panel.id));
         assert!(
             coordinator
                 .surface(SurfaceRole::Taskbar, Some("two"))
