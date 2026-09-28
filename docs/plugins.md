@@ -122,7 +122,8 @@ audio changes do not recreate a Rust fallback.
 Disabling Control Center closes ordinary Quick Settings. The trusted display
 projection chooser remains available for recovery.
 The ordinary view uses a plugin overlay; the trusted chooser uses a separate
-host surface.
+host surface. On Linux, opening it from the taskbar places the overlay beside
+that control on its output.
 Disabling Window Preview closes its visible cards and task switcher view;
 hovering a taskbar group no longer creates a Rust preview. Re-enabling the
 plugin restores the JSX preview.

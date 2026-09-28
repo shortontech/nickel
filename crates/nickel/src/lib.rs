@@ -1586,6 +1586,13 @@ fn sync_panel_popover_anchor(shell: &WinitShell, state: &LiveShell) {
             Some(&plugin_panel::control_center_surface_key()),
         )
     {
+        let _ = state.dispatch_session_command(
+            "place-anchored-plugin-popover",
+            platform::ShellCommand::ShowAnchoredPluginSurface {
+                key: plugin_panel::control_center_surface_key(),
+                anchor,
+            },
+        );
         return;
     }
     let _ = state.dispatch_session_command(
@@ -1931,10 +1938,12 @@ fn handle_shell_input(
                 )?;
             }
             if taskbar {
-                sync_panel_popover_anchor(shell, state);
                 state.sync_transient_overlays();
             }
             sync_visibility(shell, state);
+            if taskbar {
+                sync_panel_popover_anchor(shell, state);
+            }
             if taskbar_motion {
                 *hover_repaint = Some((
                     SurfaceRole::Taskbar,
@@ -2338,10 +2347,12 @@ fn handle_controller_action(
         }
         if state.plugin_panel_host_controller_for(&key, action, width, height) {
             if taskbar {
-                sync_panel_popover_anchor(shell, state);
                 state.sync_transient_overlays();
             }
             sync_visibility(shell, state);
+            if taskbar {
+                sync_panel_popover_anchor(shell, state);
+            }
             render_role(shell, state, role)?;
             if taskbar {
                 focus_visible_overlay(shell, state);
@@ -2365,10 +2376,10 @@ fn handle_controller_action(
         _ => false,
     };
     if changed {
+        sync_visibility(shell, state);
         if taskbar {
             sync_panel_popover_anchor(shell, state);
         }
-        sync_visibility(shell, state);
         render_role(shell, state, role)?;
     }
     Ok(())

@@ -196,6 +196,11 @@ pub enum Command {
         role: ShellRole,
         anchor: ShellPopoverAnchor,
     },
+    ShowAnchoredPluginSurface {
+        plugin_id: String,
+        surface_id: String,
+        anchor: ShellPopoverAnchor,
+    },
     LogOut,
     SessionAction {
         action: SessionAction,
@@ -2887,6 +2892,29 @@ mod tests {
         assert_eq!(
             decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
             envelope
+        );
+        let plugin = ClientEnvelope {
+            token: "session-token".into(),
+            request_id: 21,
+            request: Request::Command(Command::ShowAnchoredPluginSurface {
+                plugin_id: "org.nickel.control-center".into(),
+                surface_id: "main".into(),
+                anchor: ShellPopoverAnchor {
+                    control: "panel-control".into(),
+                    output: "HDMI-A-1".into(),
+                    bounds: Geometry {
+                        x: 1720,
+                        y: 0,
+                        width: 96,
+                        height: 56,
+                    },
+                    preferred: AnchorSide::Above,
+                },
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&plugin).unwrap()).unwrap(),
+            plugin
         );
     }
 

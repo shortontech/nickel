@@ -1335,6 +1335,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             }
             SessionCommand::SetShellRoleVisible { .. } => "set-shell-role-visible",
             SessionCommand::ShowAnchoredShellRole { .. } => "show-anchored-shell-role",
+            SessionCommand::ShowAnchoredPluginSurface { .. } => "show-anchored-plugin-surface",
             SessionCommand::LogOut => "log-out",
             SessionCommand::SessionAction { .. } => "session-action",
             SessionCommand::Unlock => "unlock",
@@ -1601,6 +1602,13 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
         }
         ShellCommand::ShowAnchoredShellRole { role, anchor } => {
             SessionCommand::ShowAnchoredShellRole { role, anchor }
+        }
+        ShellCommand::ShowAnchoredPluginSurface { key, anchor } => {
+            SessionCommand::ShowAnchoredPluginSurface {
+                plugin_id: key.plugin_id,
+                surface_id: key.surface_id,
+                anchor,
+            }
         }
         ShellCommand::HideContextMenu => SessionCommand::HideOverlay,
         ShellCommand::HighlightWindow(window) => SessionCommand::HighlightWindow {

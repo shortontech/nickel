@@ -2330,6 +2330,7 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
             | SessionCommand::SessionAction { .. }
             | SessionCommand::FocusShellRole { .. }
             | SessionCommand::FocusPluginSurface { .. }
+            | SessionCommand::ShowAnchoredPluginSurface { .. }
             | SessionCommand::RestoreApplicationFocus
             | SessionCommand::ConfigureOnScreenKeyboard { .. }
             | SessionCommand::OnScreenKeyboardInput { .. }
@@ -2815,6 +2816,10 @@ pub struct NickelSession {
     shell_focus_restore_window: Option<WindowId>,
     pub(crate) pending_shell_focus_role: Option<ShellRole>,
     pub(crate) pending_plugin_focus: Option<nickel_core::plugins::PluginSurfaceKey>,
+    plugin_popover_anchors: HashMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_session_protocol::ShellPopoverAnchor,
+    >,
     pub utility_windows: Vec<Window>,
     hidden_shell_roles: HashSet<ShellRole>,
     hidden_shell_role_locations: HashMap<ShellRole, Point<i32, Logical>>,
@@ -5430,6 +5435,25 @@ impl NickelSession {
             );
             if let Some(key) = surface.plugin.as_ref() {
                 adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
+                if *key == crate::plugin_panel::control_center_surface_key() {
+                    let preferred = match shell.panel_edge() {
+                        crate::winit_shell::PanelEdge::Top => {
+                            nickel_session_protocol::AnchorSide::Below
+                        }
+                        crate::winit_shell::PanelEdge::Bottom => {
+                            nickel_session_protocol::AnchorSide::Above
+                        }
+                    };
+                    if let Some((nickel_session_protocol::ShellRole::ControlCenter, anchor)) =
+                        shell.popover_anchor(preferred)
+                    {
+                        apply_internal_anchored_plugin_surface_placement(
+                            &mut placement,
+                            &anchor,
+                            &outputs,
+                        );
+                    }
+                }
             }
             let scale = surface
                 .output
@@ -7278,7 +7302,9 @@ impl NickelSession {
                 surface.role,
                 crate::winit_shell::SurfaceRole::Launcher
                     | crate::winit_shell::SurfaceRole::ControlCenter
-            ) {
+            ) || surface.plugin.as_ref()
+                == Some(&crate::plugin_panel::control_center_surface_key())
+            {
                 surface.size = (placement.geometry.2, placement.geometry.3);
                 resized = shell.set_surface_size(surface.id, surface.size);
             }
@@ -8780,6 +8806,7 @@ impl NickelSession {
             shell_focus_restore_window: None,
             pending_shell_focus_role: None,
             pending_plugin_focus: None,
+            plugin_popover_anchors: HashMap::new(),
             utility_windows: Vec::new(),
             hidden_shell_roles: HashSet::new(),
             hidden_shell_role_locations: HashMap::new(),
@@ -13142,8 +13169,6 @@ impl NickelSession {
     }
 
     fn show_anchored_shell_role(&mut self, role: ShellRole, anchor: ShellPopoverAnchor) {
-        use nickel_session_protocol::AnchorSide;
-
         if !matches!(role, ShellRole::ControlCenter | ShellRole::ProjectMenu) {
             return;
         }
@@ -13166,56 +13191,87 @@ impl NickelSession {
         }) else {
             return;
         };
-        let bounds = anchor.bounds;
-        let anchor_geometry = match anchor.preferred {
-            AnchorSide::Above => Geometry {
-                x: output.x + bounds.x,
-                y: output.y + output.height - shell_layout::PANEL_HEIGHT + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-            },
-            AnchorSide::Below => Geometry {
-                x: output.x + bounds.x,
-                y: output.y + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-            },
-            AnchorSide::Left => Geometry {
-                x: output.x + bounds.x,
-                y: output.y + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-            },
-            AnchorSide::Right => Geometry {
-                x: output.x + output.width - shell_layout::PANEL_HEIGHT + bounds.x,
-                y: output.y + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-            },
+        self.place_anchored_shell_window(window, anchor, output, Some(role), true);
+    }
+
+    fn show_anchored_plugin_surface(
+        &mut self,
+        plugin_id: &str,
+        surface_id: &str,
+        anchor: ShellPopoverAnchor,
+    ) -> bool {
+        let Some(output) = self.output_geometry_named(&anchor.output) else {
+            return false;
         };
-        let area = match anchor.preferred {
-            AnchorSide::Above => shell_layout::work_area(output),
-            AnchorSide::Below => Geometry {
-                y: output.y + shell_layout::PANEL_HEIGHT,
-                height: (output.height - shell_layout::PANEL_HEIGHT).max(0),
-                ..output
-            },
-            AnchorSide::Left | AnchorSide::Right => output,
+        let window = self
+            .registered_shell_role_slots
+            .iter()
+            .find_map(|registration| {
+                let placement = registration.plugin_surface.as_ref()?;
+                if registration.role != ShellRole::PluginSurface
+                    || placement.plugin_id != plugin_id
+                    || placement.surface_id != surface_id
+                {
+                    return None;
+                }
+                self.utility_windows
+                    .iter()
+                    .find(|window| {
+                        window
+                            .wl_surface()
+                            .is_some_and(|surface| surface.id() == registration.surface)
+                    })
+                    .cloned()
+            });
+        let Some(window) = window else {
+            return false;
         };
-        let size = window.geometry().size;
-        let target = shell_layout::anchored_popover(
-            area,
-            anchor_geometry,
-            (size.w.max(1), size.h.max(1)),
-            anchor.preferred,
+        self.plugin_popover_anchors.insert(
+            nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: plugin_id.to_owned(),
+                surface_id: surface_id.to_owned(),
+            },
+            anchor.clone(),
         );
+        self.place_anchored_shell_window(window, anchor, output, None, true);
+        true
+    }
+
+    pub(crate) fn clear_plugin_popover_anchor_for_surface(&mut self, surface: &ObjectId) {
+        let key = self
+            .registered_shell_role_slots
+            .iter()
+            .find(|registration| &registration.surface == surface)
+            .and_then(|registration| registration.plugin_surface.as_ref())
+            .map(|placement| nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: placement.plugin_id.clone(),
+                surface_id: placement.surface_id.clone(),
+            });
+        if let Some(key) = key {
+            self.plugin_popover_anchors.remove(&key);
+        }
+    }
+
+    fn place_anchored_shell_window(
+        &mut self,
+        window: Window,
+        anchor: ShellPopoverAnchor,
+        output: Geometry,
+        role: Option<ShellRole>,
+        activate: bool,
+    ) {
+        let size = window.geometry().size;
+        let (anchor_geometry, target) =
+            anchored_shell_popover_geometry(output, &anchor, (size.w.max(1), size.h.max(1)));
         self.configure_window(&window, target);
         let location = Self::shell_surface_location(&window, target);
-        self.hidden_shell_roles.remove(&role);
-        self.hidden_shell_role_locations
-            .insert(role, location.into());
-        self.map_buffered_window(window.clone(), location, true);
-        self.space.raise_element(&window, true);
+        if let Some(role) = role {
+            self.hidden_shell_roles.remove(&role);
+            self.hidden_shell_role_locations
+                .insert(role, location.into());
+        }
+        self.map_buffered_window(window.clone(), location, activate);
+        self.space.raise_element(&window, activate);
         let control = anchor.control.chars().take(80).collect::<String>();
         tracing::debug!(
             ?role,
@@ -14058,12 +14114,22 @@ impl NickelSession {
                     )
                 }
             };
-            let geometry = Geometry {
+            let mut geometry = Geometry {
                 x,
                 y,
                 width,
                 height,
             };
+            let key = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: placement.plugin_id.clone(),
+                surface_id: placement.surface_id.clone(),
+            };
+            if let Some(anchor) = self.plugin_popover_anchors.get(&key)
+                && let Some(anchor_output) = self.output_geometry_named(&anchor.output)
+            {
+                geometry =
+                    anchored_shell_popover_geometry(anchor_output, anchor, (width, height)).1;
+            }
             self.configure_window(&plugin, geometry);
             let location = Self::shell_surface_location(&plugin, geometry);
             self.map_buffered_window(plugin.clone(), location, false);
@@ -15883,6 +15949,86 @@ fn apply_internal_plugin_surface_placement(
     } else {
         placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - bottom_offset as i32;
     }
+}
+
+fn anchored_shell_popover_geometry(
+    output: Geometry,
+    anchor: &nickel_session_protocol::ShellPopoverAnchor,
+    size: (i32, i32),
+) -> (Geometry, Geometry) {
+    use nickel_session_protocol::AnchorSide;
+
+    let bounds = anchor.bounds;
+    let anchor_geometry = match anchor.preferred {
+        AnchorSide::Above => Geometry {
+            x: output.x + bounds.x,
+            y: output.y + output.height - shell_layout::PANEL_HEIGHT + bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        },
+        AnchorSide::Below | AnchorSide::Left => Geometry {
+            x: output.x + bounds.x,
+            y: output.y + bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        },
+        AnchorSide::Right => Geometry {
+            x: output.x + output.width - shell_layout::PANEL_HEIGHT + bounds.x,
+            y: output.y + bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        },
+    };
+    let area = match anchor.preferred {
+        AnchorSide::Above => shell_layout::work_area(output),
+        AnchorSide::Below => Geometry {
+            y: output.y + shell_layout::PANEL_HEIGHT,
+            height: (output.height - shell_layout::PANEL_HEIGHT).max(0),
+            ..output
+        },
+        AnchorSide::Left | AnchorSide::Right => output,
+    };
+    let target = shell_layout::anchored_popover(
+        area,
+        anchor_geometry,
+        (
+            size.0.max(1).min(area.width.max(1)),
+            size.1.max(1).min(area.height.max(1)),
+        ),
+        anchor.preferred,
+    );
+    (anchor_geometry, target)
+}
+
+fn apply_internal_anchored_plugin_surface_placement(
+    placement: &mut crate::session::InternalSurfacePlacement,
+    anchor: &nickel_session_protocol::ShellPopoverAnchor,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) {
+    let Some((output, x, y)) = outputs
+        .iter()
+        .find(|(output, _, _)| output.name == anchor.output)
+    else {
+        return;
+    };
+    let output_geometry = Geometry {
+        x: *x,
+        y: *y,
+        width: output.width as i32,
+        height: output.height as i32,
+    };
+    let (_, target) = anchored_shell_popover_geometry(
+        output_geometry,
+        anchor,
+        (placement.geometry.2 as i32, placement.geometry.3 as i32),
+    );
+    placement.output = Some(output.name.clone());
+    placement.geometry = (
+        target.x,
+        target.y,
+        target.width.max(1) as u32,
+        target.height.max(1) as u32,
+    );
 }
 
 fn avoid_trusted_control_collision(

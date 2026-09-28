@@ -241,6 +241,7 @@ impl XdgShellHandler for NickelSession {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.forget_toplevel_geometry(&surface);
         let surface_id = surface.wl_surface().id();
+        self.clear_plugin_popover_anchor_for_surface(&surface_id);
         let window_id = self.surface_windows.get(&surface_id).copied();
         if let Some(window_id) = window_id {
             self.withdraw_foreign_toplevel(window_id);
@@ -988,6 +989,7 @@ impl NickelSession {
         if !self.mapped_xdg_toplevels.remove(&surface_id) {
             return Some(window);
         }
+        self.clear_plugin_popover_anchor_for_surface(&surface_id);
         self.restored_xdg_toplevels.insert(surface_id.clone());
         if let Some(location) = self.space.element_location(&window) {
             self.xdg_toplevel_locations

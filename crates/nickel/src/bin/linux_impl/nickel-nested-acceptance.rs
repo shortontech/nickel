@@ -775,6 +775,15 @@ fn verify_control_plugin_retires(
     checked(test_input, environment, &["plugin-set", id, "disabled"])?;
     wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    checked(
+        test_input,
+        environment,
+        &["semantic", "control-center", "open", "winit"],
+    )?;
+    wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
+    checked(test_input, environment, &["key", "escape", "pressed"])?;
+    checked(test_input, environment, &["key", "escape", "released"])?;
+    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
     Ok(())
 }
 

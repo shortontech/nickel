@@ -1767,6 +1767,18 @@ impl NickelSession {
             SessionCommand::ShowAnchoredShellRole { role, anchor } => {
                 self.show_anchored_shell_role(role, anchor);
             }
+            SessionCommand::ShowAnchoredPluginSurface {
+                plugin_id,
+                surface_id,
+                anchor,
+            } => {
+                if !self.show_anchored_plugin_surface(&plugin_id, &surface_id, anchor) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin popover surface is unavailable",
+                    );
+                }
+            }
             SessionCommand::LogOut => {
                 self.remote_control.shutdown_session();
                 self.sync_remote_control_indicators();

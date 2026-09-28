@@ -22,6 +22,61 @@ use super::{
 };
 
 #[test]
+fn keyed_plugin_popover_follows_its_control_to_the_selected_output() {
+    let outputs = vec![
+        (
+            crate::internal_shell::InternalOutput {
+                name: "primary".into(),
+                x: 0,
+                y: 0,
+                width: 1200,
+                height: 768,
+                scale: 1.0,
+            },
+            0,
+            0,
+        ),
+        (
+            crate::internal_shell::InternalOutput {
+                name: "secondary".into(),
+                x: 1200,
+                y: 0,
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            },
+            1200,
+            0,
+        ),
+    ];
+    let mut placement = crate::session::InternalSurfacePlacement {
+        role: crate::session::InternalSurfaceRole::Overlay,
+        geometry: (762, 96, 420, 600),
+        output: Some("primary".into()),
+    };
+    super::apply_internal_anchored_plugin_surface_placement(
+        &mut placement,
+        &nickel_session_protocol::ShellPopoverAnchor {
+            control: "control-center".into(),
+            output: "secondary".into(),
+            bounds: nickel_session_protocol::Geometry {
+                x: 700,
+                y: 0,
+                width: 56,
+                height: 56,
+            },
+            preferred: nickel_session_protocol::AnchorSide::Above,
+        },
+        &outputs,
+    );
+    assert_eq!(placement.output.as_deref(), Some("secondary"));
+    assert!(placement.geometry.0 >= 1200);
+    assert!(placement.geometry.0 + placement.geometry.2 as i32 <= 2000);
+    assert!(placement.geometry.1 >= 0);
+    assert!(placement.geometry.1 + placement.geometry.3 as i32 <= 600);
+}
+
+#[test]
 fn mapped_client_surface_origin_accounts_for_nonzero_window_geometry() {
     let mapped = smithay::utils::Point::from((120, 80));
     let client_geometry = smithay::utils::Point::from((7, 40));
@@ -9560,6 +9615,21 @@ fn privileged_shell_commands_require_the_registered_shell_pid() {
         Command::FocusPluginSurface {
             plugin_id: "org.nickel.control-center".into(),
             surface_id: "main".into(),
+        },
+        Command::ShowAnchoredPluginSurface {
+            plugin_id: "org.nickel.control-center".into(),
+            surface_id: "main".into(),
+            anchor: nickel_session_protocol::ShellPopoverAnchor {
+                control: "control-center".into(),
+                output: "winit".into(),
+                bounds: nickel_session_protocol::Geometry {
+                    x: 4,
+                    y: 4,
+                    width: 24,
+                    height: 24,
+                },
+                preferred: nickel_session_protocol::AnchorSide::Above,
+            },
         },
         Command::RestoreApplicationFocus,
     ] {
