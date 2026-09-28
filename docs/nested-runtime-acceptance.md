@@ -28,6 +28,11 @@ phase has a deadline. On
 failure, the harness terminates its compositor child and removes its temporary
 runtime data.
 
+The harness also installs the shipped component-window example into the private
+profile. It checks that enabling the package maps an ordinary window with a
+retained UI memory report, disabling it unregisters the window and clears that
+report, and re-enabling creates a fresh window identity.
+
 This is a live graphical acceptance check, so it requires a working host display.
 On hosts where GLVND's default vendor cannot create a nested EGL display, an installed Mesa software
 renderer can be selected explicitly without changing the compositor under test:

@@ -68,6 +68,19 @@ fn run() -> Result<(), String> {
         "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-label'] ? 'On' : 'Off')); }",
     )
     .map_err(|error| error.to_string())?;
+    let window = runtime
+        .join("config/nickel/plugins/org.example.component-window");
+    fs::create_dir_all(&window).map_err(|error| error.to_string())?;
+    fs::write(
+        window.join("plugin.json"),
+        include_str!("../../../../../assets/plugins/example-window/plugin.json"),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        window.join("main.js"),
+        include_str!("../../../../../assets/plugins/example-window/main.js"),
+    )
+    .map_err(|error| error.to_string())?;
     let capability_file = runtime.join("shell-environment");
 
     let mut command = Command::new(&nickel);
@@ -140,7 +153,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-            "PASS: nested compositor ran bundled UI and an installed panel across a scaled hotplugged output, changed a live plugin setting, toggled Settings plugin activation and memory, confirmed launcher fallback and restart through scoped test input, and shut down cleanly"
+        "PASS: nested compositor ran bundled UI, an installed panel, and a component window; checked plugin activation, memory retirement, launcher fallback, and clean shutdown"
     );
     Ok(())
 }
@@ -366,6 +379,7 @@ fn exercise(
     if panel.desired_enabled || panel.memory.native_ui_bytes.is_some() {
         return Err("installed panel did not release its reported UI memory".into());
     }
+    verify_component_window(test_input, &environment)?;
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
     let toggled = checked(test_input, &environment, &["surfaces"])?;
@@ -398,6 +412,77 @@ fn exercise(
     }
     verify_settings_memory_report(settings, test_input, &environment)?;
     Ok(())
+}
+
+fn verify_component_window(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let id = "org.example.component-window";
+    let enabled = checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    let enabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&enabled).map_err(|error| error.to_string())?;
+    let status = enabled
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .ok_or("component window missing after enable")?;
+    if !status.desired_enabled
+        || status.health != nickel_session_protocol::PluginRuntimeHealth::Running
+    {
+        return Err("component window plugin did not start".into());
+    }
+    wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    let first_window = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
+    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    let disabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
+    let status = disabled
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .ok_or("component window missing after disable")?;
+    if status.desired_enabled || status.memory.native_ui_bytes.is_some() {
+        return Err("component window did not release its reported UI memory".into());
+    }
+    let windows = checked(test_input, environment, &["windows"])?;
+    if windows
+        .lines()
+        .any(|line| line.contains("\torg.example.component-window\tComponent Window Example\t"))
+    {
+        return Err(format!("component window remained registered after disable: {windows}"));
+    }
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    let reopened = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
+    if reopened == first_window {
+        return Err("component window reused its retired window identity".into());
+    }
+    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    Ok(())
+}
+
+fn wait_for_component_window(
+    test_input: &Path,
+    environment: &[(String, String)],
+    timeout: Duration,
+) -> Result<u64, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        if let Some(id) = windows.lines().find_map(|line| {
+            (line.contains("\torg.example.component-window\tComponent Window Example\t")
+                && line.contains("\tshown\t")
+                && !line.ends_with("\tunmapped"))
+            .then(|| line.split('\t').next()?.parse::<u64>().ok())
+            .flatten()
+        }) {
+            return Ok(id);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("component window did not enter the window registry: {windows}"));
+        }
+        thread::sleep(POLL);
+    }
 }
 
 fn verify_settings_memory_report(
