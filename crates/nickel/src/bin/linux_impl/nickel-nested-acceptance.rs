@@ -91,7 +91,7 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     fs::write(
         windows.join("main.js"),
-        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.surface.id)); }",
+        "function App() { return h(Panel, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second')); }",
     )
     .map_err(|error| error.to_string())?;
     let capability_file = runtime.join("shell-environment");
@@ -624,6 +624,54 @@ fn verify_sibling_windows(
             "sibling window plugin lost health or its memory account: before={before}, after={:?}",
             plugin.memory.native_ui_bytes
         ));
+    }
+    let reduced_bytes = plugin.memory.native_ui_bytes.unwrap();
+    let windows = checked(test_input, environment, &["windows"])?;
+    let first_line = windows
+        .lines()
+        .find(|line| line.starts_with(&format!("{first}\t")))
+        .ok_or("surviving plugin window disappeared before reopening sibling")?;
+    let location = first_line
+        .rsplit('\t')
+        .next()
+        .and_then(|field| field.split_whitespace().next())
+        .ok_or("surviving plugin window has no location")?;
+    let (x, y) = location
+        .split_once(',')
+        .ok_or("surviving plugin window has invalid location")?;
+    let x: i32 = x.parse().map_err(|_| "invalid plugin window x")?;
+    let y: i32 = y.parse().map_err(|_| "invalid plugin window y")?;
+    click_at(test_input, environment, x + 180, y + 188)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        let installed = windows
+            .lines()
+            .filter(|line| line.contains("\torg.example.acceptance-windows\t"))
+            .collect::<Vec<_>>();
+        if installed.len() == 2
+            && installed.iter().any(|line| line.starts_with(&format!("{first}\t")))
+            && installed.iter().any(|line| line.ends_with("420x240"))
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("plugin button did not reopen its sibling: {windows}"));
+        }
+        thread::sleep(POLL);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let bytes = wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(1))?;
+        if bytes > reduced_bytes {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "reopened plugin window did not restore memory account: reduced={reduced_bytes}, current={bytes}"
+            ));
+        }
+        thread::sleep(POLL);
     }
     checked(test_input, environment, &["plugin-set", id, "disabled"])?;
     Ok(())

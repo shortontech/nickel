@@ -1886,7 +1886,11 @@ fn handle_shell_input(
         }
         let (width, height) = entry.window().size();
         let key = entry.plugin_key().unwrap().clone();
+        let plugin_surface_count = state.plugin_panels().len();
         if state.plugin_panel_host_input_for(&key, event, width, height) {
+            if state.plugin_panels().len() != plugin_surface_count {
+                shell.set_plugin_panels(state.plugin_panels())?;
+            }
             sync_visibility(shell, state);
             render_role(shell, state, role)?;
             render_role(shell, state, SurfaceRole::Launcher)?;

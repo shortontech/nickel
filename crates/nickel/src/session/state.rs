@@ -7059,6 +7059,10 @@ impl NickelSession {
             .internal_shell
             .as_ref()
             .is_some_and(crate::internal_shell::InternalShellCoordinator::launcher_visible);
+        let plugin_surface_count = self.internal_shell.as_ref().map_or(
+            0,
+            crate::internal_shell::InternalShellCoordinator::plugin_surface_count,
+        );
         let file_clipboard_available = self.native_file_clipboard_available();
         let shell = self.internal_shell.as_mut().unwrap();
         shell.set_file_clipboard_available(file_clipboard_available);
@@ -7079,7 +7083,11 @@ impl NickelSession {
             changed.extend(shell.step_slot_changes(shell_id, batch));
         }
         let launcher_is_visible = shell.launcher_visible();
+        let plugin_surfaces_changed = plugin_surface_count != shell.plugin_surface_count();
         let _ = shell;
+        if plugin_surfaces_changed {
+            self.reconcile_internal_shell_outputs();
+        }
         if desktop_motion_only {
             // Do not turn mouse polling frequency into layout frequency or
             // rearm an immediate shell timer for every motion sample. Rendering

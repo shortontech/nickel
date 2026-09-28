@@ -1763,6 +1763,10 @@ impl DesktopBackgroundAction {
 pub enum PluginEffect {
     ShowLauncher,
     ShowSettings,
+    ShowPluginSurface {
+        plugin_id: String,
+        surface_id: String,
+    },
     SetPluginSetting {
         plugin_id: String,
         key: String,
@@ -3272,6 +3276,27 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::SettingsShow) =>
                         {
                             approved.push(PluginEffect::ShowSettings);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("show-plugin-surface") =>
+                        {
+                            let Some(surface_id) = effect.get("surfaceId").and_then(Value::as_str)
+                            else {
+                                self.last_error = Some("plugin surface ID is invalid".into());
+                                return;
+                            };
+                            if !self.manifest.surfaces.iter().any(|surface| {
+                                surface.id == surface_id
+                                    && surface.kind
+                                        == nickel_core::plugins::PluginSurfaceKind::Window
+                            }) {
+                                self.last_error = Some("plugin window is not declared".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ShowPluginSurface {
+                                plugin_id: self.manifest.id.clone(),
+                                surface_id: surface_id.to_owned(),
+                            });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("set-plugin-setting")

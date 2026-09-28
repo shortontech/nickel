@@ -37,7 +37,9 @@ It then installs a two-window package, focuses one window and sends Alt+F4
 through the same scoped test-control socket. The test checks that the other
 declared window remains, the package stays running, and its reported native UI
 memory falls after the close. The surviving window retains its ordinary window
-ID while the input lease rotates during output reconciliation.
+ID while the input lease rotates during output reconciliation. Its component
+button then requests its declared sibling through the plugin API; the test
+checks that the sibling maps again and the memory account grows.
 
 This is a live graphical acceptance check, so it requires a working host display.
 On hosts where GLVND's default vendor cannot create a nested EGL display, an installed Mesa software

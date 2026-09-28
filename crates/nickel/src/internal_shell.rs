@@ -1336,6 +1336,10 @@ impl InternalShellCoordinator {
         self.shell.plugin_status_snapshot()
     }
 
+    pub(crate) fn plugin_surface_count(&self) -> usize {
+        self.shell.plugin_panels().len()
+    }
+
     pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
         self.shell.plugin_panel_surface()
     }

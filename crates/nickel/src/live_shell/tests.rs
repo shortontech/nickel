@@ -532,7 +532,7 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
     .unwrap();
     std::fs::write(
         directory.join("main.js"),
-        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.surface.id)); }",
+        "function App() { return h(Panel, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'first'})}, 'Reopen first')); }",
     )
     .unwrap();
     let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
@@ -572,6 +572,25 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
             .plugin_panel_scene(&remaining[0].0, remaining[0].1.width, remaining[0].1.height)
             .is_some()
     );
+
+    let button = shell
+        .plugin_panel_host_for(&remaining[0].0)
+        .unwrap()
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Reopen first".into(),
+        })
+        .unwrap();
+    assert!(shell.plugin_panel_host_ui_for(
+        &remaining[0].0,
+        nickel_ui::UiEvent::AccessibilityActivate(button.id),
+        remaining[0].1.width,
+        remaining[0].1.height,
+    ));
+    assert_eq!(shell.plugin_panels().len(), 2);
+    assert!(shell.plugin_panel_matches(&panels[0].0));
+    assert!(!shell.show_plugin_window(id, "first").unwrap());
+    assert!(shell.show_plugin_window(id, "missing").is_err());
 
     shell.set_plugin_enabled(id, false).unwrap();
     shell.set_plugin_enabled(id, true).unwrap();

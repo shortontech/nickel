@@ -15,7 +15,11 @@ A window plugin participates in ordinary window focus and stacking. Closing
 its only surface disables the plugin without exiting Nickel; enable it again
 in Settings to reopen it. For a package with several surfaces, closing one
 window retires that surface and leaves its siblings running. Disable and
-re-enable the package to reopen all its declared surfaces.
+re-enable the package to reopen all its declared surfaces. A running sibling
+can reopen one declared window with
+`nickel.request({ type: "show-plugin-surface", surfaceId: "details" })`. The
+host accepts only a window ID from that plugin's own manifest and ignores a
+request for a window that is already open.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
 

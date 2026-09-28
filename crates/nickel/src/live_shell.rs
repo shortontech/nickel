@@ -3761,6 +3761,63 @@ impl LiveShell {
         Ok(true)
     }
 
+    pub(crate) fn show_plugin_window(
+        &mut self,
+        id: &str,
+        surface_id: &str,
+    ) -> Result<bool, String> {
+        let entry = self
+            .plugin_registry
+            .get(id)
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        if !entry.desired_enabled || entry.health != nickel_core::plugins::PluginHealth::Running {
+            return Err(format!("plugin {id:?} is not running"));
+        }
+        let descriptor = self
+            .external_plugin_packages
+            .get(id)
+            .ok_or_else(|| format!("plugin {id:?} is not an installed package"))?;
+        let surface = descriptor
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| {
+                surface.id == surface_id
+                    && surface.kind == nickel_core::plugins::PluginSurfaceKind::Window
+            })
+            .cloned()
+            .ok_or_else(|| format!("plugin {id:?} has no declared window {surface_id:?}"))?;
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.to_owned(),
+            surface_id: surface_id.to_owned(),
+        };
+        if self.plugin_panel_matches(&key) {
+            return Ok(false);
+        }
+        let package = descriptor.load()?;
+        let settings = self
+            .plugin_settings
+            .get(id)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
+        let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(
+            &package, &settings, &surface,
+        )?;
+        let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+        if self.plugin_panel_host.is_none() {
+            self.plugin_panel_host = Some(host);
+            self.plugin_panel_owner = id.to_owned();
+            self.plugin_panel_surface = surface;
+        } else {
+            self.plugin_panel_extra_hosts.insert(key, (surface, host));
+        }
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+        Ok(true)
+    }
+
     #[cfg(test)]
     pub(crate) fn lock_password_len(&self) -> usize {
         self.lock_host.application().password.len()
@@ -5271,6 +5328,15 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::ShowSettings => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::OpenSettings);
                 }
+                crate::plugin_panel::PluginEffect::ShowPluginSurface {
+                    plugin_id,
+                    surface_id,
+                } => match self.show_plugin_window(&plugin_id, &surface_id) {
+                    Ok(shown) => changed |= shown,
+                    Err(error) => {
+                        tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin window request failed");
+                    }
+                },
                 crate::plugin_panel::PluginEffect::SetPluginSetting {
                     plugin_id,
                     key,
