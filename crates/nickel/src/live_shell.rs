@@ -6626,6 +6626,31 @@ impl LiveShell {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    fn semantic_panel_output(&self, requested: Option<&String>) -> Option<String> {
+        requested
+            .cloned()
+            .or_else(|| self.panel_output.clone())
+            .or_else(|| {
+                self.plugin_taskbar_hosts
+                    .keys()
+                    .filter_map(Clone::clone)
+                    .min()
+            })
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn semantic_panel_host(
+        &self,
+        output: &Option<String>,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        if output == &self.panel_output {
+            self.plugin_taskbar_host.as_ref()
+        } else {
+            self.plugin_taskbar_hosts.get(output)
+        }
+    }
+
     /// Resolves a test/accessibility semantic target from the same live group
     /// and renderer frame records used by pointer hit testing. The caller is
     /// responsible for dispatching the returned point as ordinary input.
@@ -6680,11 +6705,12 @@ impl LiveShell {
                 })
             }
             ShellSemanticTarget::OnScreenKeyboardToggle => {
-                let host = self.plugin_taskbar_host.as_ref()?;
+                let output = self.semantic_panel_output(None);
+                let host = self.semantic_panel_host(&output)?;
                 let bounds = taskbar_plugin_control_bounds(host, "taskbar-keyboard")?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
-                    output: self.panel_output.clone(),
+                    output,
                     x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
                     y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
                     interaction: PointerInteraction::LeftClick,
@@ -6695,19 +6721,15 @@ impl LiveShell {
                 output,
                 interaction,
             } => {
-                let plugin_host = if output.is_none() || output == &self.panel_output {
-                    self.plugin_taskbar_host.as_ref()
-                } else {
-                    self.plugin_taskbar_hosts.get(output)
-                };
-                let plugin_host = plugin_host?;
+                let output = self.semantic_panel_output(output.as_ref());
+                let plugin_host = self.semantic_panel_host(&output)?;
                 let windows = self
                     .windows
                     .iter()
                     .filter(|window| {
                         window_belongs_to_panel(
                             self.all_windows_on_every_bar,
-                            output.as_deref().or(self.panel_output.as_deref()),
+                            output.as_deref(),
                             window.state.output.as_deref(),
                         )
                     })
@@ -6730,22 +6752,19 @@ impl LiveShell {
                     taskbar_plugin_control_bounds(plugin_host, &format!("taskbar-item-{index}"))?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
-                    output: output.clone(),
+                    output,
                     x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
                     y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
                     interaction: *interaction,
                 })
             }
             ShellSemanticTarget::PanelControlCenter { output } => {
-                let plugin_host = if output.is_none() || output == &self.panel_output {
-                    self.plugin_taskbar_host.as_ref()
-                } else {
-                    self.plugin_taskbar_hosts.get(output)
-                }?;
+                let output = self.semantic_panel_output(output.as_ref());
+                let plugin_host = self.semantic_panel_host(&output)?;
                 let bounds = taskbar_plugin_control_bounds(plugin_host, "taskbar-control")?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
-                    output: output.clone(),
+                    output,
                     x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
                     y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
                     interaction: PointerInteraction::LeftClick,

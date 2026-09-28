@@ -1511,6 +1511,17 @@
     }
 
     #[test]
+    fn unnamed_taskbar_semantic_target_uses_a_rendered_output() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.panel_scene_for_output(Some("winit"), 1200, 56);
+        let target = shell
+            .resolve_semantic_target(&ShellSemanticTarget::PanelControlCenter { output: None })
+            .expect("rendered taskbar control exists");
+        assert_eq!(target.output.as_deref(), Some("winit"));
+        assert!((0..1200).contains(&target.x));
+    }
+
+    #[test]
     fn jsx_taskbar_anchors_previews_and_codex_menu_to_its_controls() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher.set_codex_available(true);
