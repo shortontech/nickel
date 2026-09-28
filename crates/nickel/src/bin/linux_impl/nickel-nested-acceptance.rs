@@ -359,6 +359,7 @@ fn exercise(
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
     wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
+    verify_taskbar_plugin_retires(test_input, &environment)?;
     let panel_id = "org.example.acceptance-panel";
     let activated = checked(test_input, &environment, &["plugin-set", panel_id, "enabled"])?;
     let activated: nickel_session_protocol::PluginStatusSnapshot =
@@ -523,6 +524,45 @@ fn verify_run_plugin_owns_dialog(
     checked(test_input, environment, &["key", "escape", "released"])?;
     wait_for_launcher_visibility(test_input, environment, false, Duration::from_secs(5))?;
     Ok(())
+}
+
+fn verify_taskbar_plugin_retires(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let id = "org.nickel.taskbar";
+    wait_for_taskbar_presence(test_input, environment, true, Duration::from_secs(2))?;
+    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    let disabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
+    let plugin = disabled.plugins.iter().find(|plugin| plugin.id == id).ok_or("taskbar missing")?;
+    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
+        return Err("disabled taskbar retained native UI memory".into());
+    }
+    wait_for_taskbar_presence(test_input, environment, false, Duration::from_secs(2))?;
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    wait_for_taskbar_presence(test_input, environment, true, Duration::from_secs(2))?;
+    Ok(())
+}
+
+fn wait_for_taskbar_presence(
+    test_input: &Path,
+    environment: &[(String, String)],
+    expected: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        let present = surfaces.lines().any(|line| line.starts_with("Panel\t"));
+        if present == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("taskbar surface presence remained {present}: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
 }
 
 fn verify_generic_widget_slot(

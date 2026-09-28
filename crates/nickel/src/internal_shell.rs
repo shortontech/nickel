@@ -250,6 +250,7 @@ impl InternalShellCoordinator {
         // from their former geometry must not activate the replacement keyboard.
         self.shell.cancel_keyboard_gestures();
         self.shell.retain_panel_outputs(outputs);
+        let taskbar_active = self.shell.surface_visible(SurfaceRole::Taskbar);
         // Reconcile file placement before any surface can render. Creating a desktop
         // slot alone leaves newly enumerated files without a live output assignment.
         self.shell.set_desktop_outputs(
@@ -259,7 +260,8 @@ impl InternalShellCoordinator {
                 .map(|(index, output)| {
                     // Match panel slot ownership below; an output without a panel
                     // must retain its full usable desktop height.
-                    let reservation = if self.bar_on_all_displays || index == 0 {
+                    let reservation = if taskbar_active && (self.bar_on_all_displays || index == 0)
+                    {
                         PANEL_HEIGHT.min(output.height)
                     } else {
                         0
@@ -289,7 +291,7 @@ impl InternalShellCoordinator {
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, None, Some(output.name.clone()), size));
             }
-            if self.bar_on_all_displays || index == 0 {
+            if taskbar_active && (self.bar_on_all_displays || index == 0) {
                 let role = SurfaceRole::Taskbar;
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, None, Some(output.name.clone()), size));

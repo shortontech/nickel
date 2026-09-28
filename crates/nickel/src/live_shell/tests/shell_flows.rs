@@ -605,6 +605,21 @@
     }
 
     #[test]
+    fn disabled_taskbar_retires_its_visible_role() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::taskbar_manifest().id;
+        assert!(shell.surface_visible(SurfaceRole::Taskbar));
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(!shell.surface_visible(SurfaceRole::Taskbar));
+        assert_eq!(
+            shell.plugin_registry().get(id).unwrap().memory,
+            nickel_core::plugins::PluginMemory::default()
+        );
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.surface_visible(SurfaceRole::Taskbar));
+    }
+
+    #[test]
     fn plugin_launcher_submit_activates_the_focused_search_result() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new(vec![

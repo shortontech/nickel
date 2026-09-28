@@ -105,6 +105,8 @@ is enabled again in Settings.
 Disabling the bundled Launcher plugin also closes its surface and leaves its
 Meta shortcut inactive. Run remains available through Super+R, and the
 independent Settings shortcut can re-enable Launcher.
+Disabling the bundled Taskbar plugin retires its visible bar. On nested Linux,
+the desktop reclaims the bar's reserved work area until it is re-enabled.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `Panel` component's ARGB `background` can be translucent. Several installed
