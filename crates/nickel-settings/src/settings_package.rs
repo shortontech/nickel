@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use nickel_core::plugins::{PluginManifest, PluginSurfaceKind};
+use nickel_core::plugins::{PluginCapability, PluginManifest, PluginSurfaceKind};
 use nickel_session_protocol::{
     PluginMemorySnapshot, PluginRuntimeHealth, PluginStatus, PluginStatusSnapshot,
 };
@@ -10,6 +10,16 @@ use nickel_session_protocol::{
 pub(super) const ID: &str = "org.nickel.settings";
 const MANIFEST_SOURCE: &str = include_str!("../../../assets/plugins/settings/plugin.json");
 static MANIFEST: OnceLock<Result<PluginManifest, String>> = OnceLock::new();
+const PAGE_SERVICE_GRANTS: [PluginCapability; 8] = [
+    PluginCapability::SettingsRead,
+    PluginCapability::SettingsWrite,
+    PluginCapability::ApplicationsRead,
+    PluginCapability::NetworkRead,
+    PluginCapability::NetworkControl,
+    PluginCapability::BluetoothRead,
+    PluginCapability::BluetoothControl,
+    PluginCapability::DisplayControl,
+];
 
 #[derive(Clone, Copy)]
 pub(super) enum Script {
@@ -35,6 +45,9 @@ pub(super) fn manifest() -> Result<&'static PluginManifest, String> {
                 || manifest.surfaces.len() != 1
                 || manifest.surfaces[0].id != "main"
                 || manifest.surfaces[0].kind != PluginSurfaceKind::Window
+                || !PAGE_SERVICE_GRANTS
+                    .iter()
+                    .all(|grant| manifest.capabilities.contains(grant))
             {
                 return Err("bundled Settings package has an invalid host contract".into());
             }

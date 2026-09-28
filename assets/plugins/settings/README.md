@@ -8,6 +8,9 @@ package's enabled state through the shell activation registry. Disabling it
 retires its JSX contexts and leaves the native Plugins recovery view available
 to review and re-enable it. The separate Settings process follows the shell's
 desired state through its periodic memory report response.
+The manifest lists the page services it reads or changes, including application
+associations, network, Bluetooth, and display controls. Rust validates each
+typed action against current state before using those services.
 The Plugins page reports a measured lower bound for the Settings package's
 retained Rust component trees and cached page projections, and the separate
 process publishes that lower bound to the shell while running. Boa heap, textures,

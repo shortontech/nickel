@@ -8,5 +8,9 @@
   "surfaces": [
     {"id": "main", "kind": "window", "width": 1100, "height": 800}
   ],
-  "capabilities": ["settings-read", "settings-write", "network-read", "network-control"]
+  "capabilities": [
+    "settings-read", "settings-write", "applications-read",
+    "network-read", "network-control",
+    "bluetooth-read", "bluetooth-control", "display-control"
+  ]
 }
