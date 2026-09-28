@@ -40,7 +40,13 @@ pub(crate) fn internal_normalized_ingress(
         reconnect_generation: device_generation,
     };
     let recipient = nickel_ui::NormalizedRecipientBinding {
-        lease: recipient.window_focused as u64,
+        // A focus-gained event is the authority that restores this host's input
+        // lease. Rejecting it while the previous lease is zero would leave a
+        // window unable to accept input after its first focus loss.
+        lease: u64::from(
+            recipient.window_focused
+                || matches!(input, nickel_input::InputEvent::FocusGained { .. }),
+        ),
         lifetime: recipient.frame_generation,
     };
     let authority = nickel_ui::NormalizedIngressAuthority {

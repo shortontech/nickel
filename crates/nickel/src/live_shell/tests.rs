@@ -585,6 +585,36 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
         x: f64::from(button.bounds.origin.x + button.bounds.size.width / 2.0),
         y: f64::from(button.bounds.origin.y + button.bounds.size.height / 2.0),
     };
+    assert!(shell.plugin_panel_host_input_for(
+        &remaining[0].0,
+        nickel_input::InputEvent::FocusLost {
+            order: nickel_input::EventOrder(1),
+        },
+        remaining[0].1.width,
+        remaining[0].1.height,
+    ));
+    assert!(
+        !shell
+            .plugin_panel_host_for(&remaining[0].0)
+            .unwrap()
+            .inspect()
+            .window_focused
+    );
+    assert!(shell.plugin_panel_host_input_for(
+        &remaining[0].0,
+        nickel_input::InputEvent::FocusGained {
+            order: nickel_input::EventOrder(2),
+        },
+        remaining[0].1.width,
+        remaining[0].1.height,
+    ));
+    assert!(
+        shell
+            .plugin_panel_host_for(&remaining[0].0)
+            .unwrap()
+            .inspect()
+            .window_focused
+    );
     let pointer = |edge, order| {
         nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
             device: nickel_input::DeviceId(1),
@@ -596,13 +626,13 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
     };
     shell.plugin_panel_host_input_for(
         &remaining[0].0,
-        pointer(nickel_input::KeyEdge::Pressed, 1),
+        pointer(nickel_input::KeyEdge::Pressed, 3),
         remaining[0].1.width,
         remaining[0].1.height,
     );
     assert!(shell.plugin_panel_host_input_for(
         &remaining[0].0,
-        pointer(nickel_input::KeyEdge::Released, 2),
+        pointer(nickel_input::KeyEdge::Released, 4),
         remaining[0].1.width,
         remaining[0].1.height,
     ));
