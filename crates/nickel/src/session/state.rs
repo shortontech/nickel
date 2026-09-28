@@ -5385,16 +5385,12 @@ impl NickelSession {
         self.internal_ui.retire_normalized_touch_surfaces();
         self.flush_internal_shell_input();
         let outputs = self.internal_outputs();
-        for id in self
-            .internal_shell_surfaces
-            .drain()
-            .map(|(_, runtime)| runtime)
-            .collect::<Vec<_>>()
-        {
-            self.unregister_internal_application(id);
-            self.internal_ui.remove(id);
-        }
+        let mut previous = std::mem::take(&mut self.internal_shell_surfaces);
         let Some(shell) = self.internal_shell.as_mut() else {
+            for runtime in previous.into_values() {
+                self.unregister_internal_application(runtime);
+                self.internal_ui.remove(runtime);
+            }
             return;
         };
         shell.set_outputs(
@@ -5437,20 +5433,32 @@ impl NickelSession {
                 .as_deref()
                 .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
                 .map_or(1.0, |(output, _, _)| output.scale);
-            let runtime_id = self.internal_ui.insert_scene(scene, placement, scale);
+            let (runtime_id, created) = if let Some(runtime_id) = previous.remove(&surface.id) {
+                self.internal_ui
+                    .configure_surface(runtime_id, placement, scale);
+                self.internal_ui.update_scene(runtime_id, scene);
+                (runtime_id, false)
+            } else {
+                (self.internal_ui.insert_scene(scene, placement, scale), true)
+            };
             self.internal_ui
-                .bind_routed_recipient(runtime_id, surface.id);
+                .renew_routed_recipient(runtime_id, surface.id);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
-            if self
-                .internal_ui
-                .placement(runtime_id)
-                .is_some_and(|placement| {
-                    placement.role == crate::session::InternalSurfaceRole::Application
-                })
+            if created
+                && self
+                    .internal_ui
+                    .placement(runtime_id)
+                    .is_some_and(|placement| {
+                        placement.role == crate::session::InternalSurfaceRole::Application
+                    })
                 && let Some(key) = surface.plugin
             {
                 plugin_windows.push((runtime_id, key));
             }
+        }
+        for runtime in previous.into_values() {
+            self.unregister_internal_application(runtime);
+            self.internal_ui.remove(runtime);
         }
         for (runtime, key) in plugin_windows {
             self.register_internal_application_with_plugin(runtime, Some(&key));

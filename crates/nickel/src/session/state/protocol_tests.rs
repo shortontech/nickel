@@ -8262,7 +8262,7 @@ fn ordinary_client_press_dismisses_internal_launcher_without_restoring_displaced
 }
 
 #[test]
-fn applying_multi_output_fractional_scale_rebuilds_internal_surfaces_at_native_scale() {
+fn applying_multi_output_fractional_scale_updates_internal_surfaces_at_native_scale() {
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = preview_test_session();
     for name in ["one", "quarter", "half", "double"] {
@@ -8344,6 +8344,23 @@ fn applying_multi_output_fractional_scale_rebuilds_internal_surfaces_at_native_s
     // origin. Compositor-global coordinates can nevertheless be negative
     // while topology is changing, so move the already scaled outputs as a
     // group and ensure internal chrome follows that authoritative space.
+    let before = ["one", "quarter", "half", "double"]
+        .into_iter()
+        .map(|name| {
+            let shell = session.internal_shell.as_ref().unwrap();
+            let desktop = shell
+                .surface(crate::winit_shell::SurfaceRole::Desktop, Some(name))
+                .unwrap();
+            let panel = shell
+                .surface(crate::winit_shell::SurfaceRole::Taskbar, Some(name))
+                .unwrap();
+            (
+                name,
+                session.internal_shell_surfaces[&desktop.id],
+                session.internal_shell_surfaces[&panel.id],
+            )
+        })
+        .collect::<Vec<_>>();
     let shifted_outputs = session.space.outputs().cloned().collect::<Vec<_>>();
     for output in shifted_outputs {
         let geometry = session.space.output_geometry(&output).unwrap();
@@ -8368,12 +8385,20 @@ fn applying_multi_output_fractional_scale_rebuilds_internal_surfaces_at_native_s
             .surface(crate::winit_shell::SurfaceRole::Desktop, Some(name))
             .unwrap();
         let runtime = session.internal_shell_surfaces[&surface.id];
+        assert_eq!(
+            runtime,
+            before.iter().find(|entry| entry.0 == name).unwrap().1
+        );
         assert_eq!(session.internal_ui.scale_factor(runtime), Some(expected));
 
         let panel = shell
             .surface(crate::winit_shell::SurfaceRole::Taskbar, Some(name))
             .unwrap();
         let panel_runtime = session.internal_shell_surfaces[&panel.id];
+        assert_eq!(
+            panel_runtime,
+            before.iter().find(|entry| entry.0 == name).unwrap().2
+        );
         let placement = session.internal_ui.placement(panel_runtime).unwrap();
         let output = outputs.iter().find(|output| output.name == name).unwrap();
         assert_eq!(placement.geometry.0, output.geometry.x);

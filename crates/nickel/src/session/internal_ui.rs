@@ -2046,6 +2046,23 @@ impl InternalUiRuntime {
         );
     }
 
+    /// Keep a surface's window identity while invalidating input admitted
+    /// before its output placement was reconciled.
+    pub(crate) fn renew_routed_recipient(
+        &mut self,
+        runtime: InternalSurfaceId,
+        recipient: InternalSurfaceId,
+    ) {
+        let lease = self.allocate_recipient_lease();
+        self.routed_recipients.insert(
+            runtime,
+            nickel_ui::NormalizedRecipientBinding {
+                lease,
+                lifetime: recipient.snapshot_token(),
+            },
+        );
+    }
+
     pub(crate) fn normalized_recipient(
         &mut self,
         runtime: InternalSurfaceId,
@@ -3455,6 +3472,19 @@ mod tests {
         assert_eq!(runtime.surfaces.ids().collect::<Vec<_>>(), vec![id]);
         assert!(!runtime.configure_surface(id, target, 1.5));
         assert!(runtime.drain_routed_events().is_empty());
+    }
+
+    #[test]
+    fn renewing_routed_recipient_preserves_surface_identity_and_rotates_input_lease() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert_scene(Vec::new(), placement(Some("DP-1")), 1.0);
+        runtime.bind_routed_recipient(id, id);
+        let before = runtime.normalized_recipient(id);
+        runtime.renew_routed_recipient(id, id);
+        let after = runtime.normalized_recipient(id);
+        assert_eq!(after.lifetime, before.lifetime);
+        assert_ne!(after.lease, before.lease);
+        assert_eq!(runtime.surfaces.ids().collect::<Vec<_>>(), vec![id]);
     }
 
     #[test]

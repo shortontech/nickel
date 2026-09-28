@@ -2308,19 +2308,7 @@ mod tests {
         coordinator.step_slot_changes(
             menu,
             HostBatch {
-                events: vec![nickel_ui::HostEvent::Normalized {
-                    input: nickel_input::InputEvent::Key(nickel_input::KeyEvent {
-                        device: nickel_input::DeviceId(1),
-                        order: nickel_input::EventOrder(1),
-                        physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::Escape),
-                        logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::Escape),
-                        location: nickel_input::KeyLocation::Standard,
-                        edge: nickel_input::KeyEdge::Pressed,
-                        repeat: false,
-                        modifiers: nickel_input::ModifierState::default(),
-                    }),
-                    clipboard_text: None,
-                }],
+                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::ControllerBack)],
                 ..HostBatch::default()
             },
         );

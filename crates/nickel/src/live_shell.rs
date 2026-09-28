@@ -6083,7 +6083,11 @@ impl LiveShell {
                 }
             }
             SurfaceRole::WindowContextMenu => {
-                self.window_menu_host_event(HostEvent::Shortcut(shortcut), width, height)
+                if shortcut == Shortcut::Escape {
+                    self.window_menu_host_key(Some(KeyCode::Escape))
+                } else {
+                    self.window_menu_host_event(HostEvent::Shortcut(shortcut), width, height)
+                }
             }
             SurfaceRole::Lock if self.locked => {
                 let outcome = self.lock_host.step(HostBatch {

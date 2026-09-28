@@ -556,7 +556,7 @@ fn verify_sibling_windows(
     let id = "org.example.acceptance-windows";
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
     let deadline = Instant::now() + Duration::from_secs(5);
-    let (_first, second) = loop {
+    let (first, second) = loop {
         let windows = checked(test_input, environment, &["windows"])?;
         let installed = windows
             .lines()
@@ -594,7 +594,10 @@ fn verify_sibling_windows(
             .lines()
             .filter(|line| line.contains("\torg.example.acceptance-windows\t"))
             .collect::<Vec<_>>();
-        if installed.len() == 1 && installed[0].ends_with("360x220") {
+        if installed.len() == 1
+            && installed[0].starts_with(&format!("{first}\t"))
+            && installed[0].ends_with("360x220")
+        {
             break;
         }
         if Instant::now() >= deadline {
