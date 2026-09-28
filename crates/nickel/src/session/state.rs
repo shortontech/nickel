@@ -5427,10 +5427,8 @@ impl NickelSession {
                 &outputs,
                 self.launcher_output_name.as_deref(),
             );
-            if let Some(key) = surface.plugin.as_ref()
-                && let Some(offset) = shell.plugin_panel_bottom_offset(key)
-            {
-                placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - offset as i32;
+            if let Some(key) = surface.plugin.as_ref() {
+                adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
             }
             let scale = surface
                 .output
@@ -7213,10 +7211,8 @@ impl NickelSession {
                 &outputs,
                 self.launcher_output_name.as_deref(),
             );
-            if let Some(key) = surface.plugin.as_ref()
-                && let Some(offset) = shell.plugin_panel_bottom_offset(key)
-            {
-                placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - offset as i32;
+            if let Some(key) = surface.plugin.as_ref() {
+                adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
             }
             let mut resized = false;
             if matches!(
@@ -13848,9 +13844,20 @@ impl NickelSession {
             };
             let width = placement.width.min(output.size.w as u32) as i32;
             let height = placement.height.min(output.size.h as u32) as i32;
+            let y = match placement.kind {
+                nickel_session_protocol::PluginSurfacePlacementKind::Panel
+                | nickel_session_protocol::PluginSurfacePlacementKind::Dock => {
+                    output.loc.y + (output.size.h - height - placement.bottom_offset as i32).max(0)
+                }
+                nickel_session_protocol::PluginSurfacePlacementKind::Window
+                | nickel_session_protocol::PluginSurfacePlacementKind::Dialog
+                | nickel_session_protocol::PluginSurfacePlacementKind::Overlay => {
+                    output.loc.y + (output.size.h - height) / 2
+                }
+            };
             let geometry = Geometry {
                 x: output.loc.x + (output.size.w - width) / 2,
-                y: output.loc.y + (output.size.h - height - placement.bottom_offset as i32).max(0),
+                y,
                 width,
                 height,
             };
@@ -15572,6 +15579,39 @@ fn internal_shell_surface_placement(
         role,
         geometry: (x, y, surface_size.0, surface_size.1),
         output: output_name,
+    }
+}
+
+fn adjust_internal_plugin_surface_placement(
+    placement: &mut crate::session::InternalSurfacePlacement,
+    key: &nickel_core::plugins::PluginSurfaceKey,
+    shell: &crate::internal_shell::InternalShellCoordinator,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) {
+    let Some((kind, bottom_offset)) = shell.plugin_panel_placement(key) else {
+        return;
+    };
+    apply_internal_plugin_surface_placement(placement, kind, bottom_offset, outputs);
+}
+
+fn apply_internal_plugin_surface_placement(
+    placement: &mut crate::session::InternalSurfacePlacement,
+    kind: nickel_core::plugins::PluginSurfaceKind,
+    bottom_offset: u32,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) {
+    if kind == nickel_core::plugins::PluginSurfaceKind::Window {
+        if let Some((output, x, y)) = outputs
+            .iter()
+            .find(|(output, _, _)| placement.output.as_deref() == Some(output.name.as_str()))
+        {
+            placement.geometry.0 =
+                *x + output.width.saturating_sub(placement.geometry.2) as i32 / 2;
+            placement.geometry.1 =
+                *y + output.height.saturating_sub(placement.geometry.3) as i32 / 2;
+        }
+    } else {
+        placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - bottom_offset as i32;
     }
 }
 

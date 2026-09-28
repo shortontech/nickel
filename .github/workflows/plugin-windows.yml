@@ -91,6 +91,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib installed_panel_geometry_uses_its_manifest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib installed_window_geometry_centers_on_its_output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib installed_component_window_activates_and_retires_with_its_plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::plugin_launcher_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::jsx_taskbar_
@@ -120,6 +124,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-dialog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-window
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-task-action
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -1135,6 +1135,11 @@ impl NickelSession {
                             || surface.height == 0
                             || surface.height > 8192
                             || surface.bottom_offset > 8192
+                            || (!matches!(
+                                surface.kind,
+                                nickel_session_protocol::PluginSurfacePlacementKind::Panel
+                                    | nickel_session_protocol::PluginSurfacePlacementKind::Dock
+                            ) && surface.bottom_offset != 0)
                     })
                 {
                     return protocol_error(

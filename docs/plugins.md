@@ -1,13 +1,16 @@
 # Developing a Nickel plugin
 
-On Linux, panel and dock plugins register their own shell surface identity.
-Their declared size and bottom offset control compositor placement, and they
-do not replace the built-in taskbar readiness surface.
+On Linux, panel, dock, and window plugins register their own shell surface
+identity. Panels and docks use their declared size and bottom offset; windows
+are centered on the selected output. They do not replace the built-in taskbar
+readiness surface.
 
 Nickel loads a compiled JavaScript entry from a directory containing
 `plugin.json`. The [bundled hello panel](../assets/plugins/hello-panel/) is a
 minimal working example. The [taskbar](../assets/plugins/taskbar/) shows how a
 first-party plugin requests host actions.
+The [window example](../assets/plugins/example-window/) shows a centered native
+window containing JSX components and a dialog.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
 
@@ -60,7 +63,7 @@ The developer command runs edited JavaScript in the isolated shell without
 installing a second copy of that plugin. Keep its shipped `plugin.json`
 unchanged while developing it. Saving a sibling `.js` source such as the
 taskbar's `menu.js` also restarts the session. For external plugins, the
-developer command supports up to 16 panel or dock surfaces in one package, or
+developer command supports up to 16 panel, dock, or window surfaces in one package, or
 one surface-free taskbar badge, taskbar action, desktop widget, or Control
 Center section contribution;
 `nickel-plugin validate <directory>` runs the same
@@ -72,7 +75,9 @@ render without a live session. It checks the initial tree and manifest; use
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `Panel` component's ARGB `background` can be translucent. Several installed
-panel and dock plugins can be enabled together. A package can declare several
+panel, dock, and window plugins can be enabled together. A `"window"` surface
+uses its declared size, is centered on its output, and has no bottom offset.
+A package can declare several
 surfaces, each with a unique ID. Nickel starts a separate component instance for
 each and exposes `nickel.data.surface` with its `id`, `kind`, `width`, and
 `height`; the same entry can return different layouts for each ID. Surface

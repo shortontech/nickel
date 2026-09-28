@@ -276,9 +276,22 @@ pub struct ShellSurfaceIdentity {
 pub struct PluginSurfacePlacement {
     pub plugin_id: String,
     pub surface_id: String,
+    #[serde(default)]
+    pub kind: PluginSurfacePlacementKind,
     pub width: u32,
     pub height: u32,
     pub bottom_offset: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginSurfacePlacementKind {
+    #[default]
+    Panel,
+    Dock,
+    Window,
+    Dialog,
+    Overlay,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2344,6 +2357,7 @@ mod tests {
             plugin_surface: Some(PluginSurfacePlacement {
                 plugin_id: "org.example.dock".into(),
                 surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Dock,
                 width: 360,
                 height: 64,
                 bottom_offset: 24,
@@ -2361,6 +2375,12 @@ mod tests {
             request
         );
         assert_ne!(identity.role, ShellRole::Panel);
+        let mut window = identity;
+        let placement = window.plugin_surface.as_mut().unwrap();
+        placement.kind = PluginSurfacePlacementKind::Window;
+        placement.bottom_offset = 0;
+        let encoded = encode(&window).unwrap();
+        assert_eq!(decode::<ShellSurfaceIdentity>(&encoded).unwrap(), window);
     }
 
     #[test]

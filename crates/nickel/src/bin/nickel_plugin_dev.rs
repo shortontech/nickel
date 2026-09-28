@@ -182,7 +182,7 @@ mod platform {
             && package.manifest.surfaces.iter().all(|surface| {
                 matches!(
                     surface.kind,
-                    PluginSurfaceKind::Panel | PluginSurfaceKind::Dock
+                    PluginSurfaceKind::Panel | PluginSurfaceKind::Dock | PluginSurfaceKind::Window
                 )
             })
             && package.manifest.contributes.is_empty();
@@ -196,7 +196,7 @@ mod platform {
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
         if !bundled && !panel && !extension {
             return Err(
-                "dev needs an unchanged bundled manifest, panel or dock surfaces, or one supported surface-free contribution"
+                "dev needs an unchanged bundled manifest, panel, dock, or window surfaces, or one supported surface-free contribution"
                     .into(),
             );
         }

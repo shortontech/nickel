@@ -3630,15 +3630,25 @@ impl LiveShell {
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Option<u32> {
+        self.plugin_panel_placement(key).map(|(_, offset)| offset)
+    }
+
+    pub(crate) fn plugin_panel_placement(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<(nickel_core::plugins::PluginSurfaceKind, u32)> {
         if self.plugin_panel_host.is_some()
             && self.plugin_panel_owner == key.plugin_id
             && self.plugin_panel_surface.id == key.surface_id
         {
-            return Some(self.plugin_panel_surface.bottom_offset);
+            return Some((
+                self.plugin_panel_surface.kind,
+                self.plugin_panel_surface.bottom_offset,
+            ));
         }
         self.plugin_panel_extra_hosts
             .get(key)
-            .map(|(surface, _)| surface.bottom_offset)
+            .map(|(surface, _)| (surface.kind, surface.bottom_offset))
     }
 
     pub(crate) fn plugin_panel_change_token(
@@ -4087,6 +4097,7 @@ impl LiveShell {
                                 surface.kind,
                                 nickel_core::plugins::PluginSurfaceKind::Panel
                                     | nickel_core::plugins::PluginSurfaceKind::Dock
+                                    | nickel_core::plugins::PluginSurfaceKind::Window
                             )
                         })
                     {
@@ -4108,7 +4119,7 @@ impl LiveShell {
                                 .collect::<Result<Vec<_>, _>>()
                         })
                     } else {
-                        Err("installed plugin needs panel or dock surfaces in this runtime".into())
+                        Err("installed plugin needs panel, dock, or window surfaces in this runtime".into())
                     },
                 )
             } else {

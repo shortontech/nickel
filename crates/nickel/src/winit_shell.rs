@@ -1145,6 +1145,7 @@ impl WinitShell {
                     plugin_surface: Some(nickel_session_protocol::PluginSurfacePlacement {
                         plugin_id: key.plugin_id.clone(),
                         surface_id: surface.id.clone(),
+                        kind: protocol_plugin_surface_kind(surface.kind),
                         width: surface.width,
                         height: surface.height,
                         bottom_offset: surface.bottom_offset,
@@ -2355,6 +2356,7 @@ impl WinitShell {
                         nickel_session_protocol::PluginSurfacePlacement {
                             plugin_id: plugin_key.as_ref().unwrap().plugin_id.clone(),
                             surface_id: panel.id.clone(),
+                            kind: protocol_plugin_surface_kind(panel.kind),
                             width: panel.width,
                             height: panel.height,
                             bottom_offset: panel.bottom_offset,
@@ -2369,7 +2371,11 @@ impl WinitShell {
             .with_title(title)
             .with_position(LogicalPosition::new(x, y))
             .with_inner_size(LogicalSize::new(width, height))
-            .with_decorations(!surface_is_borderless(role))
+            .with_decorations(
+                !surface_is_borderless(role)
+                    || (role == SurfaceRole::Panel
+                        && panel.kind == nickel_core::plugins::PluginSurfaceKind::Window),
+            )
             .with_resizable(matches!(
                 role,
                 SurfaceRole::WindowPreview
@@ -2378,7 +2384,12 @@ impl WinitShell {
                     | SurfaceRole::OnScreenKeyboard
             ))
             .with_visible(!hidden || cfg!(target_os = "linux"));
-        let attributes = if role == SurfaceRole::Panel {
+        let attributes = if role == SurfaceRole::Panel
+            && matches!(
+                panel.kind,
+                nickel_core::plugins::PluginSurfaceKind::Panel
+                    | nickel_core::plugins::PluginSurfaceKind::Dock
+            ) {
             attributes.with_transparent(true)
         } else {
             attributes
@@ -2407,7 +2418,12 @@ impl WinitShell {
                 }
             }
             SurfaceRole::Panel => {
-                if !crate::platform::configure_preview_window(&window) {
+                if matches!(
+                    panel.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Panel
+                        | nickel_core::plugins::PluginSurfaceKind::Dock
+                ) && !crate::platform::configure_preview_window(&window)
+                {
                     tracing::warn!(?role, "failed to configure Windows plugin panel window");
                 }
             }
@@ -2590,6 +2606,21 @@ fn translate_window_event(
     }
 }
 
+fn protocol_plugin_surface_kind(
+    kind: nickel_core::plugins::PluginSurfaceKind,
+) -> nickel_session_protocol::PluginSurfacePlacementKind {
+    use nickel_core::plugins::PluginSurfaceKind;
+    use nickel_session_protocol::PluginSurfacePlacementKind;
+    match kind {
+        PluginSurfaceKind::Panel => PluginSurfacePlacementKind::Panel,
+        PluginSurfaceKind::Dock => PluginSurfacePlacementKind::Dock,
+        PluginSurfaceKind::Window => PluginSurfacePlacementKind::Window,
+        PluginSurfaceKind::Dialog => PluginSurfacePlacementKind::Dialog,
+        PluginSurfaceKind::Overlay => PluginSurfacePlacementKind::Overlay,
+        PluginSurfaceKind::Desktop => unreachable!("desktop surfaces use their own shell role"),
+    }
+}
+
 fn surface_geometry_for_panel(
     role: SurfaceRole,
     geometry: DisplayGeometry,
@@ -2599,6 +2630,16 @@ fn surface_geometry_for_panel(
     if role == SurfaceRole::Panel {
         let width = panel.width.min(geometry.width);
         let height = panel.height.min(geometry.height);
+        if panel.kind == nickel_core::plugins::PluginSurfaceKind::Window {
+            return (
+                "Nickel Plugin Window",
+                geometry.x + geometry.width.saturating_sub(width) as i32 / 2,
+                geometry.y + geometry.height.saturating_sub(height) as i32 / 2,
+                width,
+                height,
+                false,
+            );
+        }
         return (
             "Nickel Plugin Panel",
             geometry.x + geometry.width.saturating_sub(width) as i32 / 2,
@@ -3208,6 +3249,38 @@ mod tests {
             );
             assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
         }
+    }
+
+    #[test]
+    fn installed_window_geometry_centers_on_its_output() {
+        let geometry = DisplayGeometry {
+            x: 100,
+            y: 200,
+            width: 1920,
+            height: 1080,
+            scale: 1.5,
+        };
+        let window = nickel_core::plugins::PluginSurface {
+            id: "main".into(),
+            kind: nickel_core::plugins::PluginSurfaceKind::Window,
+            width: 520,
+            height: 340,
+            bottom_offset: 0,
+            output: nickel_core::plugins::PluginOutputScope::Primary,
+        };
+        let (title, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+            SurfaceRole::Panel,
+            geometry,
+            PanelEdge::Bottom,
+            &window,
+        );
+        assert_eq!(title, "Nickel Plugin Window");
+        assert_eq!((x, y, width, height), (800, 570, 520, 340));
+        assert!(!hidden);
+        assert_eq!(
+            super::protocol_plugin_surface_kind(window.kind),
+            nickel_session_protocol::PluginSurfacePlacementKind::Window
+        );
     }
 
     #[test]

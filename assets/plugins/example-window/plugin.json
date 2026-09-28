@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.example.component-window",
+  "name": "Component Window Example",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "surfaces": [{"id":"main","kind":"window","width":520,"height":340}],
+  "capabilities": ["settings-show"]
+}

@@ -485,6 +485,41 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
 }
 
 #[test]
+fn installed_component_window_activates_and_retires_with_its_plugin() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/plugins/example-window");
+    let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let id = package.manifest.id.clone();
+    let mut shell = LiveShell::new().unwrap();
+    shell.plugin_registry.register(package.manifest).unwrap();
+    shell
+        .external_plugin_packages
+        .insert(id.clone(), descriptor);
+
+    assert!(shell.set_plugin_enabled(&id, true).unwrap());
+    let panels = shell.plugin_panels();
+    assert_eq!(panels.len(), 1);
+    let (key, surface) = &panels[0];
+    assert_eq!(
+        surface.kind,
+        nickel_core::plugins::PluginSurfaceKind::Window
+    );
+    let commands = shell
+        .plugin_panel_scene(key, surface.width, surface.height)
+        .unwrap();
+    assert!(commands.iter().any(|command| matches!(command,
+        nickel_ui::backend::PaintCommand::Text { text, .. } if text == "Window plugin"
+    )));
+    assert!(shell.set_plugin_enabled(&id, false).unwrap());
+    assert!(shell.plugin_panels().is_empty());
+}
+
+#[test]
 fn installed_dock_uses_declared_offset_and_translucent_panel() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.dock");

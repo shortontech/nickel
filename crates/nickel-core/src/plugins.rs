@@ -782,6 +782,16 @@ impl PluginManifest {
                     surface.id
                 ));
             }
+            if !matches!(
+                surface.kind,
+                PluginSurfaceKind::Panel | PluginSurfaceKind::Dock
+            ) && surface.bottom_offset != 0
+            {
+                return Err(format!(
+                    "surface {:?} cannot use a bottom offset",
+                    surface.id
+                ));
+            }
         }
         let mut capabilities = HashSet::new();
         for capability in &self.capabilities {
@@ -1226,6 +1236,20 @@ mod tests {
                 "\"name\": \"Hello Panel\", \"version\": \"1.0/forged\",",
             ))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn windows_have_centered_placement_without_a_dock_offset() {
+        let source = VALID
+            .replace("\"kind\":\"panel\"", "\"kind\":\"window\"")
+            .replace("\"bottom_offset\":24,", "");
+        let manifest = PluginManifest::from_json(&source).unwrap();
+        assert_eq!(manifest.surfaces[0].kind, PluginSurfaceKind::Window);
+        assert_eq!(manifest.surfaces[0].bottom_offset, 0);
+        assert!(
+            PluginManifest::from_json(&VALID.replace("\"kind\":\"panel\"", "\"kind\":\"window\""))
+                .is_err()
         );
     }
 

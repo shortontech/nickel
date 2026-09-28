@@ -1,8 +1,10 @@
 use super::{
-    avoid_trusted_control_collision, internal_codex_chat_placement,
-    internal_codex_project_menu_placement, internal_shell_surface_placement,
+    apply_internal_plugin_surface_placement, avoid_trusted_control_collision,
+    internal_codex_chat_placement, internal_codex_project_menu_placement,
+    internal_shell_surface_placement,
 };
 use crate::{internal_shell::InternalOutput, winit_shell::SurfaceRole};
+use nickel_core::plugins::PluginSurfaceKind;
 use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 
 fn outputs() -> Vec<(InternalOutput, i32, i32)> {
@@ -32,6 +34,30 @@ fn outputs() -> Vec<(InternalOutput, i32, i32)> {
             240,
         ),
     ]
+}
+
+#[test]
+fn internal_plugin_window_centers_while_dock_uses_bottom_offset() {
+    let outputs = outputs();
+    let mut window = internal_shell_surface_placement(
+        SurfaceRole::Panel,
+        Some("right"),
+        (520, 340),
+        &outputs,
+        None,
+    );
+    apply_internal_plugin_surface_placement(&mut window, PluginSurfaceKind::Window, 0, &outputs);
+    assert_eq!(window.geometry, (1020, 790, 520, 340));
+
+    let mut dock = internal_shell_surface_placement(
+        SurfaceRole::Panel,
+        Some("right"),
+        (520, 340),
+        &outputs,
+        None,
+    );
+    apply_internal_plugin_surface_placement(&mut dock, PluginSurfaceKind::Dock, 36, &outputs);
+    assert_eq!(dock.geometry, (1020, 1304, 520, 340));
 }
 
 pub(super) fn receive_x11_clipboard(

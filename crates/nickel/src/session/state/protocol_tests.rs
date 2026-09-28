@@ -6331,6 +6331,7 @@ fn locked_test_output_disconnect_projects_readiness_to_live_topology() {
                 plugin_surface: Some(nickel_session_protocol::PluginSurfacePlacement {
                     plugin_id: id.into(),
                     surface_id: "main".into(),
+                    kind: nickel_session_protocol::PluginSurfacePlacementKind::Dock,
                     width: 360,
                     height: 64,
                     bottom_offset: 24,

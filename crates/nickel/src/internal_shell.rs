@@ -1340,11 +1340,11 @@ impl InternalShellCoordinator {
         self.shell.plugin_panel_surface()
     }
 
-    pub(crate) fn plugin_panel_bottom_offset(
+    pub(crate) fn plugin_panel_placement(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<u32> {
-        self.shell.plugin_panel_bottom_offset(key)
+    ) -> Option<(nickel_core::plugins::PluginSurfaceKind, u32)> {
+        self.shell.plugin_panel_placement(key)
     }
 
     pub(crate) fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
