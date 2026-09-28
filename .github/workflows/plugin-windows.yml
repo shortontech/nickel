@@ -426,6 +426,9 @@ jobs:
             }
             if (-not $ready) { throw "Installed component window did not become visible with a valid plugin memory report" }
             $initialBytes = [long]$plugin.memory.native_ui_bytes
+            if ($initialBytes -lt (287 * 287 * 4)) {
+              throw "Component window did not account for its decoded plugin image: $initialBytes bytes"
+            }
             if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Window", 260, 77)) {
               throw "Could not click the component window's dialog button"
             }

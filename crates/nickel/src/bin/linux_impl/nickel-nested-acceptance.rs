@@ -81,6 +81,11 @@ fn run() -> Result<(), String> {
         include_str!("../../../../../assets/plugins/example-window/main.js"),
     )
     .map_err(|error| error.to_string())?;
+    fs::write(
+        window.join("icon.png"),
+        include_bytes!("../../../../../assets/plugins/example-window/icon.png"),
+    )
+    .map_err(|error| error.to_string())?;
     let windows = runtime
         .join("config/nickel/plugins/org.example.acceptance-windows");
     fs::create_dir_all(&windows).map_err(|error| error.to_string())?;
@@ -475,6 +480,11 @@ fn verify_component_window(
     }
     let initial_bytes =
         wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    if initial_bytes < 287 * 287 * 4 {
+        return Err(format!(
+            "component window did not account for its decoded plugin image: {initial_bytes} bytes"
+        ));
+    }
     let first_window = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
     click_at(test_input, environment, first_window.1 + 260, first_window.2 + 77)?;
     wait_for_component_dialog_memory(test_input, environment, initial_bytes)?;

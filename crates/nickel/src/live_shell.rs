@@ -2793,13 +2793,14 @@ impl LiveShell {
                     ..HostBatch::default()
                 });
                 let commands = host.commands().to_vec();
+                let image_bytes = host.application_mut().retained_image_bytes();
                 let key = nickel_core::plugins::PluginSurfaceKey {
                     plugin_id: self.plugin_panel_owner.clone(),
                     surface_id: self.plugin_panel_surface.id.clone(),
                 };
                 self.record_plugin_panel_memory(
                     &key,
-                    outcome.telemetry.retained_frame_bytes as u64,
+                    (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
                 );
                 commands
             }
@@ -3694,7 +3695,11 @@ impl LiveShell {
             ..HostBatch::default()
         });
         let commands = host.commands().to_vec();
-        self.record_plugin_panel_memory(key, outcome.telemetry.retained_frame_bytes as u64);
+        let image_bytes = host.application_mut().retained_image_bytes();
+        self.record_plugin_panel_memory(
+            key,
+            (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
+        );
         Some(commands)
     }
 
@@ -4276,6 +4281,7 @@ impl LiveShell {
                                 .cloned()
                                 .map(Ok)
                                 .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
+                            let images = crate::plugin_panel::package_images(&package)?;
                             surfaces
                                 .iter()
                                 .filter(|surface| {
@@ -4286,8 +4292,8 @@ impl LiveShell {
                                     )
                                 })
                                 .map(|surface| {
-                                    crate::plugin_panel::PluginPanelApplication::from_package_surface(
-                                        &package, &settings, surface,
+                                    crate::plugin_panel::PluginPanelApplication::from_package_surface_with_images(
+                                        &package, &settings, surface, images.clone(),
                                     )
                                     .map(|application| (application, surface.clone()))
                                 })

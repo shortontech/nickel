@@ -8,7 +8,8 @@ function App() {
                 h(Button, { id: "open-dialog", onClick: () => {
                         setOpen(true);
                         nickel.openDialog("example-window-dialog");
-                    } }, "Open dialog"))),
+                    } }, "Open dialog"),
+                h(Image, { asset: "nickel-icon", width: 48, height: 48, accessibilityLabel: "Nickel icon" }))),
         h(Dialog, { id: "example-window-dialog", anchor: "open-dialog", open: open, onClose: () => setOpen(false), width: 340, height: 140 },
             h(Column, null,
                 h(Text, null, "This dialog belongs to a component window."),

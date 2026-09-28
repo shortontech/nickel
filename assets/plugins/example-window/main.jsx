@@ -9,6 +9,7 @@ function App() {
                     setOpen(true);
                     nickel.openDialog("example-window-dialog");
                 }}>Open dialog</Button>
+                <Image asset="nickel-icon" width={48} height={48} accessibilityLabel="Nickel icon" />
             </Column>
         </Box>
         <Dialog id="example-window-dialog" anchor="open-dialog" open={open}

@@ -10,7 +10,7 @@ Nickel loads a compiled JavaScript entry from a directory containing
 minimal working example. The [taskbar](../assets/plugins/taskbar/) shows how a
 first-party plugin requests host actions.
 The [window example](../assets/plugins/example-window/) shows a centered native
-window containing JSX components and a dialog.
+window containing JSX components, a packaged image, and a dialog.
 A window plugin participates in ordinary window focus and stacking. Closing
 its only surface disables the plugin without exiting Nickel; enable it again
 in Settings to reopen it. For a package with several surfaces, closing one
@@ -81,7 +81,7 @@ plugin surfaces appear on the current desktop.
 
 The command validates the manifest and JavaScript, stages the package in a
 temporary Nickel profile, and launches the test shell. Saving `plugin.json`,
-the declared JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
+a declared image, the JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the test shell. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
 profile. For first-party shell plugins, pass a bundled directory such as
@@ -138,8 +138,15 @@ The runtime provides `h`, `Panel`, `Row`, `Column`, `Text`, `Button`, `Dialog`,
 JavaScript execution has a 100,000-iteration limit per call frame. A loop that
 exceeds it returns an error to the plugin host; a failed event rolls back its
 component state so the next input can still run.
-Images use a host-provided asset key and explicit `width` and `height` (1 to
-8192 logical pixels); `fit` is `contain`, `cover`, or `stretch`. `ImageButton`
+Images use an asset key and explicit `width` and `height` (1 to
+8192 logical pixels); `fit` is `contain`, `cover`, or `stretch`. Installed
+packages can declare up to 16 PNG, JPEG, or WebP files under `images` in
+`plugin.json`, for example `"images": [{"id":"logo","path":"logo.png"}]`.
+Use `<Image asset="logo" width={48} height={48} />` to display one. Each file
+is limited to 4 MiB, all image files to 16 MiB, and their decoded total to
+4 million pixels. Nickel decodes them in Rust and counts retained RGBA pixels
+in the plugin's native memory lower bound; GPU texture memory remains a
+separate unavailable category. `ImageButton`
 also needs an ID, an accessibility label, and an `onClick` handler. A missing
 host asset renders a placeholder without giving the plugin filesystem access.
 `Button` may also handle `onDrag({ phase, x, y, bounds })`; Nickel captures the
@@ -252,7 +259,8 @@ The manifest may also declare bounded `author` and `version` strings. Settings
 shows both in the plugin list and in the enable review; missing values are
 labeled unknown or unspecified.
 For installed plugins, Nickel saves the reviewed manifest access and package
-identity when enabling. If the package later changes its JavaScript entry code,
+identity when enabling. If the package later changes its JavaScript entry code
+or a declared image,
 entry path, version, capabilities, surfaces, or extension declarations, automatic startup stops and
 Settings shows that a fresh review is required. Re-enabling records the new
 declarations.

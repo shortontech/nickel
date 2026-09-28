@@ -12,12 +12,29 @@ use sha2::{Digest, Sha256};
 pub const PLUGIN_API_VERSION: u16 = 1;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_PLUGIN_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PLUGIN_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PLUGIN_IMAGE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PLUGIN_DIRECTORIES: usize = 64;
 const MAX_ACTIVATION_SETTINGS_BYTES: usize = 16 * 1024;
 const MAX_PLUGIN_PREFERENCES_BYTES: usize = 16 * 1024;
 
 fn digest_source(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+
+fn digest_package(source: &str, images: &BTreeMap<String, Vec<u8>>) -> String {
+    if images.is_empty() {
+        return digest_source(source);
+    }
+    let mut digest = Sha256::new();
+    digest.update(source.as_bytes());
+    for (id, bytes) in images {
+        digest.update((id.len() as u64).to_le_bytes());
+        digest.update(id.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    format!("{:x}", digest.finalize())
 }
 
 /// Installed packages and package errors found immediately below one root.
@@ -40,8 +57,8 @@ impl PluginPackageDescriptor {
         if package.manifest != self.manifest {
             return Err("plugin manifest changed after discovery".into());
         }
-        if digest_source(&package.source) != self.source_digest {
-            return Err("plugin script changed after discovery".into());
+        if package.source_digest() != self.source_digest {
+            return Err("plugin script or image changed after discovery".into());
         }
         Ok(package)
     }
@@ -97,10 +114,11 @@ impl PluginCatalog {
                 if package.manifest.id != directory {
                     return Err("plugin manifest ID does not match its directory".into());
                 }
+                let source_digest = package.source_digest();
                 Ok(PluginPackageDescriptor {
                     directory: entry.path(),
                     manifest: package.manifest,
-                    source_digest: digest_source(&package.source),
+                    source_digest,
                 })
             })();
             match loaded {
@@ -121,11 +139,12 @@ impl PluginCatalog {
 pub struct PluginPackage {
     pub manifest: PluginManifest,
     pub source: String,
+    pub images: BTreeMap<String, Vec<u8>>,
 }
 
 impl PluginPackage {
     pub fn source_digest(&self) -> String {
-        digest_source(&self.source)
+        digest_package(&self.source, &self.images)
     }
 
     pub fn load(directory: impl AsRef<Path>) -> Result<Self, String> {
@@ -152,7 +171,40 @@ impl PluginPackage {
             .ok_or("plugin entry is missing")?;
         let source = String::from_utf8(source)
             .map_err(|error| format!("plugin entry is not UTF-8: {error}"))?;
-        Ok(Self { manifest, source })
+        let images = Self::load_images(&directory, &manifest)?;
+        Ok(Self {
+            manifest,
+            source,
+            images,
+        })
+    }
+
+    pub fn load_images(
+        directory: impl AsRef<Path>,
+        manifest: &PluginManifest,
+    ) -> Result<BTreeMap<String, Vec<u8>>, String> {
+        manifest.validate()?;
+        let directory = std::fs::canonicalize(directory.as_ref())
+            .map_err(|error| format!("could not open plugin directory: {error}"))?;
+        let mut images = BTreeMap::new();
+        let mut total_bytes = 0_usize;
+        for asset in &manifest.images {
+            let path = directory.join(&asset.path);
+            let resolved = std::fs::canonicalize(&path)
+                .map_err(|error| format!("could not open plugin image {:?}: {error}", asset.id))?;
+            if !resolved.starts_with(&directory) {
+                return Err(format!("plugin image {:?} escapes its directory", asset.id));
+            }
+            let bytes = nickel_storage::read_regular_file(&path, MAX_PLUGIN_IMAGE_BYTES)
+                .map_err(|error| format!("could not read plugin image {:?}: {error}", asset.id))?
+                .ok_or_else(|| format!("plugin image {:?} is missing", asset.id))?;
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > MAX_PLUGIN_IMAGE_TOTAL_BYTES {
+                return Err("plugin images exceed 16 MiB in total".into());
+            }
+            images.insert(asset.id.clone(), bytes);
+        }
+        Ok(images)
     }
 }
 
@@ -171,6 +223,8 @@ struct PluginApproval {
     author: Option<String>,
     version: Option<String>,
     entry: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    images: Vec<PluginImageAsset>,
     source_digest: String,
     capabilities: Vec<PluginCapability>,
     surfaces: Vec<PluginSurface>,
@@ -184,6 +238,7 @@ impl PluginApproval {
             author: manifest.author.clone(),
             version: manifest.version.clone(),
             entry: manifest.entry.clone(),
+            images: manifest.images.clone(),
             source_digest: source_digest.to_owned(),
             capabilities: manifest.capabilities.clone(),
             surfaces: manifest.surfaces.clone(),
@@ -456,6 +511,8 @@ pub struct PluginManifest {
     pub version: Option<String>,
     pub entry: String,
     #[serde(default)]
+    pub images: Vec<PluginImageAsset>,
+    #[serde(default)]
     pub surfaces: Vec<PluginSurface>,
     #[serde(default)]
     pub capabilities: Vec<PluginCapability>,
@@ -465,6 +522,13 @@ pub struct PluginManifest {
     pub contributes: Vec<PluginContribution>,
     #[serde(default)]
     pub settings: Vec<PluginSetting>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginImageAsset {
+    pub id: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -766,6 +830,25 @@ impl PluginManifest {
             return Err(
                 "plugin entry must be a relative .js path inside the plugin directory".into(),
             );
+        }
+        if self.images.len() > 16 {
+            return Err("plugin declares more than 16 images".into());
+        }
+        let mut image_ids = HashSet::new();
+        let mut image_paths = HashSet::new();
+        for image in &self.images {
+            if !valid_identifier(&image.id) || !image_ids.insert(&image.id) {
+                return Err(format!("invalid or duplicate image ID {:?}", image.id));
+            }
+            if !safe_relative_path(&image.path)
+                || ![".png", ".jpg", ".jpeg", ".webp"]
+                    .iter()
+                    .any(|extension| image.path.ends_with(extension))
+                || image.path == self.entry
+                || !image_paths.insert(&image.path)
+            {
+                return Err(format!("invalid or duplicate image path {:?}", image.path));
+            }
         }
         if self.surfaces.len() > 16 {
             return Err("plugin declares more than 16 surfaces".into());
@@ -1093,7 +1176,77 @@ mod tests {
             catalog.packages["org.nickel.hello-panel"]
                 .load()
                 .unwrap_err()
-                .contains("script changed after discovery")
+                .contains("script or image changed after discovery")
+        );
+    }
+
+    #[test]
+    fn declared_image_is_loaded_and_covered_by_package_approval() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("org.nickel.hello-panel");
+        std::fs::create_dir(&directory).unwrap();
+        let manifest = VALID.replace(
+            "\"entry\": \"main.js\",",
+            "\"entry\": \"main.js\", \"images\": [{\"id\":\"icon\",\"path\":\"icon.png\"}],",
+        );
+        std::fs::write(directory.join("plugin.json"), manifest).unwrap();
+        std::fs::write(directory.join("main.js"), "function App() {}").unwrap();
+        std::fs::write(directory.join("icon.png"), b"first image").unwrap();
+        let catalog = PluginCatalog::discover(root.path()).unwrap();
+        let descriptor = &catalog.packages["org.nickel.hello-panel"];
+        assert_eq!(descriptor.load().unwrap().images["icon"], b"first image");
+        std::fs::write(directory.join("icon.png"), b"changed image").unwrap();
+        assert!(descriptor.load().unwrap_err().contains("image changed"));
+    }
+
+    #[test]
+    fn image_free_approvals_keep_the_existing_fingerprint_shape() {
+        let manifest = PluginManifest::from_json(VALID).unwrap();
+        let approval = serde_json::to_value(PluginApproval::from_manifest(
+            &manifest,
+            &digest_source("function App() {}"),
+        ))
+        .unwrap();
+        assert!(approval.get("images").is_none());
+    }
+
+    #[test]
+    fn image_manifest_rejects_unsafe_paths_and_duplicate_ids() {
+        let manifest = VALID.replace(
+            "\"entry\": \"main.js\",",
+            "\"entry\": \"main.js\", \"images\": [{\"id\":\"icon\",\"path\":\"../icon.png\"}],",
+        );
+        assert!(PluginManifest::from_json(&manifest).is_err());
+        let manifest = manifest.replace("../icon.png", "icon.png").replace(
+            "\"path\":\"icon.png\"}],",
+            "\"path\":\"icon.png\"},{\"id\":\"icon\",\"path\":\"other.png\"}],",
+        );
+        assert!(PluginManifest::from_json(&manifest).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_image_link_outside_the_plugin_directory() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let manifest = VALID.replace(
+            "\"entry\": \"main.js\",",
+            "\"entry\": \"main.js\", \"images\": [{\"id\":\"icon\",\"path\":\"icon.png\"}],",
+        );
+        std::fs::write(directory.path().join("plugin.json"), manifest).unwrap();
+        std::fs::write(directory.path().join("main.js"), "function App() {}").unwrap();
+        std::fs::write(outside.path().join("icon.png"), b"outside").unwrap();
+        symlink(
+            outside.path().join("icon.png"),
+            directory.path().join("icon.png"),
+        )
+        .unwrap();
+        assert!(
+            PluginPackage::load(directory.path())
+                .unwrap_err()
+                .contains("escapes")
         );
     }
 

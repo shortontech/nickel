@@ -110,6 +110,7 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
     if let Some(source) = jsx_source(&directory, &manifest.entry)? {
         Ok(PluginPackage {
             source: compile_jsx(&directory, &manifest, &source)?,
+            images: PluginPackage::load_images(&directory, &manifest)?,
             manifest,
         })
     } else {
@@ -220,11 +221,13 @@ mod platform {
         let manifest = std::fs::read(directory.join("plugin.json"))
             .map_err(|error| format!("could not read plugin.json: {error}"))?;
         manifest.hash(&mut hasher);
-        let current_entry = std::str::from_utf8(&manifest)
+        let current_manifest = std::str::from_utf8(&manifest)
             .ok()
-            .and_then(|source| PluginManifest::from_json(source).ok())
-            .map(|manifest| manifest.entry)
-            .unwrap_or_else(|| entry.to_owned());
+            .and_then(|source| PluginManifest::from_json(source).ok());
+        let current_entry = current_manifest
+            .as_ref()
+            .map(|manifest| manifest.entry.as_str())
+            .unwrap_or(entry);
         current_entry.hash(&mut hasher);
         // A missing new entry is still a distinct edit. Watch for its creation.
         let mut has_jsx = false;
@@ -250,7 +253,32 @@ mod platform {
             sibling.file_name().hash(&mut hasher);
             std::fs::read(sibling).unwrap_or_default().hash(&mut hasher);
         }
+        if let Some(manifest) = current_manifest {
+            for image in manifest.images {
+                image.path.hash(&mut hasher);
+                std::fs::read(directory.join(image.path))
+                    .unwrap_or_default()
+                    .hash(&mut hasher);
+            }
+        }
         Ok(hasher.finish())
+    }
+
+    fn stage_images(package: &PluginPackage, target: &Path) -> Result<(), String> {
+        for asset in &package.manifest.images {
+            let bytes = package
+                .images
+                .get(&asset.id)
+                .ok_or_else(|| format!("plugin image {:?} was not loaded", asset.id))?;
+            let path = target.join(&asset.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("could not stage plugin image: {error}"))?;
+            }
+            std::fs::write(path, bytes)
+                .map_err(|error| format!("could not stage plugin image: {error}"))?;
+        }
+        Ok(())
     }
 
     fn stage(package: &PluginPackage, directory: &Path, root: &Path) -> Result<(), String> {
@@ -292,8 +320,9 @@ mod platform {
                 std::fs::create_dir_all(parent)
                     .map_err(|error| format!("could not stage bundled entry: {error}"))?;
             }
-            return std::fs::write(entry, &package.source)
-                .map_err(|error| format!("could not stage bundled entry: {error}"));
+            std::fs::write(entry, &package.source)
+                .map_err(|error| format!("could not stage bundled entry: {error}"))?;
+            return stage_images(package, &target);
         }
         let manifest_bytes = std::fs::read(directory.join("plugin.json"))
             .map_err(|error| format!("could not read plugin manifest: {error}"))?;
@@ -320,6 +349,7 @@ mod platform {
         }
         std::fs::write(entry, &package.source)
             .map_err(|error| format!("could not stage JavaScript: {error}"))?;
+        stage_images(package, &target)?;
         PluginActivationSettings::update_manifest(
             staged_config_directory(root).join("plugin-activation.json"),
             &package.manifest,
@@ -601,6 +631,34 @@ mod platform {
             .unwrap();
             assert!(activation.desired_enabled("org.example.clock", false));
             assert!(activation.approval_current(&staged.manifest, &staged.source_digest()));
+        }
+
+        #[test]
+        fn stages_and_watches_declared_plugin_images() {
+            let source = tempfile::tempdir().unwrap();
+            let example = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/example-window"
+            ));
+            for name in ["plugin.json", "main.js", "icon.png"] {
+                std::fs::copy(example.join(name), source.path().join(name)).unwrap();
+            }
+            let package = load_dev_package(source.path()).unwrap();
+            let fingerprint = source_fingerprint(source.path(), &package.manifest.entry).unwrap();
+            let profile = tempfile::tempdir().unwrap();
+            stage(&package, source.path(), profile.path()).unwrap();
+            let staged = PluginPackage::load(
+                staged_config_directory(profile.path())
+                    .join("plugins/org.example.component-window"),
+            )
+            .unwrap();
+            assert_eq!(staged.images, package.images);
+            assert_eq!(staged.source_digest(), package.source_digest());
+            std::fs::write(source.path().join("icon.png"), b"changed image").unwrap();
+            assert_ne!(
+                fingerprint,
+                source_fingerprint(source.path(), &package.manifest.entry).unwrap()
+            );
         }
 
         #[test]

@@ -1681,6 +1681,36 @@ impl From<&LauncherPluginProjection> for LauncherShortcutState {
 
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 
+pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, String> {
+    let mut total_pixels = 0_u64;
+    package
+        .images
+        .iter()
+        .enumerate()
+        .map(|(index, (id, bytes))| {
+            let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
+                .with_guessed_format()
+                .map_err(|error| format!("plugin image {id:?} has an invalid format: {error}"))?
+                .into_dimensions()
+                .map_err(|error| format!("plugin image {id:?} has invalid dimensions: {error}"))?;
+            total_pixels =
+                total_pixels.saturating_add(u64::from(dimensions.0) * u64::from(dimensions.1));
+            if dimensions.0 == 0
+                || dimensions.1 == 0
+                || dimensions.0 > 2048
+                || dimensions.1 > 2048
+                || total_pixels > 4_000_000
+            {
+                return Err(format!("plugin images exceed 4 million pixels at {id:?}"));
+            }
+            let image = image::load_from_memory(bytes)
+                .map_err(|error| format!("could not decode plugin image {id:?}: {error}"))?
+                .into_rgba8();
+            Ok((id.clone(), ((index + 1) as u16, Arc::new(image))))
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DesktopPluginWidget {
     pub label: String,
@@ -2556,7 +2586,9 @@ impl PluginPanelApplication {
     }
 
     pub fn from_package(package: &PluginPackage) -> Result<Self, String> {
-        Self::new_with_manifest(&package.source, &package.manifest, None)
+        let mut application = Self::new_with_manifest(&package.source, &package.manifest, None)?;
+        application.sync_images(package_images(package)?);
+        Ok(application)
     }
 
     pub fn from_package_with_settings(
@@ -2564,13 +2596,25 @@ impl PluginPanelApplication {
         settings: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> Result<Self, String> {
         let data = serde_json::json!({ "settings": settings }).to_string();
-        Self::new_with_manifest(&package.source, &package.manifest, Some(data))
+        let mut application =
+            Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
+        application.sync_images(package_images(package)?);
+        Ok(application)
     }
 
     pub fn from_package_surface(
         package: &PluginPackage,
         settings: &std::collections::BTreeMap<String, serde_json::Value>,
         surface: &PluginSurface,
+    ) -> Result<Self, String> {
+        Self::from_package_surface_with_images(package, settings, surface, package_images(package)?)
+    }
+
+    pub(crate) fn from_package_surface_with_images(
+        package: &PluginPackage,
+        settings: &std::collections::BTreeMap<String, serde_json::Value>,
+        surface: &PluginSurface,
+        images: PluginImages,
     ) -> Result<Self, String> {
         let data = serde_json::json!({
             "settings": settings,
@@ -2582,10 +2626,14 @@ impl PluginPanelApplication {
             },
         })
         .to_string();
-        Self::new_with_manifest(&package.source, &package.manifest, Some(data))
+        let mut application =
+            Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
+        application.sync_images(images);
+        Ok(application)
     }
 
     pub fn validate_package(package: &PluginPackage) -> Result<(), String> {
+        package_images(package)?;
         let settings: std::collections::BTreeMap<_, _> = package
             .manifest
             .settings
@@ -2919,6 +2967,13 @@ impl PluginPanelApplication {
             self.images = images;
         }
         changed
+    }
+
+    pub fn retained_image_bytes(&self) -> u64 {
+        self.images
+            .values()
+            .map(|(_, image)| image.as_raw().len() as u64)
+            .fold(0_u64, u64::saturating_add)
     }
 
     pub fn sync_launcher(&mut self, launcher: &Launcher) -> Result<bool, String> {
@@ -4784,6 +4839,7 @@ mod tests {
         external_manifest.surfaces[0].height = 400;
         let package = PluginPackage {
             manifest: external_manifest,
+            images: Default::default(),
             source: r#"
                 function App() {
                     return h(Panel, {height: 80},
@@ -5231,6 +5287,7 @@ mod tests {
     fn host_dismissal_calls_dialog_on_close_and_allows_reopen() {
         let package = PluginPackage {
             manifest: manifest().clone(),
+            images: Default::default(),
             source: r#"
                 function App() {
                     const [open, setOpen] = useState(false);
@@ -5288,12 +5345,32 @@ mod tests {
         external_manifest.id = "org.example.settings-panel".into();
         let package = PluginPackage {
             manifest: external_manifest,
+            images: Default::default(),
             source: "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-count'] ? 'Shown' : 'Hidden')); }".into(),
         };
         let settings =
             std::collections::BTreeMap::from([("show-count".to_owned(), serde_json::json!(false))]);
         let app = PluginPanelApplication::from_package_with_settings(&package, &settings).unwrap();
         assert!(format!("{:?}", app.node).contains("Hidden"));
+    }
+
+    #[test]
+    fn installed_window_loads_its_declared_image_into_the_native_host() {
+        let package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap();
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let app = PluginPanelApplication::from_package_surface(
+            &package,
+            &Default::default(),
+            &package.manifest.surfaces[0],
+        )
+        .unwrap();
+        let (_, image) = &app.images["nickel-icon"];
+        assert!(image.width() > 0 && image.height() > 0);
+        assert!(format!("{:?}", app.node).contains("nickel-icon"));
     }
 
     #[test]
