@@ -6,7 +6,7 @@
   "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [
-    {"id": "main", "kind": "panel", "width": 1920, "height": 56, "output": "all"}
+    {"id": "main", "kind": "panel", "width": 1920, "height": 56, "output": "all", "reserve_work_area": true}
   ],
   "capabilities": [
     "launcher-show",

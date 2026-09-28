@@ -3393,6 +3393,22 @@ impl LiveShell {
         }
     }
 
+    pub(crate) fn taskbar_reservation_height(&self) -> u32 {
+        if self.plugin_taskbar_host.is_none() {
+            return 0;
+        }
+        self.plugin_registry
+            .get(&crate::plugin_panel::taskbar_manifest().id)
+            .and_then(|entry| {
+                entry
+                    .manifest
+                    .surfaces
+                    .iter()
+                    .find(|surface| surface.reserve_work_area)
+            })
+            .map_or(0, |surface| surface.height)
+    }
+
     pub fn plugin_registry(&self) -> &nickel_core::plugins::PluginRegistry {
         &self.plugin_registry
     }

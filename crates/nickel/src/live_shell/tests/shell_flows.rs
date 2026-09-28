@@ -642,6 +642,7 @@
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::taskbar_manifest().id;
         assert!(shell.surface_visible(SurfaceRole::Taskbar));
+        assert_eq!(shell.taskbar_reservation_height(), 56);
         let window = OpenWindow {
             id: WindowId(71),
             application_id: Some(ApplicationId::new("org.example.menu")),
@@ -656,6 +657,7 @@
         assert!(shell.surface_visible(SurfaceRole::WindowContextMenu));
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(!shell.surface_visible(SurfaceRole::Taskbar));
+        assert_eq!(shell.taskbar_reservation_height(), 0);
         assert!(!shell.surface_visible(SurfaceRole::WindowContextMenu));
         assert!(shell.window_menu_scene().is_empty());
         assert!(shell.window_menu_plugin_host.is_none());
@@ -668,6 +670,7 @@
         );
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.surface_visible(SurfaceRole::Taskbar));
+        assert_eq!(shell.taskbar_reservation_height(), 56);
     }
 
     #[test]

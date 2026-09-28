@@ -655,6 +655,8 @@ pub struct PluginSurface {
     #[serde(default)]
     pub bottom_offset: u32,
     #[serde(default)]
+    pub reserve_work_area: bool,
+    #[serde(default)]
     pub output: PluginOutputScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
@@ -874,6 +876,14 @@ impl PluginManifest {
             {
                 return Err(format!(
                     "surface {:?} cannot use a bottom offset",
+                    surface.id
+                ));
+            }
+            if surface.reserve_work_area
+                && (surface.kind != PluginSurfaceKind::Panel || surface.bottom_offset != 0)
+            {
+                return Err(format!(
+                    "surface {:?} can reserve work area only as an edge panel",
                     surface.id
                 ));
             }
@@ -1395,6 +1405,7 @@ mod tests {
     fn accepts_a_portable_panel_manifest() {
         let manifest = PluginManifest::from_json(VALID).unwrap();
         assert_eq!(manifest.surfaces[0].bottom_offset, 24);
+        assert!(!manifest.surfaces[0].reserve_work_area);
         assert_eq!(manifest.surfaces[0].output, PluginOutputScope::All);
         assert!(manifest.author.is_none());
         assert!(manifest.version.is_none());
@@ -1412,6 +1423,21 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn reserves_work_area_only_for_an_edge_panel() {
+        let panel = VALID.replace("\"bottom_offset\":24,", "\"reserve_work_area\":true,");
+        assert!(PluginManifest::from_json(&panel).unwrap().surfaces[0].reserve_work_area);
+        for invalid in [
+            VALID.replace(
+                "\"output\":\"all\"",
+                "\"output\":\"all\",\"reserve_work_area\":true",
+            ),
+            panel.replace("\"kind\":\"panel\"", "\"kind\":\"dock\""),
+        ] {
+            assert!(PluginManifest::from_json(&invalid).is_err());
+        }
     }
 
     #[test]

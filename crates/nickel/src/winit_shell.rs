@@ -3355,6 +3355,7 @@ mod tests {
                 width: 360,
                 height: 96,
                 bottom_offset: 12,
+                reserve_work_area: false,
                 output: nickel_core::plugins::PluginOutputScope::Primary,
                 owner: None,
             };
@@ -3397,6 +3398,7 @@ mod tests {
             width: 520,
             height: 340,
             bottom_offset: 0,
+            reserve_work_area: false,
             output: nickel_core::plugins::PluginOutputScope::Primary,
             owner: None,
         };
