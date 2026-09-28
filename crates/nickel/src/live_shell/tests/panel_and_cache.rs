@@ -616,7 +616,6 @@
         );
 
         assert!(shell.application_menu_target.is_none());
-        assert!(shell.application_menu_host.is_none());
     }
 
     #[test]

@@ -27,8 +27,8 @@ use super::{
         SecureStorageState, SystemStatusUpdate,
     },
     preview_refresh_due, retain_unchanged_desktop_icons, secure_storage_status_label,
-    semantic_theme_from_palette, session_feed_status_label, shortcut_capability_status,
-    visible_tray_item, window_belongs_to_panel,
+    session_feed_status_label, shortcut_capability_status, visible_tray_item,
+    window_belongs_to_panel,
 };
 
 #[test]

@@ -596,9 +596,9 @@
     }
     use crate::{
         launcher_view::{LauncherAction, LauncherApplication},
-        model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
+        model::{ApplicationId, OpenWindow, TrayItem, WindowId},
         notification::{NotificationAction, NotificationRequest},
-        window_preview::{MenuAction, build_preview_frame},
+        window_preview::MenuAction,
         winit_shell::SurfaceRole,
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
@@ -642,8 +642,26 @@
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::taskbar_manifest().id;
         assert!(shell.surface_visible(SurfaceRole::Taskbar));
+        let window = OpenWindow {
+            id: WindowId(71),
+            application_id: Some(ApplicationId::new("org.example.menu")),
+            active: true,
+            title: "Menu owner".into(),
+            state: Default::default(),
+        };
+        shell.windows = vec![window.clone()];
+        shell.window_menu = Some(window.id);
+        shell.window_menu_snapshot = Some(window);
+        assert!(!shell.window_menu_scene().is_empty());
+        assert!(shell.surface_visible(SurfaceRole::WindowContextMenu));
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(!shell.surface_visible(SurfaceRole::Taskbar));
+        assert!(!shell.surface_visible(SurfaceRole::WindowContextMenu));
+        assert!(shell.window_menu_scene().is_empty());
+        assert!(shell.window_menu_plugin_host.is_none());
+        assert!(!shell.open_window_menu_at(71, 10, 10));
+        shell.preview_group = Some(0);
+        assert!(!shell.preview_plugin_action_allowed(crate::window_preview::PreviewAction::OpenMenu(WindowId(71))));
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
@@ -1177,9 +1195,6 @@
     fn semantic_shell_targets_come_from_live_group_preview_and_menu_records() {
         let mut shell = LiveShell::new().unwrap();
         shell
-            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
-            .unwrap();
-        shell
             .launcher
             .set_preferences(LauncherPreferences::default());
         let application_id = ApplicationId::new("org.nickel.Terminal");
@@ -1203,12 +1218,12 @@
         let panel = shell
             .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
                 application_id: "org.nickel.Terminal".into(),
-                output: Some("DP-1".into()),
+                output: None,
                 interaction: PointerInteraction::Hover,
             })
             .expect("live panel group resolves");
         assert_eq!(panel.role, ShellRole::Panel);
-        assert_eq!(panel.output.as_deref(), Some("DP-1"));
+        assert_eq!(panel.output, None);
         assert!(shell.panel_pointer_moved(panel.x as f32, 1280));
         assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Task(0)));
         assert!(shell.preview_group.is_none());
@@ -1221,13 +1236,8 @@
             (panel.x - i32::try_from(preview_width / 2).unwrap()).max(shell.panel_origin_x)
         );
 
-        let group = shell.launcher.group_windows(&shell.windows).remove(0);
-        shell.preview_frame = Some(build_preview_frame(
-            &group,
-            &HashMap::new(),
-            None,
-            shell.semantic_theme(),
-        ));
+        shell.open_window_preview(0);
+        assert!(!shell.scene(SurfaceRole::WindowPreview, preview_width, 214).is_empty());
         let preview = shell
             .resolve_semantic_target(&ShellSemanticTarget::PreviewWindow {
                 window: nickel_session_protocol::WindowId(9),
@@ -1236,18 +1246,12 @@
             .expect("live preview close target resolves");
         assert_eq!(preview.role, ShellRole::Preview);
         assert_eq!(preview.interaction, PointerInteraction::LeftClick);
-        assert_eq!(
-            shell.preview_frame.as_mut().unwrap().transition_pointer(
-                Point {
-                    x: preview.x as f32,
-                    y: preview.y as f32,
-                },
-                false,
-            ),
-            Some(crate::window_preview::PreviewAction::Close(WindowId(9)))
-        );
+        assert!(shell
+            .preview_plugin_bounds(crate::window_preview::PreviewAction::Close(WindowId(9)))
+            .is_some());
 
         shell.window_menu = Some(WindowId(9));
+        shell.window_menu_snapshot = shell.windows.iter().find(|window| window.id == WindowId(9)).cloned();
         let _ = shell.window_menu_scene();
         let menu = shell
             .resolve_semantic_target(&ShellSemanticTarget::WindowMenu {
@@ -1256,16 +1260,7 @@
             })
             .expect("live context-menu row resolves");
         assert_eq!(menu.role, ShellRole::ContextMenu);
-        assert!(
-            shell
-                .window_menu_host
-                .as_ref()
-                .unwrap()
-                .semantic_targets_for_message(&MenuAction::Minimize(WindowId(9)))
-                .into_iter()
-                .next()
-                .is_some()
-        );
+        assert!(shell.window_menu_plugin_host.is_some());
 
         shell.screenshot.show(image::RgbaImage::new(400, 200));
         let _ = shell.scene(SurfaceRole::Screenshot, 800, 600);
@@ -1494,7 +1489,6 @@
         assert!(!shell
             .scene(SurfaceRole::WindowContextMenu, super::MENU_WIDTH as u32, menu_height)
             .is_empty());
-        assert!(shell.application_menu_host.is_none());
         let taskbar_only = shell.plugin_taskbar_memory.values().copied().sum::<u64>();
         assert!(
             shell
@@ -1606,7 +1600,6 @@
         shell.window_menu_snapshot = Some(window);
         let height = shell.window_context_menu_height() as u32;
         assert!(!shell.window_menu_scene().is_empty());
-        assert!(shell.window_menu_host.is_none());
         let menu = shell.window_menu_plugin_host.as_ref().unwrap();
         let target = shell
             .resolve_semantic_target(&ShellSemanticTarget::WindowMenu {
@@ -2110,89 +2103,6 @@
                 .semantic_targets_for_message(&ControlAction::ToggleShowDesktop)
                 .is_empty(),
             "Super+P must not open the generic Control Center"
-        );
-    }
-
-    #[test]
-    fn transient_keyboard_navigation_uses_production_frame_order() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.plugin_preview_host = None;
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
-            .unwrap();
-        let palette = nickel_core::theme::ThemePalette::from_appearance(Appearance::default());
-        let group = WindowGroup {
-            application_id: None,
-            application_name: "Editor".into(),
-            windows: vec![
-                OpenWindow {
-                    id: WindowId(4),
-                    application_id: None,
-                    active: true,
-                    title: "one".into(),
-                    state: crate::model::WindowState::default(),
-                },
-                OpenWindow {
-                    id: WindowId(9),
-                    application_id: None,
-                    active: false,
-                    title: "two".into(),
-                    state: crate::model::WindowState::default(),
-                },
-            ],
-        };
-        shell.preview_group = Some(0);
-        shell.preview_frame = Some(build_preview_frame(
-            &group,
-            &HashMap::new(),
-            None,
-            semantic_theme_from_palette(palette),
-        ));
-
-        assert!(shell.preview_key(Some(KeyCode::ArrowRight)));
-        assert_eq!(shell.preview_hovered, Some(WindowId(9)));
-        assert!(shell.preview_key(Some(KeyCode::ArrowLeft)));
-        assert_eq!(shell.preview_hovered, Some(WindowId(4)));
-
-        shell.window_menu = Some(WindowId(4));
-        shell.window_menu_snapshot = Some(group.windows[0].clone());
-        let _ = shell.window_menu_scene();
-        assert!(shell.preview_key(Some(KeyCode::ArrowDown)));
-        assert!(
-            shell
-                .window_menu_host
-                .as_ref()
-                .unwrap()
-                .inspect()
-                .controller_target
-                .is_some()
-        );
-        let first_target = shell
-            .window_menu_host
-            .as_ref()
-            .unwrap()
-            .inspect()
-            .controller_target
-            .clone();
-        assert!(!shell.window_menu_host_key(Some(KeyCode::ArrowUp)));
-        assert_eq!(
-            shell
-                .window_menu_host
-                .as_ref()
-                .unwrap()
-                .inspect()
-                .controller_target,
-            first_target
-        );
-        assert!(shell.window_menu_host_key(Some(KeyCode::ArrowDown)));
-        assert_ne!(
-            shell
-                .window_menu_host
-                .as_ref()
-                .unwrap()
-                .inspect()
-                .controller_target,
-            first_target
         );
     }
 

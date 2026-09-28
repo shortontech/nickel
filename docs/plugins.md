@@ -107,6 +107,8 @@ Meta shortcut inactive. Run remains available through Super+R, and the
 independent Settings shortcut can re-enable Launcher.
 Disabling the bundled Taskbar plugin retires its visible bar. On nested Linux,
 the desktop reclaims the bar's reserved work area until it is re-enabled.
+Taskbar context menus are JSX views owned by that plugin. Disabling Taskbar
+closes an open menu; menu requests stay unavailable until it is re-enabled.
 Disabling Volume OSD closes that overlay and clears its retained native UI;
 audio changes do not recreate a Rust fallback.
 Disabling Control Center closes ordinary Quick Settings. The trusted display
