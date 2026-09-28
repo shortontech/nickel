@@ -285,6 +285,9 @@ impl InternalShellCoordinator {
         let mut desired = Vec::new();
         for (index, output) in outputs.iter().enumerate() {
             for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
+                if role == SurfaceRole::Desktop && !self.shell.surface_visible(role) {
+                    continue;
+                }
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 let plugin =
                     (role == SurfaceRole::Desktop).then(crate::plugin_panel::desktop_surface_key);
@@ -2314,7 +2317,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_desktop_keeps_its_plugin_identity_across_reactivation() {
+    fn bundled_desktop_surface_retires_and_returns_with_its_plugin() {
         let mut coordinator = coordinator();
         let output = InternalOutput {
             x: 0,
@@ -2341,29 +2344,27 @@ mod tests {
             .set_plugin_enabled(&plugin_id, false)
             .unwrap();
         coordinator.set_outputs(&[output.clone()]);
-        assert_eq!(
+        assert!(
             coordinator
                 .surface(SurfaceRole::Desktop, Some("nested"))
-                .unwrap()
-                .id,
-            id
+                .is_none()
         );
-        assert!(!coordinator.visible(id));
 
         coordinator
             .shell_mut()
             .set_plugin_enabled(&plugin_id, true)
             .unwrap();
         coordinator.set_outputs(&[output]);
+        let restored = coordinator
+            .surface(SurfaceRole::Desktop, Some("nested"))
+            .unwrap();
+        assert_ne!(restored.id, id);
         assert_eq!(
-            coordinator
-                .surface(SurfaceRole::Desktop, Some("nested"))
-                .unwrap()
-                .id,
-            id
+            restored.plugin,
+            Some(crate::plugin_panel::desktop_surface_key())
         );
-        assert!(coordinator.visible(id));
-        assert!(coordinator.scene(id).is_some());
+        assert!(coordinator.visible(restored.id));
+        assert!(coordinator.scene(restored.id).is_some());
     }
 
     #[test]

@@ -5234,8 +5234,12 @@ impl WindowsRemoteControl {
                                 match state.set_plugin_enabled(&id, enabled) {
                                     Ok(changed) => {
                                         if changed
-                                            && let Err(reason) =
-                                                shell.set_plugin_panels(state.shell_panel_surfaces())
+                                            && let Err(reason) = shell.set_plugin_surfaces(
+                                                state.surface_visible(
+                                                    crate::winit_shell::SurfaceRole::Desktop,
+                                                ),
+                                                state.shell_panel_surfaces(),
+                                            )
                                         {
                                             return error(reason);
                                         }

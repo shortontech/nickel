@@ -575,6 +575,7 @@ pub struct WinitShell {
     options: ShellOptions,
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
+    desktop_plugin_enabled: bool,
     taskbar_panel_enabled: bool,
     plugin_panel_enabled: bool,
     plugin_panel_surface: nickel_core::plugins::PluginSurface,
@@ -643,6 +644,7 @@ impl WinitShell {
             options,
             primary_output_name: None,
             active_output_name: None,
+            desktop_plugin_enabled: true,
             taskbar_panel_enabled: true,
             plugin_panel_enabled: crate::plugin_panel::enabled(),
             plugin_panel_surface: crate::plugin_panel::surface().clone(),
@@ -744,8 +746,9 @@ impl WinitShell {
         self.output_creation_retry = OutputCreationRetry::default();
         let displays = require_displays(self.display_geometries()?)?;
         let output_names = self.display_names()?;
-        let create_desktops =
-            self.options.create_desktop_surfaces && crate::platform::renders_desktop_background();
+        let create_desktops = self.desktop_plugin_enabled
+            && self.options.create_desktop_surfaces
+            && crate::platform::renders_desktop_background();
         let desired = desired_output_surfaces(
             &output_names,
             create_desktops,
@@ -843,8 +846,9 @@ impl WinitShell {
             tracing::info!("winit shell is dormant while no displays are available");
             return Ok(());
         }
-        let create_desktops =
-            self.options.create_desktop_surfaces && crate::platform::renders_desktop_background();
+        let create_desktops = self.desktop_plugin_enabled
+            && self.options.create_desktop_surfaces
+            && crate::platform::renders_desktop_background();
         let desired = desired_output_surfaces(
             &output_names,
             create_desktops,
@@ -888,6 +892,7 @@ impl WinitShell {
         // dormant for the retirement grace period so a transient topology snapshot or a
         // quick reconnect can preserve their stable surface identities.
         self.surfaces.retain(|surface| match surface.role {
+            SurfaceRole::Desktop => self.desktop_plugin_enabled,
             SurfaceRole::Panel => panel_expected(surface),
             SurfaceRole::Taskbar => desired.contains(&(surface.output_name.clone(), surface.role)),
             _ => true,
@@ -1190,8 +1195,9 @@ impl WinitShell {
         Ok(true)
     }
 
-    pub fn set_plugin_panels(
+    pub fn set_plugin_surfaces(
         &mut self,
+        desktop_plugin_enabled: bool,
         mut panels: Vec<(
             nickel_core::plugins::PluginSurfaceKey,
             nickel_core::plugins::PluginSurface,
@@ -1242,7 +1248,8 @@ impl WinitShell {
         {
             return Err("duplicate plugin panel surface".into());
         }
-        if self.taskbar_panel_enabled == taskbar_panel_enabled
+        if self.desktop_plugin_enabled == desktop_plugin_enabled
+            && self.taskbar_panel_enabled == taskbar_panel_enabled
             && self.plugin_panel_enabled == enabled
             && self.plugin_panel_owner == owner
             && self.plugin_panel_surface == surface
@@ -1302,6 +1309,7 @@ impl WinitShell {
             )
             .map_err(|error| format!("failed to register plugin surface: {error}"))?;
         }
+        self.desktop_plugin_enabled = desktop_plugin_enabled;
         self.plugin_panel_enabled = enabled;
         self.taskbar_panel_enabled = taskbar_panel_enabled;
         self.plugin_panel_owner = owner;
