@@ -214,6 +214,7 @@ jobs:
               [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr context);
               [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
               [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);
+              [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr handle);
               [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder title, int capacity);
               [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
               [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr handle, out Rect rect);
@@ -241,6 +242,20 @@ jobs:
                       return !found;
                   }, IntPtr.Zero);
                   return found;
+              }
+              public static bool IsVisibleWindowEnabled(uint processId, string expectedTitle) {
+                  bool enabled = false;
+                  EnumWindows((handle, context) => {
+                      uint owner;
+                      GetWindowThreadProcessId(handle, out owner);
+                      if (owner != processId || !IsWindowVisible(handle)) return true;
+                      var title = new StringBuilder(256);
+                      GetWindowText(handle, title, title.Capacity);
+                      if (title.ToString() != expectedTitle) return true;
+                      enabled = IsWindowEnabled(handle);
+                      return false;
+                  }, IntPtr.Zero);
+                  return enabled;
               }
               public static bool CloseVisibleWindow(uint processId, string expectedTitle) {
                   bool sent = false;
@@ -518,6 +533,9 @@ jobs:
             if (-not [NickelWindowProbe]::IsOwnedByVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Dialog", "Nickel Plugin Window")) {
               throw "Declared dialog is not owned by its home window"
             }
+            if ([NickelWindowProbe]::IsVisibleWindowEnabled([uint32]$shell.ProcessId, "Nickel Plugin Window")) {
+              throw "Dialog owner still accepts native input while its dialog is open"
+            }
             if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Dialog", 180, 119)) {
               throw "Could not click the dialog's Dismiss button"
             }
@@ -538,6 +556,9 @@ jobs:
               }
             }
             if (-not $dismissed) { throw "Dismissing the dialog did not preserve home and retire dialog memory" }
+            if (-not [NickelWindowProbe]::IsVisibleWindowEnabled([uint32]$shell.ProcessId, "Nickel Plugin Window")) {
+              throw "Dialog owner did not accept native input after dismissal"
+            }
             if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Window", 210, 77)) {
               throw "Could not reopen the dialog from its home window"
             }

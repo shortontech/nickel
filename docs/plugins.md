@@ -30,7 +30,8 @@ with `show-plugin-surface` and dismisses it with
 `nickel.request({ type: "hide-plugin-surface", surfaceId: "confirm" })`.
 The dialog's optional `owner` field names a declared window on the same output
 scope. An owned dialog can open only while that window is live; closing the
-owner also closes its dialog. Windows presents it as a native owned window.
+owner also closes its dialog. Windows presents it as a native owned window and
+blocks input to that owner until the dialog closes.
 Closing the package's last ordinary window also retires its open dialogs.
 
 Build the Rust development tools, then start an isolated nested session on

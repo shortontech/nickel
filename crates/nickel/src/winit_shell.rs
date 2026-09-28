@@ -1057,7 +1057,54 @@ impl WinitShell {
                 .window
                 .request_inner_size(LogicalSize::new(width, height));
         }
+        #[cfg(target_os = "windows")]
+        self.set_plugin_dialog_owners_enabled(false);
         Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_plugin_dialog_owners_enabled(&self, enabled: bool) {
+        use winit::platform::windows::WindowExtWindows;
+
+        let owners = self
+            .surfaces
+            .iter()
+            .filter_map(|dialog| {
+                if !dialog.display_connected || dialog.role != SurfaceRole::Panel {
+                    return None;
+                }
+                let key = dialog.plugin.as_ref()?;
+                let declaration = if self.plugin_panel_enabled
+                    && key.plugin_id == self.plugin_panel_owner
+                    && key.surface_id == self.plugin_panel_surface.id
+                {
+                    Some(&self.plugin_panel_surface)
+                } else {
+                    self.extra_plugin_panels.get(key)
+                }?;
+                if declaration.kind != nickel_core::plugins::PluginSurfaceKind::Dialog {
+                    return None;
+                }
+                Some((
+                    key.plugin_id.clone(),
+                    declaration.owner.clone()?,
+                    dialog.output_name.clone(),
+                ))
+            })
+            .collect::<HashSet<_>>();
+        for surface in &self.surfaces {
+            if surface.role == SurfaceRole::Panel
+                && surface.plugin.as_ref().is_some_and(|key| {
+                    owners.contains(&(
+                        key.plugin_id.clone(),
+                        key.surface_id.clone(),
+                        surface.output_name.clone(),
+                    ))
+                })
+            {
+                surface.window.set_enable(enabled);
+            }
+        }
     }
 
     pub fn set_bar_on_all_displays(&mut self, enabled: bool) -> Result<bool, String> {
@@ -1125,6 +1172,8 @@ impl WinitShell {
                 surface.clone(),
             );
         }
+        #[cfg(target_os = "windows")]
+        self.set_plugin_dialog_owners_enabled(true);
         self.surfaces.retain(|existing| {
             existing.role != SurfaceRole::Panel
                 || existing
