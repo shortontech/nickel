@@ -6355,6 +6355,70 @@ fn locked_test_output_disconnect_projects_readiness_to_live_topology() {
 }
 
 #[test]
+fn internal_readiness_requires_each_declared_reserved_panel_instance() {
+    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+    let (_event_loop, mut session) = preview_test_session();
+    for name in ["primary", "secondary"] {
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: name.into(),
+                logical_width: 1280,
+                logical_height: 720,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+    }
+    session
+        .enable_internal_shell(Arc::new(IdleInternalHost))
+        .expect("headless internal shell");
+    session
+        .internal_shell
+        .as_mut()
+        .unwrap()
+        .set_bar_on_all_displays(true);
+    session.reconcile_internal_shell_outputs();
+    let ready = session.protocol_shell_readiness();
+    assert_eq!((ready.outputs, ready.panels), (2, 2));
+    assert!(ready.output_roles_ready);
+
+    session
+        .internal_shell
+        .as_mut()
+        .unwrap()
+        .set_bar_on_all_displays(false);
+    let extra = session.protocol_shell_readiness();
+    assert_eq!(
+        (extra.outputs, extra.desktops, extra.panels, extra.locks),
+        (2, 2, 2, 2)
+    );
+    assert!(!extra.output_roles_ready);
+
+    session.reconcile_internal_shell_outputs();
+    assert!(session.protocol_shell_readiness().output_roles_ready);
+    session
+        .internal_shell
+        .as_mut()
+        .unwrap()
+        .set_bar_on_all_displays(true);
+    let missing = session.protocol_shell_readiness();
+    assert_eq!(
+        (
+            missing.outputs,
+            missing.desktops,
+            missing.panels,
+            missing.locks
+        ),
+        (2, 2, 1, 2)
+    );
+    assert!(!missing.output_roles_ready);
+    assert!(!missing.ready);
+
+    session.reconcile_internal_shell_outputs();
+    assert!(session.protocol_shell_readiness().output_roles_ready);
+}
+
+#[test]
 fn touch_output_hint_uses_named_logical_geometry_and_never_falls_back_after_removal() {
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = preview_test_session();

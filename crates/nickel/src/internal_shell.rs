@@ -6,7 +6,7 @@
 //! typed [`SessionHost`], output geometry, input and presentation.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, mpsc},
     time::Instant,
 };
@@ -1405,6 +1405,35 @@ impl InternalShellCoordinator {
             .is_some_and(|key| self.plugin_panel_reserves_work_area(key))
     }
 
+    pub(crate) fn expected_reserved_panel_instances(
+        &self,
+        output_names: &[String],
+    ) -> HashSet<(String, nickel_core::plugins::PluginSurfaceKey)> {
+        let taskbar_key = self.shell.taskbar_surface_key();
+        self.shell
+            .shell_panel_surfaces()
+            .into_iter()
+            .filter(|(_, surface)| surface.reserve_work_area)
+            .flat_map(|(key, surface)| {
+                output_names.iter().enumerate().filter_map({
+                    let taskbar_key = taskbar_key.clone();
+                    move |(index, output)| {
+                        if (taskbar_key.as_ref() == Some(&key)
+                            && !self.bar_on_all_displays
+                            && index != 0)
+                            || (surface.output != nickel_core::plugins::PluginOutputScope::All
+                                && index != 0)
+                        {
+                            None
+                        } else {
+                            Some((output.clone(), key.clone()))
+                        }
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn plugin_panel_reserves_work_area(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -2158,6 +2187,11 @@ mod tests {
                 .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "secondary")
                 .is_none()
         );
+        let names = ["primary".to_owned(), "secondary".to_owned()];
+        assert_eq!(
+            coordinator.expected_reserved_panel_instances(&names).len(),
+            1
+        );
         assert!(
             coordinator
                 .surface(SurfaceRole::Desktop, Some("primary"))
@@ -2170,6 +2204,10 @@ mod tests {
         );
 
         assert!(coordinator.set_bar_on_all_displays(true));
+        assert_eq!(
+            coordinator.expected_reserved_panel_instances(&names).len(),
+            2
+        );
         coordinator.set_outputs(&[
             InternalOutput {
                 x: 0,

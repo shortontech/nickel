@@ -2484,7 +2484,24 @@ impl NickelSession {
         &self,
     ) -> nickel_session_protocol::ShellReadinessSnapshot {
         if let Some(shell) = &self.internal_shell {
-            let outputs = u16::try_from(self.space.outputs().count()).unwrap_or(u16::MAX);
+            let output_names = self
+                .internal_outputs()
+                .into_iter()
+                .map(|(output, _, _)| output.name)
+                .collect::<Vec<_>>();
+            let outputs = u16::try_from(output_names.len()).unwrap_or(u16::MAX);
+            let expected_panels = shell.expected_reserved_panel_instances(&output_names);
+            let actual_panels = shell
+                .surfaces()
+                .iter()
+                .filter_map(|surface| {
+                    let key = surface.plugin.as_ref()?;
+                    if !shell.plugin_panel_reserves_work_area(key) {
+                        return None;
+                    }
+                    Some((surface.output.clone()?, key.clone()))
+                })
+                .collect::<HashSet<_>>();
             let count = |role| {
                 u16::try_from(
                     shell
@@ -2500,12 +2517,32 @@ impl NickelSession {
                 shell
                     .surfaces()
                     .iter()
-                    .filter(|surface| shell.is_reserved_panel_surface_id(surface.id))
+                    .filter(|surface| {
+                        surface
+                            .plugin
+                            .as_ref()
+                            .is_some_and(|key| shell.plugin_panel_reserves_work_area(key))
+                    })
                     .count(),
             )
             .unwrap_or(u16::MAX);
             let locks = count(crate::winit_shell::SurfaceRole::Lock);
             let launchers = count(crate::winit_shell::SurfaceRole::Launcher);
+            let output_set = output_names.into_iter().collect::<HashSet<_>>();
+            let surface_outputs = |role| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .filter(|surface| surface.role == role)
+                    .filter_map(|surface| surface.output.clone())
+                    .collect::<HashSet<_>>()
+            };
+            let output_roles_ready = desktops == outputs
+                && locks == outputs
+                && surface_outputs(crate::winit_shell::SurfaceRole::Desktop) == output_set
+                && surface_outputs(crate::winit_shell::SurfaceRole::Lock) == output_set
+                && usize::from(panels) == expected_panels.len()
+                && actual_panels == expected_panels;
             return nickel_session_protocol::ShellReadinessSnapshot {
                 expected_shell_pid: None,
                 authenticated_shell_pid: None,
@@ -2515,13 +2552,9 @@ impl NickelSession {
                 locks,
                 launchers,
                 required_singletons_ready: true,
-                output_roles_ready: desktops == outputs && locks == outputs && panels > 0,
+                output_roles_ready,
                 reserved_ordinary_windows: 0,
-                ready: outputs > 0
-                    && desktops == outputs
-                    && locks == outputs
-                    && panels > 0
-                    && launchers == 1,
+                ready: outputs > 0 && output_roles_ready && launchers == 1,
             };
         }
         let expected_shell_pid = match self
