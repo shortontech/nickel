@@ -12,6 +12,7 @@ members = [
     "crates/nickel-ui-workbench",
     "crates/nickel-windows-app-probe",
     "crates/nickel-windows-shell-setup",
+    "crates/nickel-watchdog",
     "crates/nickel-uwu",
     "crates/nickel-windows-uwp-target",
     "crates/ui-declarative-macros",

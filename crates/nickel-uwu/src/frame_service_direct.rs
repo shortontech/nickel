@@ -1,14 +1,11 @@
-//! Diagnostic-only call into this Windows build's private frame service.
+//! Calls into this Windows build's private frame service.
 
-use std::{cell::RefCell, ffi::c_void, process::Command, ptr, thread, time::Duration};
+use std::{cell::RefCell, ffi::c_void, ptr};
 
 use windows::{
     Win32::System::{
         Com::{IServiceProvider, IServiceProvider_Impl},
         Ole::IObjectWithSite,
-    },
-    Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
     },
     core::IUnknown,
 };
@@ -76,7 +73,71 @@ impl IServiceProvider_Impl for LoggingServiceProvider_Impl {
     }
 }
 
-pub fn probe(manager: &IUnknown, app_id: &str) -> std::result::Result<(), String> {
+pub(crate) struct FramePool {
+    frame_service: IUnknown,
+    _provider: IServiceProvider,
+}
+
+impl FramePool {
+    pub(crate) fn acquire_frame(&self, app_id: &str) -> std::result::Result<IUnknown, String> {
+        let vtable = unsafe { self.frame_service.as_raw().cast::<*const usize>().read() };
+        let method = unsafe { vtable.add(9).read() };
+        let wide_name: Vec<u16> = "twinui.pcshell.dll".encode_utf16().chain([0]).collect();
+        let base = unsafe { GetModuleHandleW(wide_name.as_ptr()) } as usize;
+        if method != base + 0x0d45d0 {
+            return Err(format!(
+                "frame service method 9 differs: actual={method:#x} expected={:#x}",
+                base + 0x0d45d0
+            ));
+        }
+        type GetFrame =
+            unsafe extern "system" fn(*mut c_void, *const u16, u32, *mut *mut c_void) -> HRESULT;
+        let get_frame: GetFrame = unsafe { std::mem::transmute(method) };
+        let service = self.frame_service.as_raw().cast::<u8>();
+        let pool_storage = unsafe { service.add(0x40).cast::<*mut c_void>().read() };
+        let pool_count = unsafe { service.add(0x48).cast::<usize>().read() };
+        let mut pooled_id = ptr::null();
+        let mut pooled_glom = 0;
+        if pool_count != 0 && !pool_storage.is_null() {
+            let wrapper = unsafe { pool_storage.cast::<*mut u8>().read() };
+            if !wrapper.is_null() {
+                pooled_id = unsafe { wrapper.add(0x90).cast::<*const u16>().read() };
+                pooled_glom = unsafe { wrapper.add(0xa8).cast::<u32>().read() };
+            }
+        }
+        let pooled_label = if pooled_id.is_null() {
+            "<null>".to_string()
+        } else {
+            let length = (0..512)
+                .find(|offset| unsafe { *pooled_id.add(*offset) == 0 })
+                .unwrap_or(512);
+            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pooled_id, length) })
+        };
+        println!(
+            "phase=frame-pool-entry count={pool_count} app_id={pooled_label:?} glom={pooled_glom}"
+        );
+        let globals = unsafe { ((base + 0x912160) as *const *mut u8).read() };
+        if globals.is_null() {
+            return Err("g_pIAMGlobals is null".into());
+        }
+        let reconstitution_flag = unsafe { globals.add(0x6c) };
+        let previous_flag = unsafe { reconstitution_flag.read() };
+        println!("phase=frame-pool-reconstitution previous={previous_flag}");
+        unsafe { reconstitution_flag.write(1) };
+        let requested: Vec<u16> = app_id.encode_utf16().chain([0]).collect();
+        let mut raw = ptr::null_mut();
+        let status =
+            unsafe { get_frame(self.frame_service.as_raw(), requested.as_ptr(), 0, &mut raw) };
+        unsafe { reconstitution_flag.write(previous_flag) };
+        status.ok().map_err(|error| format!("GetFrame: {error}"))?;
+        if raw.is_null() {
+            return Err("GetFrame returned a null proxy".into());
+        }
+        Ok(unsafe { IUnknown::from_raw(raw) })
+    }
+}
+
+pub(crate) fn ensure_frame_pool(manager: &IUnknown) -> std::result::Result<FramePool, String> {
     let wide_name: Vec<u16> = "twinui.pcshell.dll".encode_utf16().chain([0]).collect();
     // SAFETY: The fallback redirect has loaded this DLL and remains alive
     // throughout this call.
@@ -191,40 +252,10 @@ pub fn probe(manager: &IUnknown, app_id: &str) -> std::result::Result<(), String
         .ok()
         .map_err(|error| format!("frame pool creation: {error}"))?;
 
-    let launcher = std::env::current_exe()
-        .map_err(|error| format!("fixture path: {error}"))?
-        .with_file_name("nickel-windows-app-probe.exe");
-    println!("phase=ActivateApplication starting");
-    let mut child = Command::new(launcher)
-        .arg(app_id)
-        .spawn()
-        .map_err(|error| format!("activation probe: {error}"))?;
-    let mut dispatched = 0_u64;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("activation probe wait: {error}"))?
-        {
-            break status;
-        }
-        let mut message = MSG::default();
-        // SAFETY: The message is initialized, and all messages belong to this
-        // worker's UI thread, which owns the diagnostic shell window.
-        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
-            // SAFETY: PeekMessageW returned a valid message for this thread.
-            unsafe {
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-            dispatched += 1;
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-    println!("phase=ActivateApplication dispatched_messages={dispatched}");
-    println!("phase=ActivateApplication probe_status={status}");
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("activation probe exited with {status}"))
-    }
+    let frame_service = frame.clone();
+    drop(owned_frame);
+    Ok(FramePool {
+        frame_service,
+        _provider: provider,
+    })
 }

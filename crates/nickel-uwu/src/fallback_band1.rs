@@ -145,11 +145,6 @@ impl FallbackBandRedirect {
             original_slot_value: current,
         })
     }
-
-    #[cfg(feature = "diagnostics")]
-    pub fn redirected_count(&self) -> usize {
-        REDIRECTED.load(Ordering::Relaxed)
-    }
 }
 
 impl Drop for FallbackBandRedirect {

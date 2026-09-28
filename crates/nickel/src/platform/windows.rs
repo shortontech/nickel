@@ -3592,6 +3592,7 @@ fn activate_packaged_application(
         UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
     };
 
+    nickel_uwu::prepare_app(app_user_model_id).map_err(LaunchError::Platform)?;
     // SAFETY: This thread uses COM only for the duration of the synchronous
     // activation. If it already has an apartment, CoCreateInstance uses that
     // apartment and only successful initialization is balanced below.
@@ -3738,6 +3739,11 @@ fn launch_uri(uri: &str) -> windows::core::Result<bool> {
         Win32::UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
     };
 
+    const SETTINGS_AUMID: &str =
+        "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
+    nickel_uwu::prepare_app(SETTINGS_AUMID).map_err(|error| {
+        windows::core::Error::new(windows::core::HRESULT(0x80004005_u32 as i32), error)
+    })?;
     unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
     let result = (|| {
         let manager: IApplicationActivationManager =

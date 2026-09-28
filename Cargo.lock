@@ -3625,6 +3625,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-watchdog"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "nickel-windows-app-probe"
 version = "0.1.0"
 dependencies = [
