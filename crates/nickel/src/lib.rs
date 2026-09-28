@@ -1346,6 +1346,15 @@ fn render_role(
 
 fn sync_desktop_outputs(shell: &WinitShell, state: &mut LiveShell) {
     let configured_primary = state.primary_output_name();
+    let reserved_outputs = if state.taskbar_reservation_height() > 0 {
+        shell
+            .surfaces()
+            .filter(|surface| surface.role() == SurfaceRole::Taskbar)
+            .map(|surface| surface.output_name().to_owned())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let outputs = shell
         .surfaces()
         .filter(|surface| surface.role() == SurfaceRole::Desktop)
@@ -1354,13 +1363,22 @@ fn sync_desktop_outputs(shell: &WinitShell, state: &mut LiveShell) {
             Some((surface.output_name().to_owned(), geometry))
         })
         .collect();
-    let outputs = desktop_logical_outputs(outputs, configured_primary.as_deref());
+    let outputs = desktop_logical_outputs(
+        outputs,
+        configured_primary.as_deref(),
+        &reserved_outputs,
+        state.taskbar_reservation_height() as f32,
+        shell.panel_edge(),
+    );
     state.set_desktop_outputs(outputs);
 }
 
 fn desktop_logical_outputs(
     mut facts: Vec<(String, winit_shell::DisplayGeometry)>,
     configured_primary: Option<&str>,
+    reserved_outputs: &HashSet<String>,
+    taskbar_height: f32,
+    panel_edge: PanelEdge,
 ) -> Vec<nickel_file::desktop::DesktopOutput> {
     facts.sort_by(|left, right| left.0.cmp(&right.0));
     facts.dedup_by(|left, right| left.0 == right.0);
@@ -1447,14 +1465,23 @@ fn desktop_logical_outputs(
                         + (i64::from(geometry.y) - i64::from(anchor.y)) as f32 / anchor.scale,
                 )
             });
+            let reservation = if reserved_outputs.contains(&id) {
+                taskbar_height.min(geometry.height as f32 / geometry.scale)
+            } else {
+                0.0
+            };
             nickel_file::desktop::DesktopOutput {
                 id,
                 primary: index == primary,
                 work_area: nickel_file::desktop::Rect {
                     x,
-                    y,
+                    y: y + if panel_edge == PanelEdge::Top {
+                        reservation
+                    } else {
+                        0.0
+                    },
                     width: geometry.width as f32 / geometry.scale,
-                    height: (geometry.height as f32 / geometry.scale - 56.0).max(1.0),
+                    height: (geometry.height as f32 / geometry.scale - reservation).max(1.0),
                 },
                 scale: geometry.scale,
             }
@@ -3369,6 +3396,9 @@ mod tests {
                 ("below".into(), geometry(0, 1440, 1920, 1080, 1.0)),
             ],
             Some("primary"),
+            &std::collections::HashSet::new(),
+            0.0,
+            crate::winit_shell::PanelEdge::Bottom,
         );
         let output = |id| outputs.iter().find(|output| output.id == id).unwrap();
 
@@ -3385,10 +3415,59 @@ mod tests {
                 ("right".into(), geometry(2560, 0, 1920, 1080, 1.0)),
             ],
             Some("primary"),
+            &std::collections::HashSet::new(),
+            0.0,
+            crate::winit_shell::PanelEdge::Bottom,
         );
         assert_eq!(
             outputs, reversed,
             "enumeration order must not alter topology"
+        );
+    }
+
+    #[test]
+    fn desktop_work_area_follows_enabled_taskbar_outputs_and_edge() {
+        let displays = || {
+            ["primary", "secondary"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    (
+                        name.into(),
+                        crate::winit_shell::DisplayGeometry {
+                            x: (index * 800) as i32,
+                            y: 0,
+                            width: 800,
+                            height: 600,
+                            scale: 1.0,
+                        },
+                    )
+                })
+                .collect()
+        };
+        let reserved = std::collections::HashSet::from(["primary".to_owned()]);
+        let outputs = super::desktop_logical_outputs(
+            displays(),
+            Some("primary"),
+            &reserved,
+            56.0,
+            crate::winit_shell::PanelEdge::Top,
+        );
+        let primary = outputs
+            .iter()
+            .find(|output| output.id == "primary")
+            .unwrap();
+        let secondary = outputs
+            .iter()
+            .find(|output| output.id == "secondary")
+            .unwrap();
+        assert_eq!(
+            (primary.work_area.y, primary.work_area.height),
+            (56.0, 544.0)
+        );
+        assert_eq!(
+            (secondary.work_area.y, secondary.work_area.height),
+            (0.0, 600.0)
         );
     }
 

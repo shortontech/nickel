@@ -63,6 +63,22 @@ pub fn taskbar_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn taskbar_surface() -> &'static PluginSurface {
+    taskbar_manifest()
+        .surfaces
+        .iter()
+        .find(|surface| surface.reserve_work_area)
+        .expect("bundled taskbar needs a work-area panel")
+}
+
+pub fn taskbar_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    let manifest = taskbar_manifest();
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: manifest.id.clone(),
+        surface_id: taskbar_surface().id.clone(),
+    }
+}
+
 pub fn notification_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {

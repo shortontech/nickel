@@ -2379,15 +2379,17 @@ impl WinitShell {
         let panel = plugin
             .map(|(_, surface)| surface.clone())
             .unwrap_or_else(|| self.plugin_panel_surface.clone());
-        let plugin_key = (role == SurfaceRole::Panel).then(|| {
-            plugin.map_or_else(
+        let plugin_key = match role {
+            SurfaceRole::Taskbar => Some(crate::plugin_panel::taskbar_surface_key()),
+            SurfaceRole::Panel => Some(plugin.map_or_else(
                 || nickel_core::plugins::PluginSurfaceKey {
                     plugin_id: self.plugin_panel_owner.clone(),
                     surface_id: panel.id.clone(),
                 },
                 |(key, _)| key.clone(),
-            )
-        });
+            )),
+            _ => None,
+        };
         let (base_title, x, y, width, height, hidden) =
             surface_geometry_for_panel(role, geometry, self.options.panel_edge, &panel);
         let title = base_title;
@@ -2800,19 +2802,22 @@ fn surface_geometry(
             geometry.height,
             false,
         ),
-        SurfaceRole::Taskbar => (
-            PANEL_TITLE,
-            geometry.x,
-            match panel_edge {
-                PanelEdge::Top => geometry.y,
-                PanelEdge::Bottom => {
-                    geometry.y + geometry.height.saturating_sub(PANEL_HEIGHT) as i32
-                }
-            },
-            geometry.width,
-            PANEL_HEIGHT,
-            false,
-        ),
+        SurfaceRole::Taskbar => {
+            let height = crate::plugin_panel::taskbar_surface()
+                .height
+                .min(geometry.height);
+            (
+                PANEL_TITLE,
+                geometry.x,
+                match panel_edge {
+                    PanelEdge::Top => geometry.y,
+                    PanelEdge::Bottom => geometry.y + geometry.height.saturating_sub(height) as i32,
+                },
+                geometry.width,
+                height,
+                false,
+            )
+        }
         SurfaceRole::Panel => (
             "Nickel Plugin Panel",
             geometry.x
