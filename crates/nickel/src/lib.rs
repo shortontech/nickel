@@ -1281,7 +1281,10 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         if matches!(role, SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat) {
             continue;
         }
-        if !state.surface_visible(role) {
+        if !state.native_surface_visible(
+            role,
+            shell.surface(id).and_then(|surface| surface.plugin_key()),
+        ) {
             continue;
         }
         if taskbar {
@@ -1318,6 +1321,8 @@ fn render_role(
         .filter(|surface| {
             surface.role() == wanted
                 || (wanted == SurfaceRole::Taskbar && surface.is_taskbar_plugin())
+                || (wanted == SurfaceRole::Notification
+                    && surface.plugin_key() == Some(&plugin_panel::notification_surface_key()))
         })
         .map(|surface| {
             let (logical_width, logical_height) = surface.window().size();
@@ -1332,7 +1337,10 @@ fn render_role(
         })
         .collect::<Vec<_>>();
     for (id, role, taskbar, output, logical_width, logical_height) in surfaces {
-        if !state.surface_visible(role) {
+        if !state.native_surface_visible(
+            role,
+            shell.surface(id).and_then(|surface| surface.plugin_key()),
+        ) {
             continue;
         }
         if taskbar {
@@ -1556,10 +1564,7 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
             shell,
             id,
             role,
-            state.surface_visible(role)
-                && plugin
-                    .as_ref()
-                    .is_none_or(|key| state.plugin_surface_matches(key)),
+            state.native_surface_visible(role, plugin.as_ref()),
         );
     }
 }
@@ -2902,11 +2907,14 @@ pub fn run() -> Result<(), String> {
                     sync_visibility(&mut shell, &state);
                     #[cfg(target_os = "windows")]
                     if opening_notification_history
-                        && state.surface_visible(SurfaceRole::Notification)
+                        && state.native_surface_visible(
+                            SurfaceRole::Panel,
+                            Some(&plugin_panel::notification_surface_key()),
+                        )
                     {
                         // Passive arrival must not interrupt typing. This user-invoked
                         // history action is the explicit transition into keyboard focus.
-                        shell.raise_role(SurfaceRole::Notification);
+                        shell.raise_plugin_surface(&plugin_panel::notification_surface_key());
                     }
                     state.sync_transient_overlays();
                     focus_visible_overlay(&mut shell, &state);

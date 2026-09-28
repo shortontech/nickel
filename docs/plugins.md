@@ -125,9 +125,10 @@ Disabling Window Preview closes its visible cards and task switcher view;
 hovering a taskbar group no longer creates a Rust preview. Re-enabling the
 plugin restores the JSX preview.
 Disabling Notifications closes ordinary popups and history, releases its UI
-memory, and leaves Super+N inactive until re-enabled. Pending remote access and
-Codex approval requests retain a trusted notification surface so users can
-review and decide them even while the plugin is disabled.
+memory, and leaves Super+N inactive until re-enabled. Ordinary notification
+popups and history use the plugin's passive overlay surface. Pending remote
+access and Codex approval requests retain a trusted notification surface so
+users can review and decide them even while the plugin is disabled.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `Panel` component's ARGB `background` can be translucent. Several installed

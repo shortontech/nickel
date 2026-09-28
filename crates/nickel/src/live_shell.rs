@@ -3303,6 +3303,7 @@ impl LiveShell {
                 self.plugin_taskbar_host.is_some()
                     || self.plugin_panel_host.is_some()
                     || !self.plugin_panel_extra_hosts.is_empty()
+                    || self.plugin_notification_host.is_some()
             }
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible && self.control_surface_available(),
@@ -3330,6 +3331,22 @@ impl LiveShell {
             #[cfg(target_os = "windows")]
             SurfaceRole::TrustedControl => false,
         }
+    }
+
+    pub(crate) fn native_surface_visible(
+        &self,
+        role: SurfaceRole,
+        key: Option<&nickel_core::plugins::PluginSurfaceKey>,
+    ) -> bool {
+        if key == Some(&crate::plugin_panel::notification_surface_key()) {
+            return role == SurfaceRole::Panel
+                && self.notification_plugin_active()
+                && (self.notification.is_some() || self.notification_history_visible);
+        }
+        if role == SurfaceRole::Notification {
+            return self.trusted_notification_visible();
+        }
+        self.surface_visible(role) && key.is_none_or(|key| self.plugin_surface_matches(key))
     }
 
     pub(crate) fn taskbar_reservation_height(&self) -> u32 {
@@ -3390,6 +3407,8 @@ impl LiveShell {
                 && crate::plugin_panel::volume_osd_surface_key() == *key)
             || (self.plugin_preview_host.is_some()
                 && crate::plugin_panel::window_preview_surface_key() == *key)
+            || (self.plugin_notification_host.is_some()
+                && crate::plugin_panel::notification_surface_key() == *key)
             || self.taskbar_surface_key().as_ref() == Some(key)
             || (self.plugin_panel_host.is_some()
                 && self.plugin_panel_owner == key.plugin_id
@@ -3443,6 +3462,12 @@ impl LiveShell {
             panels.push((key, surface.clone()));
         }
         panels.extend(self.plugin_panels());
+        if self.plugin_notification_host.is_some() {
+            panels.push((
+                crate::plugin_panel::notification_surface_key(),
+                crate::plugin_panel::notification_surface().clone(),
+            ));
+        }
         panels
     }
 
@@ -3479,6 +3504,18 @@ impl LiveShell {
         i32,
         i32,
     )> {
+        if *key == crate::plugin_panel::notification_surface_key()
+            && self.plugin_notification_host.is_some()
+        {
+            let surface = crate::plugin_panel::notification_surface();
+            return Some((
+                surface.kind,
+                surface.bottom_offset,
+                surface.anchor,
+                surface.offset_x,
+                surface.offset_y,
+            ));
+        }
         if self.plugin_panel_host.is_some()
             && self.plugin_panel_owner == key.plugin_id
             && self.plugin_panel_surface.id == key.surface_id
@@ -3541,6 +3578,20 @@ impl LiveShell {
         }
         if *key == crate::plugin_panel::volume_osd_surface_key() {
             let inspection = self.plugin_volume_osd_host.as_ref()?.inspect();
+            return Some(HostChangeToken {
+                frame_generation: inspection
+                    .frame_generation
+                    .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+                semantic_generation: inspection
+                    .semantic_generation
+                    .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+            });
+        }
+        if *key == crate::plugin_panel::notification_surface_key() {
+            if !self.notification_plugin_active() {
+                return None;
+            }
+            let inspection = self.plugin_notification_host.as_ref()?.inspect();
             return Some(HostChangeToken {
                 frame_generation: inspection
                     .frame_generation
@@ -3752,6 +3803,12 @@ impl LiveShell {
                 return None;
             }
             return Some(self.volume_osd_scene(width, height));
+        }
+        if *key == crate::plugin_panel::notification_surface_key() {
+            if !self.notification_plugin_active() {
+                return None;
+            }
+            return Some(self.scene(SurfaceRole::Notification, width, height));
         }
         if *key == crate::plugin_panel::launcher_surface_key() {
             if self.plugin_launcher_host.is_none() {
@@ -5219,7 +5276,6 @@ impl LiveShell {
         self.apply_notification_effects()
     }
 
-    #[cfg(test)]
     pub(crate) fn notification_host_input(
         &mut self,
         input: nickel_input::InputEvent,
@@ -5378,6 +5434,10 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if *key == crate::plugin_panel::notification_surface_key() {
+            return self.native_surface_visible(SurfaceRole::Panel, Some(key))
+                && self.notification_host_input(input, width, height);
+        }
         if self.taskbar_surface_key().as_ref() == Some(key) {
             let Some(host) = self.plugin_taskbar_host.as_ref() else {
                 return false;
@@ -5422,6 +5482,10 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if *key == crate::plugin_panel::notification_surface_key() {
+            return self.native_surface_visible(SurfaceRole::Panel, Some(key))
+                && self.notification_controller(action);
+        }
         if self.taskbar_surface_key().as_ref() == Some(key) {
             return self
                 .step_taskbar_plugin_batch(
@@ -5458,6 +5522,10 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if *key == crate::plugin_panel::notification_surface_key() {
+            return self.native_surface_visible(SurfaceRole::Panel, Some(key))
+                && self.shell_role_host_ui(SurfaceRole::Notification, event, width, height);
+        }
         if self.taskbar_surface_key().as_ref() == Some(key) {
             return self
                 .step_taskbar_plugin_batch(

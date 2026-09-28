@@ -831,14 +831,16 @@ fn wait_for_notification_visibility(
     let deadline = Instant::now() + timeout;
     loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let line = surfaces.lines().find(|line| line.starts_with("Notification\t"))
-            .ok_or("notification surface missing")?;
-        let visible = !line.ends_with("hidden");
+        let line = surfaces.lines().find(|line| {
+            line.starts_with("PluginSurface\t")
+                && line.ends_with("org.nickel.notification/main")
+        });
+        let visible = line.is_some_and(|line| line.split('\t').nth(2) != Some("hidden"));
         if visible == expected {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!("notification visibility stayed {visible}: {line}"));
+            return Err(format!("notification visibility stayed {visible}: {surfaces}"));
         }
         thread::sleep(POLL);
     }

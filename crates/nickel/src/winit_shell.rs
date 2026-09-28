@@ -2368,6 +2368,20 @@ impl WinitShell {
         raised
     }
 
+    pub fn raise_plugin_surface(&mut self, key: &nickel_core::plugins::PluginSurfaceKey) -> bool {
+        let ids = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.plugin_key() == Some(key))
+            .map(ShellSurface::id)
+            .collect::<Vec<_>>();
+        let mut raised = false;
+        for id in ids {
+            raised |= self.raise(id);
+        }
+        raised
+    }
+
     pub fn start_text_input(&self, id: SurfaceId) -> bool {
         self.surface(id).is_some_and(|surface| {
             surface.window().set_ime_allowed(true);

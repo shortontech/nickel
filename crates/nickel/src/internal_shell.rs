@@ -468,11 +468,9 @@ impl InternalShellCoordinator {
                 } else {
                     entry.role
                 };
-                entry
-                    .plugin
-                    .as_ref()
-                    .is_some_and(|key| !self.shell.plugin_surface_matches(key))
-                    || !self.shell.surface_visible(role)
+                !self
+                    .shell
+                    .native_surface_visible(role, entry.plugin.as_ref())
                     || self.shell.surface_remote_access_protected(role)
             })
     }
@@ -486,12 +484,11 @@ impl InternalShellCoordinator {
             .iter()
             .find(|entry| entry.id == id)
             .ok_or("shell surface has retired")?;
-        if entry
-            .plugin
-            .as_ref()
-            .is_some_and(|key| !self.shell.plugin_surface_matches(key))
+        if !self
+            .shell
+            .native_surface_visible(entry.role, entry.plugin.as_ref())
         {
-            return Err("plugin surface has retired".into());
+            return Err("shell surface is hidden or retired".into());
         }
         let semantics_role = if self.is_taskbar_surface(entry) {
             SurfaceRole::Taskbar
@@ -515,12 +512,11 @@ impl InternalShellCoordinator {
             .iter()
             .find(|entry| entry.id == id)
             .ok_or("shell surface has retired")?;
-        if entry
-            .plugin
-            .as_ref()
-            .is_some_and(|key| !self.shell.plugin_surface_matches(key))
+        if !self
+            .shell
+            .native_surface_visible(entry.role, entry.plugin.as_ref())
         {
-            return Err("plugin surface has retired".into());
+            return Err("shell surface is hidden or retired".into());
         }
         let semantics_role = if self.is_taskbar_surface(entry) {
             SurfaceRole::Taskbar
@@ -615,6 +611,9 @@ impl InternalShellCoordinator {
     fn redraws_surface(&self, surface: &InternalShellSurface, roles: &[SurfaceRole]) -> bool {
         roles.contains(&surface.role)
             || (roles.contains(&SurfaceRole::Taskbar) && self.is_taskbar_surface(surface))
+            || (roles.contains(&SurfaceRole::Notification)
+                && surface.plugin.as_ref()
+                    == Some(&crate::plugin_panel::notification_surface_key()))
     }
 
     pub fn visible(&self, id: InternalSurfaceId) -> bool {
@@ -622,11 +621,8 @@ impl InternalShellCoordinator {
             .iter()
             .find(|surface| surface.id == id)
             .is_some_and(|surface| {
-                self.shell.surface_visible(surface.role)
-                    && surface
-                        .plugin
-                        .as_ref()
-                        .is_none_or(|key| self.shell.plugin_surface_matches(key))
+                self.shell
+                    .native_surface_visible(surface.role, surface.plugin.as_ref())
             })
     }
 
@@ -2188,7 +2184,12 @@ mod tests {
             },
         ]);
 
-        assert_eq!(coordinator.surfaces().len(), 15);
+        assert_eq!(coordinator.surfaces().len(), 16);
+        let notification = coordinator
+            .plugin_surface(&crate::plugin_panel::notification_surface_key(), "one")
+            .unwrap();
+        assert_eq!(notification.role, SurfaceRole::Panel);
+        assert!(!coordinator.visible(notification.id));
         let panel = coordinator
             .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "two")
             .unwrap();

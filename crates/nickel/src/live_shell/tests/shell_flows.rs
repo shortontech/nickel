@@ -71,9 +71,21 @@
         });
         shell.notification = shell.notification_feed.snapshot();
         assert!(shell.surface_visible(SurfaceRole::Notification));
+        let key = crate::plugin_panel::notification_surface_key();
+        assert!(shell.shell_panel_surfaces().iter().any(|(candidate, surface)| {
+            candidate == &key && surface.passive
+        }));
+        assert!(shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
+        assert!(!shell.native_surface_visible(SurfaceRole::Notification, None));
+        assert!(shell
+            .plugin_surface_scene_for_output(&key, Some("primary"), 420, 180)
+            .is_some());
+        assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.plugin_notification_host.is_none());
         assert!(!shell.surface_visible(SurfaceRole::Notification));
+        assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
+        assert!(!shell.plugin_surface_matches(&key));
         assert!(shell.scene(SurfaceRole::Notification, 420, 180).is_empty());
         assert!(!shell.notification_click(20.0, 20.0, 420, 180));
         assert_eq!(
@@ -108,6 +120,22 @@
         shell.notification = shell.notification_feed.snapshot();
         let id = shell.notification.as_ref().unwrap().id;
         assert!(shell.trusted_notification_visible());
+        assert!(shell.native_surface_visible(SurfaceRole::Notification, None));
+        assert!(!shell.native_surface_visible(
+            SurfaceRole::Panel,
+            Some(&crate::plugin_panel::notification_surface_key()),
+        ));
+        assert!(shell
+            .plugin_surface_scene_for_output(
+                &crate::plugin_panel::notification_surface_key(),
+                None,
+                420,
+                180,
+            )
+            .is_none());
+        assert!(shell
+            .plugin_surface_change_token(&crate::plugin_panel::notification_surface_key())
+            .is_none());
         assert!(shell.notification_plugin_projection().notification.is_none());
         let plugin_frame = shell.plugin_notification_host.as_ref().unwrap().inspect().frame_generation;
         assert!(!shell.scene(SurfaceRole::Notification, 420, 180).is_empty());
