@@ -2531,7 +2531,10 @@ impl LiveShell {
                         .unwrap()
                         .remote_access_protected()
                 })
-                .unwrap_or_else(|| self.control_host.remote_access_protected()),
+                .unwrap_or_else(|| {
+                    !self.control_host.application().view_state().projection_only
+                        || self.control_host.remote_access_protected()
+                }),
             SurfaceRole::Notification => {
                 self.notification_host.remote_access_protected()
                     || self.notification.as_ref().is_some_and(|notification| {
@@ -2615,9 +2618,11 @@ impl LiveShell {
             SurfaceRole::ControlCenter => {
                 if self.control_plugin_active() {
                     self.control_plugin_scene(width, height)
-                } else {
+                } else if self.control_host.application().view_state().projection_only {
                     self.sync_control_host(width, height);
                     self.control_host.commands().to_vec()
+                } else {
+                    Vec::new()
                 }
             }
             SurfaceRole::Notification => {
@@ -3377,7 +3382,7 @@ impl LiveShell {
                 self.plugin_panel_host.is_some() || !self.plugin_panel_extra_hosts.is_empty()
             }
             SurfaceRole::Launcher => self.launcher_visible,
-            SurfaceRole::ControlCenter => self.control_visible,
+            SurfaceRole::ControlCenter => self.control_visible && self.control_surface_available(),
             SurfaceRole::Notification => {
                 self.notification.is_some() || self.notification_history_visible
             }
@@ -4341,6 +4346,9 @@ impl LiveShell {
                 self.volume_osd_until = None;
             } else if id == crate::plugin_panel::control_center_manifest().id {
                 self.plugin_control_host = None;
+                if self.control_visible && !self.control_surface_available() {
+                    self.set_control_visible(false);
+                }
             } else if id == crate::plugin_panel::window_preview_manifest().id {
                 self.plugin_preview_host = None;
             } else if id == crate::plugin_panel::desktop_manifest().id {
@@ -5961,6 +5969,9 @@ impl LiveShell {
         if self.control_plugin_active() {
             return self.control_plugin_event(event, size, limit, authority);
         }
+        if !self.control_host.application().view_state().projection_only {
+            return Default::default();
+        }
         self.sync_control_host(size.0, size.1);
         let mut outcome = self.control_host.step(HostBatch {
             surface_size: Some(size),
@@ -5985,7 +5996,13 @@ impl LiveShell {
             SurfaceRole::ControlCenter => self
                 .control_plugin_active()
                 .then(|| self.plugin_control_host.as_ref().unwrap().inspect())
-                .unwrap_or_else(|| self.control_host.inspect()),
+                .or_else(|| {
+                    self.control_host
+                        .application()
+                        .view_state()
+                        .projection_only
+                        .then(|| self.control_host.inspect())
+                })?,
             _ => return None,
         };
         Some((
@@ -6022,7 +6039,7 @@ impl LiveShell {
             }
             SurfaceRole::Launcher => self.launcher_host_ui(event, width, height),
             SurfaceRole::ControlCenter => {
-                if !self.control_visible {
+                if !self.control_visible || !self.control_surface_available() {
                     return false;
                 }
                 if self.control_plugin_active() {
@@ -8732,6 +8749,9 @@ impl LiveShell {
     }
 
     fn set_control_visible(&mut self, visible: bool) {
+        if visible && !self.control_surface_available() {
+            return;
+        }
         #[cfg(target_os = "linux")]
         if !self.send_session_command(
             "control-center-focus",
@@ -8823,6 +8843,9 @@ impl LiveShell {
     }
 
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        if !self.control_surface_available() {
+            return false;
+        }
         if self.control_plugin_active() {
             let point = Point { x, y };
             let pressed = self.control_plugin_event(
@@ -8853,7 +8876,7 @@ impl LiveShell {
     }
 
     pub fn control_key(&mut self, key: Option<KeyCode>, width: u32, height: u32) -> bool {
-        if !self.control_visible {
+        if !self.control_visible || !self.control_surface_available() {
             return false;
         }
         self.sync_control_host(width, height);
@@ -8888,7 +8911,7 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
-        if !self.control_visible {
+        if !self.control_visible || !self.control_surface_available() {
             return false;
         }
         if self.control_plugin_active() {
@@ -11248,6 +11271,11 @@ impl LiveShell {
     fn control_plugin_active(&self) -> bool {
         self.plugin_control_host.is_some()
             && !self.control_host.application().view_state().projection_only
+    }
+
+    pub(crate) fn control_surface_available(&self) -> bool {
+        self.plugin_control_host.is_some()
+            || self.control_host.application().view_state().projection_only
     }
 
     fn control_plugin_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {

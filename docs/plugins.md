@@ -109,6 +109,8 @@ Disabling the bundled Taskbar plugin retires its visible bar. On nested Linux,
 the desktop reclaims the bar's reserved work area until it is re-enabled.
 Disabling Volume OSD closes that overlay and clears its retained native UI;
 audio changes do not recreate a Rust fallback.
+Disabling Control Center closes ordinary Quick Settings. The trusted display
+projection chooser remains available for recovery.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `Panel` component's ARGB `background` can be translucent. Several installed

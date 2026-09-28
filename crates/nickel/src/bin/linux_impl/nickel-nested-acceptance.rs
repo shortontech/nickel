@@ -360,6 +360,7 @@ fn exercise(
     checked(test_input, &environment, &["key", "meta", "released"])?;
     wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
     verify_taskbar_plugin_retires(test_input, &environment)?;
+    verify_control_plugin_retires(test_input, &environment)?;
     let panel_id = "org.example.acceptance-panel";
     let activated = checked(test_input, &environment, &["plugin-set", panel_id, "enabled"])?;
     let activated: nickel_session_protocol::PluginStatusSnapshot =
@@ -488,9 +489,17 @@ fn exercise(
 }
 
 fn press_super_r(test_input: &Path, environment: &[(String, String)]) -> Result<(), String> {
+    press_super_key(test_input, environment, "r")
+}
+
+fn press_super_key(
+    test_input: &Path,
+    environment: &[(String, String)],
+    key: &str,
+) -> Result<(), String> {
     checked(test_input, environment, &["key", "meta", "pressed"])?;
-    checked(test_input, environment, &["key", "r", "pressed"])?;
-    checked(test_input, environment, &["key", "r", "released"])?;
+    checked(test_input, environment, &["key", key, "pressed"])?;
+    checked(test_input, environment, &["key", key, "released"])?;
     checked(test_input, environment, &["key", "meta", "released"])?;
     Ok(())
 }
@@ -543,6 +552,56 @@ fn verify_taskbar_plugin_retires(
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
     wait_for_taskbar_presence(test_input, environment, true, Duration::from_secs(2))?;
     Ok(())
+}
+
+fn verify_control_plugin_retires(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let id = "org.nickel.control-center";
+    press_super_key(test_input, environment, "a")?;
+    wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
+    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    let disabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
+    let plugin = disabled.plugins.iter().find(|plugin| plugin.id == id).ok_or("control plugin missing")?;
+    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
+        return Err("disabled Control Center retained native UI memory".into());
+    }
+    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    press_super_key(test_input, environment, "a")?;
+    thread::sleep(Duration::from_millis(250));
+    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    press_super_key(test_input, environment, "a")?;
+    wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
+    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    Ok(())
+}
+
+fn wait_for_control_visibility(
+    test_input: &Path,
+    environment: &[(String, String)],
+    expected: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        let line = surfaces.lines().find(|line| line.starts_with("ControlCenter\t"))
+            .ok_or("Control Center surface missing")?;
+        let visible = !line.ends_with("hidden");
+        if visible == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("Control Center visibility stayed {visible}: {line}"));
+        }
+        thread::sleep(POLL);
+    }
 }
 
 fn wait_for_taskbar_presence(

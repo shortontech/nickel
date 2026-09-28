@@ -1656,9 +1656,29 @@ impl NickelSession {
                         "role does not accept ordinary shell focus",
                     );
                 }
+                if role == nickel_session_protocol::ShellRole::ControlCenter
+                    && self
+                        .internal_shell
+                        .as_ref()
+                        .is_some_and(|shell| !shell.can_show_control_center())
+                {
+                    return ServerMessage::Ack;
+                }
+                if role == nickel_session_protocol::ShellRole::ControlCenter
+                    && let Some(shell) = self.internal_shell.as_mut()
+                {
+                    shell.apply_control_visibility(true);
+                    self.sync_internal_shell();
+                }
                 self.focus_shell_role(role);
             }
-            SessionCommand::RestoreApplicationFocus => self.restore_application_focus(),
+            SessionCommand::RestoreApplicationFocus => {
+                if let Some(shell) = self.internal_shell.as_mut() {
+                    shell.apply_control_visibility(false);
+                    self.sync_internal_shell();
+                }
+                self.restore_application_focus();
+            }
             SessionCommand::IdentifyOutputs => self.begin_output_identification(),
             SessionCommand::CaptureOutput { path, output } => {
                 if path.is_empty() {

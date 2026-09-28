@@ -325,16 +325,29 @@
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::control_center_manifest().id;
         assert!(shell.plugin_control_host.is_some());
+        shell.apply_control_visibility(true);
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.plugin_control_host.is_none());
+        assert!(!shell.surface_visible(SurfaceRole::ControlCenter));
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
         );
-        assert!(!shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
-        assert!(!shell.control_host.commands().is_empty());
+        assert!(shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.plugin_control_host.is_some());
+    }
+
+    #[test]
+    fn display_projection_recovery_survives_control_plugin_disablement() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.control_host.application_mut().show_projection_chooser();
+        shell.apply_control_visibility(true);
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::control_center_manifest().id, false)
+            .unwrap();
+        assert!(shell.surface_visible(SurfaceRole::ControlCenter));
+        assert!(!shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
     }
 
     #[test]

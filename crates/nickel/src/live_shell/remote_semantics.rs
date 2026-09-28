@@ -204,8 +204,10 @@ impl LiveShell {
                         self.plugin_control_host.as_ref().unwrap(),
                         |_, _| false,
                     )?))
-                } else {
+                } else if self.control_host.application().view_state().projection_only {
                     project(&self.control_host, control_activate)
+                } else {
+                    Err("Control Center plugin is unavailable".into())
                 }
             }
             SurfaceRole::Notification => {
@@ -390,6 +392,9 @@ impl LiveShell {
             SurfaceRole::ControlCenter => {
                 if self.control_plugin_active() {
                     return Err("control center plugin actions require shell input".into());
+                }
+                if !self.control_host.application().view_state().projection_only {
+                    return Err("Control Center plugin is unavailable".into());
                 }
                 let outcome = mutate(
                     &mut self.control_host,

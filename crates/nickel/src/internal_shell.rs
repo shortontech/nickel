@@ -1214,6 +1214,10 @@ impl InternalShellCoordinator {
         self.shell.can_show_launcher()
     }
 
+    pub(crate) fn can_show_control_center(&self) -> bool {
+        self.shell.control_surface_available()
+    }
+
     pub fn toggle_launcher(&mut self) -> bool {
         self.shell.request_launcher_toggle()
     }
