@@ -224,11 +224,21 @@
     fn volume_osd_plugin_retires_without_native_fallback() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::volume_osd_manifest().id;
+        let key = crate::plugin_panel::volume_osd_surface_key();
         assert!(shell.plugin_volume_osd_host.is_some());
-        shell.scene(SurfaceRole::VolumeOsd, 420, 96);
+        assert!(shell.plugin_surface_matches(&key));
+        assert!(shell
+            .plugin_surface_scene_for_output(&key, None, 420, 96)
+            .is_some());
+        assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.plugin_volume_osd_host.is_none());
+        assert!(!shell.plugin_surface_matches(&key));
+        assert!(shell
+            .plugin_surface_scene_for_output(&key, None, 420, 96)
+            .is_none());
+        assert!(shell.plugin_surface_change_token(&key).is_none());
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
@@ -237,6 +247,8 @@
         assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.plugin_volume_osd_host.is_some());
+        assert!(shell.plugin_surface_matches(&key));
+        assert!(shell.plugin_surface_change_token(&key).is_some());
     }
 
     #[test]

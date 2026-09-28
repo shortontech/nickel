@@ -109,6 +109,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib volume_osd_plugin_retires_without_native_fallback
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib volume_overlay_uses_bundled_manifest_size_and_bottom_placement
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib window_preview_plugin_reports_memory_and_can_be_disabled_or_enabled
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib task_switcher_cards_render_in_jsx_and_activate_through_the_host
