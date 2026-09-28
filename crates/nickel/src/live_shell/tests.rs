@@ -434,11 +434,13 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
     assert_eq!(panel.settings[0].value, serde_json::json!(true));
 
     let generation = status.activation_generation;
-    assert!(
-        shell
-            .set_plugin_setting("org.example.panel", "show-label", serde_json::json!(false))
-            .unwrap()
-    );
+    assert!(shell.apply_plugin_effects(vec![
+        crate::plugin_panel::PluginEffect::SetPluginSetting {
+            plugin_id: "org.example.panel".into(),
+            key: "show-label".into(),
+            value: serde_json::json!(false),
+        },
+    ]));
     assert!(
         !shell
             .set_plugin_setting("org.example.panel", "show-label", serde_json::json!(false))

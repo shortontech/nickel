@@ -5212,6 +5212,16 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::ShowSettings => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::OpenSettings);
                 }
+                crate::plugin_panel::PluginEffect::SetPluginSetting {
+                    plugin_id,
+                    key,
+                    value,
+                } => match self.set_plugin_setting(&plugin_id, &key, value) {
+                    Ok(updated) => changed |= updated,
+                    Err(error) => {
+                        tracing::warn!(plugin = plugin_id, setting = key, %error, "plugin setting failed");
+                    }
+                },
                 crate::plugin_panel::PluginEffect::DesktopSelect { id } => {
                     let entry = id.split_once(':').and_then(|(first, second)| {
                         Some(nickel_file::desktop::DesktopEntryId(

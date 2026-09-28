@@ -1,6 +1,7 @@
 // @jsx h
 function App() {
     const [open, setOpen] = useState(false);
+    const openCount = nickel.data.settings?.["open-count"] ?? 0;
     return h(Panel, { height: 120, background: 0xdd202830 },
         h(Button, { id: "settings-example", onClick: () => {
                 setOpen(true);
@@ -8,8 +9,18 @@ function App() {
             } }, "Open a dialog"),
         h(Dialog, { id: "settings-example-dialog", anchor: "settings-example", open: open, onClose: () => setOpen(false), width: 320, height: 120 },
             h(Column, null,
-                h(Text, null, "Open Nickel Settings?"),
+                h(Text, null,
+                    "Opened ",
+                    openCount,
+                    " times"),
                 h(Row, null,
+                    h(Button, { id: "save-count", onClick: () => {
+                            nickel.request({
+                                type: "set-plugin-setting",
+                                key: "open-count",
+                                value: Math.min(99, openCount + 1),
+                            });
+                        } }, "Save count"),
                     h(Button, { id: "confirm-settings", onClick: () => {
                             setOpen(false);
                             nickel.request({ type: "show-settings" });

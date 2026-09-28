@@ -1,9 +1,10 @@
 # Settings dialog example
 
-This installed panel opens a JSX dialog. Its confirmation button requests the
-typed `show-settings` effect. Nickel opens Settings only when the package has
-the declared `settings-show` grant. Escape, outside input, and focus loss call
-`onClose` so the component state follows the native dialog state.
+This installed panel opens a JSX dialog. Its buttons request the typed
+`show-settings` and `set-plugin-setting` effects. Nickel opens Settings only
+with the declared `settings-show` grant, and saves the panel's own bounded
+`open-count` preference only with `settings-write`. Escape, outside input, and
+focus loss call `onClose` so component state follows the native dialog state.
 
 Generate the JavaScript entry and validate the package from the repository root:
 

@@ -1763,6 +1763,11 @@ impl DesktopBackgroundAction {
 pub enum PluginEffect {
     ShowLauncher,
     ShowSettings,
+    SetPluginSetting {
+        plugin_id: String,
+        key: String,
+        value: serde_json::Value,
+    },
     DesktopSelect {
         id: String,
     },
@@ -3269,6 +3274,36 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::ShowSettings);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
+                            == Some("set-plugin-setting")
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::SettingsWrite) =>
+                        {
+                            let Some(key) = effect.get("key").and_then(Value::as_str) else {
+                                self.last_error = Some("plugin setting key is invalid".into());
+                                return;
+                            };
+                            let Some(value) = effect.get("value") else {
+                                self.last_error = Some("plugin setting value is missing".into());
+                                return;
+                            };
+                            if !self
+                                .manifest
+                                .settings
+                                .iter()
+                                .any(|setting| setting.id == key && setting.kind.accepts(value))
+                            {
+                                self.last_error = Some("plugin setting value is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::SetPluginSetting {
+                                plugin_id: self.manifest.id.clone(),
+                                key: key.to_owned(),
+                                value: value.clone(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("desktop-background-action")
                             && self.manifest.id == desktop_manifest().id
                             && self
@@ -4769,6 +4804,67 @@ mod tests {
                 );
             } else {
                 assert!(host.application_mut().take_effects().is_empty());
+                assert!(host.application_mut().last_error().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn external_dialog_can_change_only_its_declared_setting_with_a_grant() {
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-dialog"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        for (granted, valid) in [(true, true), (false, true), (true, false)] {
+            let mut current = package.clone();
+            if !granted {
+                current.manifest.capabilities.clear();
+            }
+            if !valid {
+                current.source = current.source.replace("Math.min(99, openCount + 1)", "100");
+            }
+            let mut host = nickel_ui::UiHost::new(
+                PluginPanelApplication::from_package(&current).unwrap(),
+                320,
+                120,
+            );
+            let open = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Open a dialog".into(),
+                })
+                .unwrap();
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::AccessibilityActivate(open.id),
+                )],
+                ..Default::default()
+            });
+            let save = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Save count".into(),
+                })
+                .unwrap();
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::AccessibilityActivate(save.id),
+                )],
+                ..Default::default()
+            });
+            let effects = host.application_mut().take_effects();
+            if granted && valid {
+                assert_eq!(
+                    effects,
+                    vec![PluginEffect::SetPluginSetting {
+                        plugin_id: current.manifest.id.clone(),
+                        key: "open-count".into(),
+                        value: serde_json::json!(1),
+                    }]
+                );
+            } else {
+                assert!(effects.is_empty());
                 assert!(host.application_mut().last_error().is_some());
             }
         }

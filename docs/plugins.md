@@ -9,7 +9,7 @@ Nickel loads a compiled JavaScript entry from a directory containing
 minimal working example. The [taskbar](../assets/plugins/taskbar/) shows how a
 first-party plugin requests host actions.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
-`onClose`, and a `show-settings` request guarded by the `settings-show` grant.
+`onClose`, a `show-settings` request, and a saved plugin setting.
 
 Build the Rust development tools, then start an isolated nested session on
 Linux:
@@ -112,6 +112,13 @@ Escape, outside input, or focus loss. The handler should clear the state that
 controls `open`; dialog buttons may still update state and request typed effects.
 For example, `{ type: "show-settings" }` opens Nickel Settings when the plugin
 has the `settings-show` capability.
+Declare a typed setting in `plugin.json` to expose it in Settings and read its
+current value from `nickel.data.settings`. A component may save its own declared
+setting with `nickel.request({ type: "set-plugin-setting", key: "open-count",
+value: 1 })` when the plugin has `settings-write`. The host checks the setting
+name and value against the manifest, persists the change, and refreshes the
+plugin's active surfaces. That refresh starts fresh component state, so keep
+durable values in declared settings rather than `useState`.
 `Menu` contains up to 16 `MenuItem` children. An item can have an `onClick`
 handler, a `disabledReason`, or nested `MenuItem` children with a `label` to
 form a submenu. Items can also declare `shortcut` text and `separatorBefore`.
