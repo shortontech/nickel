@@ -48,6 +48,10 @@ fn internal_plugin_window_centers_while_dock_uses_bottom_offset() {
     );
     apply_internal_plugin_surface_placement(&mut window, PluginSurfaceKind::Window, 0, &outputs);
     assert_eq!(window.geometry, (1020, 790, 520, 340));
+    assert_eq!(
+        window.role,
+        crate::session::InternalSurfaceRole::Application
+    );
 
     let mut dock = internal_shell_surface_placement(
         SurfaceRole::Panel,

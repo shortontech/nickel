@@ -1347,6 +1347,13 @@ impl InternalShellCoordinator {
         self.shell.plugin_panel_placement(key)
     }
 
+    pub(crate) fn plugin_name(&self, id: &str) -> Option<&str> {
+        self.shell
+            .plugin_registry()
+            .get(id)
+            .map(|plugin| plugin.manifest.name.as_str())
+    }
+
     pub(crate) fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         self.shell.set_plugin_enabled(id, enabled)
     }

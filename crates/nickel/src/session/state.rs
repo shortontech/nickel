@@ -5391,6 +5391,7 @@ impl NickelSession {
             .map(|(_, runtime)| runtime)
             .collect::<Vec<_>>()
         {
+            self.unregister_internal_application(id);
             self.internal_ui.remove(id);
         }
         let Some(shell) = self.internal_shell.as_mut() else {
@@ -5403,6 +5404,7 @@ impl NickelSession {
                 .collect::<Vec<_>>(),
         );
 
+        let mut plugin_windows = Vec::new();
         for mut surface in shell.surfaces().to_vec() {
             if !shell.visible(surface.id) {
                 continue;
@@ -5439,6 +5441,19 @@ impl NickelSession {
             self.internal_ui
                 .bind_routed_recipient(runtime_id, surface.id);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
+            if self
+                .internal_ui
+                .placement(runtime_id)
+                .is_some_and(|placement| {
+                    placement.role == crate::session::InternalSurfaceRole::Application
+                })
+                && let Some(key) = surface.plugin
+            {
+                plugin_windows.push((runtime_id, key));
+            }
+        }
+        for (runtime, key) in plugin_windows {
+            self.register_internal_application_with_plugin(runtime, Some(&key));
         }
         if let Some(runtime) =
             focused_owner.and_then(|owner| self.internal_shell_surfaces.get(&owner).copied())
@@ -5713,6 +5728,14 @@ impl NickelSession {
         &mut self,
         surface: nickel_ui::InternalSurfaceId,
     ) -> Option<WindowId> {
+        self.register_internal_application_with_plugin(surface, None)
+    }
+
+    fn register_internal_application_with_plugin(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+        plugin: Option<&nickel_core::plugins::PluginSurfaceKey>,
+    ) -> Option<WindowId> {
         if let Some(id) = self.internal_surface_windows.get(&surface).copied() {
             self.activate_window(id);
             return Some(id);
@@ -5722,7 +5745,9 @@ impl NickelSession {
             .internal_ui
             .application::<nickel_file::FileApp>(surface)
             .is_some();
-        let application_id = if is_file {
+        let application_id = if let Some(plugin) = plugin {
+            plugin.plugin_id.clone()
+        } else if is_file {
             "nickel-file".to_owned()
         } else {
             self.internal_codex
@@ -5730,15 +5755,22 @@ impl NickelSession {
                 .and_then(|codex| codex.project_application_id(surface))
                 .unwrap_or_else(|| "nickel-codex".to_owned())
         };
-        let title = self
-            .internal_ui
-            .title(surface)
-            .unwrap_or(if is_file {
-                "Nickel File"
-            } else {
-                "Nickel Codex"
-            })
-            .to_owned();
+        let title = if let Some(plugin) = plugin {
+            self.internal_shell
+                .as_ref()
+                .and_then(|shell| shell.plugin_name(&plugin.plugin_id))
+                .unwrap_or(&plugin.plugin_id)
+                .to_owned()
+        } else {
+            self.internal_ui
+                .title(surface)
+                .unwrap_or(if is_file {
+                    "Nickel File"
+                } else {
+                    "Nickel Codex"
+                })
+                .to_owned()
+        };
         self.windows.update_metadata(
             id,
             WindowMetadataSource::Internal,
@@ -5815,8 +5847,10 @@ impl NickelSession {
             .internal_surface_windows
             .iter()
             .filter_map(|(surface, window)| {
-                self.internal_ui
-                    .title(*surface)
+                self.windows
+                    .app_id(*window)
+                    .and_then(|id| self.internal_shell.as_ref()?.plugin_name(id))
+                    .or_else(|| self.internal_ui.title(*surface))
                     .map(|title| (*window, title.to_owned()))
             })
             .collect::<Vec<_>>();
@@ -7147,12 +7181,14 @@ impl NickelSession {
         for id in retired {
             if let Some(runtime_id) = self.internal_shell_surfaces.remove(&id) {
                 self.invalidate_remote_shell_surface(runtime_id);
+                self.unregister_internal_application(runtime_id);
                 self.internal_ui.remove(runtime_id);
             }
             self.pending_desktop_scenes.remove(&id);
         }
         let outputs = self.internal_outputs();
         let mut focus_on_show = None;
+        let mut plugin_windows = Vec::new();
         for mut surface in entries {
             // The real ChatApplication host owns this role. LiveShell retains
             // only its visibility policy and must not paint a second shell
@@ -7168,6 +7204,7 @@ impl NickelSession {
             if !visible {
                 if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
                     self.invalidate_remote_shell_surface(runtime_id);
+                    self.unregister_internal_application(runtime_id);
                     self.internal_ui.remove(runtime_id);
                     if let Some(role) = remote_shell_event_role(surface.role) {
                         self.remote_desktop_events.record(
@@ -7353,6 +7390,16 @@ impl NickelSession {
             self.internal_ui
                 .bind_routed_recipient(runtime_id, surface.id);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
+            if self
+                .internal_ui
+                .placement(runtime_id)
+                .is_some_and(|placement| {
+                    placement.role == crate::session::InternalSurfaceRole::Application
+                })
+                && let Some(key) = surface.plugin.clone()
+            {
+                plugin_windows.push((runtime_id, key));
+            }
             if let Some(role) = remote_shell_event_role(surface.role) {
                 self.remote_desktop_events.record(
                     nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
@@ -7373,6 +7420,9 @@ impl NickelSession {
             }
         }
         self.internal_shell = Some(shell);
+        for (runtime, key) in plugin_windows {
+            self.register_internal_application_with_plugin(runtime, Some(&key));
+        }
         if let Some(surface) = focus_on_show {
             self.focus_internal_surface(surface);
         }
@@ -13076,6 +13126,36 @@ impl NickelSession {
 
     pub fn close_window(&mut self, id: WindowId) {
         if let Some(surface) = self.internal_surface_for_window(id) {
+            let plugin_owner = self.internal_shell.as_ref().and_then(|shell| {
+                let owner = self
+                    .internal_shell_surfaces
+                    .iter()
+                    .find_map(|(owner, runtime)| (*runtime == surface).then_some(*owner))?;
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|entry| entry.id == owner)?
+                    .plugin
+                    .as_ref()
+                    .map(|key| key.plugin_id.clone())
+            });
+            if let Some(plugin_id) = plugin_owner
+                && let Some(shell) = self.internal_shell.as_mut()
+            {
+                match shell.set_plugin_enabled(&plugin_id, false) {
+                    Ok(_) => {
+                        let snapshot = shell.plugin_status_snapshot();
+                        self.plugin_status = Some(snapshot.clone());
+                        self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot));
+                        self.reconcile_internal_shell_outputs();
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(plugin = %plugin_id, %error, "could not close plugin window");
+                        return;
+                    }
+                }
+            }
             if let Some(file) = self
                 .internal_file_surfaces
                 .iter()
@@ -15601,6 +15681,7 @@ fn apply_internal_plugin_surface_placement(
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
 ) {
     if kind == nickel_core::plugins::PluginSurfaceKind::Window {
+        placement.role = crate::session::InternalSurfaceRole::Application;
         if let Some((output, x, y)) = outputs
             .iter()
             .find(|(output, _, _)| placement.output.as_deref() == Some(output.name.as_str()))
