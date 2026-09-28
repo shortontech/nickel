@@ -1788,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_launcher_slot_uses_its_content_size() {
+    fn launcher_slot_uses_its_plugin_manifest_size() {
         let mut shell = coordinator();
         shell.set_outputs(&[InternalOutput {
             x: 0,
@@ -1799,9 +1799,8 @@ mod tests {
             scale: 1.0,
         }]);
         let launcher = shell.surface(SurfaceRole::Launcher, None).unwrap();
-        assert!(launcher.size.0 >= nickel_ui::START_MENU_SINGLE_PANE_BREAKPOINT as u32);
-        assert!(launcher.size.0 < 960);
-        assert!(launcher.size.1 < 720);
+        let declared = crate::plugin_panel::launcher_surface();
+        assert_eq!(launcher.size, (declared.width, declared.height));
         assert_eq!(
             shell.surfaces.get(launcher.id).unwrap().logical_size(),
             launcher.size

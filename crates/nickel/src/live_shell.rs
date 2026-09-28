@@ -160,9 +160,6 @@ pub(crate) enum CodexApprovalOwner {
     Winit(crate::winit_shell::SurfaceId),
 }
 
-const RUN_SURFACE_WIDTH: u32 = 620;
-const RUN_SURFACE_HEIGHT: u32 = 180;
-
 #[cfg(any(test, target_os = "linux"))]
 fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) -> HostEvent {
     if action == ControllerAction::Cancel && !overlay_open {
@@ -1514,7 +1511,12 @@ impl LiveShell {
                 Ok(mut application) => {
                     application.sync_images(images);
                     plugin_registry.mark_running(id)?;
-                    Some(nickel_ui::UiHost::new(application, 920, 680))
+                    let surface = crate::plugin_panel::launcher_surface();
+                    Some(nickel_ui::UiHost::new(
+                        application,
+                        surface.width,
+                        surface.height,
+                    ))
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1534,7 +1536,12 @@ impl LiveShell {
             match crate::plugin_panel::PluginPanelApplication::run_with_status(None) {
                 Ok(application) => {
                     plugin_registry.mark_running(id)?;
-                    Some(nickel_ui::UiHost::new(application, 620, 180))
+                    let surface = crate::plugin_panel::run_surface();
+                    Some(nickel_ui::UiHost::new(
+                        application,
+                        surface.width,
+                        surface.height,
+                    ))
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -4559,12 +4566,22 @@ impl LiveShell {
             crate::plugin_panel::PluginPanelApplication::launcher_with_projection(&projection).map(
                 |mut application| {
                     application.sync_images(images);
-                    self.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+                    let surface = crate::plugin_panel::launcher_surface();
+                    self.plugin_launcher_host = Some(nickel_ui::UiHost::new(
+                        application,
+                        surface.width,
+                        surface.height,
+                    ));
                 },
             )
         } else if id == crate::plugin_panel::run_manifest().id {
             crate::plugin_panel::PluginPanelApplication::run_with_status(None).map(|application| {
-                self.plugin_run_host = Some(nickel_ui::UiHost::new(application, 620, 180));
+                let surface = crate::plugin_panel::run_surface();
+                self.plugin_run_host = Some(nickel_ui::UiHost::new(
+                    application,
+                    surface.width,
+                    surface.height,
+                ));
             })
         } else if id == crate::plugin_panel::taskbar_manifest().id {
             self.plugin_taskbar_hosts.clear();
@@ -4653,12 +4670,18 @@ impl LiveShell {
     }
 
     pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
-        self.run_visible
-            .then_some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT))
+        self.run_visible.then(|| {
+            let surface = crate::plugin_panel::run_surface();
+            (surface.width, surface.height)
+        })
     }
 
     pub(crate) fn launcher_preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
-        crate::launcher_view::preferred_launcher_surface_size(&self.launcher, self.palette, maximum)
+        let size = self.launcher_surface_size().unwrap_or_else(|| {
+            let surface = crate::plugin_panel::launcher_surface();
+            (surface.width, surface.height)
+        });
+        (size.0.min(maximum.0), size.1.min(maximum.1))
     }
 
     pub fn next_host_deadline(&self) -> Option<Instant> {
@@ -5257,11 +5280,6 @@ impl LiveShell {
             ]
         };
         self.step_taskbar_plugin(events, width)
-            .is_some_and(|outcome| outcome.changed)
-    }
-
-    pub fn panel_controller(&mut self, action: ControllerAction, width: u32) -> bool {
-        self.step_taskbar_plugin(vec![HostEvent::Controller(action)], width)
             .is_some_and(|outcome| outcome.changed)
     }
 

@@ -170,6 +170,7 @@ impl LauncherApplication {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn preferred_launcher_surface_size(
     launcher: &Launcher,
     palette: ThemePalette,

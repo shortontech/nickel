@@ -55,16 +55,18 @@ pub fn launcher_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn launcher_surface() -> &'static PluginSurface {
+    launcher_manifest()
+        .surfaces
+        .first()
+        .expect("bundled launcher needs a surface")
+}
+
 pub fn launcher_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     let manifest = launcher_manifest();
     nickel_core::plugins::PluginSurfaceKey {
         plugin_id: manifest.id.clone(),
-        surface_id: manifest
-            .surfaces
-            .first()
-            .expect("bundled launcher needs a surface")
-            .id
-            .clone(),
+        surface_id: launcher_surface().id.clone(),
     }
 }
 
@@ -177,16 +179,18 @@ pub fn run_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn run_surface() -> &'static PluginSurface {
+    run_manifest()
+        .surfaces
+        .first()
+        .expect("bundled Run dialog needs a surface")
+}
+
 pub fn run_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     let manifest = run_manifest();
     nickel_core::plugins::PluginSurfaceKey {
         plugin_id: manifest.id.clone(),
-        surface_id: manifest
-            .surfaces
-            .first()
-            .expect("bundled Run dialog needs a surface")
-            .id
-            .clone(),
+        surface_id: run_surface().id.clone(),
     }
 }
 

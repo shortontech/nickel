@@ -1353,9 +1353,12 @@ impl WinitShell {
     pub fn launcher_maximum_size(&self) -> Option<(u32, u32)> {
         let index = self.active_output_index()?;
         let geometry = self.displays.get(index)?.0;
+        let surface = crate::plugin_panel::launcher_surface();
         Some((
-            920.min(geometry.width),
-            680.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
+            surface.width.min(geometry.width),
+            surface
+                .height
+                .min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
         ))
     }
 
@@ -2982,14 +2985,24 @@ fn surface_geometry(
             crate::plugin_panel::surface().height.min(geometry.height),
             true,
         ),
-        SurfaceRole::Launcher => (
-            LAUNCHER_TITLE,
-            geometry.x + 18,
-            geometry.y + geometry.height.saturating_sub(744) as i32,
-            920.min(geometry.width),
-            680.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
-            cfg!(not(target_os = "linux")),
-        ),
+        SurfaceRole::Launcher => {
+            let surface = crate::plugin_panel::launcher_surface();
+            let height = surface
+                .height
+                .min(geometry.height.saturating_sub(PANEL_HEIGHT + 8));
+            (
+                LAUNCHER_TITLE,
+                geometry.x + 18,
+                geometry.y
+                    + geometry
+                        .height
+                        .saturating_sub(height.saturating_add(PANEL_HEIGHT + 8))
+                        as i32,
+                surface.width.min(geometry.width),
+                height,
+                cfg!(not(target_os = "linux")),
+            )
+        }
         SurfaceRole::ControlCenter => (
             CONTROL_CENTER_TITLE,
             geometry.x + geometry.width.saturating_sub(438) as i32,

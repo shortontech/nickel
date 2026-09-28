@@ -557,8 +557,19 @@
         assert!(!shell.launcher_visible);
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.plugin_run_host.is_some());
+        let launcher_surface = crate::plugin_panel::launcher_surface();
+        assert_eq!(
+            shell.launcher_preferred_surface_size((960, 720)),
+            (launcher_surface.width, launcher_surface.height)
+        );
         shell.apply_session_launcher_visibility(true);
         assert!(shell.set_run_visible(true));
+        let run_surface = crate::plugin_panel::run_surface();
+        assert_eq!(
+            shell.launcher_preferred_surface_size((960, 720)),
+            (run_surface.width, run_surface.height)
+        );
+        assert_eq!(shell.launcher_preferred_surface_size((480, 120)), (480, 120));
         assert_eq!(shell.active_launcher_surface_key(), Some(run_key.clone()));
         assert!(shell.plugin_run_host.as_ref().unwrap().inspect().keyboard_focus.is_some());
         assert!(shell
