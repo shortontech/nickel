@@ -68,6 +68,19 @@ fn run() -> Result<(), String> {
         "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-label'] ? 'On' : 'Off')); }",
     )
     .map_err(|error| error.to_string())?;
+    let reserved = runtime
+        .join("config/nickel/plugins/org.example.reserved-panel");
+    fs::create_dir_all(&reserved).map_err(|error| error.to_string())?;
+    fs::write(
+        reserved.join("plugin.json"),
+        include_str!("../../../../../assets/plugins/example-reserved-panel/plugin.json"),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        reserved.join("main.js"),
+        include_str!("../../../../../assets/plugins/example-reserved-panel/main.js"),
+    )
+    .map_err(|error| error.to_string())?;
     let window = runtime
         .join("config/nickel/plugins/org.example.component-window");
     fs::create_dir_all(&window).map_err(|error| error.to_string())?;
@@ -394,6 +407,7 @@ fn exercise(
     verify_bundled_overlay_surface_retires(test_input, &environment, "org.nickel.window-preview", "Preview")?;
     verify_control_plugin_retires(test_input, &environment)?;
     verify_notification_plugin_retires(test_input, &environment)?;
+    verify_reserved_panel_stacks_and_reflows(test_input, &environment)?;
     let panel_id = "org.example.acceptance-panel";
     let activated = checked(test_input, &environment, &["plugin-set", panel_id, "enabled"])?;
     let activated: nickel_session_protocol::PluginStatusSnapshot =
@@ -587,6 +601,65 @@ fn verify_taskbar_plugin_retires(
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
     wait_for_taskbar_presence(test_input, environment, true, Duration::from_secs(2))?;
     Ok(())
+}
+
+fn panel_geometry(surfaces: &str, key: &str) -> Option<(i32, i32, u32, u32)> {
+    let geometry = surfaces
+        .lines()
+        .find(|line| line.starts_with("Panel\twinit\t") && line.ends_with(key))?
+        .split('\t')
+        .nth(2)?;
+    let (origin, size) = geometry.split_once(' ')?;
+    let (x, y) = origin.split_once(',')?;
+    let (width, height) = size.split_once('x')?;
+    Some((x.parse().ok()?, y.parse().ok()?, width.parse().ok()?, height.parse().ok()?))
+}
+
+fn verify_reserved_panel_stacks_and_reflows(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    const TASKBAR: &str = "org.nickel.taskbar/main";
+    const RESERVED: &str = "org.example.reserved-panel/main";
+    let before = checked(test_input, environment, &["surfaces"])?;
+    let baseline = panel_geometry(&before, TASKBAR).ok_or("taskbar geometry unavailable")?;
+    checked(test_input, environment, &["plugin-set", "org.example.reserved-panel", "enabled"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        if let (Some(taskbar), Some(reserved)) =
+            (panel_geometry(&surfaces, TASKBAR), panel_geometry(&surfaces, RESERVED))
+        {
+            let taskbar_bottom = taskbar.1 + taskbar.3 as i32;
+            let reserved_bottom = reserved.1 + reserved.3 as i32;
+            if taskbar.0 != reserved.0
+                || taskbar.2 != reserved.2
+                || !(taskbar_bottom <= reserved.1 || reserved_bottom <= taskbar.1)
+                || taskbar_bottom.max(reserved_bottom) != baseline.1 + baseline.3 as i32
+            {
+                return Err(format!("reserved panels did not stack on one output: {surfaces}"));
+            }
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("reserved panel did not appear: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
+    checked(test_input, environment, &["plugin-set", "org.example.reserved-panel", "disabled"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        if panel_geometry(&surfaces, RESERVED).is_none()
+            && panel_geometry(&surfaces, TASKBAR) == Some(baseline)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("taskbar did not reflow after reserved panel retirement: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
 }
 
 fn verify_desktop_plugin_retires(
