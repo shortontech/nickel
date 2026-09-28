@@ -248,6 +248,79 @@ jobs:
             if (Test-Path $stderr) { Get-Content $stderr -Tail 30 }
           }
 
+      - name: Verify top panel reserves the Windows work area
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class NickelPanelProbe {
+              private delegate bool EnumWindowsProc(IntPtr handle, IntPtr context);
+              [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+              [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo {
+                  public int Size;
+                  public Rect Monitor;
+                  public Rect Work;
+                  public uint Flags;
+              }
+              [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr context);
+              [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder title, int capacity);
+              [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
+              [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr handle, uint flags);
+              [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+              public static string Check(uint processId) {
+                  IntPtr panel = IntPtr.Zero;
+                  EnumWindows((handle, context) => {
+                      uint owner;
+                      GetWindowThreadProcessId(handle, out owner);
+                      if (owner != processId) return true;
+                      var title = new StringBuilder(256);
+                      GetWindowText(handle, title, title.Capacity);
+                      if (title.ToString() == "Nickel Taskbar") { panel = handle; return false; }
+                      return true;
+                  }, IntPtr.Zero);
+                  if (panel == IntPtr.Zero) return "panel window not found";
+                  Rect bounds;
+                  if (!GetWindowRect(panel, out bounds)) return "panel bounds unavailable";
+                  IntPtr monitor = MonitorFromWindow(panel, 2);
+                  var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+                  if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info)) return "monitor work area unavailable";
+                  if (bounds.Top < info.Monitor.Top || bounds.Bottom > info.Monitor.Bottom ||
+                      bounds.Top >= info.Monitor.Top + (info.Monitor.Bottom - info.Monitor.Top) / 2)
+                      return $"panel is not on the top edge: panel={bounds.Top}..{bounds.Bottom}, monitor={info.Monitor.Top}..{info.Monitor.Bottom}";
+                  if (info.Work.Top < bounds.Bottom)
+                      return $"panel is not reserved: panel bottom={bounds.Bottom}, work top={info.Work.Top}";
+                  return "ok";
+              }
+          }
+          '@
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nickel-top-panel-smoke"
+          New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+          $env:LOCALAPPDATA = Join-Path $smokeRoot "local"
+          $env:APPDATA = Join-Path $smokeRoot "roaming"
+          New-Item -ItemType Directory -Force -Path @($env:LOCALAPPDATA, $env:APPDATA) | Out-Null
+          $stdout = Join-Path $smokeRoot "shell.stdout"
+          $stderr = Join-Path $smokeRoot "shell.stderr"
+          $shell = Start-Process -FilePath "target/debug/nickel.exe" -ArgumentList @("--no-desktop-windows", "--panel-top") -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          try {
+            $result = "panel window not found"
+            for ($attempt = 0; $attempt -lt 120; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              $shell.Refresh()
+              if ($shell.HasExited) { throw "Nickel shell exited before panel verification (exit $($shell.ExitCode))" }
+              $result = [NickelPanelProbe]::Check([uint32]$shell.Id)
+              if ($result -eq "ok") { break }
+            }
+            if ($result -ne "ok") { throw "Windows top panel verification failed: $result" }
+            Write-Host "Windows top panel geometry and monitor work area agree."
+          } finally {
+            $shell.Refresh()
+            if (-not $shell.HasExited) { Stop-Process -Id $shell.Id -Force }
+            if (Test-Path $stderr) { Get-Content $stderr -Tail 30 }
+          }
+
       - name: Smoke test an installed component window on Windows
         shell: pwsh
         run: |
