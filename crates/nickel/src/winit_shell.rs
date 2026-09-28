@@ -1000,7 +1000,7 @@ impl WinitShell {
             let output_name = output_names.get(display_index).ok_or_else(|| {
                 "winit output identity count changed during shell sync".to_string()
             })?;
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
                 if !desired.contains(&(output_name.clone(), role)) {
                     continue;
                 }
@@ -1008,8 +1008,6 @@ impl WinitShell {
                     surface.display_connected
                         && surface.role == role
                         && surface.output_name == *output_name
-                        && (role != SurfaceRole::Panel
-                            || surface.plugin.as_ref() == Some(&primary_plugin_key))
                 }) {
                     continue;
                 }
@@ -1017,8 +1015,6 @@ impl WinitShell {
                     !surface.display_connected
                         && surface.role == role
                         && surface.output_name == *output_name
-                        && (role != SurfaceRole::Panel
-                            || surface.plugin.as_ref() == Some(&primary_plugin_key))
                 }) {
                     surface.display_index = display_index;
                     surface.display_connected = true;
@@ -1050,16 +1046,18 @@ impl WinitShell {
                 }
             }
         }
-        let mut extra = active_panels
+        let mut panels = active_panels
             .iter()
-            .filter(|(key, _)| *key != &primary_plugin_key)
             .map(|(key, surface)| (key.clone(), surface.clone()))
             .collect::<Vec<_>>();
         // A dialog with an owner needs its ordinary window created first.
-        extra.sort_by_key(|(_, surface)| {
-            surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog
+        panels.sort_by_key(|(key, surface)| {
+            (
+                surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog,
+                key != &primary_plugin_key && key != &taskbar_key,
+            )
         });
-        for (key, panel) in extra {
+        for (key, panel) in panels {
             for (display_index, geometry) in displays.iter().copied().enumerate() {
                 let output_name = &output_names[display_index];
                 if !desired_plugin_panels.contains(&(output_name.clone(), key.clone())) {
@@ -1081,6 +1079,18 @@ impl WinitShell {
                 }) {
                     existing.display_index = display_index;
                     existing.display_connected = true;
+                    let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                        SurfaceRole::Panel,
+                        geometry,
+                        self.options.panel_edge,
+                        &panel,
+                    );
+                    existing
+                        .window
+                        .set_outer_position(LogicalPosition::new(x, y));
+                    let _ = existing
+                        .window
+                        .request_inner_size(LogicalSize::new(width, height));
                     existing.window.set_visible(true);
                 } else if let Err(error) = self.create_surface_with_plugin(
                     SurfaceRole::Panel,
