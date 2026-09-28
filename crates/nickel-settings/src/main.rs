@@ -3299,30 +3299,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
+    #[cfg(target_os = "windows")]
+    return std::thread::Builder::new()
+        .name("nickel-settings-ui".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            run_settings_ui(initial_page, initial_output).map_err(|error| error.to_string())
+        })?
+        .join()
+        .map_err(|_| std::io::Error::other("Settings UI thread panicked"))?
+        .map_err(|error| std::io::Error::other(error).into());
+
+    #[cfg(not(target_os = "windows"))]
+    run_settings_ui(initial_page, initial_output)
+}
+
+fn run_settings_ui(
+    initial_page: SettingsPage,
+    initial_output: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _log_path = nickel_logging::init("nickel-settings").ok();
-    nickel_ui::run_with_adapter(
+    let app = {
+        let mut app = SettingsApp::with_initial_page(initial_page);
+        if initial_page == SettingsPage::BluetoothPair {
+            app.load_bluetooth();
+            if app.bluetooth.available && app.bluetooth.powered && !app.bluetooth.discovering {
+                app.start_bluetooth_operation(BluetoothOperation::SetDiscovery(true), || {
+                    set_bluetooth_adapter_property("Discovering", true)
+                });
+            }
+        }
+        if let Some(output) = initial_output
+            && let Some(index) = app
+                .displays
+                .iter()
+                .position(|display| display.connector == output)
         {
-            let mut app = SettingsApp::with_initial_page(initial_page);
-            if initial_page == SettingsPage::BluetoothPair {
-                app.load_bluetooth();
-                if app.bluetooth.available && app.bluetooth.powered && !app.bluetooth.discovering {
-                    app.start_bluetooth_operation(BluetoothOperation::SetDiscovery(true), || {
-                        set_bluetooth_adapter_property("Discovering", true)
-                    });
-                }
-            }
-            if let Some(output) = initial_output
-                && let Some(index) = app
-                    .displays
-                    .iter()
-                    .position(|display| display.connector == output)
-            {
-                app.selected = index;
-            }
-            app
-        },
-        SettingsHostAdapter::default(),
-    )
+            app.selected = index;
+        }
+        app
+    };
+    #[cfg(target_os = "windows")]
+    return nickel_ui::run_with_adapter_on_any_thread(app, SettingsHostAdapter::default());
+
+    #[cfg(not(target_os = "windows"))]
+    nickel_ui::run_with_adapter(app, SettingsHostAdapter::default())
 }
 
 #[cfg(test)]
