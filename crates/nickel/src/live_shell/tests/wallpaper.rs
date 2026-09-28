@@ -132,6 +132,7 @@
                 if rect.size.width >= 320.0 && rect.size.height >= 200.0 && *color >> 24 != 0
         )));
         assert!(shell.desktop_host.application().plugin_background);
+        assert!(shell.surface_visible(SurfaceRole::Desktop));
         let plugin_host = shell.plugin_desktop_host.as_mut().unwrap();
         let image_bytes = plugin_host.application().retained_image_bytes();
         assert!(image_bytes > 0);
@@ -153,6 +154,7 @@
             nickel_ui::backend::PaintCommand::Image { .. }
         )));
         assert!(!shell.desktop_host.application().plugin_background);
+        assert!(!shell.surface_visible(SurfaceRole::Desktop));
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
@@ -165,6 +167,7 @@
             nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. }
         )));
         assert!(shell.desktop_host.application().plugin_background);
+        assert!(shell.surface_visible(SurfaceRole::Desktop));
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.unwrap() > 0);
     }
 

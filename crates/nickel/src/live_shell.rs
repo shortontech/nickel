@@ -3284,7 +3284,7 @@ impl LiveShell {
 
     pub fn surface_visible(&self, role: SurfaceRole) -> bool {
         match role {
-            SurfaceRole::Desktop => true,
+            SurfaceRole::Desktop => self.plugin_desktop_host.is_some(),
             SurfaceRole::Taskbar => self.plugin_taskbar_host.is_some(),
             SurfaceRole::Panel => {
                 self.plugin_taskbar_host.is_some()
