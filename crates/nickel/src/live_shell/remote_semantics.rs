@@ -181,12 +181,12 @@ impl LiveShell {
                 }
             }
             SurfaceRole::Notification => {
-                if let Some(host) = self.plugin_notification_host.as_ref() {
-                    Ok(observe_only(plugin_projection(host, |_, _| false)?))
-                } else if self.trusted_notification_visible() {
+                if self.trusted_notification_visible() {
                     Ok(observe_only(project(&self.notification_host, |_| {
                         RemoteActionDisposition::Unavailable
                     })?))
+                } else if let Some(host) = self.plugin_notification_host.as_ref() {
+                    Ok(observe_only(plugin_projection(host, |_, _| false)?))
                 } else {
                     Err("Notification plugin is unavailable".into())
                 }

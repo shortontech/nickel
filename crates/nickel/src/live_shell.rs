@@ -2593,7 +2593,10 @@ impl LiveShell {
                 }
             }
             SurfaceRole::Notification => {
-                if self.plugin_notification_host.is_some() {
+                if self.trusted_notification_visible() {
+                    self.sync_notification_host(width, height);
+                    self.notification_host.commands().to_vec()
+                } else if self.notification_plugin_active() {
                     self.step_notification_plugin(HostBatch {
                         surface_size: Some((width, height)),
                         ..HostBatch::default()
@@ -2601,9 +2604,6 @@ impl LiveShell {
                     self.plugin_notification_host
                         .as_ref()
                         .map_or_else(Vec::new, |host| host.commands().to_vec())
-                } else if self.trusted_notification_visible() {
-                    self.sync_notification_host(width, height);
-                    self.notification_host.commands().to_vec()
                 } else {
                     Vec::new()
                 }
@@ -4831,11 +4831,22 @@ impl LiveShell {
                 .control_plugin_active()
                 .then(|| host_token(self.plugin_control_host.as_ref().unwrap().inspect()))
                 .or(Some(self.control_change_token)),
-            SurfaceRole::Notification => Some(host_token(
-                self.plugin_notification_host
-                    .as_ref()
-                    .map_or_else(|| self.notification_host.inspect(), |host| host.inspect()),
-            )),
+            SurfaceRole::Notification => {
+                let trusted = self.trusted_notification_visible();
+                let inspection = if trusted {
+                    self.notification_host.inspect()
+                } else {
+                    self.plugin_notification_host
+                        .as_ref()
+                        .map_or_else(|| self.notification_host.inspect(), |host| host.inspect())
+                };
+                let mut token = host_token(inspection);
+                if trusted {
+                    token.frame_generation = token.frame_generation.wrapping_add(1_u64 << 63);
+                    token.semantic_generation = token.semantic_generation.wrapping_add(1_u64 << 63);
+                }
+                Some(token)
+            }
             SurfaceRole::VolumeOsd => self
                 .plugin_volume_osd_host
                 .as_ref()
@@ -5180,7 +5191,7 @@ impl LiveShell {
         if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
-        if self.plugin_notification_host.is_some() {
+        if self.notification_plugin_active() {
             let point = Point { x, y };
             return self
                 .step_notification_plugin(HostBatch {
@@ -5218,7 +5229,8 @@ impl LiveShell {
         if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
-        if let Some(host) = self.plugin_notification_host.as_ref() {
+        if self.notification_plugin_active() {
+            let host = self.plugin_notification_host.as_ref().unwrap();
             let (ingress, authority) =
                 internal_normalized_ingress(input, None, "notification", host.inspect(), None);
             return self.notification_host_event_authorized(
@@ -5249,7 +5261,7 @@ impl LiveShell {
         if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
-        if self.plugin_notification_host.is_some() {
+        if self.notification_plugin_active() {
             return self
                 .step_notification_plugin(HostBatch {
                     surface_size: Some((width, height)),
@@ -5285,7 +5297,7 @@ impl LiveShell {
             }
             _ => return false,
         };
-        if self.plugin_notification_host.is_some() {
+        if self.notification_plugin_active() {
             self.step_notification_plugin(HostBatch {
                 events: vec![event],
                 ..HostBatch::default()
@@ -5310,7 +5322,7 @@ impl LiveShell {
         } else {
             HostEvent::Controller(action)
         };
-        if self.plugin_notification_host.is_some() {
+        if self.notification_plugin_active() {
             return self
                 .step_notification_plugin(HostBatch {
                     events: vec![event],
@@ -6200,7 +6212,7 @@ impl LiveShell {
                 if !self.surface_visible(SurfaceRole::Notification) {
                     return false;
                 }
-                if self.plugin_notification_host.is_some() {
+                if self.notification_plugin_active() {
                     return self
                         .step_notification_plugin(HostBatch {
                             surface_size: Some((width, height)),
@@ -9339,26 +9351,38 @@ impl LiveShell {
         });
     }
 
+    fn trusted_notification_id(&self, id: u32) -> bool {
+        self.remote_lease_notifications.contains_key(&id)
+            || self.codex_approval_notifications.contains_key(&id)
+    }
+
     fn trusted_notification_visible(&self) -> bool {
-        self.notification.as_ref().is_some_and(|notification| {
-            self.remote_lease_notifications
-                .contains_key(&notification.id)
-                || self
-                    .codex_approval_notifications
-                    .contains_key(&notification.id)
-        }) || (self.notification_history_visible
-            && (!self.remote_lease_notifications.is_empty()
-                || !self.codex_approval_notifications.is_empty()))
+        self.notification
+            .as_ref()
+            .is_some_and(|notification| self.trusted_notification_id(notification.id))
+            || (self.notification_history_visible
+                && (!self.remote_lease_notifications.is_empty()
+                    || !self.codex_approval_notifications.is_empty()))
+    }
+
+    fn notification_plugin_active(&self) -> bool {
+        self.plugin_notification_host.is_some() && !self.trusted_notification_visible()
     }
 
     fn notification_plugin_projection(&self) -> crate::plugin_panel::NotificationPluginProjection {
         let history = if self.notification_history_visible {
-            self.notification_feed.history()
+            self.notification_feed
+                .history()
+                .into_iter()
+                .filter(|notification| !self.trusted_notification_id(notification.id))
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
         crate::plugin_panel::NotificationPluginProjection::from_feed(
-            self.notification.as_ref(),
+            self.notification
+                .as_ref()
+                .filter(|notification| !self.trusted_notification_id(notification.id)),
             &history,
             self.notification_history_visible,
         )

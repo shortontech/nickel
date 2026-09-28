@@ -83,6 +83,54 @@
     }
 
     #[test]
+    fn trusted_remote_approval_uses_host_even_when_notification_plugin_is_enabled() {
+        use nickel_session_protocol::{
+            RemoteLeaseRequest, RemoteLeaseRequestChanges, RemotePendingLease,
+            RemoteResourceScope,
+        };
+
+        let mut shell = LiveShell::new().unwrap();
+        assert!(shell.plugin_notification_host.is_some());
+        shell.sync_remote_lease_notifications_from(vec![RemotePendingLease {
+            pending_generation: 1,
+            client_id: "test-client".into(),
+            client_label: "Requester".into(),
+            request: RemoteLeaseRequest {
+                renewal: None,
+                scope: RemoteResourceScope::FullSession,
+                duration_seconds: Some(300),
+                allow_resumption: false,
+                full_debug: false,
+            },
+            resource_label: None,
+            changes: RemoteLeaseRequestChanges::default(),
+        }]);
+        shell.notification = shell.notification_feed.snapshot();
+        let id = shell.notification.as_ref().unwrap().id;
+        assert!(shell.trusted_notification_visible());
+        assert!(shell.notification_plugin_projection().notification.is_none());
+        let plugin_frame = shell.plugin_notification_host.as_ref().unwrap().inspect().frame_generation;
+        assert!(!shell.scene(SurfaceRole::Notification, 420, 180).is_empty());
+        assert_eq!(shell.plugin_notification_host.as_ref().unwrap().inspect().frame_generation, plugin_frame);
+        let trusted_token = shell.scene_change_token(SurfaceRole::Notification).unwrap();
+        let approve = shell.notification_host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Approve".into(),
+        }).unwrap();
+        let x = approve.bounds.origin.x + approve.bounds.size.width / 2.0;
+        let y = approve.bounds.origin.y + approve.bounds.size.height / 2.0;
+        assert!(shell.notification_click(x, y, 420, 180));
+        assert!(shell.remote_lease_submitting.contains(&id));
+
+        shell.notification_history_visible = true;
+        assert!(shell.notification_plugin_projection().history.is_empty());
+        shell.notification_history_visible = false;
+        shell.notification = None;
+        assert!(!shell.trusted_notification_visible());
+        assert_ne!(shell.scene_change_token(SurfaceRole::Notification).unwrap(), trusted_token);
+    }
+
+    #[test]
     fn notification_plugin_secure_field_protects_its_surface() {
         let mut shell = LiveShell::new().unwrap();
         let source = "function App() { return h(Panel, {}, h(TextField, {id: 'private', value: 'secret', secure: true, onChange: value => {}})); }";
