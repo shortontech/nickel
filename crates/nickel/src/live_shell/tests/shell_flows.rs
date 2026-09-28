@@ -602,7 +602,7 @@
         winit_shell::SurfaceRole,
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
-    use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
+    use nickel_core::theme::{Appearance, ThemePalette};
 
     fn preferences_fixture(shell: &mut LiveShell, path: std::path::PathBuf) {
         let preferences = LauncherPreferences::load(&path).unwrap_or_default();
@@ -1294,7 +1294,6 @@
         }];
         shell.keyboard_enabled = true;
         shell.scene(SurfaceRole::Taskbar, 1280, 56);
-        shell.panel_host.application_mut().groups = Arc::new(Vec::new());
 
         let application = shell
             .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
@@ -1736,155 +1735,6 @@
     }
 
     #[test]
-    fn taskbar_secondary_click_opens_application_menu_for_captured_group_at_item_anchor() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
-            .unwrap();
-        shell
-            .launcher
-            .set_preferences(LauncherPreferences::default());
-        let application_id = ApplicationId::new("org.kde.dolphin");
-        shell.windows = vec![
-            OpenWindow {
-                id: WindowId(41),
-                application_id: Some(application_id.clone()),
-                active: false,
-                title: "Files".into(),
-                state: crate::model::WindowState::default(),
-            },
-            OpenWindow {
-                id: WindowId(42),
-                application_id: Some(application_id),
-                active: true,
-                title: "Downloads".into(),
-                state: crate::model::WindowState::default(),
-            },
-        ];
-        shell.panel_origin_x = 1_920;
-        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
-        let target = shell
-            .panel_host
-            .unique_semantic_target_for_message(&super::TaskbarAction::Task(0))
-            .expect("taskbar item");
-        let expected_anchor = shell.panel_origin_x + target.bounds.origin.x.round() as i32;
-        let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
-
-        assert!(shell.panel_click(center, 1_280, true));
-        assert!(shell.window_menu.is_none());
-        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
-        assert!(shell.preview_group.is_none());
-        assert_eq!(
-            shell
-                .application_menu_target
-                .as_ref()
-                .map(|target| target.windows.clone()),
-            Some(vec![WindowId(41), WindowId(42)])
-        );
-        shell.windows[0].active = true;
-        shell.windows[1].active = false;
-        assert_eq!(
-            shell
-                .application_menu_target
-                .as_ref()
-                .map(|target| target.windows.clone()),
-            Some(vec![WindowId(41), WindowId(42)]),
-            "an open menu must not recapture membership when group activity changes"
-        );
-        shell.windows[0].active = false;
-        shell.windows[1].active = true;
-
-        shell.sync_transient_overlays();
-        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
-        assert_eq!(
-            shell.window_menu_geometry(),
-            Some((
-                expected_anchor,
-                shell.panel_origin_y,
-                super::MENU_WIDTH.ceil() as u32,
-                shell.window_context_menu_height() as u32,
-            ))
-        );
-
-        shell.close_window_preview();
-        let outcome = shell.panel_host.perform_accessibility_action(
-            target.id.clone(),
-            SemanticAction::Invoke(ActionKind::ContextMenu),
-        );
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        assert!(shell.apply_panel_effects());
-        assert!(shell.application_menu_target.is_some());
-        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
-
-        for event in [
-            HostEvent::Ui(UiEvent::KeyboardContextMenu),
-            HostEvent::Controller(ControllerAction::ContextMenu),
-            HostEvent::Ui(UiEvent::TouchLongPress(Point {
-                x: center,
-                y: target.bounds.origin.y + target.bounds.size.height / 2.0,
-            })),
-        ] {
-            shell.close_window_preview();
-            shell.panel_host.step(HostBatch {
-                events: vec![
-                    HostEvent::Ui(UiEvent::AccessibilityFocus(target.id.clone())),
-                    event,
-                ],
-                ..HostBatch::default()
-            });
-            assert!(shell.apply_panel_effects());
-            assert!(shell.application_menu_target.is_some());
-            assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
-        }
-    }
-
-    #[test]
-    fn taskbar_primary_click_activates_the_topmost_group_window_without_opening_previews() {
-        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
-            crate::session_host::default_session_host(),
-        ));
-        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
-            .unwrap();
-        shell
-            .launcher
-            .set_preferences(LauncherPreferences::default());
-        let application_id = ApplicationId::new("org.kde.konsole");
-        shell.windows = [WindowId(41), WindowId(42)]
-            .into_iter()
-            .map(|id| OpenWindow {
-                id,
-                application_id: Some(application_id.clone()),
-                active: id == WindowId(42),
-                title: format!("Terminal {}", id.0),
-                state: crate::model::WindowState::default(),
-            })
-            .collect();
-        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
-        let target = shell
-            .panel_host
-            .unique_semantic_target_for_message(&super::TaskbarAction::Task(0))
-            .expect("taskbar item");
-        let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
-
-        assert!(shell.panel_click(center, 1_280, false));
-        assert!(shell.preview_group.is_none());
-        let commands = host.take_commands();
-        assert!(commands.iter().any(|command| matches!(
-            command,
-            crate::platform::ShellCommand::WindowAction {
-                window: WindowId(42),
-                action: crate::platform::WindowAction::Activate,
-            }
-        )));
-        assert!(!commands.iter().any(|command| matches!(
-            command,
-            crate::platform::ShellCommand::ShowPreview { .. }
-        )));
-    }
-
-    #[test]
     fn preview_window_menus_anchor_to_their_distinct_cards() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher.set_preferences(LauncherPreferences::default());
@@ -1962,47 +1812,6 @@
         assert!(shell.window_menu.is_none());
         assert!(shell.window_menu_snapshot.is_none());
         assert!(shell.preview_group.is_none());
-    }
-
-    #[test]
-    fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false).unwrap();
-        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
-        shell.set_panel_output("left");
-        let target = shell
-            .panel_host
-            .unique_semantic_target_for_message(&super::TaskbarAction::Control)
-            .expect("control button");
-        let expected = target.bounds;
-        let outcome = shell
-            .panel_host
-            .perform_accessibility_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        assert!(shell.apply_panel_effects());
-        let (role, first) = shell.popover_anchor(AnchorSide::Above).unwrap();
-        assert_eq!(role, ShellRole::ControlCenter);
-        assert_eq!(first.control, "panel-control");
-        assert_eq!(first.output, "left");
-        assert_eq!(first.bounds.x, expected.origin.x.floor() as i32);
-
-        shell.set_panel_output("right");
-        for _ in 0..2 {
-            let target = shell
-                .panel_host
-                .unique_semantic_target_for_message(&super::TaskbarAction::Control)
-                .unwrap();
-            let outcome = shell.panel_host.perform_accessibility_action(
-                target.id,
-                SemanticAction::Invoke(ActionKind::Activate),
-            );
-            assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-            assert!(shell.apply_panel_effects());
-        }
-        let (_, reopened) = shell.popover_anchor(AnchorSide::Below).unwrap();
-        assert_eq!(reopened.output, "right");
-        assert_eq!(reopened.preferred, AnchorSide::Below);
-        assert_eq!(reopened.bounds, first.bounds);
     }
 
     #[test]

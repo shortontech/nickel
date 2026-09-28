@@ -166,85 +166,28 @@
     }
 
     #[test]
-    fn warm_panel_hover_reuses_task_projection_and_builtin_images() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::new((0..10_000).map(|index| crate::model::Application::new(format!("app.{index}"), format!("App {index}"), None, None, None)).collect());
-        shell.windows = vec![OpenWindow { id: WindowId(77), application_id: None, active: true, title: "Nickel Settings".into(), state: Default::default() }];
-        shell.scene(SurfaceRole::Taskbar, 1280, 56);
-        let groups = Arc::clone(&shell.panel_host.application().groups);
-        let image = Arc::clone(&shell.panel_host.application().task_icons[0].as_ref().unwrap().1);
-        let target = shell.panel_host.query_unique(&SemanticSelector::RoleAndName { role: SemanticRole::Button, name: "Open Nickel Start".into() }).unwrap();
-        for _ in 0..20 {
-            shell.panel_pointer_moved(target.bounds.origin.x + target.bounds.size.width / 2.0, 1280);
-            shell.scene(SurfaceRole::Taskbar, 1280, 56);
-            assert!(Arc::ptr_eq(&groups, &shell.panel_host.application().groups));
-            assert!(Arc::ptr_eq(&image, &shell.panel_host.application().task_icons[0].as_ref().unwrap().1));
-            assert!(!shell.sync_panel_host());
-        }
-        shell.launcher.toggle_pin("app.1");
-        assert!(shell.sync_panel_host());
-        assert!(!Arc::ptr_eq(&groups, &shell.panel_host.application().groups));
-        assert!(shell.panel_host.application().groups[0].pinned);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn panel_render_context_preserves_input_output_and_reuses_each_output_projection() {
-        use nickel_session_protocol::{Geometry, OutputSnapshot, OutputTransform, Snapshot, WindowSnapshot, WorkspaceId};
-        let output = |name: &str, x| OutputSnapshot { name: name.into(), model: name.into(), geometry: Geometry { x, y: 0, width: 1000, height: 800 }, work_area: Geometry { x, y: 0, width: 1000, height: 744 }, scale_120: 120, transform: OutputTransform::Normal, physical_width_mm: 1, physical_height_mm: 1, primary: x == 0, enabled: true, modes: Vec::new(), current_mode: None };
-        let window = |id, x, title: &str| WindowSnapshot { id: nickel_session_protocol::WindowId(id), application_id: format!("app.{id}"), title: title.into(), active: id == 1, minimized: false, maximized: false, fullscreen: false, geometry: Some(Geometry { x, y: 0, width: 400, height: 400 }), workspace: WorkspaceId(1) };
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::new(Vec::new());
-        shell.all_windows_on_every_bar = false;
-        shell.apply_internal_session_snapshot(Snapshot { outputs: vec![output("left", 0), output("right", 1000)], windows: vec![window(1, 0, "Left task"), window(2, 1000, "Right task")], ..Default::default() });
-        shell.refresh_fast();
-        shell.set_panel_output("left");
-        shell.scene(SurfaceRole::Taskbar, 1000, 56);
-        shell.panel_scene_for_output(Some("right"), 1000, 56);
-        assert_eq!(shell.panel_output.as_deref(), Some("left"));
-        assert_eq!(shell.panel_hosts[&Some("right".into())].application().groups[0].application_name, "Right task");
-        let right = Arc::clone(&shell.panel_hosts[&Some("right".into())].application().groups);
-        shell.panel_scene_for_output(Some("left"), 1000, 56);
-        assert_eq!(shell.panel_host.application().groups[0].application_name, "Left task");
-        shell.panel_scene_for_output(Some("right"), 1000, 56);
-        assert!(Arc::ptr_eq(&right, &shell.panel_hosts[&Some("right".into())].application().groups));
-        shell.panel_host_ui(UiEvent::PointerMoved(Point { x: 0.0, y: 0.0 }), 1000);
-        assert_eq!(shell.panel_host.application().groups[0].application_name, "Left task");
-        shell.apply_internal_session_snapshot(Snapshot { outputs: vec![output("left", 0), output("right", 1000)], windows: vec![window(1, 1000, "Left task"), window(2, 1000, "Right task")], ..Default::default() });
-        assert!(shell.refresh_fast(), "a geometry-only output move invalidates task membership");
-        shell.panel_scene_for_output(Some("left"), 1000, 56);
-        assert!(shell.panel_host.application().groups.is_empty());
-        shell.all_windows_on_every_bar = true;
-        shell.panel_scene_for_output(Some("left"), 1000, 56);
-        assert_eq!(shell.panel_host.application().groups.len(), 2);
-        shell.panel_scene_for_output(Some("right"), 1000, 56);
-        assert_eq!(shell.panel_host.application().groups.len(), 2);
-        shell.retain_panel_outputs(&[]);
-        assert!(shell.panel_projections.is_empty());
-        assert!(!shell.panel_hosts.contains_key(&Some("right".into())));
-        assert!(!shell.panel_hosts.contains_key(&Some("left".into())));
-        assert!(shell.panel_output.is_none());
-    }
-
-    #[test]
     fn rendering_a_sibling_panel_preserves_pointer_capture_and_keyboard_focus() {
         let mut shell = LiveShell::new().unwrap();
         shell.set_panel_output("left");
         shell.scene(SurfaceRole::Taskbar, 1280, 56);
-        let target = shell.panel_host.query_unique(&SemanticSelector::RoleAndName { role: SemanticRole::Button, name: "Open Nickel Start".into() }).unwrap();
-        let point = Point { x: target.bounds.origin.x + target.bounds.size.width / 2.0, y: target.bounds.origin.y + target.bounds.size.height / 2.0 };
+        let target = super::taskbar_plugin_control_bounds(
+            shell.plugin_taskbar_host.as_ref().unwrap(),
+            "taskbar-launcher",
+        )
+        .unwrap();
+        let point = Point { x: target.origin.x + target.size.width / 2.0, y: target.origin.y + target.size.height / 2.0 };
         shell.panel_host_ui(UiEvent::FocusNext, 1280);
         shell.panel_host_ui(UiEvent::PointerMoved(point), 1280);
         shell.panel_host_ui(UiEvent::PointerPressed(point), 1280);
-        let before = shell.panel_host.inspect();
+        let before = shell.plugin_taskbar_host.as_ref().unwrap().inspect();
         shell.panel_scene_for_output(Some("right"), 800, 56);
-        let after = shell.panel_host.inspect();
+        let after = shell.plugin_taskbar_host.as_ref().unwrap().inspect();
         assert_eq!(before.pointer_capture, after.pointer_capture);
         assert_eq!(before.pointer_hover, after.pointer_hover);
         assert_eq!(before.keyboard_focus, after.keyboard_focus);
         assert_eq!(shell.panel_output.as_deref(), Some("left"));
-        assert!(shell.panel_hosts[&Some("right".into())].inspect().pointer_hover.is_none());
-        assert!(shell.panel_hosts[&Some("right".into())].inspect().pointer_capture.is_none());
+        assert!(shell.plugin_taskbar_hosts[&Some("right".into())].inspect().pointer_hover.is_none());
+        assert!(shell.plugin_taskbar_hosts[&Some("right".into())].inspect().pointer_capture.is_none());
         shell.panel_host_ui(UiEvent::PointerReleased(point), 1280);
         assert!(shell.launcher_visible);
     }
@@ -259,61 +202,6 @@
             layout.codex_icon_bounds(),
             Rect::new(1700.0, 14.0, 28.0, 28.0)
         );
-    }
-
-    #[test]
-    fn panel_host_owns_pointer_and_accessibility_targets() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false).unwrap();
-        let commands = shell.scene(SurfaceRole::Taskbar, 1280, 56);
-        assert!(!commands.is_empty());
-
-        let launcher = shell
-            .panel_host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open Nickel Start".into(),
-            })
-            .unwrap();
-        let center = Point {
-            x: launcher.bounds.origin.x + launcher.bounds.size.width / 2.0,
-            y: launcher.bounds.origin.y + launcher.bounds.size.height / 2.0,
-        };
-        assert!(shell.panel_pointer_moved(center.x, 1280));
-        assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Launcher));
-        assert!(
-            shell
-                .panel_host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
-                    name: "Open Quick Settings".into(),
-                })
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn panel_scene_rebuilds_when_persisted_appearance_changes() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false).unwrap();
-        let before_commands = shell.scene(SurfaceRole::Taskbar, 1280, 56);
-        let before = shell.panel_change_token;
-        let light = ThemePalette::from_appearance(Appearance {
-            mode: ThemeMode::Light,
-            accent: nickel_core::theme::accent_from_hue(167),
-            intensity: 100,
-        });
-        let dark = ThemePalette::from_appearance(Appearance {
-            mode: ThemeMode::Dark,
-            accent: nickel_core::theme::accent_from_hue(167),
-            intensity: 100,
-        });
-        shell.palette = if shell.palette == light { dark } else { light };
-
-        let commands = shell.scene(SurfaceRole::Taskbar, 1280, 56);
-
-        assert_ne!(shell.panel_change_token, before);
-        assert_ne!(commands, before_commands);
     }
 
     #[test]
@@ -332,68 +220,16 @@
         let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
 
         assert_ne!(shell.panel_change_token, before);
-        assert_eq!(
-            shell
-                .panel_host
-                .semantic_targets_for_message(&super::TaskbarAction::Task(0))
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn native_taskbar_fallback_shares_one_animated_project_face() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
-            .unwrap();
-        shell.launcher = crate::launcher::Launcher::new(Vec::new());
-        shell.windows = [
-            (1, "io.nickel.codex.project.alpha"),
-            (2, "io.nickel.codex.project.alpha"),
-            (3, "io.nickel.codex.project.beta"),
-        ]
-        .into_iter()
-        .map(|(id, application_id)| OpenWindow {
-            id: WindowId(id),
-            application_id: Some(ApplicationId::new(application_id)),
-            active: id == 1,
-            title: format!("Codex {id}"),
-            state: Default::default(),
-        })
-        .collect();
-
-        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
         assert!(shell
-            .panel_deadline
-            .is_some_and(|deadline| deadline <= Instant::now() + Duration::from_millis(400)));
-        let groups = &shell.panel_host.application().groups;
-        assert_eq!(groups.len(), 2);
-        assert_eq!(
-            groups
-                .iter()
-                .map(|group| group.windows.len())
-                .sum::<usize>(),
-            3
-        );
-        let initial = shell.panel_host.application().task_icons[0]
+            .plugin_taskbar_host
             .as_ref()
             .unwrap()
-            .0;
-        let now = Instant::now();
-        shell.panel_deadline = Some(now);
-        assert!(shell.poll_host_deadlines(now).contains(&SurfaceRole::Taskbar));
-        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
-        let animated = shell.panel_host.application().task_icons[0]
-            .as_ref()
-            .unwrap()
-            .0;
-        assert_ne!(initial, animated);
-        assert_eq!((initial - 0x3100) / 4, (animated - 0x3100) / 4);
+            .application()
+            .rendered_taskbar_item_matches(0, "google-chrome"));
     }
 
     #[test]
-    fn jsx_taskbar_animates_project_faces_without_polling_the_native_host() {
+    fn jsx_taskbar_animates_project_faces() {
         let mut shell = LiveShell::new().unwrap();
         assert!(shell.plugin_taskbar_host.is_some());
         shell.launcher = crate::launcher::Launcher::new(Vec::new());
@@ -408,14 +244,12 @@
         shell.scene(SurfaceRole::Taskbar, 1280, 56);
         let (clock, _) = super::panel_clock_text();
         let initial = shell.taskbar_plugin_projection(&clock).1["task:0"].0;
-        let native_frame = shell.panel_host.application().pet_frame;
         let due = shell.panel_pet_deadline.expect("JSX pet animation deadline");
         assert!(due <= Instant::now() + Duration::from_millis(400));
 
         assert!(shell.poll_host_deadlines(due).contains(&SurfaceRole::Taskbar));
         let animated = shell.taskbar_plugin_projection(&clock).1["task:0"].0;
         assert_ne!(initial, animated);
-        assert_eq!(shell.panel_host.application().pet_frame, native_frame);
         assert!(shell.panel_pet_deadline.is_some_and(|deadline| deadline > due));
     }
 
@@ -460,8 +294,10 @@
 
         let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
 
-        assert_eq!(shell.panel_host.application().groups[0].application_name, "Music");
-        assert_eq!(shell.panel_host.application().task_icons[0].as_ref().unwrap().0, 0x3001);
+        let (clock, _) = super::panel_clock_text();
+        let (projection, images) = shell.taskbar_plugin_projection(&clock);
+        assert_eq!(projection.items[0].name, "Music");
+        assert_eq!(images["task:0"].0, 0x3001);
     }
 
     #[test]
@@ -534,7 +370,6 @@
             .set_pins(vec![("org.example.pinned".into(), 0)]);
         shell.launcher_preferences_path = Some(directory.path().join("launcher-preferences"));
         shell.windows.clear();
-        shell.sync_panel_host();
 
         shell.apply_panel_action(super::TaskbarAction::TaskContext(0));
 
@@ -607,7 +442,6 @@
                 state: crate::model::WindowState::default(),
             })
             .collect();
-        shell.sync_panel_host();
         shell.apply_panel_action(super::TaskbarAction::TaskContext(0));
         assert!(shell.application_menu_target.is_some());
 
@@ -616,23 +450,6 @@
         );
 
         assert!(shell.application_menu_target.is_none());
-    }
-
-    #[test]
-    fn due_panel_clock_deadline_rebuilds_only_when_the_minute_changes() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
-            .unwrap();
-        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
-        shell.panel_host.application_mut().clock = "stale".into();
-        shell.panel_host.application_mut().date = "stale".into();
-        let now = Instant::now();
-        shell.panel_deadline = Some(now);
-
-        assert!(shell.poll_host_deadlines(now).contains(&SurfaceRole::Taskbar));
-        assert_ne!(shell.panel_host.application().clock, "stale");
-        assert!(shell.panel_deadline.is_some_and(|deadline| deadline > now));
     }
 
     #[test]
@@ -668,34 +485,6 @@
                 .next_host_deadline()
                 .is_none_or(|deadline| deadline > due)
         );
-    }
-
-    #[test]
-    fn panel_hover_treats_semantic_ids_as_opaque() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false).unwrap();
-        shell.tray = vec![TrayItem {
-            id: "opaque/panel-task-999".into(),
-            title: "Opaque tray target".into(),
-            icon: RgbaImage::new(18, 18),
-        }];
-        shell.tray_icons = panel_tray_icons(&shell.tray);
-        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
-
-        let tray = shell
-            .panel_host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Opaque tray target".into(),
-            })
-            .unwrap();
-        let center = Point {
-            x: tray.bounds.origin.x + tray.bounds.size.width / 2.0,
-            y: tray.bounds.origin.y + tray.bounds.size.height / 2.0,
-        };
-
-        assert!(shell.panel_pointer_moved(center.x, 1280));
-        assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Tray(0)));
     }
 
     #[test]

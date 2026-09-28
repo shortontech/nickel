@@ -8,7 +8,7 @@ use crate::platform::NotificationSource;
 use image::{Rgba, RgbaImage};
 use nickel_input::KeyCode;
 use nickel_session_protocol::{
-    AnchorSide, PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
+    PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
     ShellSemanticTarget, WindowMenuTargetAction,
 };
 use nickel_ui::{
@@ -87,37 +87,6 @@ fn settings_status_is_idle_until_the_separate_process_reports_memory() {
         nickel_session_protocol::PluginRuntimeHealth::Idle
     );
     assert!(settings.memory.native_ui_bytes.is_none());
-}
-
-#[test]
-fn jsx_taskbar_projection_does_not_read_native_task_groups_or_icons() {
-    let mut shell = LiveShell::new().unwrap();
-    let (clock, _) = super::panel_clock_text();
-    let before = shell.taskbar_plugin_projection(&clock);
-    shell.sync_panel_host();
-    let from_native = super::taskbar_plugin_data(
-        super::TaskbarProjectionInput::from(shell.panel_host.application()),
-        &clock,
-    );
-    assert_eq!(before.0, from_native.0);
-    assert_eq!(
-        before.1.keys().collect::<Vec<_>>(),
-        from_native.1.keys().collect::<Vec<_>>()
-    );
-    let native = shell.panel_host.application_mut();
-    native.groups = Arc::new(Vec::new());
-    native.task_icons.clear();
-    native.tray.clear();
-    let after = shell.taskbar_plugin_projection(&clock);
-    assert_eq!(before.0, after.0);
-    assert_eq!(
-        before.1.keys().collect::<Vec<_>>(),
-        after.1.keys().collect::<Vec<_>>()
-    );
-    assert_eq!(
-        before.1.values().map(|(id, _)| id).collect::<Vec<_>>(),
-        after.1.values().map(|(id, _)| id).collect::<Vec<_>>()
-    );
 }
 
 include!("tests/wallpaper.rs");
@@ -1271,7 +1240,9 @@ fn pointer_opened_control_center_does_not_paint_initial_keyboard_focus() {
     );
     assert!(
         shell
-            .panel_host
+            .plugin_taskbar_host
+            .as_mut()
+            .unwrap()
             .adopt_input_modality(InputModality::Pointer)
     );
 

@@ -192,7 +192,9 @@ const PREVIEW_CACHE_CAPACITY: usize = 32;
 pub(crate) mod remote_semantics;
 #[path = "live_shell/taskbar.rs"]
 mod taskbar;
-pub use taskbar::{TaskbarAction, TaskbarUi};
+pub use taskbar::TaskbarAction;
+#[cfg(any(test, feature = "workbench-fixtures"))]
+pub use taskbar::TaskbarUi;
 use taskbar::{
     TaskbarHover, normalize_tray_items, panel_clock_text, panel_tray_icons, tint_panel_icon,
 };
@@ -492,7 +494,6 @@ pub struct LiveShell {
     codex_project_menu_visible: bool,
     panel_hover: Option<TaskbarHover>,
     panel_hover_output: Option<String>,
-    panel_host: nickel_ui::UiHost<TaskbarUi>,
     plugin_registry: nickel_core::plugins::PluginRegistry,
     plugin_settings:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
@@ -573,7 +574,6 @@ pub struct LiveShell {
         HashMap<Option<String>, nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_memory: HashMap<Option<String>, u64>,
     plugin_taskbar_menu_memory: u64,
-    panel_hosts: HashMap<Option<String>, nickel_ui::UiHost<TaskbarUi>>,
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
@@ -776,21 +776,6 @@ struct TaskbarProjectionInput<'a> {
     task_icons: &'a [Option<(u16, Arc<image::RgbaImage>)>],
     tray: &'a [crate::model::TrayItem],
     tray_icons: &'a [Arc<image::RgbaImage>],
-}
-
-impl<'a> From<&'a TaskbarUi> for TaskbarProjectionInput<'a> {
-    fn from(panel: &'a TaskbarUi) -> Self {
-        Self {
-            groups: panel.groups.as_ref(),
-            keyboard_enabled: panel.keyboard_enabled,
-            codex_available: panel.codex_available,
-            panel_icon: &panel.panel_icon,
-            codex_icon: &panel.codex_icon,
-            task_icons: &panel.task_icons,
-            tray: &panel.tray,
-            tray_icons: &panel.tray_icons,
-        }
-    }
 }
 
 fn taskbar_plugin_data(
@@ -1423,32 +1408,8 @@ impl LiveShell {
         );
         let launcher_view = LauncherViewState::default();
         let mut launcher_icons = LauncherIconCache::new();
-        let (clock, date) = panel_clock_text();
-        let panel_host = nickel_ui::UiHost::new(
-            TaskbarUi {
-                keyboard_enabled: false,
-                keyboard_visible: false,
-                groups: Arc::new(launcher.taskbar_applications(&windows)),
-                codex_available: launcher.codex_available(),
-                tray: tray.clone(),
-                tray_icons: tray_icons.clone(),
-                panel_icon: Arc::clone(&panel_icon),
-                codex_icon: Arc::clone(&codex_icon),
-                task_icons: Vec::new(),
-                pet_frame: 0,
-                palette,
-                panel_hover: None,
-                launcher_visible: false,
-                codex_project_menu_visible: false,
-                control_visible: false,
-                clock,
-                date,
-                effects: Vec::new(),
-                task_drag: None,
-            },
-            1920,
-            56,
-        );
+        let (clock, _) = panel_clock_text();
+        let initial_taskbar_groups = launcher.taskbar_applications(&windows);
         let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
         plugin_registry.register(crate::plugin_panel::manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::launcher_manifest().clone())?;
@@ -1590,8 +1551,17 @@ impl LiveShell {
             let id = &crate::plugin_panel::taskbar_manifest().id;
             plugin_registry.set_enabled(id, true)?;
             let (projection, images) = taskbar_plugin_data(
-                TaskbarProjectionInput::from(panel_host.application()),
-                &panel_host.application().clock,
+                TaskbarProjectionInput {
+                    groups: &initial_taskbar_groups,
+                    keyboard_enabled: false,
+                    codex_available: launcher.codex_available(),
+                    panel_icon: &panel_icon,
+                    codex_icon: &codex_icon,
+                    task_icons: &[],
+                    tray: &tray,
+                    tray_icons: &tray_icons,
+                },
+                &clock,
             );
             match crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection)
             {
@@ -1734,7 +1704,6 @@ impl LiveShell {
             codex_project_menu_visible: false,
             panel_hover: None,
             panel_hover_output: None,
-            panel_host,
             plugin_registry,
             plugin_settings,
             external_plugin_packages,
@@ -1759,7 +1728,6 @@ impl LiveShell {
             plugin_taskbar_hosts: HashMap::new(),
             plugin_taskbar_memory: HashMap::new(),
             plugin_taskbar_menu_memory: 0,
-            panel_hosts: HashMap::new(),
             panel_projections: HashMap::new(),
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
@@ -4628,21 +4596,9 @@ impl LiveShell {
         push("launcher-preferences", self.launcher_preference_deadline);
         push(
             "panel",
-            self.panel_hosts
-                .iter()
-                .filter(|(output, _)| !self.plugin_taskbar_hosts.contains_key(*output))
-                .filter_map(|(_, host)| host.next_deadline())
-                .chain(
-                    self.plugin_taskbar_host
-                        .is_none()
-                        .then(|| self.panel_host.next_deadline())
-                        .flatten(),
-                )
-                .chain(
-                    self.plugin_taskbar_hosts
-                        .values()
-                        .filter_map(|host| host.next_deadline()),
-                )
+            self.plugin_taskbar_hosts
+                .values()
+                .filter_map(|host| host.next_deadline())
                 .chain(
                     self.plugin_taskbar_host
                         .as_ref()
@@ -4944,41 +4900,8 @@ impl LiveShell {
         if desktop_changed {
             changed.push(SurfaceRole::Desktop);
         }
-        let input_output = self.panel_output.clone();
         let plugin_clock_due = self.plugin_taskbar_host.is_some()
             && self.panel_deadline.is_some_and(|deadline| now >= deadline);
-        let mut due_panels = self
-            .panel_hosts
-            .iter()
-            .filter(|(output, host)| {
-                !self.plugin_taskbar_hosts.contains_key(*output)
-                    && host.next_deadline().is_some_and(|deadline| now >= deadline)
-            })
-            .map(|(output, _)| output.clone())
-            .collect::<Vec<_>>();
-        if self.plugin_taskbar_host.is_none()
-            && self
-                .panel_deadline
-                .into_iter()
-                .chain(self.panel_host.next_deadline())
-                .any(|deadline| now >= deadline)
-        {
-            due_panels.push(input_output.clone());
-        }
-        for output in due_panels {
-            self.switch_panel_output(output);
-            let outcome = self.panel_host.step(HostBatch {
-                now: Some(now),
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-            self.panel_change_token = outcome.change_token;
-            self.panel_deadline = outcome.next_deadline;
-            if outcome.changed | self.apply_panel_effects() {
-                changed.push(SurfaceRole::Taskbar);
-            }
-        }
-        self.switch_panel_output(input_output);
         if plugin_clock_due {
             self.panel_deadline = Some(now + taskbar::duration_until_next_minute());
             changed.push(SurfaceRole::Taskbar);
@@ -6237,15 +6160,10 @@ impl LiveShell {
             TaskbarAction::Codex => Some("taskbar-codex"),
             _ => None,
         };
-        let anchor_bounds = if let Some(host) = self.plugin_taskbar_host.as_ref() {
-            plugin_control.and_then(|id| taskbar_plugin_control_bounds(host, id))
-        } else {
-            self.panel_host
-                .semantic_targets_for_message(&action)
-                .into_iter()
-                .next()
-                .map(|target| target.bounds)
-        };
+        let anchor_bounds = self
+            .plugin_taskbar_host
+            .as_ref()
+            .and_then(|host| plugin_control.and_then(|id| taskbar_plugin_control_bounds(host, id)));
         if let Some((role, control)) = anchored_role
             && let (Some(output), Some(bounds)) = (self.panel_output.clone(), anchor_bounds)
         {
@@ -6305,13 +6223,6 @@ impl LiveShell {
                         taskbar_plugin_control_bounds(host, &format!("taskbar-item-{index}"))
                             .map(|bounds| bounds.origin.x.round() as i32)
                     })
-                    .or_else(|| {
-                        self.panel_host
-                            .semantic_targets_for_message(&TaskbarAction::Task(index))
-                            .into_iter()
-                            .next()
-                            .map(|target| target.bounds.origin.x.round() as i32)
-                    })
                     .unwrap_or((PANEL_ITEM_WIDTH * (index + 1) as f32).round() as i32);
                 self.window_menu_anchor_x = Some(self.panel_origin_x + x);
                 self.window_menu_anchor_y = Some(self.panel_origin_y);
@@ -6361,9 +6272,11 @@ impl LiveShell {
                     self.set_launcher_visible(false);
                 }
                 if !self.control_visible {
-                    let _ = self
-                        .control_host
-                        .adopt_input_modality(self.panel_host.inspect().modality);
+                    if let Some(taskbar) = self.plugin_taskbar_host.as_ref() {
+                        let _ = self
+                            .control_host
+                            .adopt_input_modality(taskbar.inspect().modality);
+                    }
                 }
                 self.set_control_visible(!self.control_visible);
             }
@@ -6668,19 +6581,7 @@ impl LiveShell {
         if self.panel_output == output {
             return;
         }
-        let next = self.panel_hosts.remove(&output).unwrap_or_else(|| {
-            let mut application = self.panel_host.application().clone();
-            application.effects.clear();
-            application.task_drag = None;
-            application.panel_hover = None;
-            nickel_ui::UiHost::new(application, 1920, 56)
-        });
-        let previous = std::mem::replace(&mut self.panel_host, next);
-        if self.panel_hosts.len() >= 32 {
-            self.panel_hosts.clear();
-        }
         let previous_output = std::mem::replace(&mut self.panel_output, output);
-        self.panel_hosts.insert(previous_output.clone(), previous);
         if let Some(current) = self.plugin_taskbar_host.take() {
             let next = self
                 .plugin_taskbar_hosts
@@ -6719,7 +6620,7 @@ impl LiveShell {
         self.panel_deadline = if self.plugin_taskbar_host.is_some() {
             Some(Instant::now() + taskbar::duration_until_next_minute())
         } else {
-            self.panel_host.next_deadline()
+            None
         };
     }
 
@@ -7565,23 +7466,18 @@ impl LiveShell {
     }
 
     fn preview_origin_x(&self, index: usize, width: u32) -> i32 {
-        let control_bounds = if let Some(host) = self.plugin_taskbar_host.as_ref() {
-            taskbar_plugin_control_bounds(host, &format!("taskbar-item-{index}"))
-        } else {
-            self.panel_host
-                .semantic_targets_for_message(&TaskbarAction::Task(index))
-                .into_iter()
-                .next()
-                .map(|target| target.bounds)
-        }
-        .unwrap_or_else(|| {
-            Rect::new(
-                PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
-                0.0,
-                PANEL_ITEM_WIDTH,
-                PANEL_ITEM_WIDTH,
-            )
-        });
+        let control_bounds = self
+            .plugin_taskbar_host
+            .as_ref()
+            .and_then(|host| taskbar_plugin_control_bounds(host, &format!("taskbar-item-{index}")))
+            .unwrap_or_else(|| {
+                Rect::new(
+                    PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
+                    0.0,
+                    PANEL_ITEM_WIDTH,
+                    PANEL_ITEM_WIDTH,
+                )
+            });
         TaskbarPreviewAnchor::new(self.panel_origin_x, control_bounds).preview_origin_x(width)
     }
 
@@ -8122,9 +8018,12 @@ impl LiveShell {
                 .as_ref()
                 .is_some_and(|host| host.pointer_interaction_active())
             || self.lock_host.pointer_interaction_active()
-            || self.panel_host.pointer_interaction_active()
             || self
-                .panel_hosts
+                .plugin_taskbar_host
+                .as_ref()
+                .is_some_and(|host| host.pointer_interaction_active())
+            || self
+                .plugin_taskbar_hosts
                 .values()
                 .any(|host| host.pointer_interaction_active())
             || self
@@ -10465,11 +10364,6 @@ impl LiveShell {
         {
             self.switch_panel_output(None);
         }
-        self.panel_hosts.retain(|output, _| {
-            output
-                .as_ref()
-                .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
-        });
         self.panel_projections.retain(|output, _| {
             output
                 .as_ref()
@@ -10558,65 +10452,6 @@ impl LiveShell {
             },
             clock,
         )
-    }
-
-    fn sync_panel_host(&mut self) -> bool {
-        let groups = self.panel_groups();
-        let tasks_changed = !Arc::ptr_eq(&groups, &self.panel_host.application().groups);
-        let pet_frame = self.panel_host.application().pet_frame;
-        let task_icons = self.resolve_task_icons(groups.as_ref(), pet_frame);
-        let visible_panel_hover = self.visible_panel_hover();
-        let application = self.panel_host.application_mut();
-        let keyboard_changed = application.keyboard_enabled != self.keyboard_enabled
-            || application.keyboard_visible != self.keyboard_visible;
-        application.keyboard_enabled = self.keyboard_enabled;
-        application.keyboard_visible = self.keyboard_visible;
-        let task_icons_changed = application.task_icons.len() != task_icons.len()
-            || application
-                .task_icons
-                .iter()
-                .zip(&task_icons)
-                .any(|(current, next)| match (current, next) {
-                    (Some((current_id, current)), Some((next_id, next))) => {
-                        current_id != next_id || !Arc::ptr_eq(current, next)
-                    }
-                    (None, None) => false,
-                    _ => true,
-                });
-        let application_changed = application.palette != self.palette
-            || tasks_changed
-            || application.tray != self.tray
-            || application.panel_hover != visible_panel_hover
-            || application.launcher_visible != self.launcher_visible
-            || application.codex_project_menu_visible != self.codex_project_menu_visible
-            || application.control_visible != self.control_visible
-            || application.codex_available != self.launcher.codex_available()
-            || task_icons_changed
-            || keyboard_changed;
-        application.codex_available = self.launcher.codex_available();
-        application.groups = groups;
-        if application.tray != self.tray {
-            application.tray.clone_from(&self.tray);
-        }
-        application.tray_icons.clone_from(&self.tray_icons);
-        application.panel_icon = Arc::clone(&self.panel_icon);
-        application.codex_icon = Arc::clone(&self.codex_icon);
-        application.task_icons = task_icons;
-        application.palette = self.palette;
-        application.panel_hover = visible_panel_hover;
-        application.launcher_visible = self.launcher_visible;
-        application.codex_project_menu_visible = self.codex_project_menu_visible;
-        application.control_visible = self.control_visible;
-        application_changed
-    }
-
-    fn apply_panel_effects(&mut self) -> bool {
-        let effects = std::mem::take(&mut self.panel_host.application_mut().effects);
-        let changed = !effects.is_empty();
-        for action in effects {
-            self.apply_panel_action(action);
-        }
-        changed
     }
 }
 
