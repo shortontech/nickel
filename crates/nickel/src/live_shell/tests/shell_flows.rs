@@ -541,6 +541,8 @@
     fn run_plugin_can_start_render_and_retire() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::run_manifest().id;
+        let run_key = crate::plugin_panel::run_surface_key();
+        let launcher_key = crate::plugin_panel::launcher_surface_key();
         shell.set_plugin_enabled(id, false).unwrap();
         assert!(!shell.set_run_visible(true));
         assert!(!shell.run_visible);
@@ -549,12 +551,21 @@
         assert!(shell.plugin_run_host.is_some());
         shell.apply_session_launcher_visibility(true);
         assert!(shell.set_run_visible(true));
+        assert_eq!(shell.active_launcher_surface_key(), Some(run_key.clone()));
         assert!(shell.plugin_run_host.as_ref().unwrap().inspect().keyboard_focus.is_some());
-        shell.scene(super::SurfaceRole::Launcher, 620, 180);
+        assert!(shell
+            .plugin_surface_scene_for_output(&run_key, None, 620, 180)
+            .is_some());
+        assert_ne!(
+            shell.plugin_surface_change_token(&run_key),
+            shell.plugin_surface_change_token(&launcher_key)
+        );
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.plugin_run_host.is_none());
         assert!(!shell.run_visible);
+        assert_eq!(shell.active_launcher_surface_key(), Some(launcher_key));
+        assert!(shell.plugin_surface_change_token(&run_key).is_none());
         assert!(shell.run_scene(620, 180).is_empty());
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
@@ -648,10 +659,14 @@
     fn disabled_launcher_retires_surface_without_native_fallback() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::launcher_manifest().id;
+        let key = crate::plugin_panel::launcher_surface_key();
         assert!(shell.can_show_launcher());
+        assert_eq!(shell.active_launcher_surface_key(), Some(key.clone()));
         shell.apply_session_launcher_visibility(true);
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(!shell.can_show_launcher());
+        assert!(shell.active_launcher_surface_key().is_none());
+        assert!(shell.plugin_surface_change_token(&key).is_none());
         assert!(!shell.launcher_visible);
         assert!(shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
         assert!(!shell.request_launcher_toggle());
@@ -659,6 +674,7 @@
         assert_eq!(shell.launcher.query(), "");
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.can_show_launcher());
+        assert_eq!(shell.active_launcher_surface_key(), Some(key));
         assert!(!shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
     }
 

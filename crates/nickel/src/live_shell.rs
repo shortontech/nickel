@@ -3345,6 +3345,18 @@ impl LiveShell {
         })
     }
 
+    pub(crate) fn active_launcher_surface_key(
+        &self,
+    ) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+        if self.run_visible {
+            self.plugin_run_host.as_ref()?;
+            Some(crate::plugin_panel::run_surface_key())
+        } else {
+            self.plugin_launcher_host.as_ref()?;
+            Some(crate::plugin_panel::launcher_surface_key())
+        }
+    }
+
     pub fn plugin_registry(&self) -> &nickel_core::plugins::PluginRegistry {
         &self.plugin_registry
     }
@@ -3358,6 +3370,9 @@ impl LiveShell {
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> bool {
         (self.plugin_desktop_host.is_some() && crate::plugin_panel::desktop_surface_key() == *key)
+            || (self.plugin_launcher_host.is_some()
+                && crate::plugin_panel::launcher_surface_key() == *key)
+            || (self.plugin_run_host.is_some() && crate::plugin_panel::run_surface_key() == *key)
             || (self.plugin_volume_osd_host.is_some()
                 && crate::plugin_panel::volume_osd_surface_key() == *key)
             || self.taskbar_surface_key().as_ref() == Some(key)
@@ -3489,7 +3504,25 @@ impl LiveShell {
                     .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
             });
         }
-        self.plugin_panel_change_token(key)
+        let (inspection, surface_salt) = if *key == crate::plugin_panel::launcher_surface_key() {
+            (self.plugin_launcher_host.as_ref()?.inspect(), 0)
+        } else if *key == crate::plugin_panel::run_surface_key() {
+            // Both plugins share one native popup. Distinguish their tokens
+            // even when their host-local frame generations happen to match.
+            (self.plugin_run_host.as_ref()?.inspect(), 1_u64 << 63)
+        } else {
+            return self.plugin_panel_change_token(key);
+        };
+        Some(HostChangeToken {
+            frame_generation: inspection
+                .frame_generation
+                .wrapping_add(self.plugin_activation_generation.rotate_left(32))
+                .wrapping_add(surface_salt),
+            semantic_generation: inspection
+                .semantic_generation
+                .wrapping_add(self.plugin_activation_generation.rotate_left(32))
+                .wrapping_add(surface_salt),
+        })
     }
 
     fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
@@ -3668,6 +3701,18 @@ impl LiveShell {
                 return None;
             }
             return Some(self.volume_osd_scene(width, height));
+        }
+        if *key == crate::plugin_panel::launcher_surface_key() {
+            if self.plugin_launcher_host.is_none() {
+                return None;
+            }
+            return Some(self.launcher_scene(width, height));
+        }
+        if *key == crate::plugin_panel::run_surface_key() {
+            if self.plugin_run_host.is_none() {
+                return None;
+            }
+            return Some(self.run_scene(width, height));
         }
         self.plugin_panel_scene_for_output(key, output, width, height)
     }

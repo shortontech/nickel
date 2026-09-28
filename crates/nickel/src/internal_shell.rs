@@ -627,8 +627,13 @@ impl InternalShellCoordinator {
 
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
+        let launcher_key = self
+            .entries
+            .iter()
+            .find(|surface| surface.id == id && surface.role == SurfaceRole::Launcher)
+            .and_then(|_| self.shell.active_launcher_surface_key());
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
-        let commands = if let Some(key) = surface.plugin.as_ref() {
+        let commands = if let Some(key) = surface.plugin.as_ref().or(launcher_key.as_ref()) {
             self.shell.plugin_surface_scene_for_output(
                 key,
                 surface.output.as_deref(),

@@ -55,6 +55,19 @@ pub fn launcher_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn launcher_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    let manifest = launcher_manifest();
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: manifest.id.clone(),
+        surface_id: manifest
+            .surfaces
+            .first()
+            .expect("bundled launcher needs a surface")
+            .id
+            .clone(),
+    }
+}
+
 pub fn taskbar_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -162,6 +175,19 @@ pub fn run_manifest() -> &'static PluginManifest {
         PluginManifest::from_json(include_str!("../../../assets/plugins/run/plugin.json"))
             .expect("bundled run plugin manifest must be valid")
     })
+}
+
+pub fn run_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    let manifest = run_manifest();
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: manifest.id.clone(),
+        surface_id: manifest
+            .surfaces
+            .first()
+            .expect("bundled Run dialog needs a surface")
+            .id
+            .clone(),
+    }
 }
 
 fn bundled_source(

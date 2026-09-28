@@ -1236,6 +1236,9 @@ fn scene_for_native_surface(
     let surface = shell.surface(id)?;
     if let Some(key) = surface.plugin_key() {
         state.plugin_surface_scene_for_output(key, Some(surface.output_name()), width, height)
+    } else if surface.role() == SurfaceRole::Launcher {
+        let key = state.active_launcher_surface_key()?;
+        state.plugin_surface_scene_for_output(&key, None, width, height)
     } else {
         Some(state.scene(surface.role(), width, height))
     }
@@ -1249,6 +1252,10 @@ fn scene_change_token_for_native_surface(
 ) -> Option<HostChangeToken> {
     if let Some(key) = shell.surface(id)?.plugin_key() {
         state.plugin_surface_change_token(key)
+    } else if role == SurfaceRole::Launcher {
+        state
+            .active_launcher_surface_key()
+            .and_then(|key| state.plugin_surface_change_token(&key))
     } else {
         state.scene_change_token(role)
     }
