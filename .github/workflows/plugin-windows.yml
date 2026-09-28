@@ -125,6 +125,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib disabled_taskbar_retires_its_visible_role
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib taskbar_plugin_identity_retires_and_returns_with_its_surface
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib shell_surfaces_follow_updated_display_geometry
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib desktop_work_area_follows_enabled_taskbar_outputs_and_edge

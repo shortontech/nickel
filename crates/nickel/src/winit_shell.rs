@@ -847,7 +847,9 @@ impl WinitShell {
                 self.create_surface(role, 0, primary, primary_name)?;
             }
         }
-        self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
+        if self.taskbar_panel_enabled {
+            self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
+        }
         self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Screenshot, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::OnScreenKeyboard, 0, primary, primary_name)?;
@@ -929,6 +931,7 @@ impl WinitShell {
         let launcher_available = launcher_plugin_surface_available(&self.active_fixed_plugins);
         self.surfaces.retain(|surface| match surface.role {
             SurfaceRole::Launcher => launcher_available,
+            SurfaceRole::WindowContextMenu => self.taskbar_panel_enabled,
             SurfaceRole::Desktop | SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
                 fixed_plugin_surface_key(surface.role)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key))
@@ -1073,8 +1076,10 @@ impl WinitShell {
             SurfaceRole::Launcher,
             SurfaceRole::VolumeOsd,
             SurfaceRole::WindowPreview,
+            SurfaceRole::WindowContextMenu,
         ] {
             if (role == SurfaceRole::Launcher && launcher_available
+                || role == SurfaceRole::WindowContextMenu && self.taskbar_panel_enabled
                 || fixed_plugin_surface_key(role)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
                 && !self.surfaces.iter().any(|surface| surface.role == role)

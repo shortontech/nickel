@@ -339,6 +339,11 @@ impl InternalShellCoordinator {
                 {
                     continue;
                 }
+                if role == SurfaceRole::WindowContextMenu
+                    && self.shell.taskbar_surface_key().is_none()
+                {
+                    continue;
+                }
                 let plugin = match role {
                     SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
                     SurfaceRole::WindowPreview => {
@@ -2313,6 +2318,10 @@ mod tests {
             .clone()
             .unwrap();
         let original_id = coordinator.plugin_surface(&key, "nested").unwrap().id;
+        let menu_id = coordinator
+            .surface(SurfaceRole::WindowContextMenu, None)
+            .unwrap()
+            .id;
 
         coordinator
             .shell_mut()
@@ -2321,6 +2330,11 @@ mod tests {
         coordinator.set_outputs(&[output.clone()]);
         assert!(coordinator.plugin_surface(&key, "nested").is_none());
         assert!(coordinator.scene(original_id).is_none());
+        assert!(
+            coordinator
+                .surface(SurfaceRole::WindowContextMenu, None)
+                .is_none()
+        );
 
         coordinator
             .shell_mut()
@@ -2330,6 +2344,13 @@ mod tests {
         let restored = coordinator.plugin_surface(&key, "nested").unwrap();
         assert_ne!(restored.id, original_id);
         assert!(coordinator.visible(restored.id));
+        assert_ne!(
+            coordinator
+                .surface(SurfaceRole::WindowContextMenu, None)
+                .unwrap()
+                .id,
+            menu_id
+        );
     }
 
     #[test]

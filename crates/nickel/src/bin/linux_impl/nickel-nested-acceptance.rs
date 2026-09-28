@@ -598,8 +598,10 @@ fn verify_taskbar_plugin_retires(
         return Err("disabled taskbar retained native UI memory".into());
     }
     wait_for_taskbar_presence(test_input, environment, false, Duration::from_secs(2))?;
+    wait_for_role_presence(test_input, environment, "ContextMenu", false)?;
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
     wait_for_taskbar_presence(test_input, environment, true, Duration::from_secs(2))?;
+    wait_for_role_presence(test_input, environment, "ContextMenu", true)?;
     Ok(())
 }
 
