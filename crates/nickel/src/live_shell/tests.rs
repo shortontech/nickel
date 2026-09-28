@@ -546,6 +546,14 @@ fn fixed_shell_surface_keys_follow_bundled_plugin_activation() {
             crate::plugin_panel::desktop_manifest().id.clone(),
         ),
         (
+            crate::plugin_panel::launcher_surface_key(),
+            crate::plugin_panel::launcher_manifest().id.clone(),
+        ),
+        (
+            crate::plugin_panel::run_surface_key(),
+            crate::plugin_panel::run_manifest().id.clone(),
+        ),
+        (
             crate::plugin_panel::volume_osd_surface_key(),
             crate::plugin_panel::volume_osd_manifest().id.clone(),
         ),

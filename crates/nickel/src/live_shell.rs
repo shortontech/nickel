@@ -3451,6 +3451,8 @@ impl LiveShell {
     ) -> HashSet<nickel_core::plugins::PluginSurfaceKey> {
         [
             crate::plugin_panel::desktop_surface_key(),
+            crate::plugin_panel::launcher_surface_key(),
+            crate::plugin_panel::run_surface_key(),
             crate::plugin_panel::volume_osd_surface_key(),
             crate::plugin_panel::window_preview_surface_key(),
         ]

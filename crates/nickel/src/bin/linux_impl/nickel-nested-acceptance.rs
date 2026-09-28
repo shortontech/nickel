@@ -553,6 +553,7 @@ fn verify_run_plugin_owns_dialog(
         return Err("disabled Run plugin retained its UI memory".into());
     }
     wait_for_launcher_visibility(test_input, environment, false, Duration::from_secs(5))?;
+    wait_for_role_presence(test_input, environment, "Launcher", false)?;
     press_super_r(test_input, environment)?;
     thread::sleep(Duration::from_millis(250));
     let surfaces = checked(test_input, environment, &["surfaces"])?;
@@ -560,6 +561,7 @@ fn verify_run_plugin_owns_dialog(
         return Err(format!("disabled Run opened a fallback dialog: {surfaces}"));
     }
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    wait_for_role_presence(test_input, environment, "Launcher", true)?;
     press_super_r(test_input, environment)?;
     wait_for_launcher_visibility(test_input, environment, true, Duration::from_secs(5))?;
     checked(test_input, environment, &["key", "escape", "pressed"])?;
@@ -1617,14 +1619,13 @@ fn wait_for_launcher_visibility(
         let surfaces = checked(test_input, environment, &["surfaces"])?;
         let launcher = surfaces
             .lines()
-            .find(|line| line.starts_with("Launcher\t"))
-            .ok_or("internal launcher disappeared while awaiting visibility")?;
-        if launcher.ends_with("hidden") != expected_visible {
+            .find(|line| line.starts_with("Launcher\t"));
+        if launcher.is_some_and(|line| !line.ends_with("hidden")) == expected_visible {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "launcher did not become {} before deadline: {launcher}",
+                "launcher did not become {} before deadline: {launcher:?}",
                 if expected_visible {
                     "visible"
                 } else {
