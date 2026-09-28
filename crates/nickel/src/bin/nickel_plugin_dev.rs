@@ -140,9 +140,9 @@ mod platform {
         PluginPackage, PluginSlotContract, PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::{
-        PluginPanelApplication, control_center_manifest, desktop_manifest, launcher_manifest,
-        manifest, notification_manifest, run_manifest, taskbar_manifest, volume_osd_manifest,
-        window_preview_manifest,
+        PluginPanelApplication, codex_projects_manifest, control_center_manifest, desktop_manifest,
+        launcher_manifest, manifest, notification_manifest, run_manifest, taskbar_manifest,
+        volume_osd_manifest, window_preview_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
@@ -154,6 +154,7 @@ mod platform {
             notification_manifest(),
             run_manifest(),
             control_center_manifest(),
+            codex_projects_manifest(),
             window_preview_manifest(),
             volume_osd_manifest(),
         ]
@@ -607,6 +608,17 @@ mod platform {
                 assert!(package.manifest.surfaces.is_empty());
                 assert_eq!(package.manifest.contributes.len(), 1);
             }
+        }
+
+        #[test]
+        fn codex_project_menu_uses_the_bundled_dev_path() {
+            let root = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/codex-projects"
+            ));
+            let package = load_dev_package(root).unwrap();
+            assert_eq!(package.manifest.id, "org.nickel.codex-projects");
+            assert_eq!(package.manifest.surfaces.len(), 1);
         }
 
         #[test]
