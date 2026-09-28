@@ -15,9 +15,25 @@ Build the Rust development tools, then start an isolated nested session on
 Linux:
 
 ```sh
-cargo build -p nickel --bin nickel-plugin --bin nickel-nested --features backend-winit
+cargo build -p nickel --bin nickel-plugin --bin nickel-nested --bin nickel-test-input --features backend-winit
 target/debug/nickel-plugin dev assets/plugins/hello-panel
 ```
+
+The Linux dev command prints a private `test-control.env` path for its nested
+session. In another terminal, load that file and send Super to the nested shell:
+
+```sh
+set -a
+. /path/printed/by/nickel-plugin/test-control.env
+set +a
+target/debug/nickel-test-input key meta pressed
+target/debug/nickel-test-input key meta released
+target/debug/nickel-test-input surfaces
+```
+
+This targets the nested session, so it does not press a controller Guide button
+or toggle the host desktop's launcher. The file is removed with the temporary
+profile when dev mode stops.
 
 On Windows, build `nickel-plugin.exe` and `nickel.exe` beside each other, then
 run `nickel-plugin.exe dev assets/plugins/hello-panel`. The command starts a

@@ -325,7 +325,39 @@ mod platform {
             );
         }
         #[cfg(target_os = "linux")]
-        command.env("XDG_CONFIG_HOME", config_root);
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let runtime = config_root.join("runtime");
+            std::fs::create_dir_all(&runtime)
+                .map_err(|error| format!("could not create nested runtime: {error}"))?;
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("could not protect nested runtime: {error}"))?;
+            let control_environment = config_root.join("test-control.env");
+            if control_environment.exists() {
+                std::fs::remove_file(&control_environment).map_err(|error| {
+                    format!("could not replace test-control credentials: {error}")
+                })?;
+            }
+            if let Some(display) = std::env::var_os("WAYLAND_DISPLAY") {
+                let display = PathBuf::from(display);
+                let display = if display.is_absolute() {
+                    display
+                } else {
+                    std::env::var_os("XDG_RUNTIME_DIR")
+                        .map(PathBuf::from)
+                        .ok_or("WAYLAND_DISPLAY needs XDG_RUNTIME_DIR for nested plugin dev")?
+                        .join(display)
+                };
+                command.env("WAYLAND_DISPLAY", display);
+            }
+            command
+                .env_remove("WAYLAND_SOCKET")
+                .env("XDG_CONFIG_HOME", config_root)
+                .env("XDG_RUNTIME_DIR", runtime)
+                .env("NICKEL_TEST_CONTROL_ENV_FILE", control_environment)
+                .arg("--test-control");
+        }
         #[cfg(target_os = "windows")]
         command
             .env("LOCALAPPDATA", config_root)
@@ -364,6 +396,11 @@ mod platform {
         println!(
             "Testing {} in isolated Nickel. Save plugin.json, JSX source, or {} to reload; Ctrl+C stops.",
             package.manifest.id, package.manifest.entry
+        );
+        #[cfg(target_os = "linux")]
+        println!(
+            "Nested input credentials: {}",
+            config.path().join("test-control.env").display()
         );
         let mut child = launch(
             &shell,
