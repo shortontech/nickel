@@ -5235,7 +5235,7 @@ impl WindowsRemoteControl {
                                     Ok(changed) => {
                                         if changed
                                             && let Err(reason) =
-                                                shell.set_plugin_panels(state.plugin_panels())
+                                                shell.set_plugin_panels(state.shell_panel_surfaces())
                                         {
                                             return error(reason);
                                         }
