@@ -130,7 +130,9 @@ typed effect, as the bundled taskbar does when moving a pinned app.
 Escape, outside input, or focus loss. The handler should clear the state that
 controls `open`; dialog buttons may still update state and request typed effects.
 For example, `{ type: "show-settings" }` opens Nickel Settings when the plugin
-has the `settings-show` capability.
+has the `settings-show` capability. Nickel launches its bundled Settings
+executable when installed beside the shell, including from a nested session;
+the application catalog remains a fallback.
 Declare a typed setting in `plugin.json` to expose it in Settings and read its
 current value from `nickel.data.settings`. A component may save its own declared
 setting with `nickel.request({ type: "set-plugin-setting", key: "open-count",

@@ -451,8 +451,33 @@ fn verify_component_window(
     let first_window = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
     click_at(test_input, environment, first_window.1 + 260, first_window.2 + 77)?;
     wait_for_component_dialog_memory(test_input, environment, initial_bytes)?;
-    checked(test_input, environment, &["key", "escape", "pressed"])?;
-    checked(test_input, environment, &["key", "escape", "released"])?;
+    click_at(test_input, environment, first_window.1 + 80, first_window.2 + 182)?;
+    wait_for_settings_memory(test_input, environment, true, Duration::from_secs(8))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let settings_window = loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        if let Some(id) = windows.lines().find_map(|line| {
+            line.contains("\tNickel Settings\t")
+                .then(|| line.split('\t').next()?.parse::<u64>().ok())
+                .flatten()
+        }) {
+            break id;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("plugin action launched no Settings window: {windows}"));
+        }
+        thread::sleep(POLL);
+    };
+    checked(
+        test_input,
+        environment,
+        &["semantic", "window", &settings_window.to_string(), "click"],
+    )?;
+    checked(test_input, environment, &["key", "alt", "pressed"])?;
+    checked(test_input, environment, &["key", "f4", "pressed"])?;
+    checked(test_input, environment, &["key", "f4", "released"])?;
+    checked(test_input, environment, &["key", "alt", "released"])?;
+    wait_for_settings_memory_expiry(test_input, environment, Duration::from_secs(7))?;
     let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
     let disabled: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
@@ -731,7 +756,15 @@ fn verify_settings_memory_report(
     let _ = process.kill();
     let _ = process.wait();
     result?;
-    let deadline = Instant::now() + Duration::from_secs(7);
+    wait_for_settings_memory_expiry(test_input, environment, Duration::from_secs(7))
+}
+
+fn wait_for_settings_memory_expiry(
+    test_input: &Path,
+    environment: &[(String, String)],
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
     loop {
         let output = checked(test_input, environment, &["plugins"])?;
         let snapshot: nickel_session_protocol::PluginStatusSnapshot =

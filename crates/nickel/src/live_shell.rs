@@ -8120,9 +8120,7 @@ impl LiveShell {
             }
             platform::GlobalShortcut::ShowRun => self.set_run_visible(true),
             platform::GlobalShortcut::OpenFiles => self.launch_named_application("Nickel File"),
-            platform::GlobalShortcut::OpenSettings => {
-                self.launch_named_application("Nickel Settings")
-            }
+            platform::GlobalShortcut::OpenSettings => self.launch_settings(None),
             platform::GlobalShortcut::ShowControlCenter => {
                 self.control_host.application_mut().show_control_center();
                 self.set_control_visible(true);
@@ -8950,6 +8948,79 @@ impl LiveShell {
             return false;
         };
         self.shortcut_action_status = None;
+        self.launch_application(application);
+        true
+    }
+
+    fn launch_settings(&mut self, screen: Option<&str>) -> bool {
+        let sibling = std::env::current_exe().ok().map(|path| {
+            path.with_file_name(if cfg!(target_os = "windows") {
+                "nickel-settings.exe"
+            } else {
+                "nickel-settings"
+            })
+        });
+        #[cfg(target_os = "windows")]
+        if let Some(path) = sibling.as_ref().filter(|path| path.is_file()) {
+            let mut command = std::process::Command::new(path);
+            if let Some(screen) = screen {
+                command.args(["--screen", screen]);
+            }
+            match command.spawn() {
+                Ok(_) => {
+                    self.launcher_status = None;
+                    self.set_launcher_visible(false);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to launch Nickel Settings");
+                    self.launcher_status =
+                        Some(format!("Could not launch Nickel Settings: {error}"));
+                }
+            }
+            return true;
+        }
+        let application = sibling
+            .filter(|path| path.is_file())
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .map(|program| {
+                let mut command = vec![program];
+                if let Some(screen) = screen {
+                    command.extend(["--screen".into(), screen.into()]);
+                }
+                Application::new(
+                    crate::settings_plugin_report::ID.into(),
+                    "Nickel Settings".into(),
+                    None,
+                    None,
+                    Some(command),
+                )
+            })
+            .or_else(|| {
+                self.launcher
+                    .applications()
+                    .find(|application| application.name() == "Nickel Settings")
+                    .cloned()
+                    .map(|application| {
+                        if let (Some(screen), Some(command)) =
+                            (screen, application.launch_command())
+                        {
+                            let mut command = command.to_vec();
+                            command.extend(["--screen".into(), screen.into()]);
+                            Application::new(
+                                application.id().to_owned(),
+                                application.name().to_owned(),
+                                application.icon().map(str::to_owned),
+                                application.icon_path().map(std::path::Path::to_owned),
+                                Some(command),
+                            )
+                        } else {
+                            application
+                        }
+                    })
+            });
+        let Some(application) = application else {
+            return self.launch_named_application("Nickel Settings");
+        };
         self.launch_application(application);
         true
     }
@@ -11278,49 +11349,7 @@ impl LiveShell {
                     crate::launcher::SettingsDestination::KeyboardShortcuts => "keyboard-shortcuts",
                     crate::launcher::SettingsDestination::About => "about",
                 };
-                #[cfg(target_os = "windows")]
-                {
-                    let result = std::env::current_exe()
-                        .map(|path| path.with_file_name("nickel-settings.exe"))
-                        .and_then(|path| {
-                            std::process::Command::new(path)
-                                .args(["--screen", screen])
-                                .spawn()
-                        });
-                    match result {
-                        Ok(_) => self.set_launcher_visible(false),
-                        Err(error) => {
-                            tracing::warn!(%error, "failed to launch Nickel Settings");
-                            self.launcher_status =
-                                Some(format!("Could not launch Nickel Settings: {error}"));
-                        }
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let application = self
-                        .launcher
-                        .applications()
-                        .find(|application| application.name() == "Nickel Settings")
-                        .cloned();
-                    if let Some(application) = application {
-                        let application = match application.launch_command() {
-                            Some(command) => {
-                                let mut command = command.to_vec();
-                                command.extend(["--screen".into(), screen.into()]);
-                                Application::new(
-                                    application.id().to_owned(),
-                                    application.name().to_owned(),
-                                    application.icon().map(str::to_owned),
-                                    application.icon_path().map(std::path::Path::to_owned),
-                                    Some(command),
-                                )
-                            }
-                            _ => application,
-                        };
-                        self.launch_application(application);
-                    }
-                }
+                self.launch_settings(Some(screen));
             }
             LauncherShellEffect::OpenAccount => {
                 self.set_control_visible(true);

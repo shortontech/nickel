@@ -31,7 +31,10 @@ runtime data.
 The harness also installs the shipped component-window example into the private
 profile. It checks that enabling the package maps an ordinary window with a
 retained UI memory report, sends a scoped pointer click to open its component
-dialog, and observes the larger retained native tree. Disabling it unregisters
+dialog, and observes the larger retained native tree. It clicks the dialog's
+typed Settings action, checks that Settings opens in the private session and
+reports its own UI memory, then closes it and waits for that report to expire.
+Disabling the example unregisters
 the window and clears that report, and re-enabling creates a fresh window identity.
 It then installs a two-window package, focuses one window and sends Alt+F4
 through the same scoped test-control socket. The test checks that the other
