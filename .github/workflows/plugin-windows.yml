@@ -187,6 +187,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-overlay
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-reserved-panel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-task-action
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-control-section
@@ -327,6 +329,109 @@ jobs:
             $shell.Refresh()
             if (-not $shell.HasExited) { Stop-Process -Id $shell.Id -Force }
             if (Test-Path $stderr) { Get-Content $stderr -Tail 30 }
+          }
+
+      - name: Verify two reserved panels stack on Windows
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class NickelPanelStackProbe {
+              private delegate bool EnumWindowsProc(IntPtr handle, IntPtr context);
+              [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+              [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo {
+                  public int Size;
+                  public Rect Monitor;
+                  public Rect Work;
+                  public uint Flags;
+              }
+              [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr context);
+              [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+              [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder title, int capacity);
+              [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
+              [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr handle, uint flags);
+              [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+              public static string Check(uint processId) {
+                  var panels = new List<(IntPtr Monitor, Rect Bounds)>();
+                  EnumWindows((handle, context) => {
+                      uint owner;
+                      GetWindowThreadProcessId(handle, out owner);
+                      if (owner != processId || !IsWindowVisible(handle)) return true;
+                      var title = new StringBuilder(256);
+                      GetWindowText(handle, title, title.Capacity);
+                      if (title.ToString() != "Nickel Taskbar") return true;
+                      Rect bounds;
+                      if (GetWindowRect(handle, out bounds)) panels.Add((MonitorFromWindow(handle, 2), bounds));
+                      return true;
+                  }, IntPtr.Zero);
+                  if (panels.Count < 2) return $"found {panels.Count} reserved panel window(s)";
+                  for (int first = 0; first < panels.Count; first++) {
+                      for (int second = first + 1; second < panels.Count; second++) {
+                          var a = panels[first];
+                          var b = panels[second];
+                          if (a.Monitor == IntPtr.Zero || a.Monitor != b.Monitor) continue;
+                          var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+                          if (!GetMonitorInfo(a.Monitor, ref info)) return "monitor work area unavailable";
+                          bool fullWidth = Math.Abs(a.Bounds.Left - info.Monitor.Left) <= 2 &&
+                              Math.Abs(a.Bounds.Right - info.Monitor.Right) <= 2 &&
+                              Math.Abs(b.Bounds.Left - info.Monitor.Left) <= 2 &&
+                              Math.Abs(b.Bounds.Right - info.Monitor.Right) <= 2;
+                          bool separate = a.Bounds.Bottom <= b.Bounds.Top || b.Bounds.Bottom <= a.Bounds.Top;
+                          bool reserved = info.Work.Bottom <= Math.Min(a.Bounds.Top, b.Bounds.Top);
+                          if (fullWidth && separate && reserved) return "ok";
+                          return $"panels overlap or leave work area unreserved: first={a.Bounds.Top}..{a.Bounds.Bottom}, second={b.Bounds.Top}..{b.Bounds.Bottom}, workBottom={info.Work.Bottom}";
+                      }
+                  }
+                  return "reserved panels did not share a monitor";
+              }
+          }
+          '@
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nickel-reserved-panels-smoke"
+          New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+          $stdout = Join-Path $smokeRoot "dev.stdout"
+          $stderr = Join-Path $smokeRoot "dev.stderr"
+          $statusFile = Join-Path $smokeRoot "plugin-status.json"
+          $dev = Start-Process -FilePath "target/debug/nickel-plugin.exe" -ArgumentList @("dev", "assets/plugins/example-reserved-panel") -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $profileDir = $null
+          $shell = $null
+          try {
+            $result = "reserved panels not ready"
+            for ($attempt = 0; $attempt -lt 120; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              $dev.Refresh()
+              if ($dev.HasExited) { throw "Reserved panel development shell exited early (exit $($dev.ExitCode))" }
+              if (-not $profileDir -and (Test-Path $stdout)) {
+                $log = Get-Content $stdout -Raw
+                if ($log -match '(?m)^Isolated plugin profile: (.+?)\r?$') {
+                  $profileDir = $Matches[1].Trim()
+                  $env:LOCALAPPDATA = $profileDir
+                  $env:APPDATA = $profileDir
+                }
+              }
+              if (-not $profileDir) { continue }
+              $shell = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($dev.Id)" | Where-Object { $_.Name -eq "nickel.exe" } | Select-Object -First 1
+              if (-not $shell) { continue }
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $plugin = $snapshot.plugins | Where-Object { $_.id -eq "org.example.reserved-panel" } | Select-Object -First 1
+              if (-not $plugin -or $plugin.health.state -ne "running") { continue }
+              $result = [NickelPanelStackProbe]::Check([uint32]$shell.ProcessId)
+              if ($result -eq "ok") { break }
+            }
+            if ($result -ne "ok") { throw "Windows reserved panel stack verification failed: $result" }
+            Write-Host "Bundled and installed reserved panels stack without overlap on Windows."
+          } finally {
+            Get-CimInstance Win32_Process -Filter "ParentProcessId=$($dev.Id)" | Where-Object { $_.Name -eq "nickel.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            $dev.Refresh()
+            if (-not $dev.HasExited) { Stop-Process -Id $dev.Id -Force }
+            if (Test-Path $stderr) { Get-Content $stderr -Tail 30 }
+            if ($profileDir -and (Test-Path $profileDir)) { Remove-Item $profileDir -Recurse -Force -ErrorAction SilentlyContinue }
           }
 
       - name: Smoke test an installed component window on Windows

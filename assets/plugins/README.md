@@ -53,6 +53,8 @@ that host's `commands` slot; run the three directories together to inspect both
 display and interactive composition.
 The [dialog example](example-dialog/) opens a component dialog and requests
 Settings through a declared capability.
+The [reserved panel example](example-reserved-panel/) spans each output and
+stacks with the bundled taskbar while reserving desktop work area.
 The [separate dialog example](example-surface-dialog/) opens an owned native
 dialog surface. The [overlay example](example-overlay/) opens a translucent
 surface from a component window and dismisses it independently.

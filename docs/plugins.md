@@ -9,6 +9,9 @@ Nickel loads a compiled JavaScript entry from a directory containing
 `plugin.json`. The [bundled hello panel](../assets/plugins/hello-panel/) is a
 minimal working example. The [taskbar](../assets/plugins/taskbar/) shows how a
 first-party plugin requests host actions.
+The [reserved panel example](../assets/plugins/example-reserved-panel/) shows
+how to span each output and reserve work area alongside the taskbar. Remove
+`reserve_work_area` and set `bottom_offset` for a floating dock.
 The [window example](../assets/plugins/example-window/) shows a centered native
 window containing JSX components, a packaged image, and a dialog.
 A window plugin participates in ordinary window focus and stacking. Closing
