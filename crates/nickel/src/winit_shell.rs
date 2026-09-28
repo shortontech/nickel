@@ -2481,6 +2481,8 @@ impl WinitShell {
             .unwrap_or_else(|| {
                 if role == SurfaceRole::Desktop {
                     crate::plugin_panel::desktop_surface().clone()
+                } else if role == SurfaceRole::VolumeOsd {
+                    crate::plugin_panel::volume_osd_surface().clone()
                 } else {
                     self.plugin_panel_surface.clone()
                 }
@@ -2488,6 +2490,7 @@ impl WinitShell {
         let plugin_key = match role {
             SurfaceRole::Desktop => Some(crate::plugin_panel::desktop_surface_key()),
             SurfaceRole::Taskbar => Some(crate::plugin_panel::taskbar_surface_key()),
+            SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
             SurfaceRole::Panel => Some(plugin.map_or_else(
                 || nickel_core::plugins::PluginSurfaceKey {
                     plugin_id: self.plugin_panel_owner.clone(),
@@ -2542,16 +2545,18 @@ impl WinitShell {
                     application_id: application_id.clone(),
                     role: session_role,
                     output,
-                    plugin_surface: matches!(role, SurfaceRole::Desktop | SurfaceRole::Panel).then(
-                        || nickel_session_protocol::PluginSurfacePlacement {
-                            plugin_id: plugin_key.as_ref().unwrap().plugin_id.clone(),
-                            surface_id: panel.id.clone(),
-                            kind: protocol_plugin_surface_kind(panel.kind),
-                            width: panel.width,
-                            height: panel.height,
-                            bottom_offset: panel.bottom_offset,
-                        },
-                    ),
+                    plugin_surface: matches!(
+                        role,
+                        SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::VolumeOsd
+                    )
+                    .then(|| nickel_session_protocol::PluginSurfacePlacement {
+                        plugin_id: plugin_key.as_ref().unwrap().plugin_id.clone(),
+                        surface_id: panel.id.clone(),
+                        kind: protocol_plugin_surface_kind(panel.kind),
+                        width: panel.width,
+                        height: panel.height,
+                        bottom_offset: panel.bottom_offset,
+                    }),
                 },
             )
             .map_err(|error| format!("failed to register shell surface: {error}"))?;
@@ -2862,6 +2867,19 @@ fn surface_geometry_for_panel(
     panel_edge: PanelEdge,
     panel: &nickel_core::plugins::PluginSurface,
 ) -> (&'static str, i32, i32, u32, u32, bool) {
+    if role == SurfaceRole::VolumeOsd {
+        return (
+            VOLUME_OSD_TITLE,
+            geometry.x + (geometry.width.saturating_sub(panel.width) / 2) as i32,
+            geometry.y
+                + geometry
+                    .height
+                    .saturating_sub(panel.height.saturating_add(82)) as i32,
+            panel.width.min(geometry.width),
+            panel.height.min(geometry.height),
+            true,
+        );
+    }
     if role == SurfaceRole::Panel {
         let width = panel.width.min(geometry.width);
         let height = panel.height.min(geometry.height);
@@ -3524,6 +3542,26 @@ mod tests {
             assert_eq!((x, y, width, height), (-1200, expected_y, 1200, 56));
             assert!(!hidden);
         }
+    }
+
+    #[test]
+    fn volume_overlay_uses_bundled_manifest_size_and_bottom_placement() {
+        let geometry = DisplayGeometry {
+            x: 100,
+            y: 200,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+        };
+        let (title, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+            SurfaceRole::VolumeOsd,
+            geometry,
+            PanelEdge::Bottom,
+            crate::plugin_panel::volume_osd_surface(),
+        );
+        assert_eq!(title, super::VOLUME_OSD_TITLE);
+        assert_eq!((x, y, width, height), (850, 1102, 420, 96));
+        assert!(hidden);
     }
 
     #[test]

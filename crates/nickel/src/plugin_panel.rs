@@ -99,6 +99,20 @@ pub fn volume_osd_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn volume_osd_surface() -> &'static PluginSurface {
+    volume_osd_manifest()
+        .surfaces
+        .first()
+        .expect("bundled volume overlay needs a surface")
+}
+
+pub fn volume_osd_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: volume_osd_manifest().id.clone(),
+        surface_id: volume_osd_surface().id.clone(),
+    }
+}
+
 pub fn control_center_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {

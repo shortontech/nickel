@@ -344,7 +344,9 @@ impl InternalShellCoordinator {
                 } else {
                     maximum
                 };
-                desired.push((role, None, None, size));
+                let plugin = (role == SurfaceRole::VolumeOsd)
+                    .then(crate::plugin_panel::volume_osd_surface_key);
+                desired.push((role, plugin, None, size));
             }
         }
 
@@ -572,10 +574,11 @@ impl InternalShellCoordinator {
             .iter()
             .find(|surface| surface.id == id)
             .is_some_and(|surface| {
-                surface.plugin.as_ref().map_or_else(
-                    || self.shell.surface_visible(surface.role),
-                    |key| self.shell.plugin_surface_matches(key),
-                )
+                self.shell.surface_visible(surface.role)
+                    && surface
+                        .plugin
+                        .as_ref()
+                        .is_none_or(|key| self.shell.plugin_surface_matches(key))
             })
     }
 
@@ -1513,7 +1516,10 @@ fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) 
         SurfaceRole::Launcher => launcher_size(width, height),
         SurfaceRole::ControlCenter => control_center_size(width, height),
         SurfaceRole::Notification => (420.min(width), 180.min(height)),
-        SurfaceRole::VolumeOsd => (420.min(width), 96.min(height)),
+        SurfaceRole::VolumeOsd => (
+            crate::plugin_panel::volume_osd_surface().width.min(width),
+            crate::plugin_panel::volume_osd_surface().height.min(height),
+        ),
         SurfaceRole::WindowPreview => (760.min(width), 520.min(height)),
         SurfaceRole::WindowContextMenu | SurfaceRole::CodexProjectMenu => {
             (360.min(width), 480.min(height))
@@ -1974,7 +1980,13 @@ mod tests {
             height: 600,
             scale: 1.0,
         }]);
-        let osd = shell.surface(SurfaceRole::VolumeOsd, None).unwrap().id;
+        let osd_surface = shell.surface(SurfaceRole::VolumeOsd, None).unwrap();
+        assert_eq!(
+            osd_surface.plugin,
+            Some(crate::plugin_panel::volume_osd_surface_key())
+        );
+        assert_eq!(osd_surface.size, (420, 96));
+        let osd = osd_surface.id;
         shell.apply_system_status_update(crate::platform::SystemStatusUpdate::Audio(
             crate::platform::AudioStatus {
                 available: true,

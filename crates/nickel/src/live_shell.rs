@@ -3358,6 +3358,8 @@ impl LiveShell {
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> bool {
         (self.plugin_desktop_host.is_some() && crate::plugin_panel::desktop_surface_key() == *key)
+            || (self.plugin_volume_osd_host.is_some()
+                && crate::plugin_panel::volume_osd_surface_key() == *key)
             || self.taskbar_surface_key().as_ref() == Some(key)
             || (self.plugin_panel_host.is_some()
                 && self.plugin_panel_owner == key.plugin_id
@@ -3475,6 +3477,17 @@ impl LiveShell {
                 .plugin_desktop_host
                 .as_ref()
                 .map(|_| self.desktop_change_token);
+        }
+        if *key == crate::plugin_panel::volume_osd_surface_key() {
+            let inspection = self.plugin_volume_osd_host.as_ref()?.inspect();
+            return Some(HostChangeToken {
+                frame_generation: inspection
+                    .frame_generation
+                    .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+                semantic_generation: inspection
+                    .semantic_generation
+                    .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+            });
         }
         self.plugin_panel_change_token(key)
     }
@@ -3649,6 +3662,12 @@ impl LiveShell {
                 return None;
             }
             return Some(self.desktop_scene(width, height));
+        }
+        if *key == crate::plugin_panel::volume_osd_surface_key() {
+            if self.plugin_volume_osd_host.is_none() {
+                return None;
+            }
+            return Some(self.volume_osd_scene(width, height));
         }
         self.plugin_panel_scene_for_output(key, output, width, height)
     }
