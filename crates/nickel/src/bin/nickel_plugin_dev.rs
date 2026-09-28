@@ -412,6 +412,8 @@ mod platform {
             "Nested input credentials: {}",
             config.path().join("test-control.env").display()
         );
+        #[cfg(target_os = "windows")]
+        println!("Isolated plugin profile: {}", config.path().display());
         let mut child = launch(
             &shell,
             config.path(),
