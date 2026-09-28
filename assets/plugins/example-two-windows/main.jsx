@@ -7,6 +7,12 @@ function App() {
                 type: "show-plugin-surface",
                 surfaceId: "details",
             })}>Reopen details</Button>
-            : <Text>Details window</Text>}
+            : <Column>
+                <Text>Details window</Text>
+                <Button id="close-details" onClick={() => nickel.request({
+                    type: "hide-plugin-surface",
+                    surfaceId: "details",
+                })}>Close details</Button>
+            </Column>}
     </Panel>;
 }

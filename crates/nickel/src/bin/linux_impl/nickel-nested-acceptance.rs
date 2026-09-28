@@ -91,7 +91,7 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     fs::write(
         windows.join("main.js"),
-        "function App() { return h(Panel, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second')); }",
+        "function App() { return nickel.data.surface.id === 'first' ? h(Panel, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second')) : h(Panel, {}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
     )
     .map_err(|error| error.to_string())?;
     let dialog = runtime
@@ -191,7 +191,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked owner-close retirement, memory, launcher fallback, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked typed surface hide, owner-close retirement, memory, launcher fallback, and clean shutdown"
     );
     Ok(())
 }
@@ -722,6 +722,50 @@ fn verify_sibling_windows(
             return Err(format!(
                 "reopened plugin window did not restore memory account: reduced={reduced_bytes}, current={bytes}"
             ));
+        }
+        thread::sleep(POLL);
+    }
+    let windows = checked(test_input, environment, &["windows"])?;
+    let second_line = windows
+        .lines()
+        .find(|line| line.contains("\torg.example.acceptance-windows\t") && line.ends_with("420x240"))
+        .ok_or("reopened plugin window disappeared before typed hide")?;
+    let location = second_line
+        .rsplit('\t')
+        .next()
+        .and_then(|field| field.split_whitespace().next())
+        .ok_or("reopened plugin window has no location")?;
+    let (x, y) = location
+        .split_once(',')
+        .ok_or("reopened plugin window has invalid location")?;
+    let x: i32 = x.parse().map_err(|_| "invalid reopened plugin window x")?;
+    let y: i32 = y.parse().map_err(|_| "invalid reopened plugin window y")?;
+    click_at(test_input, environment, x + 210, y + 208)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        let installed = windows
+            .lines()
+            .filter(|line| line.contains("\torg.example.acceptance-windows\t"))
+            .collect::<Vec<_>>();
+        let status = checked(test_input, environment, &["plugins"])?;
+        let status: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&status).map_err(|error| error.to_string())?;
+        let plugin = status
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .ok_or("sibling window plugin disappeared after typed hide")?;
+        if installed.len() == 1
+            && installed[0].starts_with(&format!("{first}\t"))
+            && plugin.desired_enabled
+            && plugin.health == nickel_session_protocol::PluginRuntimeHealth::Running
+            && plugin.memory.native_ui_bytes == Some(reduced_bytes)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("typed window hide did not retire only its sibling: {windows}"));
         }
         thread::sleep(POLL);
     }

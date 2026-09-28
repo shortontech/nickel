@@ -21,7 +21,10 @@ can reopen one declared window with
 host accepts only a window, dialog, or overlay ID from that plugin's own manifest and
 ignores a request for a surface that is already open. The
 [two-window example](../assets/plugins/example-two-windows/) shows the request
-in a working package.
+in a working package. A window can request
+`nickel.request({ type: "hide-plugin-surface", surfaceId: "details" })` to close
+itself or a declared sibling; closing its last ordinary surface disables the
+package.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
 The [separate dialog example](../assets/plugins/example-surface-dialog/) declares

@@ -3320,12 +3320,14 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 surface.id == surface_id
                                     && matches!(
                                         surface.kind,
-                                        nickel_core::plugins::PluginSurfaceKind::Dialog
+                                        nickel_core::plugins::PluginSurfaceKind::Window
+                                            | nickel_core::plugins::PluginSurfaceKind::Dialog
                                             | nickel_core::plugins::PluginSurfaceKind::Overlay
                                     )
                             }) {
-                                self.last_error =
-                                    Some("plugin dialog or overlay is not declared".into());
+                                self.last_error = Some(
+                                    "plugin window, dialog, or overlay is not declared".into(),
+                                );
                                 return;
                             }
                             approved.push(PluginEffect::HidePluginSurface {
@@ -4963,6 +4965,45 @@ mod tests {
         assert_eq!(
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowPluginSurface {
+                plugin_id: package.manifest.id.clone(),
+                surface_id: "details".into(),
+            }]
+        );
+        let details = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "details")
+            .unwrap();
+        let mut details = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package_surface(
+                &package,
+                &std::collections::BTreeMap::new(),
+                details,
+            )
+            .unwrap(),
+            details.width,
+            details.height,
+        );
+        let close = details
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Close details".into(),
+            })
+            .unwrap();
+        assert!(close.bounds.origin.x < 225.0);
+        assert!(close.bounds.origin.x + close.bounds.size.width > 225.0);
+        assert!(close.bounds.origin.y < 77.0);
+        assert!(close.bounds.origin.y + close.bounds.size.height > 77.0);
+        details.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(close.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            details.application_mut().take_effects(),
+            vec![PluginEffect::HidePluginSurface {
                 plugin_id: package.manifest.id.clone(),
                 surface_id: "details".into(),
             }]
