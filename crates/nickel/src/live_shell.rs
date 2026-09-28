@@ -5285,18 +5285,6 @@ impl LiveShell {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
-            #[cfg(target_os = "windows")]
-            if matches!(
-                input,
-                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button { .. })
-            ) {
-                eprintln!(
-                    "plugin host before button: key={key:?} focused={} frame={} semantic={}",
-                    host.inspect().window_focused,
-                    host.inspect().frame_generation,
-                    host.inspect().semantic_generation,
-                );
-            }
             let (event, authority) =
                 internal_normalized_ingress(input, None, "plugin-panel", host.inspect(), None);
             let changed = host
