@@ -3304,6 +3304,7 @@ impl LiveShell {
                     || self.plugin_panel_host.is_some()
                     || !self.plugin_panel_extra_hosts.is_empty()
                     || self.plugin_notification_host.is_some()
+                    || self.plugin_control_host.is_some()
             }
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible && self.control_surface_available(),
@@ -3338,6 +3339,15 @@ impl LiveShell {
         role: SurfaceRole,
         key: Option<&nickel_core::plugins::PluginSurfaceKey>,
     ) -> bool {
+        if key == Some(&crate::plugin_panel::control_center_surface_key()) {
+            return role == SurfaceRole::Panel
+                && self.control_visible
+                && self.control_plugin_active();
+        }
+        if role == SurfaceRole::ControlCenter {
+            return self.control_visible
+                && self.control_host.application().view_state().projection_only;
+        }
         if key == Some(&crate::plugin_panel::notification_surface_key()) {
             return role == SurfaceRole::Panel
                 && self.notification_plugin_active()
@@ -3409,6 +3419,8 @@ impl LiveShell {
                 && crate::plugin_panel::window_preview_surface_key() == *key)
             || (self.plugin_notification_host.is_some()
                 && crate::plugin_panel::notification_surface_key() == *key)
+            || (self.plugin_control_host.is_some()
+                && crate::plugin_panel::control_center_surface_key() == *key)
             || self.taskbar_surface_key().as_ref() == Some(key)
             || (self.plugin_panel_host.is_some()
                 && self.plugin_panel_owner == key.plugin_id
@@ -3468,6 +3480,12 @@ impl LiveShell {
                 crate::plugin_panel::notification_surface().clone(),
             ));
         }
+        if self.plugin_control_host.is_some() {
+            panels.push((
+                crate::plugin_panel::control_center_surface_key(),
+                crate::plugin_panel::control_center_surface().clone(),
+            ));
+        }
         panels
     }
 
@@ -3504,6 +3522,18 @@ impl LiveShell {
         i32,
         i32,
     )> {
+        if *key == crate::plugin_panel::control_center_surface_key()
+            && self.plugin_control_host.is_some()
+        {
+            let surface = crate::plugin_panel::control_center_surface();
+            return Some((
+                surface.kind,
+                surface.bottom_offset,
+                surface.anchor,
+                surface.offset_x,
+                surface.offset_y,
+            ));
+        }
         if *key == crate::plugin_panel::notification_surface_key()
             && self.plugin_notification_host.is_some()
         {
@@ -3570,6 +3600,20 @@ impl LiveShell {
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Option<HostChangeToken> {
+        if *key == crate::plugin_panel::control_center_surface_key() {
+            if !self.control_plugin_active() {
+                return None;
+            }
+            let inspection = self.plugin_control_host.as_ref()?.inspect();
+            return Some(HostChangeToken {
+                frame_generation: inspection
+                    .frame_generation
+                    .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+                semantic_generation: inspection
+                    .semantic_generation
+                    .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+            });
+        }
         if *key == crate::plugin_panel::desktop_surface_key() {
             return self
                 .plugin_desktop_host
@@ -3792,6 +3836,12 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> Option<Vec<PaintCommand>> {
+        if *key == crate::plugin_panel::control_center_surface_key() {
+            if !self.control_plugin_active() {
+                return None;
+            }
+            return Some(self.scene(SurfaceRole::ControlCenter, width, height));
+        }
         if *key == crate::plugin_panel::desktop_surface_key() {
             if self.plugin_desktop_host.is_none() {
                 return None;
@@ -5434,6 +5484,17 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if *key == crate::plugin_panel::control_center_surface_key() {
+            if !self.native_surface_visible(SurfaceRole::Panel, Some(key)) {
+                return false;
+            }
+            let host = self.plugin_control_host.as_ref().unwrap();
+            let (event, authority) =
+                internal_normalized_ingress(input, None, "control-center", host.inspect(), None);
+            return self
+                .control_host_event_authorized(event, (width, height), None, Some(authority))
+                .changed;
+        }
         if *key == crate::plugin_panel::notification_surface_key() {
             return self.native_surface_visible(SurfaceRole::Panel, Some(key))
                 && self.notification_host_input(input, width, height);
@@ -5482,6 +5543,10 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if *key == crate::plugin_panel::control_center_surface_key() {
+            return self.native_surface_visible(SurfaceRole::Panel, Some(key))
+                && self.control_controller(action, width, height);
+        }
         if *key == crate::plugin_panel::notification_surface_key() {
             return self.native_surface_visible(SurfaceRole::Panel, Some(key))
                 && self.notification_controller(action);
@@ -5522,6 +5587,10 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if *key == crate::plugin_panel::control_center_surface_key() {
+            return self.native_surface_visible(SurfaceRole::Panel, Some(key))
+                && self.shell_role_host_ui(SurfaceRole::ControlCenter, event, width, height);
+        }
         if *key == crate::plugin_panel::notification_surface_key() {
             return self.native_surface_visible(SurfaceRole::Panel, Some(key))
                 && self.shell_role_host_ui(SurfaceRole::Notification, event, width, height);
@@ -8433,7 +8502,13 @@ impl LiveShell {
         if !self.send_session_command(
             "control-center-focus",
             if visible {
-                ShellCommand::FocusControlCenter
+                if self.control_plugin_active() {
+                    ShellCommand::FocusPluginSurface {
+                        key: crate::plugin_panel::control_center_surface_key(),
+                    }
+                } else {
+                    ShellCommand::FocusControlCenter
+                }
             } else {
                 ShellCommand::RestoreApplicationFocus
             },

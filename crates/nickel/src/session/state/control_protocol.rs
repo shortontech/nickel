@@ -1888,6 +1888,12 @@ impl NickelSession {
                         "plugin surface is unavailable for focus",
                     );
                 }
+                if key == crate::plugin_panel::control_center_surface_key()
+                    && let Some(shell) = self.internal_shell.as_mut()
+                {
+                    shell.apply_control_visibility(true);
+                    self.sync_internal_shell();
+                }
                 if !self.focus_plugin_surface(&key.plugin_id, &key.surface_id) {
                     self.pending_plugin_focus = Some(key);
                 }

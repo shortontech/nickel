@@ -614,6 +614,9 @@ impl InternalShellCoordinator {
             || (roles.contains(&SurfaceRole::Notification)
                 && surface.plugin.as_ref()
                     == Some(&crate::plugin_panel::notification_surface_key()))
+            || (roles.contains(&SurfaceRole::ControlCenter)
+                && surface.plugin.as_ref()
+                    == Some(&crate::plugin_panel::control_center_surface_key()))
     }
 
     pub fn visible(&self, id: InternalSurfaceId) -> bool {
@@ -2184,12 +2187,17 @@ mod tests {
             },
         ]);
 
-        assert_eq!(coordinator.surfaces().len(), 16);
+        assert_eq!(coordinator.surfaces().len(), 17);
         let notification = coordinator
             .plugin_surface(&crate::plugin_panel::notification_surface_key(), "one")
             .unwrap();
         assert_eq!(notification.role, SurfaceRole::Panel);
         assert!(!coordinator.visible(notification.id));
+        let control = coordinator
+            .plugin_surface(&crate::plugin_panel::control_center_surface_key(), "one")
+            .unwrap();
+        assert_eq!(control.role, SurfaceRole::Panel);
+        assert!(!coordinator.visible(control.id));
         let panel = coordinator
             .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "two")
             .unwrap();

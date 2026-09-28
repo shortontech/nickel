@@ -485,10 +485,18 @@
     fn control_center_plugin_can_be_disabled_and_reenabled() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::control_center_manifest().id;
+        let key = crate::plugin_panel::control_center_surface_key();
         assert!(shell.plugin_control_host.is_some());
         shell.apply_control_visibility(true);
+        assert!(shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
+        assert!(!shell.native_surface_visible(SurfaceRole::ControlCenter, None));
+        assert!(shell
+            .plugin_surface_scene_for_output(&key, Some("primary"), 420, 600)
+            .is_some());
+        assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.plugin_control_host.is_none());
+        assert!(!shell.plugin_surface_matches(&key));
         assert!(!shell.surface_visible(SurfaceRole::ControlCenter));
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
@@ -504,10 +512,21 @@
         let mut shell = LiveShell::new().unwrap();
         shell.control_host.application_mut().show_projection_chooser();
         shell.apply_control_visibility(true);
+        let key = crate::plugin_panel::control_center_surface_key();
+        assert!(shell.native_surface_visible(SurfaceRole::ControlCenter, None));
+        assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
+        assert!(shell
+            .plugin_surface_scene_for_output(&key, Some("primary"), 420, 600)
+            .is_none());
         shell
             .set_plugin_enabled(&crate::plugin_panel::control_center_manifest().id, false)
             .unwrap();
         assert!(shell.surface_visible(SurfaceRole::ControlCenter));
+        assert!(shell.native_surface_visible(SurfaceRole::ControlCenter, None));
+        assert!(!shell.native_surface_visible(
+            SurfaceRole::Panel,
+            Some(&crate::plugin_panel::control_center_surface_key()),
+        ));
         assert!(!shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
     }
 

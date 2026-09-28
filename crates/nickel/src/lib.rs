@@ -1323,6 +1323,8 @@ fn render_role(
                 || (wanted == SurfaceRole::Taskbar && surface.is_taskbar_plugin())
                 || (wanted == SurfaceRole::Notification
                     && surface.plugin_key() == Some(&plugin_panel::notification_surface_key()))
+                || (wanted == SurfaceRole::ControlCenter
+                    && surface.plugin_key() == Some(&plugin_panel::control_center_surface_key()))
         })
         .map(|surface| {
             let (logical_width, logical_height) = surface.window().size();
@@ -1578,6 +1580,14 @@ fn sync_panel_popover_anchor(shell: &WinitShell, state: &LiveShell) {
     let Some((role, anchor)) = state.popover_anchor(preferred) else {
         return;
     };
+    if role == nickel_session_protocol::ShellRole::ControlCenter
+        && state.native_surface_visible(
+            SurfaceRole::Panel,
+            Some(&plugin_panel::control_center_surface_key()),
+        )
+    {
+        return;
+    }
     let _ = state.dispatch_session_command(
         "place-anchored-shell-popover",
         platform::ShellCommand::ShowAnchoredShellRole { role, anchor },
@@ -1645,9 +1655,16 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
         if role == SurfaceRole::WindowPreview {
             continue;
         }
-        if state.surface_visible(role) {
+        if state.native_surface_visible(role, None) {
             shell.raise_role(role);
         }
+    }
+    #[cfg(target_os = "windows")]
+    if state.native_surface_visible(
+        SurfaceRole::Panel,
+        Some(&plugin_panel::control_center_surface_key()),
+    ) {
+        shell.raise_plugin_surface(&plugin_panel::control_center_surface_key());
     }
 }
 

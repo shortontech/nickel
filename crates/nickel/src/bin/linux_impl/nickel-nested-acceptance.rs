@@ -751,6 +751,12 @@ fn verify_control_plugin_retires(
     let id = "org.nickel.control-center";
     press_super_key(test_input, environment, "a")?;
     wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
+    thread::sleep(Duration::from_millis(250));
+    checked(test_input, environment, &["key", "escape", "pressed"])?;
+    checked(test_input, environment, &["key", "escape", "released"])?;
+    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    press_super_key(test_input, environment, "a")?;
+    wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
     let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
     let disabled: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
@@ -781,14 +787,16 @@ fn wait_for_control_visibility(
     let deadline = Instant::now() + timeout;
     loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let line = surfaces.lines().find(|line| line.starts_with("ControlCenter\t"))
-            .ok_or("Control Center surface missing")?;
-        let visible = !line.ends_with("hidden");
+        let line = surfaces.lines().find(|line| {
+            line.starts_with("PluginSurface\t")
+                && line.ends_with("org.nickel.control-center/main")
+        });
+        let visible = line.is_some_and(|line| line.split('\t').nth(2) != Some("hidden"));
         if visible == expected {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!("Control Center visibility stayed {visible}: {line}"));
+            return Err(format!("Control Center visibility stayed {visible}: {surfaces}"));
         }
         thread::sleep(POLL);
     }

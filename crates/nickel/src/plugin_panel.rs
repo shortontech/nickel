@@ -154,6 +154,22 @@ pub fn control_center_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn control_center_surface() -> &'static PluginSurface {
+    let surface = control_center_manifest()
+        .surfaces
+        .first()
+        .expect("bundled Control Center needs a surface");
+    assert_eq!(surface.kind, PluginSurfaceKind::Overlay);
+    surface
+}
+
+pub fn control_center_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: control_center_manifest().id.clone(),
+        surface_id: control_center_surface().id.clone(),
+    }
+}
+
 pub fn window_preview_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -3461,6 +3477,10 @@ impl nickel_ui::Application for PluginPanelApplication {
         }
         if self.overlay_open && shortcut == Shortcut::Submit {
             return nickel_ui::ShortcutOutcome::from_changed(false);
+        }
+        if self.manifest.id == control_center_manifest().id && shortcut == Shortcut::Escape {
+            self.effects.push(PluginEffect::ToggleControlCenter);
+            return nickel_ui::ShortcutOutcome::handled(true);
         }
         let Some(shortcuts) = &self.launcher_shortcuts else {
             return nickel_ui::ShortcutOutcome::from_changed(false);
