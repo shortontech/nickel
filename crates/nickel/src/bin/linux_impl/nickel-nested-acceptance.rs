@@ -218,7 +218,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked typed surface hide, owner-close retirement, memory, launcher fallback, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked typed surface hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
     );
     Ok(())
 }
@@ -312,9 +312,6 @@ fn exercise(
     if launcher_memory == 0 {
         return Err("rendered launcher reported zero native UI memory".into());
     }
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
-    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
     let disabled = checked(
         test_input,
         &environment,
@@ -333,12 +330,12 @@ fn exercise(
     {
         return Err("launcher did not retire and clear reported UI memory".into());
     }
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
-    wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
     wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    thread::sleep(Duration::from_millis(250));
+    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
+    verify_run_plugin_owns_dialog(test_input, &environment)?;
     let enabled = checked(
         test_input,
         &environment,
@@ -356,7 +353,12 @@ fn exercise(
     {
         return Err("launcher did not resume after re-enable".into());
     }
-    verify_run_plugin_owns_dialog(test_input, &environment)?;
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
     let panel_id = "org.example.acceptance-panel";
     let activated = checked(test_input, &environment, &["plugin-set", panel_id, "enabled"])?;
     let activated: nickel_session_protocol::PluginStatusSnapshot =

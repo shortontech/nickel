@@ -155,7 +155,6 @@ impl InternalShellCoordinator {
 
     pub(crate) fn set_controller_family(&mut self, family: nickel_ui::ControllerFamily) {
         self.controller_family = family;
-        self.shell.set_launcher_controller_family(family);
     }
 
     pub fn semantic_theme(&self) -> nickel_ui::SemanticTheme {
@@ -1207,6 +1206,10 @@ impl InternalShellCoordinator {
         if self.launcher_visible() != visible {
             self.shell.apply_session_launcher_visibility(visible);
         }
+    }
+
+    pub(crate) fn can_show_launcher(&self) -> bool {
+        self.shell.can_show_launcher()
     }
 
     pub fn toggle_launcher(&mut self) -> bool {

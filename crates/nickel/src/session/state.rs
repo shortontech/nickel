@@ -10091,6 +10091,14 @@ impl NickelSession {
     }
 
     pub(super) fn set_launcher_visible_on_output(&mut self, visible: bool, output: Option<String>) {
+        if visible
+            && self
+                .internal_shell
+                .as_ref()
+                .is_some_and(|shell| !shell.can_show_launcher())
+        {
+            return;
+        }
         let was_visible = self.internal_shell.as_ref().map_or_else(
             || self.launcher_visibility.is_visible(),
             |shell| shell.launcher_visible(),

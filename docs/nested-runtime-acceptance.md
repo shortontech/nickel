@@ -81,6 +81,11 @@ A later run on the same date also passed the Settings process memory report:
 the nested Settings window published nonzero UI memory, then its shell status
 row disappeared after the bounded report expiry.
 
+The current acceptance now disables Launcher while open, checks that its
+surface retires, sends Meta to the nested session while disabled, and verifies
+that no native launcher appears. Re-enabling the plugin restores the shortcut.
+It also sends Super+R to exercise the bundled Run dialog.
+
 The X11 host command reached the nested test-control listener but the host X
 server returned an XIO error. Readiness then failed with `WouldBlock`, so this
 run does not establish X11 presentation parity.

@@ -102,6 +102,9 @@ render without a live session. It checks the initial tree and manifest; use
 The bundled Run dialog is wholly rendered by its JS plugin. Disabling that
 plugin closes an open Run dialog; its shortcut stays inactive until the plugin
 is enabled again in Settings.
+Disabling the bundled Launcher plugin also closes its surface and leaves its
+Meta shortcut inactive. Run remains available through Super+R, and the
+independent Settings shortcut can re-enable Launcher.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `Panel` component's ARGB `background` can be translucent. Several installed

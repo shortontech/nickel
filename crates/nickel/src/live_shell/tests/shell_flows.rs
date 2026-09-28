@@ -587,156 +587,21 @@
     }
 
     #[test]
-    fn launcher_open_focuses_search_and_sequential_input_survives_mode_change() {
+    fn disabled_launcher_retires_surface_without_native_fallback() {
         let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
-            .unwrap();
+        let id = &crate::plugin_panel::launcher_manifest().id;
+        assert!(shell.can_show_launcher());
         shell.apply_session_launcher_visibility(true);
-        shell.launcher_host.step(HostBatch {
-            surface_size: Some((920, 680)),
-            ..HostBatch::default()
-        });
-        assert!(shell.launcher_host.inspect().keyboard_focus.is_some());
-        shell.launcher_host.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::TextInput("a".into()))],
-            ..HostBatch::default()
-        });
-        for action in shell.launcher_host.application_mut().take_effects() {
-            shell.apply_launcher_action(action);
-        }
-        assert_eq!(shell.launcher.query(), "a");
-        let status = shell.launcher_status_text();
-        shell
-            .launcher_host
-            .application_mut()
-            .sync(&shell.launcher, shell.palette, status);
-        shell.launcher_host.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::TextInput("b".into()))],
-            ..HostBatch::default()
-        });
-        for action in shell.launcher_host.application_mut().take_effects() {
-            shell.apply_launcher_action(action);
-        }
-        assert_eq!(shell.launcher.query(), "ab");
-    }
-
-    #[test]
-    fn first_launcher_open_accepts_typing_after_native_scene_layout() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
-            .unwrap();
-        shell.launcher.set_codex_available(true);
-        shell.apply_session_launcher_visibility(true);
-        shell.scene(SurfaceRole::Launcher, 960, 720);
-        shell.launcher_host_ui(UiEvent::TextInput("konsole".into()), 960, 720);
-        assert_eq!(shell.launcher.query(), "konsole");
-    }
-
-    #[test]
-    fn reopening_launcher_replaces_retained_child_focus_with_search() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
-            .unwrap();
-        shell.apply_session_launcher_visibility(true);
-        shell.scene(SurfaceRole::Launcher, 920, 680);
-        let non_search = shell
-            .launcher_host
-            .unique_semantic_target_for_message(&LauncherAction::SetView(
-                crate::launcher::LauncherView::Applications,
-            ))
-            .expect("launcher navigation target");
-        assert!(shell.launcher_host.request_focus(non_search.id).changed);
-        shell.apply_session_launcher_visibility(false);
-        shell.apply_session_launcher_visibility(true);
-        let search = shell
-            .launcher_host
-            .query_unique(&nickel_ui::SemanticSelector::Role(
-                nickel_ui::SemanticRole::TextField,
-            ))
-            .expect("launcher search field");
-        assert_eq!(
-            shell.launcher_host.inspect().keyboard_focus,
-            Some(search.id)
-        );
-        shell.launcher_host_ui(UiEvent::TextInput("files".into()), 920, 680);
-        assert_eq!(shell.launcher.query(), "files");
-    }
-
-    #[test]
-    fn launcher_submit_opens_the_keyboard_focused_dashboard_project() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
-            .unwrap();
-        shell.launcher.set_codex_available(true);
-        shell.set_dashboard_projects(crate::launcher::DashboardSection::Ready(vec![
-            crate::launcher::DashboardProject {
-                id: "nickel".into(),
-                name: "Nickel".into(),
-                roots: Vec::new(),
-                chat_count: Some(1),
-                activity: crate::launcher::ProjectActivity::Idle,
-                // Recent-project navigation only exposes projects with activity.
-                last_used_at: Some(1),
-            },
-        ]));
-        shell.apply_session_launcher_visibility(true);
-        shell.launcher_host_event_with_clipboard_limit(HostEvent::Poll, 920, 680, None);
-        let target = shell
-            .launcher_host
-            .unique_semantic_target_for_message(&LauncherAction::OpenProject("nickel".into()))
-            .expect("Nickel project row");
-        for event in [UiEvent::KeyboardNavigateDown, UiEvent::KeyboardNavigateLeft] {
-            shell.launcher_host_ui(event, 920, 680);
-        }
-        for _ in 0..7 {
-            shell.launcher_host_ui(UiEvent::KeyboardNavigateDown, 920, 680);
-        }
-        assert_eq!(shell.launcher_host.inspect().controller_target, Some(target.id));
-        assert!(shell.take_requested_codex_project().is_none());
-        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
-        assert_eq!(shell.take_requested_codex_project().as_deref(), Some("nickel"));
-    }
-
-    #[test]
-    fn launcher_submit_dispatches_the_keyboard_focused_dashboard_application() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::launcher_manifest().id, false)
-            .unwrap();
-        shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
-            "org.kde.konsole".into(),
-            "Konsole".into(),
-            None,
-            None,
-            Some(vec!["nickel-test-command-that-does-not-exist".into()]),
-        )]);
-        shell.apply_session_launcher_visibility(true);
-        shell.launcher_host_event_with_clipboard_limit(HostEvent::Poll, 920, 680, None);
-        let target = shell
-            .launcher_host
-            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
-                "org.kde.konsole".into(),
-            ))
-            .expect("Konsole application row");
-        for event in [
-            UiEvent::KeyboardNavigateDown,
-            UiEvent::KeyboardNavigateRight,
-        ] {
-            shell.launcher_host_ui(event, 920, 680);
-        }
-        assert_eq!(shell.launcher_host.inspect().controller_target, Some(target.id));
-        assert!(!shell.launcher_status.as_deref().unwrap_or_default().starts_with("Could not launch Konsole: "));
-        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
-        // An intentionally unavailable executable proves the production launch
-        // action ran without spawning a real application during this test.
-        assert!(
-            shell.launcher_status.as_deref().unwrap_or_default()
-                .starts_with("Could not launch Konsole: ")
-        );
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(!shell.can_show_launcher());
+        assert!(!shell.launcher_visible);
+        assert!(shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
+        assert!(!shell.request_launcher_toggle());
+        assert!(!shell.launcher_host_ui(UiEvent::TextInput("ignored".into()), 920, 680));
+        assert_eq!(shell.launcher.query(), "");
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.can_show_launcher());
+        assert!(!shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
     }
 
     #[test]

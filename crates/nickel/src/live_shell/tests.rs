@@ -1781,7 +1781,15 @@ fn rejected_launcher_focus_request_does_not_project_internal_focus() {
 
     assert!(!shell.request_launcher_toggle());
     assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
-    assert!(shell.launcher_host.inspect().keyboard_focus.is_none());
+    assert!(
+        shell
+            .plugin_launcher_host
+            .as_ref()
+            .unwrap()
+            .inspect()
+            .keyboard_focus
+            .is_none()
+    );
 }
 
 #[test]

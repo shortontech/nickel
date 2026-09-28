@@ -914,10 +914,7 @@ impl NickelSession {
             for effect in outcome.effects {
                 use super::remote_launcher_favorites::SemanticFavoriteAction;
                 let favorite = match &effect {
-                    crate::live_shell::remote_semantics::RemoteShellEffect::Launcher(
-                        crate::launcher_view::LauncherShellEffect::TogglePin(application),
-                    )
-                    | crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
+                    crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
                         crate::live_shell::TaskbarAction::ToggleTaskPin(application),
                         _,
                     ) => Some(SemanticFavoriteAction::Toggle(application.clone())),
@@ -964,14 +961,6 @@ impl NickelSession {
                         application,
                         catalog_generation,
                     });
-                    if matches!(
-                        &effect,
-                        crate::live_shell::remote_semantics::RemoteShellEffect::Launcher(_)
-                    ) {
-                        steps.push(ShellActionStep::Command(
-                            crate::platform::ShellCommand::Hide,
-                        ));
-                    }
                     continue;
                 }
                 if let crate::live_shell::remote_semantics::RemoteShellEffect::Control(action) =

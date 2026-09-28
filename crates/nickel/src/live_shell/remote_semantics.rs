@@ -80,26 +80,6 @@ fn plugin_projection(
     Ok((host.resolved_frame_generation(), nodes))
 }
 
-fn launcher_activate(action: &LauncherAction) -> RemoteActionDisposition {
-    match action {
-        LauncherAction::SetView(_)
-        | LauncherAction::ActivateResult(_)
-        | LauncherAction::TogglePin(_)
-        | LauncherAction::LaunchApplication(_)
-        | LauncherAction::ShowNarrowPrimary
-        | LauncherAction::SetQuery(_)
-        | LauncherAction::SearchScroll
-        | LauncherAction::DashboardScroll
-        | LauncherAction::Dismiss => RemoteActionDisposition::Guarded,
-        LauncherAction::RetryPreferencePersistence
-        | LauncherAction::OpenProject(_)
-        | LauncherAction::SeeAllProjects
-        | LauncherAction::OpenSettings(_)
-        | LauncherAction::OpenAccount
-        | LauncherAction::RequestLogout => RemoteActionDisposition::Unavailable,
-    }
-}
-
 fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
     match action {
         ControlAction::ToggleWifiSection
@@ -215,7 +195,7 @@ impl LiveShell {
                         leaf == "launcher-query" && action == nickel_ui::ActionKind::SetValue
                     })
                 } else {
-                    project(&self.launcher_host, launcher_activate)
+                    Err("Launcher plugin is unavailable".into())
                 }
             }
             SurfaceRole::ControlCenter => {
@@ -305,7 +285,6 @@ impl LiveShell {
 // the Linux compositor owns their guarded application.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) enum RemoteShellEffect {
-    Launcher(LauncherShellEffect),
     Panel(TaskbarAction, Option<String>),
     Control(ControlAction),
 }
@@ -409,23 +388,7 @@ impl LiveShell {
                 }
                 outcome
             }
-            SurfaceRole::Launcher => {
-                let outcome = mutate(
-                    &mut self.launcher_host,
-                    generation,
-                    node,
-                    action,
-                    clipboard_limit,
-                )?;
-                for action in self.launcher_host.application_mut().take_effects() {
-                    if let Some(effect) =
-                        reduce_launcher_action(&mut self.launcher, &mut self.launcher_view, action)
-                    {
-                        effects.push(RemoteShellEffect::Launcher(effect));
-                    }
-                }
-                outcome
-            }
+            SurfaceRole::Launcher => return Err("Launcher plugin is unavailable".into()),
             SurfaceRole::ControlCenter => {
                 if self.control_plugin_active() {
                     return Err("control center plugin actions require shell input".into());
@@ -531,15 +494,6 @@ impl LiveShell {
         effect: &RemoteShellEffect,
     ) -> Result<Option<Application>, String> {
         let selected = match effect {
-            RemoteShellEffect::Launcher(LauncherShellEffect::ActivateResult(index)) => {
-                Some(self.launcher.result_at(*index).cloned())
-            }
-            RemoteShellEffect::Launcher(LauncherShellEffect::LaunchApplication(id)) => Some(
-                self.launcher
-                    .applications()
-                    .find(|app| app.id() == id)
-                    .cloned(),
-            ),
             RemoteShellEffect::Panel(TaskbarAction::Task(index), output) => {
                 let previous = self.panel_output.clone();
                 let token = self.panel_change_token;
@@ -578,10 +532,6 @@ impl LiveShell {
         ));
         self.session_host = staged.clone();
         let result: Result<(), String> = match effect {
-            RemoteShellEffect::Launcher(LauncherShellEffect::Dismiss) => {
-                self.apply_launcher_effect(LauncherShellEffect::Dismiss);
-                Ok(())
-            }
             RemoteShellEffect::Panel(
                 action @ (TaskbarAction::Launcher | TaskbarAction::Control),
                 output,
@@ -601,10 +551,6 @@ impl LiveShell {
                 | ControlAction::CancelSessionAction
                 | ControlAction::RequestSessionAction(_),
             ) => Ok(()),
-            RemoteShellEffect::Launcher(effect) => {
-                drop(effect);
-                Err("launcher native effect requires guarded delivery".into())
-            }
             RemoteShellEffect::Panel(action, output) => {
                 drop((action, output));
                 Err("panel native effect requires guarded delivery".into())
@@ -723,7 +669,6 @@ mod tests {
     fn every_advertised_production_shell_action_has_a_dispatch_disposition() {
         let shell = LiveShell::new().expect("live shell");
 
-        assert_advertised_actions_are_guarded(&shell.launcher_host, launcher_activate);
         assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
         assert_advertised_actions_are_guarded(&shell.panel_host, panel_activate);
         assert_advertised_actions_are_guarded(&shell.volume_osd_host, |_| {

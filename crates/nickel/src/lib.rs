@@ -2217,7 +2217,6 @@ fn handle_controller_action(
     if !state.surface_visible(SurfaceRole::Screenshot)
         && controller_launcher_shortcut(action).is_some()
     {
-        state.set_launcher_controller_family(family);
         let changed = state.request_launcher_toggle();
         if changed {
             sync_visibility(shell, state);
