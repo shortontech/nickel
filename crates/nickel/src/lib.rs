@@ -1892,7 +1892,9 @@ fn handle_shell_input(
         let changed = state.plugin_panel_host_input_for(&key, event, width, height);
         #[cfg(target_os = "windows")]
         if pointer_button {
-            tracing::warn!(?key, width, height, changed, "plugin host pointer result");
+            eprintln!(
+                "plugin host pointer result: key={key:?} size={width}x{height} changed={changed}"
+            );
         }
         if changed {
             if state.plugin_panels().len() != plugin_surface_count {

@@ -2240,12 +2240,8 @@ impl WinitShell {
                                 InputEvent::Pointer(nickel_input::PointerEvent::Button { .. })
                             )
                         {
-                            tracing::warn!(
-                                ?surface,
-                                ?device,
-                                ?input,
-                                scale,
-                                "plugin native pointer button"
+                            eprintln!(
+                                "plugin native pointer button: surface={surface:?} device={device:?} input={input:?} scale={scale}"
                             );
                         }
                         queue_shell_input(pending, surface, input);
