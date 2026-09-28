@@ -61,7 +61,14 @@ jobs:
           node-version: '24'
       - name: Install TypeScript
         shell: pwsh
-        run: npm install --global typescript@5.9.3
+        run: |
+          npm install --global typescript@5.9.3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $prefix = npm prefix --global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $prefix | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & (Join-Path $prefix "tsc.cmd") --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test the JSX host and plugin packages
         shell: pwsh

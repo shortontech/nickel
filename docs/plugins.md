@@ -79,10 +79,10 @@ The installed entry is plain JavaScript. If `main.jsx` or `main.tsx` exists
 beside a declared `main.js` entry, both commands run a local
 `node_modules/.bin/tsc` or `tsc` from `PATH` before validation. The `dev`
 command also recompiles after each source edit. Both compile in a temporary
-directory and leave the package's `main.js` untouched. TypeScript 5.6 or newer
-is needed for this automatic
-compile path. Generate the `.js` entry when packaging for installation; for
-example:
+directory and leave the package's `main.js` untouched. On Windows the tool
+looks for `tsc.cmd` in the local package or on `PATH`. TypeScript 5.6 or newer
+is needed for this automatic compile path. Generate the `.js` entry when
+packaging for installation, for example:
 
 ```sh
 tsc --allowJs --checkJs false --noCheck --noEmitOnError --jsx react \

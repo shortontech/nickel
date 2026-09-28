@@ -43,11 +43,11 @@ fn compile_jsx(
 ) -> Result<String, String> {
     let output = tempfile::tempdir()
         .map_err(|error| format!("could not create JSX build directory: {error}"))?;
-    let compiler = directory.join("node_modules/.bin/tsc");
+    let compiler = directory.join("node_modules/.bin").join(tsc_executable());
     let compiler = if compiler.is_file() {
         compiler.into_os_string()
     } else {
-        "tsc".into()
+        tsc_executable().into()
     };
     let status = Command::new(compiler)
         .current_dir(directory)
@@ -91,6 +91,14 @@ fn compile_jsx(
         .map_err(|error| format!("could not read compiled JavaScript: {error}"))
 }
 
+fn tsc_executable() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "tsc.cmd"
+    } else {
+        "tsc"
+    }
+}
+
 pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
     let directory = std::fs::canonicalize(directory)
         .map_err(|error| format!("could not open plugin directory: {error}"))?;
@@ -124,6 +132,8 @@ mod platform {
     };
 
     use super::load_package;
+    #[cfg(test)]
+    use super::tsc_executable;
     use nickel_core::plugins::{
         MAX_PLUGIN_ENTRY_BYTES, PluginActivationSettings, PluginContributionMode, PluginManifest,
         PluginPackage, PluginSlotContract, PluginSurfaceKind,
@@ -638,7 +648,11 @@ mod platform {
 
         #[test]
         fn compiles_jsx_without_overwriting_the_entry_and_rejects_invalid_edits() {
-            if Command::new("tsc").arg("--version").output().is_err() {
+            if Command::new(tsc_executable())
+                .arg("--version")
+                .output()
+                .is_err()
+            {
                 return;
             }
             let source = tempfile::tempdir().unwrap();
@@ -666,7 +680,11 @@ mod platform {
 
         #[test]
         fn compiles_tsx_with_type_annotations() {
-            if Command::new("tsc").arg("--version").output().is_err() {
+            if Command::new(tsc_executable())
+                .arg("--version")
+                .output()
+                .is_err()
+            {
                 return;
             }
             let source = tempfile::tempdir().unwrap();
