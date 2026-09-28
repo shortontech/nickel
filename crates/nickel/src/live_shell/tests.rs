@@ -394,7 +394,7 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
     std::fs::create_dir(&directory).unwrap();
     std::fs::write(
         directory.join("plugin.json"),
-        r#"{"api_version":1,"id":"org.example.panel","name":"External Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"primary"}],"settings":[{"id":"show-label","label":"Show label","kind":"boolean","default":true}]}"#,
+        r#"{"api_version":1,"id":"org.example.panel","name":"External Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"primary"}],"capabilities":["settings-write"],"settings":[{"id":"show-label","label":"Show label","kind":"boolean","default":true}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -471,6 +471,17 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
             .unwrap()
     );
     assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
+    assert!(!shell.apply_plugin_effects(vec![
+        crate::plugin_panel::PluginEffect::SetPluginSetting {
+            plugin_id: "org.example.panel".into(),
+            key: "show-label".into(),
+            value: serde_json::json!(true),
+        },
+    ]));
+    assert_eq!(
+        shell.plugin_settings["org.example.panel"]["show-label"],
+        serde_json::json!(false)
+    );
 }
 
 #[test]

@@ -5216,12 +5216,29 @@ impl LiveShell {
                     plugin_id,
                     key,
                     value,
-                } => match self.set_plugin_setting(&plugin_id, &key, value) {
-                    Ok(updated) => changed |= updated,
-                    Err(error) => {
-                        tracing::warn!(plugin = plugin_id, setting = key, %error, "plugin setting failed");
+                } => {
+                    let granted = self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
+                        entry.desired_enabled
+                            && entry
+                                .manifest
+                                .capabilities
+                                .contains(&nickel_core::plugins::PluginCapability::SettingsWrite)
+                    });
+                    if !granted {
+                        tracing::warn!(
+                            plugin = plugin_id,
+                            setting = key,
+                            "plugin setting grant is unavailable"
+                        );
+                        continue;
                     }
-                },
+                    match self.set_plugin_setting(&plugin_id, &key, value) {
+                        Ok(updated) => changed |= updated,
+                        Err(error) => {
+                            tracing::warn!(plugin = plugin_id, setting = key, %error, "plugin setting failed");
+                        }
+                    }
+                }
                 crate::plugin_panel::PluginEffect::DesktopSelect { id } => {
                     let entry = id.split_once(':').and_then(|(first, second)| {
                         Some(nickel_file::desktop::DesktopEntryId(
