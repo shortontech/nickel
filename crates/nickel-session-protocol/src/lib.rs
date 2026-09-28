@@ -211,6 +211,10 @@ pub enum Command {
     FocusShellRole {
         role: ShellRole,
     },
+    FocusPluginSurface {
+        plugin_id: String,
+        surface_id: String,
+    },
     RestoreApplicationFocus,
     IdentifyOutputs,
     CaptureOutput {
@@ -2823,6 +2827,10 @@ mod tests {
         for command in [
             Command::FocusShellRole {
                 role: ShellRole::ControlCenter,
+            },
+            Command::FocusPluginSurface {
+                plugin_id: "org.nickel.control-center".into(),
+                surface_id: "main".into(),
             },
             Command::RestoreApplicationFocus,
         ] {

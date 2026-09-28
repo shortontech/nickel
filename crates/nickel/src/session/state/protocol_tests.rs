@@ -9557,6 +9557,10 @@ fn privileged_shell_commands_require_the_registered_shell_pid() {
         Command::FocusShellRole {
             role: ShellRole::ControlCenter,
         },
+        Command::FocusPluginSurface {
+            plugin_id: "org.nickel.control-center".into(),
+            surface_id: "main".into(),
+        },
         Command::RestoreApplicationFocus,
     ] {
         assert!(command_requires_shell_identity(&command));

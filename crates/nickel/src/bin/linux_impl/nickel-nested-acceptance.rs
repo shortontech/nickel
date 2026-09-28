@@ -801,6 +801,12 @@ fn verify_notification_plugin_retires(
     let id = "org.nickel.notification";
     press_super_key(test_input, environment, "n")?;
     wait_for_notification_visibility(test_input, environment, true, Duration::from_secs(2))?;
+    thread::sleep(Duration::from_millis(250));
+    checked(test_input, environment, &["key", "escape", "pressed"])?;
+    checked(test_input, environment, &["key", "escape", "released"])?;
+    wait_for_notification_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    press_super_key(test_input, environment, "n")?;
+    wait_for_notification_visibility(test_input, environment, true, Duration::from_secs(2))?;
     let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
     let disabled: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&disabled).map_err(|error| error.to_string())?;

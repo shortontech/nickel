@@ -1862,6 +1862,36 @@ impl NickelSession {
                 }
                 self.focus_shell_role(role);
             }
+            SessionCommand::FocusPluginSurface {
+                plugin_id,
+                surface_id,
+            } => {
+                let key = nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id,
+                    surface_id,
+                };
+                let registered = self.internal_shell.as_ref().is_some_and(|shell| {
+                    shell
+                        .surfaces()
+                        .iter()
+                        .any(|surface| surface.plugin.as_ref() == Some(&key))
+                }) || self.registered_shell_role_slots.iter().any(|slot| {
+                    slot.role == nickel_session_protocol::ShellRole::PluginSurface
+                        && slot.plugin_surface.as_ref().is_some_and(|placement| {
+                            placement.plugin_id == key.plugin_id
+                                && placement.surface_id == key.surface_id
+                        })
+                });
+                if !registered {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin surface is unavailable for focus",
+                    );
+                }
+                if !self.focus_plugin_surface(&key.plugin_id, &key.surface_id) {
+                    self.pending_plugin_focus = Some(key);
+                }
+            }
             SessionCommand::RestoreApplicationFocus => {
                 if let Some(shell) = self.internal_shell.as_mut() {
                     shell.apply_control_visibility(false);

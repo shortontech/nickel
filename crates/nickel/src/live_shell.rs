@@ -7919,14 +7919,6 @@ impl LiveShell {
                     .sync_history(&history, self.palette);
                 self.notification = history.first().cloned();
                 self.notification_history_visible = true;
-                #[cfg(target_os = "linux")]
-                let _ = self.send_session_command(
-                    "focus-notifications",
-                    ShellCommand::SetShellRoleVisible {
-                        role: nickel_session_protocol::ShellRole::Notification,
-                        visible: true,
-                    },
-                );
                 true
             }
             platform::GlobalShortcut::ShowDesktop => {

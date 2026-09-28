@@ -2896,7 +2896,6 @@ pub fn run() -> Result<(), String> {
                         sync_visibility(&mut shell, &state);
                     }
                 }
-                #[cfg(target_os = "windows")]
                 let opening_notification_history =
                     shortcut == platform::GlobalShortcut::ShowNotifications;
                 if state.global_shortcut(shortcut) {
@@ -2905,6 +2904,20 @@ pub fn run() -> Result<(), String> {
                         state.shell_panel_surfaces(),
                     )?;
                     sync_visibility(&mut shell, &state);
+                    #[cfg(target_os = "linux")]
+                    if opening_notification_history
+                        && state.native_surface_visible(
+                            SurfaceRole::Panel,
+                            Some(&plugin_panel::notification_surface_key()),
+                        )
+                    {
+                        let _ = state.dispatch_session_command(
+                            "focus-notification-history",
+                            platform::ShellCommand::FocusPluginSurface {
+                                key: plugin_panel::notification_surface_key(),
+                            },
+                        );
+                    }
                     #[cfg(target_os = "windows")]
                     if opening_notification_history
                         && state.native_surface_visible(

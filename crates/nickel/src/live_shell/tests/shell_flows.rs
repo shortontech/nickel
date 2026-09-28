@@ -94,6 +94,29 @@
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opening_plugin_notification_history_does_not_reopen_the_trusted_surface() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        host.take_commands();
+        assert!(shell.global_shortcut(crate::platform::GlobalShortcut::ShowNotifications));
+        assert!(shell.native_surface_visible(
+            SurfaceRole::Panel,
+            Some(&crate::plugin_panel::notification_surface_key()),
+        ));
+        assert!(!shell.native_surface_visible(SurfaceRole::Notification, None));
+        assert!(!host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::SetShellRoleVisible {
+                role: nickel_session_protocol::ShellRole::Notification,
+                visible: true,
+            }
+        )));
+    }
+
     #[test]
     fn trusted_remote_approval_uses_host_even_when_notification_plugin_is_enabled() {
         use nickel_session_protocol::{

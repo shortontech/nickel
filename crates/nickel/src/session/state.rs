@@ -2329,6 +2329,7 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
             | SessionCommand::Unlock
             | SessionCommand::SessionAction { .. }
             | SessionCommand::FocusShellRole { .. }
+            | SessionCommand::FocusPluginSurface { .. }
             | SessionCommand::RestoreApplicationFocus
             | SessionCommand::ConfigureOnScreenKeyboard { .. }
             | SessionCommand::OnScreenKeyboardInput { .. }
@@ -2813,6 +2814,7 @@ pub struct NickelSession {
     lock_restore_window: Option<WindowId>,
     shell_focus_restore_window: Option<WindowId>,
     pub(crate) pending_shell_focus_role: Option<ShellRole>,
+    pub(crate) pending_plugin_focus: Option<nickel_core::plugins::PluginSurfaceKey>,
     pub utility_windows: Vec<Window>,
     hidden_shell_roles: HashSet<ShellRole>,
     hidden_shell_role_locations: HashMap<ShellRole, Point<i32, Logical>>,
@@ -8777,6 +8779,7 @@ impl NickelSession {
             lock_restore_window: None,
             shell_focus_restore_window: None,
             pending_shell_focus_role: None,
+            pending_plugin_focus: None,
             utility_windows: Vec::new(),
             hidden_shell_roles: HashSet::new(),
             hidden_shell_role_locations: HashMap::new(),
@@ -10632,6 +10635,10 @@ impl NickelSession {
             let changed = shell.global_shortcut(action);
             if changed {
                 self.sync_internal_shell();
+                if action == nickel_session_protocol::ShortcutAction::ShowNotifications {
+                    let key = crate::plugin_panel::notification_surface_key();
+                    self.focus_plugin_surface(&key.plugin_id, &key.surface_id);
+                }
                 self.schedule_internal_ui_frame();
             }
             self.wake_internal_shell();
@@ -10911,6 +10918,7 @@ impl NickelSession {
         if !shell_role_accepts_ordinary_focus(role) {
             return false;
         }
+        self.pending_plugin_focus = None;
         if role == ShellRole::Screenshot {
             self.screenshot_output_name = self.preferred_interaction_output_name();
         }
@@ -10950,7 +10958,79 @@ impl NickelSession {
         let Some(target) = target else {
             return false;
         };
+        drop(registry);
+        self.remember_shell_focus_restore_window();
+        if role == ShellRole::Screenshot {
+            self.place_screenshot_surface(&target);
+        }
+        self.space.raise_element(&target, true);
+        self.surrender_internal_focus();
+        self.realize_seat_focus(
+            crate::session::focus::KeyboardFocusTarget::for_window(&target),
+            FocusScope::Other(role as u64),
+        );
+        self.send_tracked_xdg_configures_for_all_windows();
+        true
+    }
+
+    pub(crate) fn focus_plugin_surface(&mut self, plugin_id: &str, surface_id: &str) -> bool {
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: plugin_id.to_owned(),
+            surface_id: surface_id.to_owned(),
+        };
+        if let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
+            shell
+                .surfaces()
+                .iter()
+                .find(|surface| surface.plugin.as_ref() == Some(&key) && shell.visible(surface.id))
+                .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
+        }) {
+            self.pending_shell_focus_role = None;
+            self.pending_plugin_focus = None;
+            return self.focus_internal_surface(runtime);
+        }
+        let target = self
+            .registered_shell_role_slots
+            .iter()
+            .find_map(|registration| {
+                let placement = registration.plugin_surface.as_ref()?;
+                if registration.role != ShellRole::PluginSurface
+                    || placement.plugin_id != plugin_id
+                    || placement.surface_id != surface_id
+                {
+                    return None;
+                }
+                self.utility_windows
+                    .iter()
+                    .find(|window| {
+                        window
+                            .wl_surface()
+                            .is_some_and(|surface| surface.id() == registration.surface)
+                    })
+                    .cloned()
+            });
+        let Some(target) = target else {
+            return false;
+        };
+        if !self.space.elements().any(|window| window == &target) {
+            return false;
+        }
+        self.pending_shell_focus_role = None;
+        self.pending_plugin_focus = None;
+        self.remember_shell_focus_restore_window();
+        self.space.raise_element(&target, true);
+        self.surrender_internal_focus();
+        self.realize_seat_focus(
+            crate::session::focus::KeyboardFocusTarget::for_window(&target),
+            FocusScope::Other(ShellRole::PluginSurface as u64),
+        );
+        self.send_tracked_xdg_configures_for_all_windows();
+        true
+    }
+
+    fn remember_shell_focus_restore_window(&mut self) {
         if self.shell_focus_restore_window.is_none() {
+            let registry = self.windows.snapshot();
             let shell_ids = self
                 .shell_windows()
                 .filter_map(|window| {
@@ -10980,17 +11060,6 @@ impl NickelSession {
                     .map(|window| window.id)
             });
         }
-        if role == ShellRole::Screenshot {
-            self.place_screenshot_surface(&target);
-        }
-        self.space.raise_element(&target, true);
-        self.surrender_internal_focus();
-        self.realize_seat_focus(
-            crate::session::focus::KeyboardFocusTarget::for_window(&target),
-            FocusScope::Other(role as u64),
-        );
-        self.send_tracked_xdg_configures_for_all_windows();
-        true
     }
 
     fn restore_application_focus(&mut self) {
@@ -10998,6 +11067,7 @@ impl NickelSession {
             self.screenshot_output_name = None;
         }
         self.pending_shell_focus_role = None;
+        self.pending_plugin_focus = None;
         if let Some(window) = self.shell_focus_restore_window.take() {
             self.activate_window(window);
         } else {

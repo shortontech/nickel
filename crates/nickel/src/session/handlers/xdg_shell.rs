@@ -1272,6 +1272,17 @@ impl NickelSession {
         {
             self.focus_shell_role(role);
         }
+        if is_utility
+            && let Some(key) = self.pending_plugin_focus.clone()
+            && identity
+                .as_ref()
+                .and_then(|identity| identity.plugin_surface.as_ref())
+                .is_some_and(|placement| {
+                    placement.plugin_id == key.plugin_id && placement.surface_id == key.surface_id
+                })
+        {
+            self.focus_plugin_surface(&key.plugin_id, &key.surface_id);
+        }
         // The shell and its dynamic Codex windows share one Wayland
         // client. New toplevels from that client are deliberately not focused
         // until their role is known, so shell chrome cannot steal keyboard

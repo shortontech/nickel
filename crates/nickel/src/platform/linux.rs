@@ -1342,6 +1342,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::HideOverlay => "hide-overlay",
             SessionCommand::ShowOverlay { .. } => "show-overlay",
             SessionCommand::FocusShellRole { .. } => "focus-shell-role",
+            SessionCommand::FocusPluginSurface { .. } => "focus-plugin-surface",
             SessionCommand::RestoreApplicationFocus => "restore-application-focus",
             SessionCommand::IdentifyOutputs => "identify-outputs",
             SessionCommand::CaptureOutput { .. } => "capture-output",
@@ -1580,6 +1581,10 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
         },
         ShellCommand::FocusControlCenter => SessionCommand::FocusShellRole {
             role: SessionShellRole::ControlCenter,
+        },
+        ShellCommand::FocusPluginSurface { key } => SessionCommand::FocusPluginSurface {
+            plugin_id: key.plugin_id,
+            surface_id: key.surface_id,
         },
         ShellCommand::FocusPreview => SessionCommand::FocusShellRole {
             role: SessionShellRole::Preview,

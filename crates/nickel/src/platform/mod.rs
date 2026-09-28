@@ -786,6 +786,10 @@ pub enum ShellCommand {
     #[cfg(target_os = "linux")]
     FocusControlCenter,
     #[cfg(target_os = "linux")]
+    FocusPluginSurface {
+        key: nickel_core::plugins::PluginSurfaceKey,
+    },
+    #[cfg(target_os = "linux")]
     FocusPreview,
     #[cfg(target_os = "linux")]
     FocusContextMenu,
