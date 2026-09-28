@@ -114,7 +114,11 @@
             .unwrap();
         let mut shell = LiveShell::new().unwrap();
         assert!(shell.refresh_configured_wallpaper(Some(path)));
-        let plugin_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        let key = crate::plugin_panel::desktop_surface_key();
+        let plugin_scene = shell
+            .plugin_surface_scene_for_output(&key, Some("primary"), 320, 200)
+            .expect("active desktop plugin surface");
+        assert!(shell.plugin_surface_change_token(&key).is_some());
         let wallpaper_index = plugin_scene
             .iter()
             .position(|command| matches!(
@@ -155,13 +159,18 @@
         )));
         assert!(!shell.desktop_host.application().plugin_background);
         assert!(!shell.surface_visible(SurfaceRole::Desktop));
+        assert!(shell.plugin_surface_scene_for_output(&key, Some("primary"), 320, 200).is_none());
+        assert!(shell.plugin_surface_change_token(&key).is_none());
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
         );
 
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        let resumed_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        let resumed_scene = shell
+            .plugin_surface_scene_for_output(&key, Some("primary"), 320, 200)
+            .expect("reactivated desktop plugin surface");
+        assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(resumed_scene.iter().any(|command| matches!(
             command,
             nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. }

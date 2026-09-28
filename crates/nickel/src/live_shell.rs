@@ -3466,6 +3466,19 @@ impl LiveShell {
         })
     }
 
+    pub(crate) fn plugin_surface_change_token(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<HostChangeToken> {
+        if *key == crate::plugin_panel::desktop_surface_key() {
+            return self
+                .plugin_desktop_host
+                .as_ref()
+                .map(|_| self.desktop_change_token);
+        }
+        self.plugin_panel_change_token(key)
+    }
+
     fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
         use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
 
@@ -3622,6 +3635,22 @@ impl LiveShell {
             return Some(self.panel_scene_for_output(output, width, height));
         }
         self.plugin_panel_scene(key, width, height)
+    }
+
+    pub(crate) fn plugin_surface_scene_for_output(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<PaintCommand>> {
+        if *key == crate::plugin_panel::desktop_surface_key() {
+            if self.plugin_desktop_host.is_none() {
+                return None;
+            }
+            return Some(self.desktop_scene(width, height));
+        }
+        self.plugin_panel_scene_for_output(key, output, width, height)
     }
 
     fn record_plugin_panel_memory(

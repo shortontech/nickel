@@ -1509,10 +1509,8 @@ impl WinitShell {
             ]
         });
         let role = surface.diagnostic_role();
-        let scene = if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
-            surface
-                .plugin_key()
-                .and_then(|key| state.plugin_panel_change_token(key))
+        let scene = if let Some(key) = surface.plugin_key() {
+            state.plugin_surface_change_token(key)
         } else {
             state.scene_change_token(role)
         };

@@ -1234,13 +1234,8 @@ fn scene_for_native_surface(
     height: u32,
 ) -> Option<Vec<nickel_ui::backend::PaintCommand>> {
     let surface = shell.surface(id)?;
-    if matches!(surface.role(), SurfaceRole::Panel | SurfaceRole::Taskbar) {
-        state.plugin_panel_scene_for_output(
-            surface.plugin_key()?,
-            Some(surface.output_name()),
-            width,
-            height,
-        )
+    if let Some(key) = surface.plugin_key() {
+        state.plugin_surface_scene_for_output(key, Some(surface.output_name()), width, height)
     } else {
         Some(state.scene(surface.role(), width, height))
     }
@@ -1252,8 +1247,8 @@ fn scene_change_token_for_native_surface(
     id: SurfaceId,
     role: SurfaceRole,
 ) -> Option<HostChangeToken> {
-    if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
-        state.plugin_panel_change_token(shell.surface(id)?.plugin_key()?)
+    if let Some(key) = shell.surface(id)?.plugin_key() {
+        state.plugin_surface_change_token(key)
     } else {
         state.scene_change_token(role)
     }
