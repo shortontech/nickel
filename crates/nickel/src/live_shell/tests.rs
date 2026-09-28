@@ -475,6 +475,43 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
 }
 
 #[test]
+fn keyed_panel_controller_opens_a_component_dialog() {
+    let mut shell = LiveShell::new().unwrap();
+    let source = include_str!("../../../../assets/plugins/hello-panel/main.js");
+    let app = crate::plugin_panel::PluginPanelApplication::new(source).unwrap();
+    shell.plugin_panel_host = Some(UiHost::new(app, 360, 96));
+    let (key, surface) = shell.plugin_panels().into_iter().next().unwrap();
+    shell
+        .plugin_panel_scene(&key, surface.width, surface.height)
+        .unwrap();
+    let host = shell.plugin_panel_host_for(&key).unwrap();
+    let open = host
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Open dialog".into(),
+        })
+        .unwrap();
+    assert!(host.request_focus(open.id).changed);
+
+    assert!(shell.plugin_panel_host_controller_for(
+        &key,
+        ControllerAction::Confirm,
+        surface.width,
+        surface.height,
+    ));
+    assert!(
+        shell
+            .plugin_panel_host_for(&key)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Show".into(),
+            })
+            .is_ok()
+    );
+}
+
+#[test]
 fn installed_component_window_activates_and_retires_with_its_plugin() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/plugins/example-window");

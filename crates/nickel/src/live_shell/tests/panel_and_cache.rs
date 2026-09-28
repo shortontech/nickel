@@ -193,6 +193,94 @@
     }
 
     #[test]
+    fn taskbar_uses_keyed_panel_scene_and_ui_routes() {
+        let mut shell = LiveShell::new().unwrap();
+        let key = shell.taskbar_surface_key().unwrap();
+        shell.set_panel_output("left");
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        assert!(!shell
+            .plugin_panel_scene_for_output(&key, Some("right"), 1280, 56)
+            .unwrap()
+            .is_empty());
+        assert_eq!(shell.panel_output.as_deref(), Some("left"));
+
+        let target = super::taskbar_plugin_control_bounds(
+            shell.plugin_taskbar_host.as_ref().unwrap(),
+            "taskbar-launcher",
+        )
+        .unwrap();
+        let point = Point {
+            x: target.origin.x + target.size.width / 2.0,
+            y: target.origin.y + target.size.height / 2.0,
+        };
+        assert!(shell.plugin_panel_host_ui_for(&key, UiEvent::PointerPressed(point), 1280, 56));
+        assert!(shell.plugin_panel_host_ui_for(&key, UiEvent::PointerReleased(point), 1280, 56));
+        assert!(shell.launcher_visible);
+
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
+            .unwrap();
+        assert!(shell.plugin_panel_scene_for_output(&key, Some("left"), 1280, 56).is_none());
+        assert!(!shell.plugin_panel_host_ui_for(&key, UiEvent::PointerPressed(point), 1280, 56));
+    }
+
+    #[test]
+    fn taskbar_keyed_controller_activates_focused_launcher_button() {
+        let mut shell = LiveShell::new().unwrap();
+        let key = shell.taskbar_surface_key().unwrap();
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        let host = shell.plugin_taskbar_host.as_mut().unwrap();
+        let target = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Open Nickel Start".into(),
+            })
+            .unwrap();
+        assert!(host.request_focus(target.id).changed);
+
+        assert!(shell.plugin_panel_host_controller_for(
+            &key,
+            nickel_ui::ControllerAction::Confirm,
+            1280,
+            56,
+        ));
+        assert!(shell.launcher_visible);
+    }
+
+    #[test]
+    fn taskbar_keyed_normalized_pointer_opens_launcher() {
+        let mut shell = LiveShell::new().unwrap();
+        let key = shell.taskbar_surface_key().unwrap();
+        shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        let bounds = super::taskbar_plugin_control_bounds(
+            shell.plugin_taskbar_host.as_ref().unwrap(),
+            "taskbar-launcher",
+        )
+        .unwrap();
+        let point = nickel_input::Point {
+            x: f64::from(bounds.origin.x + bounds.size.width / 2.0),
+            y: f64::from(bounds.origin.y + bounds.size.height / 2.0),
+        };
+        let pointer = |edge, order| {
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(order),
+                position: Some(point),
+                button: nickel_input::PointerButton::Primary,
+                edge,
+            })
+        };
+        shell.plugin_panel_host_input_for(&key, pointer(nickel_input::KeyEdge::Pressed, 1), 1280, 56);
+        assert!(shell.plugin_panel_host_input_for(
+            &key,
+            pointer(nickel_input::KeyEdge::Released, 2),
+            1280,
+            56,
+        ));
+        assert!(shell.launcher_visible);
+    }
+
+    #[test]
     fn taskbar_memory_counts_shared_images_once_across_outputs() {
         let mut shell = LiveShell::new().unwrap();
         shell.set_panel_output("left");

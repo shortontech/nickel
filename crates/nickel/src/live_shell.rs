@@ -3469,7 +3469,9 @@ impl LiveShell {
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Option<HostChangeToken> {
-        let inspection = if self.plugin_panel_host.is_some()
+        let inspection = if self.taskbar_surface_key().as_ref() == Some(key) {
+            self.plugin_taskbar_host.as_ref()?.inspect()
+        } else if self.plugin_panel_host.is_some()
             && self.plugin_panel_owner == key.plugin_id
             && self.plugin_panel_surface.id == key.surface_id
         {
@@ -3601,6 +3603,9 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> Option<Vec<PaintCommand>> {
+        if self.taskbar_surface_key().as_ref() == Some(key) {
+            return Some(self.panel_scene(width, height));
+        }
         if self.plugin_panel_host.is_some()
             && self.plugin_panel_owner == key.plugin_id
             && self.plugin_panel_surface.id == key.surface_id
@@ -3630,6 +3635,19 @@ impl LiveShell {
             (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
         );
         Some(commands)
+    }
+
+    pub(crate) fn plugin_panel_scene_for_output(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<PaintCommand>> {
+        if self.taskbar_surface_key().as_ref() == Some(key) {
+            return Some(self.panel_scene_for_output(output, width, height));
+        }
+        self.plugin_panel_scene(key, width, height)
     }
 
     fn record_plugin_panel_memory(
@@ -5224,6 +5242,24 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if self.taskbar_surface_key().as_ref() == Some(key) {
+            let Some(host) = self.plugin_taskbar_host.as_ref() else {
+                return false;
+            };
+            let (event, authority) =
+                internal_normalized_ingress(input, None, "taskbar-panel", host.inspect(), None);
+            return self
+                .step_taskbar_plugin_batch(
+                    HostBatch {
+                        events: vec![event],
+                        normalized_authorities: vec![authority],
+                        ..HostBatch::default()
+                    },
+                    width,
+                    height,
+                )
+                .is_some_and(|outcome| outcome.changed);
+        }
         let (changed, effects) = {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
@@ -5243,6 +5279,41 @@ impl LiveShell {
         changed | self.apply_plugin_effects(effects)
     }
 
+    pub(crate) fn plugin_panel_host_controller_for(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        action: ControllerAction,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if self.taskbar_surface_key().as_ref() == Some(key) {
+            return self
+                .step_taskbar_plugin_batch(
+                    HostBatch {
+                        events: vec![HostEvent::Controller(action)],
+                        ..HostBatch::default()
+                    },
+                    width,
+                    height,
+                )
+                .is_some_and(|outcome| outcome.changed);
+        }
+        let (changed, effects) = {
+            let Some(host) = self.plugin_panel_host_for(key) else {
+                return false;
+            };
+            let changed = host
+                .step(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Controller(action)],
+                    ..HostBatch::default()
+                })
+                .changed;
+            (changed, host.application_mut().take_effects())
+        };
+        changed | self.apply_plugin_effects(effects)
+    }
+
     #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn plugin_panel_host_ui_for(
         &mut self,
@@ -5251,6 +5322,18 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if self.taskbar_surface_key().as_ref() == Some(key) {
+            return self
+                .step_taskbar_plugin_batch(
+                    HostBatch {
+                        events: vec![HostEvent::Ui(event)],
+                        ..HostBatch::default()
+                    },
+                    width,
+                    height,
+                )
+                .is_some_and(|outcome| outcome.changed);
+        }
         let (changed, effects) = {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
@@ -10259,8 +10342,15 @@ impl LiveShell {
         self.shortcut_capability_status = shortcut_capability_status(capability);
     }
 
-    fn panel_scene(&mut self, width: u32, _height: u32) -> Vec<PaintCommand> {
-        self.step_taskbar_plugin(vec![HostEvent::Poll], width);
+    fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        self.step_taskbar_plugin_batch(
+            HostBatch {
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            },
+            width,
+            height,
+        );
         self.plugin_taskbar_host
             .as_ref()
             .map(|host| host.commands().to_vec())
@@ -10271,6 +10361,22 @@ impl LiveShell {
         &mut self,
         events: Vec<HostEvent>,
         width: u32,
+    ) -> Option<nickel_ui::HostEventOutcome> {
+        self.step_taskbar_plugin_batch(
+            HostBatch {
+                events,
+                ..HostBatch::default()
+            },
+            width,
+            crate::plugin_panel::taskbar_surface().height,
+        )
+    }
+
+    fn step_taskbar_plugin_batch(
+        &mut self,
+        mut batch: HostBatch,
+        width: u32,
+        height: u32,
     ) -> Option<nickel_ui::HostEventOutcome> {
         let (clock, _) = panel_clock_text();
         let (mut projection, images) = self.taskbar_plugin_projection(&clock);
@@ -10284,12 +10390,9 @@ impl LiveShell {
                 false
             }
         };
-        let mut outcome = host.step(HostBatch {
-            application_changed: image_changed || projection_changed,
-            surface_size: Some((width, 56)),
-            events,
-            ..HostBatch::default()
-        });
+        batch.application_changed |= image_changed || projection_changed;
+        batch.surface_size = Some((width, height));
+        let mut outcome = host.step(batch);
         let effects = host.application_mut().take_effects();
         if self.plugin_taskbar_memory.len() >= 32
             && !self.plugin_taskbar_memory.contains_key(&self.panel_output)

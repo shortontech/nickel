@@ -592,15 +592,13 @@ impl InternalShellCoordinator {
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
-        let commands = if surface.role == SurfaceRole::Taskbar {
-            self.shell.panel_scene_for_output(
+        let commands = if let Some(key) = surface.plugin.as_ref() {
+            self.shell.plugin_panel_scene_for_output(
+                key,
                 surface.output.as_deref(),
                 surface.size.0,
                 surface.size.1,
-            )
-        } else if let Some(key) = surface.plugin.as_ref() {
-            self.shell
-                .plugin_panel_scene(key, surface.size.0, surface.size.1)?
+            )?
         } else {
             self.shell
                 .scene(surface.role, surface.size.0, surface.size.1)
@@ -883,10 +881,7 @@ impl InternalShellCoordinator {
             } else {
                 nickel_ui::UiEvent::FocusLost
             };
-            changed |= if entry.role == SurfaceRole::Taskbar {
-                self.shell
-                    .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
-            } else if let Some(key) = entry.plugin.as_ref() {
+            changed |= if let Some(key) = entry.plugin.as_ref() {
                 self.shell
                     .plugin_panel_host_ui_for(key, event, entry.size.0, entry.size.1)
             } else {
@@ -952,25 +947,33 @@ impl InternalShellCoordinator {
                     }
                     _ => {}
                 }
-                changed |= match entry.role {
-                    SurfaceRole::Lock => self.shell.lock_host_controller(action),
-                    SurfaceRole::Launcher => self
-                        .shell
-                        .launcher_host_controller(action, self.controller_family),
-                    SurfaceRole::ControlCenter => {
-                        self.shell
-                            .control_controller(action, entry.size.0, entry.size.1)
+                changed |= if let Some(key) = entry.plugin.as_ref() {
+                    self.shell.plugin_panel_host_controller_for(
+                        key,
+                        action,
+                        entry.size.0,
+                        entry.size.1,
+                    )
+                } else {
+                    match entry.role {
+                        SurfaceRole::Lock => self.shell.lock_host_controller(action),
+                        SurfaceRole::Launcher => self
+                            .shell
+                            .launcher_host_controller(action, self.controller_family),
+                        SurfaceRole::ControlCenter => {
+                            self.shell
+                                .control_controller(action, entry.size.0, entry.size.1)
+                        }
+                        SurfaceRole::WindowPreview => self.shell.preview_controller(action),
+                        SurfaceRole::WindowContextMenu => {
+                            self.shell.window_menu_host_controller(action)
+                        }
+                        SurfaceRole::Notification => self.shell.notification_controller(action),
+                        SurfaceRole::Desktop => self.shell.desktop_controller(action),
+                        SurfaceRole::Screenshot => self.shell.screenshot_controller(action),
+                        SurfaceRole::OnScreenKeyboard => self.shell.keyboard_controller(action),
+                        _ => false,
                     }
-                    SurfaceRole::WindowPreview => self.shell.preview_controller(action),
-                    SurfaceRole::WindowContextMenu => {
-                        self.shell.window_menu_host_controller(action)
-                    }
-                    SurfaceRole::Notification => self.shell.notification_controller(action),
-                    SurfaceRole::Taskbar => self.shell.panel_controller(action, entry.size.0),
-                    SurfaceRole::Desktop => self.shell.desktop_controller(action),
-                    SurfaceRole::Screenshot => self.shell.screenshot_controller(action),
-                    SurfaceRole::OnScreenKeyboard => self.shell.keyboard_controller(action),
-                    _ => false,
                 };
                 continue;
             }
@@ -1174,10 +1177,7 @@ impl InternalShellCoordinator {
                     batch.clipboard_text_limit,
                 )),
                 _ => {
-                    changed |= if entry.role == SurfaceRole::Taskbar {
-                        self.shell
-                            .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
-                    } else if let Some(key) = entry.plugin.as_ref() {
+                    changed |= if let Some(key) = entry.plugin.as_ref() {
                         self.shell
                             .plugin_panel_host_ui_for(key, event, entry.size.0, entry.size.1)
                     } else {
