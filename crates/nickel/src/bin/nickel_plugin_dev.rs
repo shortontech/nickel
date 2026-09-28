@@ -69,7 +69,7 @@ fn compile_jsx(
             "none",
             "--rootDir",
         ])
-        .arg(directory)
+        .arg(".")
         .arg("--outDir")
         .arg(output.path())
         .arg(source)
