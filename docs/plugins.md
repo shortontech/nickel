@@ -11,9 +11,9 @@ minimal working example. The [taskbar](../assets/plugins/taskbar/) shows how a
 first-party plugin requests host actions.
 The [window example](../assets/plugins/example-window/) shows a centered native
 window containing JSX components and a dialog.
-In the nested shell, a window plugin participates in ordinary window focus and
-stacking. Closing its window disables the plugin; enable it again in Settings
-to reopen it.
+A window plugin participates in ordinary window focus and stacking. Closing
+its window disables the plugin without exiting Nickel; enable it again in
+Settings to reopen it.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
 

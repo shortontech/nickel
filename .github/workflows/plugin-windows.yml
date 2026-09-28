@@ -204,6 +204,7 @@ jobs:
               [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);
               [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder title, int capacity);
               [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
+              [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
               private struct Rect { public int Left, Top, Right, Bottom; }
               public static bool HasVisibleWindow(uint processId, string expectedTitle) {
                   bool found = false;
@@ -219,6 +220,19 @@ jobs:
                       return !found;
                   }, IntPtr.Zero);
                   return found;
+              }
+              public static bool CloseVisibleWindow(uint processId, string expectedTitle) {
+                  bool sent = false;
+                  EnumWindows((handle, context) => {
+                      uint owner;
+                      GetWindowThreadProcessId(handle, out owner);
+                      if (owner != processId || !IsWindowVisible(handle)) return true;
+                      var title = new StringBuilder(256);
+                      GetWindowText(handle, title, title.Capacity);
+                      if (title.ToString() == expectedTitle) sent = PostMessage(handle, 0x0010, IntPtr.Zero, IntPtr.Zero);
+                      return !sent;
+                  }, IntPtr.Zero);
+                  return sent;
               }
           }
           '@
@@ -260,6 +274,28 @@ jobs:
               }
             }
             if (-not $ready) { throw "Installed component window did not become visible with a valid plugin memory report" }
+            if (-not [NickelWindowProbe]::CloseVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window")) {
+              throw "Could not send WM_CLOSE to the installed component window"
+            }
+            $closed = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              $shellProcess = Get-Process -Id $shell.ProcessId -ErrorAction SilentlyContinue
+              if (-not $shellProcess) { throw "Closing the plugin window exited the Nickel shell" }
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $plugin = $snapshot.plugins | Where-Object { $_.id -eq "org.example.component-window" } | Select-Object -First 1
+              $retired = $plugin -and -not $plugin.desired_enabled -and $plugin.health.state -eq "disabled" -and $null -eq $plugin.memory.native_ui_bytes
+              $windowGone = -not [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window")
+              if ($retired -and $windowGone) {
+                $closed = $true
+                Write-Host "Closing the installed window retired its plugin while Nickel stayed running."
+                break
+              }
+            }
+            if (-not $closed) { throw "Installed component window did not retire after WM_CLOSE" }
           } finally {
             if ($dev) {
               Get-CimInstance Win32_Process -Filter "ParentProcessId=$($dev.Id)" | Where-Object { $_.Name -eq "nickel.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }

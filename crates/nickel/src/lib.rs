@@ -2925,6 +2925,29 @@ pub fn run() -> Result<(), String> {
                 state.hide_overlay(SurfaceRole::Screenshot);
                 sync_visibility(&mut shell, &state);
             }
+            Some(ShellEvent::CloseRequested(surface))
+                if shell.surface(surface).is_some_and(|entry| {
+                    entry.plugin_key().is_some_and(|key| {
+                        state.plugin_panel_placement(key).is_some_and(|(kind, _)| {
+                            kind == nickel_core::plugins::PluginSurfaceKind::Window
+                        })
+                    })
+                }) =>
+            {
+                let plugin_id = shell
+                    .surface(surface)
+                    .and_then(|entry| entry.plugin_key())
+                    .expect("plugin window close has an owner")
+                    .plugin_id
+                    .clone();
+                if let Err(error) = state.set_plugin_enabled(&plugin_id, false) {
+                    tracing::warn!(plugin = %plugin_id, %error, "could not close plugin window");
+                } else {
+                    shell.set_plugin_panels(state.plugin_panels())?;
+                    sync_visibility(&mut shell, &state);
+                }
+            }
+            Some(ShellEvent::CloseRequested(surface)) if shell.surface(surface).is_none() => {}
             Some(ShellEvent::RuntimeTerminated { code }) => {
                 tracing::info!(code, "native shell event source terminated; exiting");
                 break;
