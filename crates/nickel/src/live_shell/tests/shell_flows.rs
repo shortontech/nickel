@@ -83,6 +83,18 @@
     }
 
     #[test]
+    fn notification_plugin_secure_field_protects_its_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let source = "function App() { return h(Panel, {}, h(TextField, {id: 'private', value: 'secret', secure: true, onChange: value => {}})); }";
+        shell.plugin_notification_host = Some(nickel_ui::UiHost::new(
+            crate::plugin_panel::PluginPanelApplication::new(source).unwrap(),
+            420,
+            180,
+        ));
+        assert!(shell.surface_remote_access_protected(SurfaceRole::Notification));
+    }
+
+    #[test]
     fn window_preview_plugin_reports_memory_and_can_be_disabled_or_enabled() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new(Vec::new());

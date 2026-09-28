@@ -2501,8 +2501,11 @@ impl LiveShell {
                         || self.control_host.remote_access_protected()
                 }),
             SurfaceRole::Notification => {
-                self.notification_host.remote_access_protected()
-                    || self.trusted_notification_visible()
+                self.trusted_notification_visible()
+                    || self.plugin_notification_host.as_ref().map_or_else(
+                        || self.notification_host.remote_access_protected(),
+                        |host| host.remote_access_protected(),
+                    )
             }
             SurfaceRole::VolumeOsd => self
                 .plugin_volume_osd_host

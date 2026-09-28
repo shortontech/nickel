@@ -39,6 +39,8 @@ The component vocabulary includes `Panel`, `Row`, `Column`, `Text`, `Image`,
 `ImageButton`, `Button`, `Badge`, `Action`, `Widget`, `Section`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. A
 full-viewport `Surface` component is used by the bundled desktop background
 plugin. The host owns image bytes and exposes them by asset name to JSX.
+Use `secure={true}` on a `TextField` for passwords or other private input. The
+host masks its paint and blocks remote semantic inspection of that surface.
 The [task badge example](example-task-badge/) shows a surface-free extension
 that contributes UI to the bundled taskbar's declared slot.
 The [desktop widget example](example-desktop-widget/) contributes a bounded

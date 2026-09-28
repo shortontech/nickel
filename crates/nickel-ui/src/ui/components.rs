@@ -1500,6 +1500,16 @@ impl<Message> TextField<Message> {
         mask: char,
         map: fn(String) -> Message,
     ) -> Self {
+        let mut field = Self::on_change_masked_with_placeholder_internal(value, placeholder, mask);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    fn on_change_masked_with_placeholder_internal(
+        value: &str,
+        placeholder: impl Into<String>,
+        mask: char,
+    ) -> Self {
         let displayed = if value.is_empty() {
             placeholder.into()
         } else {
@@ -1519,7 +1529,21 @@ impl<Message> TextField<Message> {
             *input_value = Some(value.to_owned());
             *input_mask = Some(mask);
         }
-        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    /// Map edits from a masked field with a field-specific callback.
+    pub fn on_change_masked_with_placeholder_mapped(
+        value: &str,
+        placeholder: impl Into<String>,
+        mask: char,
+        map: impl Fn(String) -> Message + 'static,
+    ) -> Self
+    where
+        Message: 'static,
+    {
+        let mut field = Self::on_change_masked_with_placeholder_internal(value, placeholder, mask);
+        field.text.0.text_mapper = Some(TextMessageMapper::new(map));
         field
     }
 

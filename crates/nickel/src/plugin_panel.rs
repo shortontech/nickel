@@ -350,6 +350,7 @@ enum PanelNode {
         id: String,
         value: String,
         placeholder: String,
+        secure: bool,
         action: usize,
     },
     Button {
@@ -912,6 +913,11 @@ impl PanelNode {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned(),
+                secure: match value.get("secure") {
+                    None => false,
+                    Some(Value::Bool(secure)) => *secure,
+                    _ => return Err("text field secure must be a boolean".into()),
+                },
                 action: value
                     .get("action")
                     .and_then(Value::as_u64)
@@ -1442,16 +1448,32 @@ impl PanelNode {
                 id,
                 value,
                 placeholder,
+                secure,
                 action,
-            } => AnyView::new(
-                UiTextField::on_change_with_placeholder_mapped(value, placeholder, {
-                    let action = *action;
-                    move |value| PluginMessage::Text(action, value)
-                })
-                .id(id.clone())
-                .accessibility_label(placeholder)
-                .height(44.0),
-            ),
+            } => {
+                let field = if *secure {
+                    UiTextField::on_change_masked_with_placeholder_mapped(
+                        value,
+                        placeholder,
+                        '•',
+                        {
+                            let action = *action;
+                            move |value| PluginMessage::Text(action, value)
+                        },
+                    )
+                } else {
+                    UiTextField::on_change_with_placeholder_mapped(value, placeholder, {
+                        let action = *action;
+                        move |value| PluginMessage::Text(action, value)
+                    })
+                };
+                AnyView::new(
+                    field
+                        .id(id.clone())
+                        .accessibility_label(placeholder)
+                        .height(44.0),
+                )
+            }
             Self::Button {
                 id,
                 label,
@@ -5711,6 +5733,21 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::RunDismiss]
         );
+    }
+
+    #[test]
+    fn secure_jsx_text_field_masks_paint_and_protects_remote_semantics() {
+        let source = "function App() { return h(Panel, {}, h(TextField, {id: 'password', value: 'secret-value', placeholder: 'Password', secure: true, onChange: value => {}})); }";
+        let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 100);
+        assert!(host.remote_access_protected());
+        assert!(matches!(
+            host.bounded_semantic_nodes(64, 4096),
+            Err(nickel_ui::BoundedSemanticError::ProtectedSurface)
+        ));
+        assert!(!host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Text { text, .. } if text.contains("secret-value")
+        )));
     }
 
     #[test]

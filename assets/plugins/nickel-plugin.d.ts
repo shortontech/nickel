@@ -53,6 +53,8 @@ interface NickelTextFieldProps extends NickelProps {
     id: string;
     value?: string;
     placeholder?: string;
+    /** Mask the displayed value and protect the surface from remote inspection. */
+    secure?: boolean;
     onChange: (value: string) => void;
 }
 interface NickelImageProps extends NickelProps {
