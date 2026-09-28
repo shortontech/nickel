@@ -10,6 +10,20 @@ fn usage() -> &'static str {
 }
 
 fn main() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    return std::thread::Builder::new()
+        .name("nickel-plugin-command".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_command)
+        .map_err(|error| format!("could not start plugin command: {error}"))?
+        .join()
+        .map_err(|_| "plugin command panicked".to_owned())?;
+
+    #[cfg(not(target_os = "windows"))]
+    run_command()
+}
+
+fn run_command() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
     match args.next().as_deref() {
         Some(command) if command == "list" => {
