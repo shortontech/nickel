@@ -1724,6 +1724,107 @@
     }
 
     #[test]
+    fn desktop_background_menu_uses_jsx_submenu_and_typed_visibility_action() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.desktop_host.application_mut().persist_layout = false;
+        shell
+            .desktop_host
+            .application_mut()
+            .layout
+            .set_icons_visible(true);
+        shell.set_file_clipboard_available(false);
+        shell.set_desktop_output("primary".into(), 0.0, 0.0, 1.0);
+        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        shell
+            .desktop_host
+            .application_mut()
+            .open_background_context(Some(nickel_file::desktop::Point { x: 500.0, y: 160.0 }));
+        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        let menu_host = shell.plugin_desktop_host.as_ref().unwrap();
+        assert!(menu_host.inspect().open_overlay.is_some());
+        assert!(!menu_host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Paste"))
+            .expect("JSX background menu exposes Paste")
+            .enabled);
+        assert!(shell
+            .desktop_host
+            .application()
+            .frame_overlays(ViewContext::new(
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                InputModality::Pointer,
+            ))
+            .iter()
+            .all(|overlay| !matches!(overlay, FrameOverlay::Menu(_))));
+        let view = menu_host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("View"))
+            .expect("JSX background menu exposes View")
+            .rect;
+        assert!(view.origin.x >= 450.0, "menu should follow the context point");
+        let view_point = nickel_input::Point {
+            x: f64::from(view.origin.x + view.size.width / 2.0),
+            y: f64::from(view.origin.y + view.size.height / 2.0),
+        };
+        let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Motion {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(1),
+                position: view_point,
+                delta: None,
+            },
+        ));
+        let hide = shell
+            .plugin_desktop_host
+            .as_ref()
+            .unwrap()
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Hide desktop icons"))
+            .expect("View submenu exposes JSX visibility action")
+            .rect;
+        let point = nickel_input::Point {
+            x: f64::from(hide.origin.x + hide.size.width / 2.0),
+            y: f64::from(hide.origin.y + hide.size.height / 2.0),
+        };
+        for (order, edge) in [nickel_input::KeyEdge::Pressed, nickel_input::KeyEdge::Released]
+            .into_iter()
+            .enumerate()
+        {
+            let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
+                nickel_input::PointerEvent::Button {
+                    device: nickel_input::DeviceId(1),
+                    order: nickel_input::EventOrder(order as u64 + 2),
+                    button: nickel_input::PointerButton::Primary,
+                    edge,
+                    position: Some(point),
+                },
+            ));
+        }
+        assert!(!shell.desktop_host.application().layout.icons_visible());
+        assert!(shell.desktop_host.application().context_menu.is_none());
+    }
+
+    #[test]
+    fn desktop_plugin_background_action_rejects_unavailable_and_stale_commands() {
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.open_background_context(None);
+        assert!(!desktop.apply_background_plugin_action(
+            crate::plugin_panel::DesktopBackgroundAction::Paste
+        ));
+        assert!(desktop.context_menu.is_some());
+        desktop.topology_generation = desktop.topology_generation.wrapping_add(1);
+        assert!(desktop.apply_background_plugin_action(
+            crate::plugin_panel::DesktopBackgroundAction::ToggleIcons
+        ));
+        assert!(desktop.layout.icons_visible());
+        assert!(desktop.context_menu.is_none());
+    }
+
+    #[test]
     fn stale_desktop_menu_command_is_rejected_after_topology_change() {
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
         let mut desktop = super::DesktopApplication::fixture(None, palette);

@@ -3108,20 +3108,14 @@ impl LiveShell {
             application.cancel_pointer_transaction();
             self.desktop_overlay_pointer_capture = None;
         }
-        let plugin_file_menu_open = !pointer_cancelled
+        let plugin_desktop_menu_open = !pointer_cancelled
             && self.desktop_host.application().plugin_background
-            && self
-                .desktop_host
-                .application()
-                .context_menu
-                .as_ref()
-                .and_then(|context| context.entry)
-                .is_some()
+            && self.desktop_host.application().context_menu.is_some()
             && self
                 .plugin_desktop_host
                 .as_ref()
                 .is_some_and(|host| host.inspect().open_overlay.is_some());
-        if plugin_file_menu_open {
+        if plugin_desktop_menu_open {
             let captured_release = matches!(
                 &event,
                 nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
@@ -5292,6 +5286,14 @@ impl LiveShell {
                                 .execute_context_action(entry, action);
                             changed = true;
                         }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::DesktopBackgroundAction(action) => {
+                    if self.plugin_desktop_host.is_some() {
+                        changed |= self
+                            .desktop_host
+                            .application_mut()
+                            .apply_background_plugin_action(action);
                     }
                 }
                 crate::plugin_panel::PluginEffect::RunSubmit(command) => {
@@ -8979,19 +8981,55 @@ impl LiveShell {
             .context_menu
             .as_ref()
             .filter(|context| context.output == application.active_output)
-            .and_then(|context| context.entry)
-            .map(|entry| format!("{}:{}", entry.0.0, entry.0.1))
-            .filter(|id| {
-                tiles
-                    .iter()
-                    .any(|tile| tile.get("id").and_then(serde_json::Value::as_str) == Some(id))
-            })
-            .map(|id| serde_json::json!({ "id": id }));
-        let menu_anchor = context
-            .as_ref()
-            .and_then(|context| context.get("id"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
+            .and_then(|context| {
+                if let Some(entry) = context.entry {
+                    let id = format!("{}:{}", entry.0.0, entry.0.1);
+                    return tiles
+                        .iter()
+                        .any(|tile| tile.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()))
+                        .then(|| serde_json::json!({ "kind": "file", "id": id }));
+                }
+                let arrangement = match application.layout.arrangement() {
+                    nickel_file::desktop::Arrangement::Manual => "manual",
+                    nickel_file::desktop::Arrangement::Sorted { key, direction } => {
+                        match (key, direction) {
+                            (nickel_file::desktop::SortKey::Name, nickel_file::desktop::SortDirection::Ascending) => "sort-name",
+                            (nickel_file::desktop::SortKey::Name, nickel_file::desktop::SortDirection::Descending) => "sort-name-descending",
+                            (nickel_file::desktop::SortKey::Kind, nickel_file::desktop::SortDirection::Ascending) => "sort-kind",
+                            (nickel_file::desktop::SortKey::Kind, nickel_file::desktop::SortDirection::Descending) => "sort-kind-descending",
+                            (nickel_file::desktop::SortKey::Size, nickel_file::desktop::SortDirection::Ascending) => "sort-size",
+                            (nickel_file::desktop::SortKey::Size, nickel_file::desktop::SortDirection::Descending) => "sort-size-descending",
+                            (nickel_file::desktop::SortKey::Modified, nickel_file::desktop::SortDirection::Ascending) => "sort-modified-ascending",
+                            (nickel_file::desktop::SortKey::Modified, nickel_file::desktop::SortDirection::Descending) => "sort-modified",
+                        }
+                    }
+                };
+                let point = context.anchor.unwrap_or(application.pointer_position);
+                Some(serde_json::json!({
+                    "kind": "background",
+                    "x": point.x,
+                    "y": point.y,
+                    "iconsVisible": application.layout.icons_visible(),
+                    "iconWidth": application.layout.grid().0,
+                    "arrangement": arrangement,
+                    "foldersFirst": application.layout.folder_grouping() == nickel_file::desktop::FolderGrouping::FoldersFirst,
+                    "pasteAvailable": context.paste_available && !application.paste_in_progress,
+                    "desktopWritable": context.desktop_writable,
+                }))
+            });
+        let menu_anchor = context.as_ref().and_then(|context| {
+            if context.get("kind").and_then(serde_json::Value::as_str) == Some("background") {
+                Some((
+                    "plugin-menu-desktop-background-actions",
+                    "desktop-background".to_owned(),
+                ))
+            } else {
+                context
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|id| ("plugin-menu-desktop-file-actions", id.to_owned()))
+            }
+        });
         let plugin_commands = if let Some(host) = self.plugin_desktop_host.as_mut() {
             let data = serde_json::json!({
                 "width": width.clamp(1, 8192),
@@ -9024,11 +9062,11 @@ impl LiveShell {
                         events: vec![HostEvent::Poll],
                         ..HostBatch::default()
                     });
-                    let retained_frame_bytes = if let Some(anchor) = menu_anchor.as_deref()
+                    let retained_frame_bytes = if let Some((menu_id, anchor)) = menu_anchor.as_ref()
                         && host.inspect().open_overlay.is_none()
                     {
                         host.open_transient(
-                            nickel_ui::OverlayId::new("plugin-menu-desktop-file-actions"),
+                            nickel_ui::OverlayId::new(*menu_id),
                             nickel_ui::UiId::new(anchor),
                         )
                         .telemetry

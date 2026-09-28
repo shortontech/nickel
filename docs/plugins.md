@@ -81,6 +81,8 @@ controls `open`; dialog buttons may still update state and request typed effects
 `Menu` contains up to 16 `MenuItem` children. An item can have an `onClick`
 handler, a `disabledReason`, or nested `MenuItem` children with a `label` to
 form a submenu. Items can also declare `shortcut` text and `separatorBefore`.
+Set both `x` and `y` to place a menu at a pointer position relative to its
+declared anchor surface.
 The host renders and navigates these as native menu rows, including the
 disabled state and submenu hierarchy.
 Nickel does not embed
@@ -92,7 +94,10 @@ Copy, Rename, Properties, and Open in Terminal. It requests
 declares `desktop-files-manage`. Nickel checks the grant, rendered tile, current
 file identity, and output before carrying out the request. The bundled JSX
 desktop presents the file context menu; native menus remain available when the
-plugin is disabled, and file windows retain their own presentation.
+plugin is disabled, and file windows retain their own presentation. The bundled
+desktop background menu is also JSX; its View and Sort By submenus request
+typed `desktop-background-action` effects under `desktop-control`, while the
+host checks the current menu context before changing desktop state.
 
 Manifests may declare typed composition relationships. A target declares a
 `provides_slots` entry with an ID, a `badge`, `widget`, `action`, or `section`

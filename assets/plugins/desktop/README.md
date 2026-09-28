@@ -25,6 +25,12 @@ checks that ID against the current desktop before opening it. On drag release,
 `onMove({ dx, dy })` requests `desktop-move` under the `desktop-arrange` grant.
 Nickel validates the current tile and bounded delta, then applies its snap,
 collision, group movement, and persistence policy. Drag preview, modifier
-interpretation, group selection, and menus remain Rust-owned.
+interpretation and group selection remain Rust-owned. File and background
+context menus are JSX components while this plugin is active. The background
+menu uses nested `MenuItem` components for View and Sort By; its actions request
+`desktop-background-action` under `desktop-control`. Nickel checks the live
+menu context and handles desktop layout, clipboard, folder creation, and
+Settings navigation. The native menus remain available when this plugin is
+disabled.
 Settings can disable the
 plugin to restore native painting and shows its measured retained UI memory.

@@ -204,6 +204,7 @@ enum PanelNode {
     },
     Surface {
         children: Vec<Self>,
+        id: Option<String>,
         background: u32,
         width: u32,
         height: u32,
@@ -268,6 +269,7 @@ enum PanelNode {
     Menu {
         id: String,
         anchor: String,
+        point: Option<Point>,
         open: bool,
         items: Vec<Self>,
     },
@@ -632,6 +634,11 @@ impl PanelNode {
                         .filter(|value| !value.is_null())
                         .map(Self::parse)
                         .collect::<Result<Vec<_>, _>>()?,
+                    id: value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 128)
+                        .map(str::to_owned),
                     background: value
                         .get("background")
                         .and_then(Value::as_u64)
@@ -903,6 +910,25 @@ impl PanelNode {
                 Ok(Self::Menu {
                     id: id.to_owned(),
                     anchor: anchor.to_owned(),
+                    point: match (value.get("x"), value.get("y")) {
+                        (None, None) => None,
+                        (Some(x), Some(y)) => {
+                            let coordinate = |value: &Value| {
+                                value
+                                    .as_f64()
+                                    .filter(|value| {
+                                        value.is_finite() && (-8192.0..=8192.0).contains(value)
+                                    })
+                                    .map(|value| value as f32)
+                                    .ok_or("menu point coordinate is invalid")
+                            };
+                            Some(Point {
+                                x: coordinate(x)?,
+                                y: coordinate(y)?,
+                            })
+                        }
+                        _ => return Err("menu point needs both x and y".into()),
+                    },
                     open: value.get("open").and_then(Value::as_bool).unwrap_or(false),
                     items,
                 })
@@ -1150,6 +1176,7 @@ impl PanelNode {
             }
             Self::Surface {
                 children,
+                id,
                 background,
                 width,
                 height,
@@ -1160,13 +1187,15 @@ impl PanelNode {
                         layer = layer.child(child.view(images));
                     }
                 }
-                AnyView::new(
-                    Container::new()
-                        .width(*width as f32)
-                        .height(*height as f32)
-                        .background(*background)
-                        .child(layer),
-                )
+                let mut container = Container::new()
+                    .width(*width as f32)
+                    .height(*height as f32)
+                    .background(*background)
+                    .child(layer);
+                if let Some(id) = id {
+                    container = container.id(id.clone());
+                }
+                AnyView::new(container)
             }
             Self::Panel {
                 children,
@@ -1640,6 +1669,62 @@ pub struct ControlPluginSection {
     pub value: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DesktopBackgroundAction {
+    ToggleIcons,
+    SmallIcons,
+    MediumIcons,
+    LargeIcons,
+    SortName,
+    SortNameDescending,
+    SortKind,
+    SortKindDescending,
+    SortSize,
+    SortSizeDescending,
+    SortModified,
+    SortModifiedAscending,
+    Manual,
+    AlignGrid,
+    AutoArrange,
+    FoldersFirst,
+    FoldersMixed,
+    Refresh,
+    Paste,
+    NewFolder,
+    DisplaySettings,
+    Personalize,
+}
+
+impl DesktopBackgroundAction {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "toggle-icons" => Self::ToggleIcons,
+            "small-icons" => Self::SmallIcons,
+            "medium-icons" => Self::MediumIcons,
+            "large-icons" => Self::LargeIcons,
+            "sort-name" => Self::SortName,
+            "sort-name-descending" => Self::SortNameDescending,
+            "sort-kind" => Self::SortKind,
+            "sort-kind-descending" => Self::SortKindDescending,
+            "sort-size" => Self::SortSize,
+            "sort-size-descending" => Self::SortSizeDescending,
+            "sort-modified" => Self::SortModified,
+            "sort-modified-ascending" => Self::SortModifiedAscending,
+            "manual" => Self::Manual,
+            "align-grid" => Self::AlignGrid,
+            "auto-arrange" => Self::AutoArrange,
+            "folders-first" => Self::FoldersFirst,
+            "folders-mixed" => Self::FoldersMixed,
+            "refresh" => Self::Refresh,
+            "paste" => Self::Paste,
+            "new-folder" => Self::NewFolder,
+            "display-settings" => Self::DisplaySettings,
+            "personalize" => Self::Personalize,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
@@ -1658,6 +1743,7 @@ pub enum PluginEffect {
         id: String,
         action: nickel_file::desktop::DesktopContextAction,
     },
+    DesktopBackgroundAction(DesktopBackgroundAction),
     RunSubmit(String),
     RunDismiss,
     ToggleLauncher,
@@ -2986,6 +3072,45 @@ impl nickel_ui::Application for PluginPanelApplication {
                         {
                             approved.push(PluginEffect::ShowLauncher);
                         }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("desktop-background-action")
+                            && self.manifest.id == desktop_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DesktopControl) =>
+                        {
+                            let Some(action) = effect
+                                .get("action")
+                                .and_then(Value::as_str)
+                                .and_then(DesktopBackgroundAction::parse)
+                            else {
+                                self.last_error =
+                                    Some("desktop background action is invalid".into());
+                                return;
+                            };
+                            if matches!(
+                                action,
+                                DesktopBackgroundAction::Paste | DesktopBackgroundAction::NewFolder
+                            ) && !self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DesktopFilesManage)
+                            {
+                                self.last_error =
+                                    Some("desktop file management grant is missing".into());
+                                return;
+                            }
+                            if !matches!(
+                                self.node.menu("desktop-background-actions"),
+                                Some(PanelNode::Menu { open: true, .. })
+                            ) {
+                                self.last_error =
+                                    Some("desktop background menu is not active".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::DesktopBackgroundAction(action));
+                        }
                         _ if effect.get("type").and_then(Value::as_str) == Some("desktop-open")
                             && self.manifest.id == desktop_manifest().id
                             && self
@@ -3862,12 +3987,19 @@ impl nickel_ui::Application for PluginPanelApplication {
                 PanelNode::Menu {
                     id,
                     anchor,
+                    point,
                     open: true,
                     items,
                 } => {
                     let mut menu = OverlayMenu::new(
                         format!("plugin-menu-{id}"),
-                        OverlayAnchor::Node(UiId::from(anchor.clone())),
+                        point.map_or_else(
+                            || OverlayAnchor::Node(UiId::from(anchor.clone())),
+                            |point| OverlayAnchor::Point {
+                                invocation_target: UiId::from(anchor.clone()),
+                                point,
+                            },
+                        ),
                     );
                     for item in items {
                         if let Some(item) = item.overlay_menu_item() {

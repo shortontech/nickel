@@ -26,6 +26,7 @@ interface NickelPanelProps extends NickelProps {
     height?: number;
 }
 interface NickelSurfaceProps extends NickelProps {
+    id?: string;
     width: number;
     height: number;
     background?: NickelColor;
@@ -78,6 +79,8 @@ interface NickelMenuProps extends NickelProps {
     id: string;
     anchor: string;
     open?: boolean;
+    x?: number;
+    y?: number;
 }
 interface NickelMenuItemProps extends NickelProps {
     id: string;

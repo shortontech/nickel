@@ -22,6 +22,7 @@ use nickel_ui::{
 
 use super::desktop_label_foreground;
 use crate::file_window_host::FileWindowHost;
+use crate::plugin_panel::DesktopBackgroundAction;
 
 pub struct DesktopApplication {
     pub(super) wallpaper: Option<Arc<image::RgbaImage>>,
@@ -872,6 +873,74 @@ impl DesktopApplication {
         self.dismiss_context_menu(DesktopMenuDismissReason::Action);
     }
 
+    pub(super) fn apply_background_plugin_action(
+        &mut self,
+        action: DesktopBackgroundAction,
+    ) -> bool {
+        let Some(context) = self.context_menu.as_ref() else {
+            return false;
+        };
+        if context.entry.is_some() || context.output != self.active_output {
+            return false;
+        }
+        if matches!(action, DesktopBackgroundAction::Paste)
+            && (!context.paste_available || self.paste_in_progress)
+        {
+            return false;
+        }
+        if matches!(action, DesktopBackgroundAction::NewFolder) && !context.desktop_writable {
+            return false;
+        }
+        let command = match action {
+            DesktopBackgroundAction::ToggleIcons => {
+                DesktopCommand::IconsVisible(!self.layout.icons_visible())
+            }
+            DesktopBackgroundAction::SmallIcons => DesktopCommand::IconSize(72.0, 88.0),
+            DesktopBackgroundAction::MediumIcons => DesktopCommand::IconSize(96.0, 112.0),
+            DesktopBackgroundAction::LargeIcons => DesktopCommand::IconSize(128.0, 144.0),
+            DesktopBackgroundAction::SortName => {
+                DesktopCommand::Sort(DesktopSortKey::Name, DesktopSortDirection::Ascending)
+            }
+            DesktopBackgroundAction::SortNameDescending => {
+                DesktopCommand::Sort(DesktopSortKey::Name, DesktopSortDirection::Descending)
+            }
+            DesktopBackgroundAction::SortKind => {
+                DesktopCommand::Sort(DesktopSortKey::Kind, DesktopSortDirection::Ascending)
+            }
+            DesktopBackgroundAction::SortKindDescending => {
+                DesktopCommand::Sort(DesktopSortKey::Kind, DesktopSortDirection::Descending)
+            }
+            DesktopBackgroundAction::SortSize => {
+                DesktopCommand::Sort(DesktopSortKey::Size, DesktopSortDirection::Ascending)
+            }
+            DesktopBackgroundAction::SortSizeDescending => {
+                DesktopCommand::Sort(DesktopSortKey::Size, DesktopSortDirection::Descending)
+            }
+            DesktopBackgroundAction::SortModified => {
+                DesktopCommand::Sort(DesktopSortKey::Modified, DesktopSortDirection::Descending)
+            }
+            DesktopBackgroundAction::SortModifiedAscending => {
+                DesktopCommand::Sort(DesktopSortKey::Modified, DesktopSortDirection::Ascending)
+            }
+            DesktopBackgroundAction::Manual => DesktopCommand::Manual,
+            DesktopBackgroundAction::AlignGrid => DesktopCommand::AlignGrid,
+            DesktopBackgroundAction::AutoArrange => DesktopCommand::AutoArrange,
+            DesktopBackgroundAction::FoldersFirst => {
+                DesktopCommand::FolderGrouping(FolderGrouping::FoldersFirst)
+            }
+            DesktopBackgroundAction::FoldersMixed => {
+                DesktopCommand::FolderGrouping(FolderGrouping::Mixed)
+            }
+            DesktopBackgroundAction::Refresh => DesktopCommand::Refresh,
+            DesktopBackgroundAction::Paste => DesktopCommand::Paste,
+            DesktopBackgroundAction::NewFolder => DesktopCommand::NewFolder,
+            DesktopBackgroundAction::DisplaySettings => DesktopCommand::DisplaySettings,
+            DesktopBackgroundAction::Personalize => DesktopCommand::Personalize,
+        };
+        self.apply_desktop_command(command);
+        self.context_menu.is_none()
+    }
+
     fn launch_settings(&mut self, destination: SettingsDestination) {
         let result = std::env::current_exe()
             .map_err(|error| error.to_string())
@@ -1360,7 +1429,7 @@ impl nickel_ui::Application for DesktopApplication {
         if context.output != self.active_output {
             return selection_marquee.into_iter().collect();
         }
-        if self.plugin_background && context.entry.is_some() {
+        if self.plugin_background {
             return selection_marquee.into_iter().collect();
         }
         if context.entry.is_none() {
