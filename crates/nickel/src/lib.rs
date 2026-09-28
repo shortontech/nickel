@@ -2934,14 +2934,13 @@ pub fn run() -> Result<(), String> {
                     })
                 }) =>
             {
-                let plugin_id = shell
+                let key = shell
                     .surface(surface)
                     .and_then(|entry| entry.plugin_key())
                     .expect("plugin window close has an owner")
-                    .plugin_id
                     .clone();
-                if let Err(error) = state.set_plugin_enabled(&plugin_id, false) {
-                    tracing::warn!(plugin = %plugin_id, %error, "could not close plugin window");
+                if let Err(error) = state.close_plugin_window(&key) {
+                    tracing::warn!(plugin = %key.plugin_id, %error, "could not close plugin window");
                 } else {
                     shell.set_plugin_panels(state.plugin_panels())?;
                     sync_visibility(&mut shell, &state);

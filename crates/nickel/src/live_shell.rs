@@ -3713,6 +3713,54 @@ impl LiveShell {
         );
     }
 
+    pub(crate) fn close_plugin_window(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Result<bool, String> {
+        if !self
+            .plugin_panel_placement(key)
+            .is_some_and(|(kind, _)| kind == nickel_core::plugins::PluginSurfaceKind::Window)
+        {
+            return Ok(false);
+        }
+        if self
+            .plugin_panels()
+            .iter()
+            .filter(|(surface, _)| surface.plugin_id == key.plugin_id)
+            .count()
+            == 1
+        {
+            return self.set_plugin_enabled(&key.plugin_id, false);
+        }
+        if self.plugin_panel_owner == key.plugin_id
+            && self.plugin_panel_surface.id == key.surface_id
+        {
+            self.plugin_panel_host = None;
+            self.plugin_panel_owner = crate::plugin_panel::manifest().id.clone();
+            self.plugin_panel_surface = crate::plugin_panel::surface().clone();
+        } else {
+            self.plugin_panel_extra_hosts.remove(key);
+        }
+        self.plugin_panel_memory.remove(key);
+        let remaining_bytes = self
+            .plugin_panel_memory
+            .iter()
+            .filter(|(surface, _)| surface.plugin_id == key.plugin_id)
+            .map(|(_, bytes)| *bytes)
+            .fold(0_u64, u64::saturating_add);
+        self.plugin_registry.record_memory(
+            &key.plugin_id,
+            nickel_core::plugins::PluginMemory {
+                native_ui_bytes: Some(remaining_bytes),
+                ..Default::default()
+            },
+        )?;
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+        Ok(true)
+    }
+
     #[cfg(test)]
     pub(crate) fn lock_password_len(&self) -> usize {
         self.lock_host.application().password.len()

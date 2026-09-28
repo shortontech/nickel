@@ -13136,22 +13136,22 @@ impl NickelSession {
                     .iter()
                     .find(|entry| entry.id == owner)?
                     .plugin
-                    .as_ref()
-                    .map(|key| key.plugin_id.clone())
+                    .clone()
             });
-            if let Some(plugin_id) = plugin_owner
+            if let Some(key) = plugin_owner
                 && let Some(shell) = self.internal_shell.as_mut()
             {
-                match shell.set_plugin_enabled(&plugin_id, false) {
-                    Ok(_) => {
+                match shell.close_plugin_window(&key) {
+                    Ok(true) => {
                         let snapshot = shell.plugin_status_snapshot();
                         self.plugin_status = Some(snapshot.clone());
                         self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot));
                         self.reconcile_internal_shell_outputs();
                         return;
                     }
+                    Ok(false) => return,
                     Err(error) => {
-                        tracing::warn!(plugin = %plugin_id, %error, "could not close plugin window");
+                        tracing::warn!(plugin = %key.plugin_id, %error, "could not close plugin window");
                         return;
                     }
                 }

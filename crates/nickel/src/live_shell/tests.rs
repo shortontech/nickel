@@ -520,6 +520,65 @@ fn installed_component_window_activates_and_retires_with_its_plugin() {
 }
 
 #[test]
+fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "org.example.two-windows";
+    let directory = root.path().join(id);
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.two-windows","name":"Two windows","entry":"main.js","surfaces":[{"id":"first","kind":"window","width":360,"height":220},{"id":"second","kind":"window","width":400,"height":240}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.surface.id)); }",
+    )
+    .unwrap();
+    let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let mut shell = LiveShell::new().unwrap();
+    shell.plugin_registry.register(package.manifest).unwrap();
+    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell.set_plugin_enabled(id, true).unwrap();
+    let panels = shell.plugin_panels();
+    assert_eq!(panels.len(), 2);
+    for (key, surface) in &panels {
+        shell.plugin_panel_scene(key, surface.width, surface.height);
+    }
+    let both_bytes = shell
+        .plugin_registry
+        .get(id)
+        .unwrap()
+        .memory
+        .native_ui_bytes
+        .unwrap();
+    assert!(both_bytes > 0);
+
+    assert!(shell.close_plugin_window(&panels[0].0).unwrap());
+    let remaining = shell.plugin_panels();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].0, panels[1].0);
+    let status = shell.plugin_registry.get(id).unwrap();
+    assert!(status.desired_enabled);
+    assert_eq!(status.health, nickel_core::plugins::PluginHealth::Running);
+    assert!(status.memory.native_ui_bytes.unwrap() < both_bytes);
+    assert!(
+        shell
+            .plugin_panel_scene(&remaining[0].0, remaining[0].1.width, remaining[0].1.height)
+            .is_some()
+    );
+
+    shell.set_plugin_enabled(id, false).unwrap();
+    shell.set_plugin_enabled(id, true).unwrap();
+    assert_eq!(shell.plugin_panels().len(), 2);
+}
+
+#[test]
 fn installed_dock_uses_declared_offset_and_translucent_panel() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.dock");

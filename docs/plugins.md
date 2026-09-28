@@ -12,8 +12,10 @@ first-party plugin requests host actions.
 The [window example](../assets/plugins/example-window/) shows a centered native
 window containing JSX components and a dialog.
 A window plugin participates in ordinary window focus and stacking. Closing
-its window disables the plugin without exiting Nickel; enable it again in
-Settings to reopen it.
+its only surface disables the plugin without exiting Nickel; enable it again
+in Settings to reopen it. For a package with several surfaces, closing one
+window retires that surface and leaves its siblings running. Disable and
+re-enable the package to reopen all its declared surfaces.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
 

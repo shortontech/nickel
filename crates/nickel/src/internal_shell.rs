@@ -1358,6 +1358,13 @@ impl InternalShellCoordinator {
         self.shell.set_plugin_enabled(id, enabled)
     }
 
+    pub(crate) fn close_plugin_window(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Result<bool, String> {
+        self.shell.close_plugin_window(key)
+    }
+
     pub(crate) fn set_plugin_setting(
         &mut self,
         id: &str,
