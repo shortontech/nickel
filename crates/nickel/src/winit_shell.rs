@@ -2490,6 +2490,8 @@ impl WinitShell {
                     crate::plugin_panel::desktop_surface().clone()
                 } else if role == SurfaceRole::VolumeOsd {
                     crate::plugin_panel::volume_osd_surface().clone()
+                } else if role == SurfaceRole::WindowPreview {
+                    crate::plugin_panel::window_preview_surface().clone()
                 } else {
                     self.plugin_panel_surface.clone()
                 }
@@ -2498,6 +2500,7 @@ impl WinitShell {
             SurfaceRole::Desktop => Some(crate::plugin_panel::desktop_surface_key()),
             SurfaceRole::Taskbar => Some(crate::plugin_panel::taskbar_surface_key()),
             SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
+            SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),
             SurfaceRole::Panel => Some(plugin.map_or_else(
                 || nickel_core::plugins::PluginSurfaceKey {
                     plugin_id: self.plugin_panel_owner.clone(),
@@ -2554,7 +2557,10 @@ impl WinitShell {
                     output,
                     plugin_surface: matches!(
                         role,
-                        SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::VolumeOsd
+                        SurfaceRole::Desktop
+                            | SurfaceRole::Panel
+                            | SurfaceRole::VolumeOsd
+                            | SurfaceRole::WindowPreview
                     )
                     .then(|| nickel_session_protocol::PluginSurfacePlacement {
                         plugin_id: plugin_key.as_ref().unwrap().plugin_id.clone(),

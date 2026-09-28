@@ -1842,7 +1842,12 @@ impl LiveShell {
             let data = serde_json::json!({"windows": []});
             match crate::plugin_panel::PluginPanelApplication::window_preview_with_data(&data) {
                 Ok(application) => {
-                    shell.plugin_preview_host = Some(nickel_ui::UiHost::new(application, 300, 214));
+                    let surface = crate::plugin_panel::window_preview_surface();
+                    shell.plugin_preview_host = Some(nickel_ui::UiHost::new(
+                        application,
+                        surface.width,
+                        surface.height,
+                    ));
                     shell.plugin_registry.mark_running(id)?;
                 }
                 Err(error) => {
@@ -3383,6 +3388,8 @@ impl LiveShell {
             || (self.plugin_run_host.is_some() && crate::plugin_panel::run_surface_key() == *key)
             || (self.plugin_volume_osd_host.is_some()
                 && crate::plugin_panel::volume_osd_surface_key() == *key)
+            || (self.plugin_preview_host.is_some()
+                && crate::plugin_panel::window_preview_surface_key() == *key)
             || self.taskbar_surface_key().as_ref() == Some(key)
             || (self.plugin_panel_host.is_some()
                 && self.plugin_panel_owner == key.plugin_id
@@ -3518,6 +3525,11 @@ impl LiveShell {
             // Both plugins share one native popup. Distinguish their tokens
             // even when their host-local frame generations happen to match.
             (self.plugin_run_host.as_ref()?.inspect(), 1_u64 << 63)
+        } else if *key == crate::plugin_panel::window_preview_surface_key() {
+            if !self.preview_plugin_active() {
+                return None;
+            }
+            (self.plugin_preview_host.as_ref()?.inspect(), 0)
         } else {
             return self.plugin_panel_change_token(key);
         };
@@ -3721,6 +3733,12 @@ impl LiveShell {
                 return None;
             }
             return Some(self.run_scene(width, height));
+        }
+        if *key == crate::plugin_panel::window_preview_surface_key() {
+            if !self.preview_plugin_active() {
+                return None;
+            }
+            return Some(self.window_preview_scene());
         }
         self.plugin_panel_scene_for_output(key, output, width, height)
     }
@@ -4621,7 +4639,12 @@ impl LiveShell {
             let data = serde_json::json!({"windows": []});
             crate::plugin_panel::PluginPanelApplication::window_preview_with_data(&data).map(
                 |application| {
-                    self.plugin_preview_host = Some(nickel_ui::UiHost::new(application, 300, 214));
+                    let surface = crate::plugin_panel::window_preview_surface();
+                    self.plugin_preview_host = Some(nickel_ui::UiHost::new(
+                        application,
+                        surface.width,
+                        surface.height,
+                    ));
                 },
             )
         } else if id == crate::plugin_panel::desktop_manifest().id {

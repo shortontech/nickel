@@ -298,6 +298,12 @@ fn exercise(
     }) {
         return Err(format!("desktop plugin surface is missing: {surfaces:?}"));
     }
+    if !surfaces.lines().any(|line| {
+        line.starts_with("Preview\tunmapped\t")
+            && line.ends_with("org.nickel.window-preview/main")
+    }) {
+        return Err(format!("preview plugin surface is missing: {surfaces:?}"));
+    }
     let plugin_output = checked(test_input, &environment, &["plugins"])?;
     let plugins: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&plugin_output).map_err(|error| error.to_string())?;

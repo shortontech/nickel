@@ -148,6 +148,20 @@ pub fn window_preview_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn window_preview_surface() -> &'static PluginSurface {
+    window_preview_manifest()
+        .surfaces
+        .first()
+        .expect("bundled window preview needs a surface")
+}
+
+pub fn window_preview_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: window_preview_manifest().id.clone(),
+        surface_id: window_preview_surface().id.clone(),
+    }
+}
+
 pub fn desktop_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {

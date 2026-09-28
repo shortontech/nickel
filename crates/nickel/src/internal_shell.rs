@@ -344,8 +344,13 @@ impl InternalShellCoordinator {
                 } else {
                     maximum
                 };
-                let plugin = (role == SurfaceRole::VolumeOsd)
-                    .then(crate::plugin_panel::volume_osd_surface_key);
+                let plugin = match role {
+                    SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
+                    SurfaceRole::WindowPreview => {
+                        Some(crate::plugin_panel::window_preview_surface_key())
+                    }
+                    _ => None,
+                };
                 desired.push((role, plugin, None, size));
             }
         }
@@ -2418,6 +2423,26 @@ mod tests {
             coordinator
                 .shell_mut()
                 .surface_visible(SurfaceRole::Taskbar)
+        );
+    }
+
+    #[test]
+    fn preview_slot_uses_its_plugin_surface_identity() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        let preview = coordinator
+            .surface(SurfaceRole::WindowPreview, None)
+            .unwrap();
+        assert_eq!(
+            preview.plugin,
+            Some(crate::plugin_panel::window_preview_surface_key())
         );
     }
 

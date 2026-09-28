@@ -17,7 +17,11 @@ fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurface
         && (identity.role != ShellRole::PluginSurface || identity.plugin_surface.is_some())
         && (matches!(
             identity.role,
-            ShellRole::Desktop | ShellRole::PluginSurface | ShellRole::Panel | ShellRole::VolumeOsd
+            ShellRole::Desktop
+                | ShellRole::PluginSurface
+                | ShellRole::Panel
+                | ShellRole::VolumeOsd
+                | ShellRole::Preview
         ) || identity.plugin_surface.is_none())
         && (identity.role != ShellRole::Desktop
             || identity.plugin_surface.as_ref().is_none_or(|surface| {
@@ -25,6 +29,11 @@ fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurface
                     && surface.bottom_offset == 0
             }))
         && (identity.role != ShellRole::VolumeOsd
+            || identity.plugin_surface.as_ref().is_none_or(|surface| {
+                surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Overlay
+                    && surface.bottom_offset == 0
+            }))
+        && (identity.role != ShellRole::Preview
             || identity.plugin_surface.as_ref().is_none_or(|surface| {
                 surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Overlay
                     && surface.bottom_offset == 0
@@ -119,6 +128,28 @@ mod shell_surface_identity_tests {
         let mut identity = ShellSurfaceIdentity {
             application_id: "io.nickel.shell.surface.42.11".into(),
             role: ShellRole::VolumeOsd,
+            output: None,
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: key.plugin_id,
+                surface_id: key.surface_id,
+                kind: PluginSurfacePlacementKind::Overlay,
+                width: surface.width,
+                height: surface.height,
+                bottom_offset: 0,
+            }),
+        };
+        assert!(shell_surface_identity_valid(&identity));
+        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Panel;
+        assert!(!shell_surface_identity_valid(&identity));
+    }
+
+    #[test]
+    fn preview_accepts_only_overlay_plugin_placement() {
+        let key = crate::plugin_panel::window_preview_surface_key();
+        let surface = crate::plugin_panel::window_preview_surface();
+        let mut identity = ShellSurfaceIdentity {
+            application_id: "io.nickel.shell.surface.42.12".into(),
+            role: ShellRole::Preview,
             output: None,
             plugin_surface: Some(PluginSurfacePlacement {
                 plugin_id: key.plugin_id,
