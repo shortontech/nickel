@@ -170,7 +170,14 @@ jobs:
               $states = $snapshot.plugins | Where-Object { $_.id -in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop") } | ForEach-Object { "$($_.id)=$($_.health.state)" }
               throw "Windows shell plugins did not reach running: $($states -join ', ')"
             }
+            $taskbar = $snapshot.plugins | Where-Object { $_.id -eq "org.nickel.taskbar" } | Select-Object -First 1
+            $taskbarBytes = [long]$taskbar.memory.native_ui_bytes
+            $taskbarPeak = [long]$taskbar.memory.tracked_peak_bytes
+            if ($taskbarBytes -le 0 -or $taskbarPeak -lt $taskbarBytes) {
+              throw "Windows taskbar plugin has no valid retained UI memory report"
+            }
             Write-Host "Live Windows launcher, taskbar, and desktop plugins are running."
+            Write-Host "Taskbar retained UI: $taskbarBytes bytes; peak: $taskbarPeak bytes."
           } finally {
             $shell.Refresh()
             if (-not $shell.HasExited) { Stop-Process -Id $shell.Id -Force }
