@@ -136,9 +136,19 @@
                 if rect.size.width >= 320.0 && rect.size.height >= 200.0 && *color >> 24 != 0
         )));
         assert!(shell.desktop_host.application().plugin_background);
+        let plugin_host = shell.plugin_desktop_host.as_mut().unwrap();
+        let image_bytes = plugin_host.application().retained_image_bytes();
+        assert!(image_bytes > 0);
+        let frame_bytes = plugin_host
+            .step(HostBatch::default())
+            .telemetry
+            .retained_frame_bytes as u64;
         let id = &crate::plugin_panel::desktop_manifest().id;
         let status = shell.plugin_registry().get(id).unwrap();
-        assert!(status.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0));
+        assert_eq!(
+            status.memory.native_ui_bytes,
+            Some(frame_bytes.saturating_add(image_bytes))
+        );
 
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         let native_scene = shell.scene(SurfaceRole::Desktop, 320, 200);

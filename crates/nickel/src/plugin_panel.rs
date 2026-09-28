@@ -3002,7 +3002,9 @@ impl PluginPanelApplication {
     }
 
     pub fn retained_image_bytes(&self) -> u64 {
+        let mut seen = std::collections::HashSet::new();
         self.retained_image_allocations()
+            .filter(|(address, _)| seen.insert(*address))
             .map(|(_, bytes)| bytes)
             .fold(0_u64, u64::saturating_add)
     }
@@ -4860,6 +4862,18 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowLauncher]
         );
+    }
+
+    #[test]
+    fn retained_image_bytes_counts_shared_image_once() {
+        let mut app =
+            PluginPanelApplication::new("function App() { return h(Panel, {}); }").unwrap();
+        let shared = Arc::new(image::RgbaImage::new(8, 8));
+        let mut images = PluginImages::new();
+        images.insert("first".into(), (1, Arc::clone(&shared)));
+        images.insert("second".into(), (2, Arc::clone(&shared)));
+        app.sync_images(images);
+        assert_eq!(app.retained_image_bytes(), shared.as_raw().len() as u64);
     }
 
     #[test]

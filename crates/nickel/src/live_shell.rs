@@ -8956,10 +8956,13 @@ impl LiveShell {
                         outcome.telemetry.retained_frame_bytes
                     };
                     let commands = host.commands().to_vec();
+                    let image_bytes = host.application().retained_image_bytes();
                     let _ = self.plugin_registry.record_memory(
                         &crate::plugin_panel::desktop_manifest().id,
                         nickel_core::plugins::PluginMemory {
-                            native_ui_bytes: Some(retained_frame_bytes as u64),
+                            native_ui_bytes: Some(
+                                (retained_frame_bytes as u64).saturating_add(image_bytes),
+                            ),
                             ..Default::default()
                         },
                     );
@@ -9784,10 +9787,13 @@ impl LiveShell {
             });
             self.preview_frame = None;
             let commands = host.commands().to_vec();
+            let image_bytes = host.application().retained_image_bytes();
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::window_preview_manifest().id,
                 nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    native_ui_bytes: Some(
+                        (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
+                    ),
                     ..Default::default()
                 },
             );
@@ -10201,10 +10207,13 @@ impl LiveShell {
             });
             let commands = host.commands().to_vec();
             let effects = host.application_mut().take_effects();
+            let image_bytes = host.application().retained_image_bytes();
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::launcher_manifest().id,
                 nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    native_ui_bytes: Some(
+                        (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
+                    ),
                     ..nickel_core::plugins::PluginMemory::default()
                 },
             );

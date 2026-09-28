@@ -95,8 +95,19 @@
         }];
         let id = &crate::plugin_panel::window_preview_manifest().id;
         shell.open_window_preview(0);
+        shell.preview_images.insert(
+            WindowId(71),
+            Arc::new(RgbaImage::from_pixel(8, 8, Rgba([20, 40, 60, 255]))),
+        );
         assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
         assert!(shell.preview_plugin_active());
+        let preview_host = shell.plugin_preview_host.as_mut().unwrap();
+        let image_bytes = preview_host.application().retained_image_bytes();
+        assert!(image_bytes > 0);
+        let frame_bytes = preview_host
+            .step(HostBatch::default())
+            .telemetry
+            .retained_frame_bytes as u64;
         let status = shell
             .plugin_status_snapshot()
             .plugins
@@ -104,7 +115,10 @@
             .find(|plugin| &plugin.id == id)
             .unwrap();
         assert!(status.desired_enabled);
-        assert!(status.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0));
+        assert_eq!(
+            status.memory.native_ui_bytes,
+            Some(frame_bytes.saturating_add(image_bytes))
+        );
 
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(!shell.preview_plugin_active());
