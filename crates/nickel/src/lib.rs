@@ -1936,10 +1936,10 @@ fn handle_shell_input(
                 state.set_panel_origin_y(display.y);
             }
         }
-        let plugin_surface_count = state.plugin_panels().len();
+        let plugin_surface_count = state.shell_panel_surfaces().len();
         if state.plugin_panel_host_input_for(&key, event, width, height) {
-            if state.plugin_panels().len() != plugin_surface_count {
-                shell.set_plugin_panels(state.plugin_panels())?;
+            if state.shell_panel_surfaces().len() != plugin_surface_count {
+                shell.set_plugin_panels(state.shell_panel_surfaces())?;
             }
             if taskbar {
                 sync_panel_popover_anchor(shell, state);
@@ -2498,7 +2498,7 @@ pub fn run() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
     let mut state = LiveShell::new_with_safe_mode(command_line.safe_mode)?;
-    shell.set_plugin_panels(state.plugin_panels())?;
+    shell.set_plugin_panels(state.shell_panel_surfaces())?;
     let mut feature_settings = OptionalFeatureSettings::load_default();
     feature_settings.codex_enabled = feature_settings.effective_codex_enabled();
     let mut codex = CodexSurfaces::new(&shell, &feature_settings, state.semantic_theme())?;
@@ -2897,7 +2897,7 @@ pub fn run() -> Result<(), String> {
                 let opening_notification_history =
                     shortcut == platform::GlobalShortcut::ShowNotifications;
                 if state.global_shortcut(shortcut) {
-                    shell.set_plugin_panels(state.plugin_panels())?;
+                    shell.set_plugin_panels(state.shell_panel_surfaces())?;
                     sync_visibility(&mut shell, &state);
                     #[cfg(target_os = "windows")]
                     if opening_notification_history
@@ -2975,7 +2975,7 @@ pub fn run() -> Result<(), String> {
                 if let Err(error) = state.close_plugin_window(&key) {
                     tracing::warn!(plugin = %key.plugin_id, %error, "could not close plugin window");
                 } else {
-                    shell.set_plugin_panels(state.plugin_panels())?;
+                    shell.set_plugin_panels(state.shell_panel_surfaces())?;
                     sync_visibility(&mut shell, &state);
                 }
             }

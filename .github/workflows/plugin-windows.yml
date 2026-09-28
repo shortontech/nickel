@@ -93,6 +93,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib installed_panel_geometry_uses_its_manifest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib reserved_plugin_panel_uses_full_output_and_configured_edge
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib installed_window_geometry_centers_on_its_output
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib installed_component_window_activates_and_retires_with_its_plugin

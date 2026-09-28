@@ -193,7 +193,8 @@ fn desired_output_surfaces(
             .into_iter()
             .filter(|role| {
                 (*role != SurfaceRole::Desktop || create_desktops)
-                    && (*role != SurfaceRole::Taskbar || panel_outputs.contains(output))
+                    && (*role != SurfaceRole::Taskbar
+                        || (!cfg!(target_os = "windows") && panel_outputs.contains(output)))
                     && (*role != SurfaceRole::Panel
                         || (cfg!(target_os = "windows")
                             && plugin_panel_enabled
@@ -498,6 +499,12 @@ impl ShellSurface {
     }
 
     pub fn role(&self) -> SurfaceRole {
+        #[cfg(target_os = "windows")]
+        if self.role == SurfaceRole::Panel
+            && self.plugin.as_ref() == Some(&crate::plugin_panel::taskbar_surface_key())
+        {
+            return SurfaceRole::Taskbar;
+        }
         self.role
     }
 
@@ -558,6 +565,7 @@ pub struct WinitShell {
     options: ShellOptions,
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
+    taskbar_panel_enabled: bool,
     plugin_panel_enabled: bool,
     plugin_panel_surface: nickel_core::plugins::PluginSurface,
     plugin_panel_owner: String,
@@ -625,6 +633,7 @@ impl WinitShell {
             options,
             primary_output_name: None,
             active_output_name: None,
+            taskbar_panel_enabled: true,
             plugin_panel_enabled: crate::plugin_panel::enabled(),
             plugin_panel_surface: crate::plugin_panel::surface().clone(),
             plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
@@ -761,6 +770,31 @@ impl WinitShell {
                 }
             }
         }
+        #[cfg(target_os = "windows")]
+        if self.taskbar_panel_enabled {
+            let key = crate::plugin_panel::taskbar_surface_key();
+            let panel = crate::plugin_panel::taskbar_surface().clone();
+            let outputs = panel_outputs(
+                &output_names,
+                self.options.bar_on_all_displays,
+                self.primary_output_name.as_deref(),
+            );
+            for (display_index, geometry) in displays.iter().copied().enumerate() {
+                let output_name = &output_names[display_index];
+                if outputs.contains(output_name)
+                    && let Err(error) = self.create_surface_with_plugin(
+                        SurfaceRole::Panel,
+                        display_index,
+                        geometry,
+                        output_name,
+                        Some((&key, &panel)),
+                    )
+                {
+                    output_creation_failed = true;
+                    tracing::warn!(output = output_name, %error, "failed to create bundled taskbar panel");
+                }
+            }
+        }
         if output_creation_failed {
             self.output_creation_retry.failed(Instant::now());
         }
@@ -820,13 +854,31 @@ impl WinitShell {
             surface_id: self.plugin_panel_surface.id.clone(),
         };
         let mut active_panels = self.extra_plugin_panels.clone();
+        #[cfg(target_os = "windows")]
+        if self.taskbar_panel_enabled {
+            active_panels.insert(
+                crate::plugin_panel::taskbar_surface_key(),
+                crate::plugin_panel::taskbar_surface().clone(),
+            );
+        }
         if self.plugin_panel_enabled {
             active_panels.insert(
                 primary_plugin_key.clone(),
                 self.plugin_panel_surface.clone(),
             );
         }
-        let desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
+        let mut desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
+        #[cfg(target_os = "windows")]
+        {
+            let taskbar_key = crate::plugin_panel::taskbar_surface_key();
+            let outputs = panel_outputs(
+                &output_names,
+                self.options.bar_on_all_displays,
+                self.primary_output_name.as_deref(),
+            );
+            desired_plugin_panels
+                .retain(|(output, key)| key != &taskbar_key || outputs.contains(output));
+        }
         let panel_expected = |surface: &ShellSurface| {
             surface.plugin.as_ref().is_some_and(|key| {
                 desired_plugin_panels.contains(&(surface.output_name.clone(), key.clone()))
@@ -920,9 +972,9 @@ impl WinitShell {
             }
         }
         if cfg!(target_os = "windows") {
-            let mut extra = self
-                .extra_plugin_panels
+            let mut extra = active_panels
                 .iter()
+                .filter(|(key, _)| *key != &primary_plugin_key)
                 .map(|(key, surface)| (key.clone(), surface.clone()))
                 .collect::<Vec<_>>();
             // A dialog with an owner needs its ordinary window created first.
@@ -1121,11 +1173,24 @@ impl WinitShell {
 
     pub fn set_plugin_panels(
         &mut self,
-        panels: Vec<(
+        mut panels: Vec<(
             nickel_core::plugins::PluginSurfaceKey,
             nickel_core::plugins::PluginSurface,
         )>,
     ) -> Result<bool, String> {
+        let taskbar_key = crate::plugin_panel::taskbar_surface_key();
+        let taskbar_panel_enabled =
+            if let Some(index) = panels.iter().position(|(key, _)| *key == taskbar_key) {
+                let (_, surface) = panels.remove(index);
+                if surface != *crate::plugin_panel::taskbar_surface()
+                    || panels.iter().any(|(key, _)| *key == taskbar_key)
+                {
+                    return Err("bundled taskbar panel declaration changed".into());
+                }
+                true
+            } else {
+                false
+            };
         let mut panels = panels.into_iter();
         let primary = panels.next();
         if primary
@@ -1158,7 +1223,8 @@ impl WinitShell {
         {
             return Err("duplicate plugin panel surface".into());
         }
-        if self.plugin_panel_enabled == enabled
+        if self.taskbar_panel_enabled == taskbar_panel_enabled
+            && self.plugin_panel_enabled == enabled
             && self.plugin_panel_owner == owner
             && self.plugin_panel_surface == surface
             && self.extra_plugin_panels == extra
@@ -1166,6 +1232,10 @@ impl WinitShell {
             return Ok(false);
         }
         let mut active = extra.clone();
+        #[cfg(target_os = "windows")]
+        if taskbar_panel_enabled {
+            active.insert(taskbar_key, crate::plugin_panel::taskbar_surface().clone());
+        }
         if enabled {
             active.insert(
                 nickel_core::plugins::PluginSurfaceKey {
@@ -1211,6 +1281,7 @@ impl WinitShell {
             .map_err(|error| format!("failed to register plugin surface: {error}"))?;
         }
         self.plugin_panel_enabled = enabled;
+        self.taskbar_panel_enabled = taskbar_panel_enabled;
         self.plugin_panel_owner = owner;
         self.plugin_panel_surface = surface;
         self.extra_plugin_panels = extra;
@@ -1455,7 +1526,14 @@ impl WinitShell {
                 i64::from(size.height),
             ]
         });
-        let scene = state.scene_change_token(surface.role);
+        let role = surface.role();
+        let scene = if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
+            surface
+                .plugin_key()
+                .and_then(|key| state.plugin_panel_change_token(key))
+        } else {
+            state.scene_change_token(role)
+        };
         let native = surface
             .window
             .window_handle()
@@ -1469,11 +1547,11 @@ impl WinitShell {
             .unwrap_or_default();
         crate::windows_shell_diagnostics::SurfaceObservation {
             native,
-            role: surface.role,
+            role,
             generation: surface.diagnostic_generation,
             native_visible: surface.visible,
-            canonical_visible: state.surface_visible(surface.role),
-            protected: state.surface_remote_access_protected(surface.role),
+            canonical_visible: state.surface_visible(role),
+            protected: state.surface_remote_access_protected(role),
             geometry,
             output: Some(surface.output_name.clone()),
             scene_generation: scene.map(|token| token.frame_generation),
@@ -1765,7 +1843,7 @@ impl WinitShell {
     pub fn presenter_roles(&self) -> Vec<SurfaceRole> {
         self.surfaces
             .iter()
-            .filter_map(|surface| surface.presenter.as_ref().map(|_| surface.role))
+            .filter_map(|surface| surface.presenter.as_ref().map(|_| surface.role()))
             .collect()
     }
 
@@ -2533,7 +2611,11 @@ impl WinitShell {
                 }
             }
             SurfaceRole::Panel => {
-                if matches!(
+                if panel.reserve_work_area {
+                    if !crate::platform::configure_panel_window(&window) {
+                        tracing::warn!(?role, "failed to configure Windows reserved panel window");
+                    }
+                } else if matches!(
                     panel.kind,
                     nickel_core::plugins::PluginSurfaceKind::Panel
                         | nickel_core::plugins::PluginSurfaceKind::Dock
@@ -2753,6 +2835,19 @@ fn surface_geometry_for_panel(
     if role == SurfaceRole::Panel {
         let width = panel.width.min(geometry.width);
         let height = panel.height.min(geometry.height);
+        if panel.reserve_work_area {
+            return (
+                PANEL_TITLE,
+                geometry.x,
+                match panel_edge {
+                    PanelEdge::Top => geometry.y,
+                    PanelEdge::Bottom => geometry.y + geometry.height.saturating_sub(height) as i32,
+                },
+                geometry.width,
+                height,
+                false,
+            );
+        }
         if matches!(
             panel.kind,
             nickel_core::plugins::PluginSurfaceKind::Window
@@ -3316,7 +3411,7 @@ mod tests {
     }
 
     #[test]
-    fn every_enabled_output_requires_its_own_wallpaper_bar_and_lock() {
+    fn every_enabled_output_requires_wallpaper_and_lock() {
         let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
         let desired = desired_output_surfaces(
             &outputs,
@@ -3326,18 +3421,21 @@ mod tests {
             false,
             nickel_core::plugins::PluginOutputScope::Primary,
         );
-        assert_eq!(desired.len(), 6);
+        assert_eq!(
+            desired.len(),
+            if cfg!(target_os = "windows") { 4 } else { 6 }
+        );
         for output in outputs {
-            for role in [
-                SurfaceRole::Desktop,
-                SurfaceRole::Taskbar,
-                SurfaceRole::Lock,
-            ] {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
                 assert!(
                     desired.contains(&(output.clone(), role)),
                     "{output} {role:?}"
                 );
             }
+            assert_eq!(
+                desired.contains(&(output, SurfaceRole::Taskbar)),
+                !cfg!(target_os = "windows")
+            );
         }
     }
 
@@ -3385,6 +3483,25 @@ mod tests {
                 cfg!(target_os = "windows")
             );
             assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
+        }
+    }
+
+    #[test]
+    fn reserved_plugin_panel_uses_full_output_and_configured_edge() {
+        let geometry = DisplayGeometry {
+            x: -1200,
+            y: 100,
+            width: 1200,
+            height: 800,
+            scale: 1.0,
+        };
+        let panel = crate::plugin_panel::taskbar_surface();
+        for (edge, expected_y) in [(PanelEdge::Top, 100), (PanelEdge::Bottom, 844)] {
+            let (title, x, y, width, height, hidden) =
+                super::surface_geometry_for_panel(SurfaceRole::Panel, geometry, edge, panel);
+            assert_eq!(title, super::PANEL_TITLE);
+            assert_eq!((x, y, width, height), (-1200, expected_y, 1200, 56));
+            assert!(!hidden);
         }
     }
 
@@ -3448,7 +3565,10 @@ mod tests {
                 ("HDMI-A-1".to_owned(), SurfaceRole::Lock),
             ])
         );
-        assert!(after.contains(&("DP-1".to_owned(), SurfaceRole::Taskbar)));
+        assert_eq!(
+            after.contains(&("DP-1".to_owned(), SurfaceRole::Taskbar)),
+            !cfg!(target_os = "windows")
+        );
         assert!(!after.contains(&("HDMI-A-1".to_owned(), SurfaceRole::Taskbar)));
     }
 
@@ -3483,7 +3603,10 @@ mod tests {
             false,
             nickel_core::plugins::PluginOutputScope::Primary,
         );
-        assert_eq!(desired.len(), 4);
+        assert_eq!(
+            desired.len(),
+            if cfg!(target_os = "windows") { 2 } else { 4 }
+        );
         assert!(
             desired
                 .iter()
