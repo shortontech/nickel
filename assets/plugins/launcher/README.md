@@ -20,7 +20,8 @@ bounded pinned and recent app list, and Places. The plugin renders dashboard
 and search buttons inside native scroll views. The dashboard also shows recent
 projects, account, Settings, and a component logout dialog. The root
 `Viewport` declares the launcher's background and padding and fills the host
-window at its current output size. Actions go through typed `nickel.request`
+window at its current output size. Its scroll view uses the remaining height,
+including on smaller outputs. Actions go through typed `nickel.request`
 calls. The host checks declared capabilities and current launcher state,
 including app and project IDs, before acting. Search ranking,
 favorite state, application execution, and session authority remain Rust

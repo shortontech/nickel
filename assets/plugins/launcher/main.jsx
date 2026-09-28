@@ -8,12 +8,12 @@ function App() {
         setMenuTarget({id: item.id, index: item.index, pinned: item.pinned, kind, anchor});
         nickel.openMenu("launcher-app-actions");
     };
-    return <Viewport background={0xf12b303c} padding={20}><Column>
+    return <Viewport background={0xf12b303c} padding={20}>
         <Text>Nickel Launcher</Text>
         {data.status ? <Text>{data.status}</Text> : null}
         <TextField id="launcher-query" value={data.query} placeholder="Search applications"
             onChange={query => nickel.request({type: "launcher-set-query", query})} />
-        {data.dashboardVisible ? <ScrollView id="launcher-dashboard-scroll" height={580}>
+        {data.dashboardVisible ? <ScrollView id="launcher-dashboard-scroll" grow={true}>
             <Text>Places</Text>
             {data.places.map(place => <Row>
                 <Button id={"launcher-place-" + place.index}
@@ -85,7 +85,7 @@ function App() {
             }}>Log out</Button> : null}
         </ScrollView> : null}
         {!data.dashboardVisible ?
-        <ScrollView id="launcher-search-scroll" height={580}>
+        <ScrollView id="launcher-search-scroll" grow={true}>
             {data.results.length === 0 ? <Text>No applications found</Text> : null}
             {data.results.map(result => <Row>
                 <Button id={"launcher-result-" + result.index}
@@ -132,5 +132,5 @@ function App() {
                 {menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"}
             </MenuItem>
         </Menu> : null}
-    </Column></Viewport>;
+    </Viewport>;
 }

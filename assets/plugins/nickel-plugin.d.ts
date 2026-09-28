@@ -161,7 +161,7 @@ declare function Action(props: NickelActionProps): JSX.Element;
 declare function Section(props: NickelSectionProps): JSX.Element;
 declare function Row(props: NickelProps): JSX.Element;
 declare function Column(props: NickelProps): JSX.Element;
-declare function ScrollView(props: NickelProps & { id: string; height?: number }): JSX.Element;
+declare function ScrollView(props: NickelProps & { id: string; height?: number; grow?: boolean }): JSX.Element;
 declare function Text(props: NickelTextProps): JSX.Element;
 declare function Image(props: NickelImageProps): JSX.Element;
 declare function ImageButton(props: NickelImageButtonProps): JSX.Element;

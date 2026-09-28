@@ -160,6 +160,9 @@ components.
 `Viewport` fills its host window and accepts an ARGB `background` and `padding`
 from 0 to 256 logical pixels. Use it as the root for a full-window layout such
 as the bundled launcher; its size follows the declared surface and output.
+Inside a `Viewport`, `<ScrollView id="items" grow={true}>` takes the remaining
+height and shrinks when the window does. Use `height` for a fixed-size scroll
+area; `grow` and `height` cannot be combined.
 JavaScript execution has a 100,000-iteration limit per call frame. A loop that
 exceeds it returns an error to the plugin host; a failed event rolls back its
 component state so the next input can still run.

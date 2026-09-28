@@ -347,6 +347,7 @@ enum PanelNode {
     ScrollView {
         id: String,
         height: u32,
+        grow: bool,
         children: Vec<Self>,
     },
     Text {
@@ -824,6 +825,10 @@ impl PanelNode {
                     if id.is_empty() || id.len() > 128 {
                         return Err("scroll view ID must contain 1 to 128 characters".into());
                     }
+                    let grow = value.get("grow").and_then(Value::as_bool).unwrap_or(false);
+                    if grow && value.get("height").is_some() {
+                        return Err("scroll view cannot set both grow and height".into());
+                    }
                     let height = value.get("height").and_then(Value::as_u64).unwrap_or(480);
                     if !(1..=8192).contains(&height) {
                         return Err("scroll view height must be 1 to 8192".into());
@@ -831,6 +836,7 @@ impl PanelNode {
                     Ok(Self::ScrollView {
                         id: id.to_owned(),
                         height: height as u32,
+                        grow,
                         children,
                     })
                 } else {
@@ -1353,7 +1359,7 @@ impl PanelNode {
                 background,
                 padding,
             } => {
-                let mut column = Column::new().fill_width();
+                let mut column = Column::new().fill_width().fill_height();
                 for child in children {
                     column = column.child(child.view(images));
                 }
@@ -1405,18 +1411,21 @@ impl PanelNode {
             Self::ScrollView {
                 id,
                 height,
+                grow,
                 children,
             } => {
                 let mut column = Column::new().fill_width();
                 for child in children {
                     column = column.child(child.view(images));
                 }
-                AnyView::new(
-                    VerticalScroll::new(PluginMessage::Scroll, 0.0)
-                        .id(id.clone())
-                        .height(*height as f32)
-                        .child(column),
-                )
+                let scroll = VerticalScroll::new(PluginMessage::Scroll, 0.0)
+                    .id(id.clone())
+                    .child(column);
+                AnyView::new(if *grow {
+                    scroll.grow(1.0)
+                } else {
+                    scroll.height(*height as f32)
+                })
             }
             Self::Text { value, color } => AnyView::new(
                 Container::new()
@@ -5208,6 +5217,35 @@ mod tests {
     }
 
     #[test]
+    fn installed_viewport_tracks_window_resize_and_keeps_content_inset() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.viewport".into();
+        let package = PluginPackage {
+            manifest: external_manifest,
+            images: Default::default(),
+            source: "function App() { return h(Viewport, {background: 0xff112233, padding: 20}, h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open')); }".into(),
+        };
+        let app = PluginPanelApplication::from_package(&package).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 400, 200);
+        for (width, height) in [(400, 200), (240, 120)] {
+            host.step(nickel_ui::HostBatch {
+                surface_size: Some((width, height)),
+                ..Default::default()
+            });
+            let button = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Open".into(),
+                })
+                .unwrap();
+            assert_eq!(button.bounds.origin.x, 20.0);
+            assert_eq!(button.bounds.origin.y, 20.0);
+            assert!(button.bounds.origin.x + button.bounds.size.width <= width as f32);
+            assert!(button.bounds.origin.y + button.bounds.size.height <= height as f32);
+        }
+    }
+
+    #[test]
     fn external_dialog_example_requests_settings_only_with_its_grant() {
         let directory = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -5853,6 +5891,22 @@ mod tests {
         ));
         assert!(panel.node.button_action("launcher-settings").is_some());
         assert!(panel.node.dialog("launcher-logout-dialog").is_some());
+    }
+
+    #[test]
+    fn launcher_scroll_area_shrinks_with_the_popup() {
+        let launcher = Launcher::new(Vec::new());
+        let app = PluginPanelApplication::launcher(&launcher).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 920, 680);
+        let large = host.scroll_extent(&PluginMessage::Scroll).unwrap();
+        host.step(nickel_ui::HostBatch {
+            surface_size: Some((500, 260)),
+            ..Default::default()
+        });
+        let small = host.scroll_extent(&PluginMessage::Scroll).unwrap();
+        assert!(small.viewport.height < large.viewport.height);
+        assert!(small.viewport.height <= 220.0);
+        assert!(small.viewport.height > 0.0);
     }
 
     #[test]

@@ -114,7 +114,7 @@ function h(kind, props, ...children) {
     const closeAction = typeof props?.onClose === 'function'
         ? __handlers.push(props.onClose) - 1 : null;
     return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
-        x: props?.x, y: props?.y, width: props?.width, height: props?.height,
+        x: props?.x, y: props?.y, width: props?.width, height: props?.height, grow: props?.grow,
         background: props?.background, padding: props?.padding, radius: props?.radius, color: props?.color,
         label: props?.label, disabledReason: props?.disabledReason,
         shortcut: props?.shortcut, separatorBefore: props?.separatorBefore,
