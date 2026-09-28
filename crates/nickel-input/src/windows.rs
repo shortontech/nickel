@@ -171,6 +171,26 @@ impl<A: Clone> WindowsInputAdapter<A> {
         outcomes
     }
 
+    /// Discards retained modifier state without interpreting the correction as input.
+    pub fn clear_modifier_state(&mut self, modifier: crate::AggregateModifier) {
+        let sides = match modifier {
+            crate::AggregateModifier::Shift => {
+                [crate::Modifier::ShiftLeft, crate::Modifier::ShiftRight]
+            }
+            crate::AggregateModifier::Control => {
+                [crate::Modifier::ControlLeft, crate::Modifier::ControlRight]
+            }
+            crate::AggregateModifier::Alt => [crate::Modifier::AltLeft, crate::Modifier::AltRight],
+            crate::AggregateModifier::Super => {
+                [crate::Modifier::SuperLeft, crate::Modifier::SuperRight]
+            }
+        };
+        for side in sides {
+            self.engine
+                .reconcile_modifier(WINDOWS_KEYBOARD_DEVICE, side, false);
+        }
+    }
+
     pub fn key_held(&self, key: KeyCode) -> bool {
         self.engine
             .pressed_keys(WINDOWS_KEYBOARD_DEVICE)
@@ -975,6 +995,31 @@ mod tests {
             observed_super_sides(sides, 0x5c, KeyEdge::Released, false),
             0
         );
+    }
+
+    #[test]
+    fn clearing_stale_super_state_does_not_fire_bare_modifier_action() {
+        let binding = Binding {
+            shortcut: Shortcut {
+                key: ShortcutKey::Physical(PhysicalKey::Code(KeyCode::SuperLeft)),
+                modifiers: std::collections::BTreeSet::new(),
+                trigger: ShortcutTrigger::ModifierReleased(crate::Modifier::SuperLeft),
+            },
+            action: "launcher",
+            suppress: false,
+        };
+        let mut adapter = WindowsInputAdapter::new([binding]);
+        assert!(
+            adapter
+                .handle_key_code(KeyCode::SuperLeft, KeyEdge::Pressed)
+                .outcomes
+                .is_empty()
+        );
+
+        adapter.clear_modifier_state(AggregateModifier::Super);
+
+        assert!(!adapter.modifier_held(AggregateModifier::Super));
+        assert!(!adapter.key_held(KeyCode::SuperLeft));
     }
 
     #[test]

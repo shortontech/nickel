@@ -551,7 +551,7 @@ impl WinitShell {
         }
         let events = builder.build().map_err(|error| error.to_string())?;
         #[cfg(target_os = "windows")]
-        let internal_window_thread = crate::platform::register_internal_window_thread();
+        let internal_window_thread = crate::platform::register_shell_window_thread();
         #[cfg(target_os = "windows")]
         let external_events = Arc::new(Mutex::new(VecDeque::new()));
         tracing::info!(

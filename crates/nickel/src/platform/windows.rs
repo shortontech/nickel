@@ -1392,13 +1392,6 @@ static LAUNCHER_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static INTERNAL_WINDOW_THREADS: LazyLock<Mutex<HashSet<u32>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
-static SUPER_HOOK_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static NICKEL_WINDOW_SUPER_SIDES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-static NICKEL_WINDOW_SUPER_CHORDED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static NICKEL_WINDOW_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 static PREVIEW_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static TASK_SWITCHER_PEEK_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
@@ -2548,7 +2541,7 @@ fn handle_native_keyboard_hook(
             // Super side affecting later ordinary keys. Reconcile aggregate
             // state against Windows before interpreting a non-Super key.
             if !super_edge && !super_physically_held {
-                outcomes.extend(adapter.reconcile_modifier_release(AggregateModifier::Super));
+                adapter.clear_modifier_state(AggregateModifier::Super);
             }
             // Windows can deliver Print Screen as a release without a press. Recover the
             // pressed shortcut edge here, where the hook sees every foreground window.
@@ -2581,12 +2574,6 @@ fn handle_native_keyboard_hook(
     } else {
         super_edge || outcomes.iter().any(|outcome| outcome.suppress)
     };
-    if outcomes
-        .iter()
-        .any(|outcome| outcome.action == HotkeyAction::ToggleLauncher)
-    {
-        SUPER_HOOK_TOGGLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    }
     send_hotkey_outcomes(outcomes);
     if suppress {
         HookDisposition::Suppress
@@ -2763,6 +2750,7 @@ struct ForeignWindowAtPoint {
 pub struct InternalWindowThreadGuard {
     thread_id: u32,
     message_hook: Option<HHOOK>,
+    draggable_windows: bool,
 }
 
 unsafe extern "system" fn internal_window_message_hook(
@@ -2815,7 +2803,7 @@ fn internal_message_shortcut(
     Some((key, edge))
 }
 
-pub fn register_internal_window_thread() -> InternalWindowThreadGuard {
+fn register_window_message_thread(draggable_windows: bool) -> InternalWindowThreadGuard {
     // SAFETY: this installs an in-process hook only for the current thread. The callback and
     // owning guard both remain valid until the hook is removed on this same thread.
     let thread_id = unsafe { GetCurrentThreadId() };
@@ -2831,13 +2819,22 @@ pub fn register_internal_window_thread() -> InternalWindowThreadGuard {
         tracing::warn!(%error, thread_id, "could not observe internal window messages");
     })
     .ok();
-    if let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
+    if draggable_windows && let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
         threads.insert(thread_id);
     }
     InternalWindowThreadGuard {
         thread_id,
         message_hook,
+        draggable_windows,
     }
+}
+
+pub fn register_internal_window_thread() -> InternalWindowThreadGuard {
+    register_window_message_thread(true)
+}
+
+pub fn register_shell_window_thread() -> InternalWindowThreadGuard {
+    register_window_message_thread(false)
 }
 
 impl Drop for InternalWindowThreadGuard {
@@ -2846,7 +2843,9 @@ impl Drop for InternalWindowThreadGuard {
             // SAFETY: this guard owns the thread-local hook handle.
             let _ = unsafe { UnhookWindowsHookEx(hook) };
         }
-        if let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
+        if self.draggable_windows
+            && let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock()
+        {
             threads.remove(&self.thread_id);
         }
     }
@@ -2855,12 +2854,20 @@ impl Drop for InternalWindowThreadGuard {
 fn draggable_window_owner(window: HWND, nickel_process: u32) -> bool {
     let mut process_id = 0;
     let thread_id = unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
+    INTERNAL_WINDOW_THREADS.lock().is_ok_and(|threads| {
+        drag_target_owner_allowed(process_id, thread_id, nickel_process, &threads)
+    })
+}
+
+fn drag_target_owner_allowed(
+    process_id: u32,
+    thread_id: u32,
+    nickel_process: u32,
+    internal_window_threads: &HashSet<u32>,
+) -> bool {
     process_id != 0
         && thread_id != 0
-        && (process_id != nickel_process
-            || INTERNAL_WINDOW_THREADS
-                .lock()
-                .is_ok_and(|threads| threads.contains(&thread_id)))
+        && (process_id != nickel_process || internal_window_threads.contains(&thread_id))
 }
 
 unsafe extern "system" fn find_foreign_window_at_point(window: HWND, state: LPARAM) -> BOOL {
@@ -3008,13 +3015,6 @@ fn pointer_drag_rectangle(
 
 fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     crate::windows_remote_control::observe_physical_pointer(event);
-    if matches!(
-        event.kind,
-        NativePointerKind::PrimaryPressed | NativePointerKind::SecondaryPressed
-    ) && NICKEL_WINDOW_SUPER_SIDES.load(std::sync::atomic::Ordering::Acquire) != 0
-    {
-        NICKEL_WINDOW_SUPER_CHORDED.store(true, std::sync::atomic::Ordering::Release);
-    }
     // Injected hook traffic is not the physical Windows pointer source and may
     // neither start, update, nor complete its operation binding.
     if event.injected {
@@ -3112,33 +3112,20 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     ) {
         return HookDisposition::Forward;
     }
-    // A focused in-process window can report Super on its own event queue even
-    // when the low-level hook has not observed the corresponding key edge yet.
-    let file_window_super =
-        NICKEL_WINDOW_SUPER_SIDES.load(std::sync::atomic::Ordering::Acquire) != 0;
-    let physical_super = event.super_physically_held || file_window_super;
     let physical_alt = event.alt_physically_held;
-    let (super_held, gesture, reconciled) = windows_input_adapter()
+    let (super_held, gesture) = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
-            let reconciled = if !physical_super {
-                adapter.reconcile_modifier_release(AggregateModifier::Super)
-            } else {
-                Vec::new()
-            };
             let super_held = adapter.modifier_held(AggregateModifier::Super);
-            let gesture = adapter.begin_physical_super_pointer_gesture(
-                if event.kind == NativePointerKind::PrimaryPressed {
+            let gesture =
+                adapter.begin_pointer_gesture(if event.kind == NativePointerKind::PrimaryPressed {
                     PointerButton::Primary
                 } else {
                     PointerButton::Secondary
-                },
-                physical_super,
-            );
-            (super_held, gesture, reconciled)
+                });
+            (super_held, gesture)
         })
         .unwrap_or_default();
-    send_hotkey_outcomes(reconciled);
     let gesture = gesture.or_else(|| {
         physical_alt.then_some(match event.kind {
             NativePointerKind::PrimaryPressed => SuperPointerGesture::Move,
@@ -3149,8 +3136,6 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     let chord_started = gesture.is_some();
     tracing::debug!(
         super_held,
-        physical_super,
-        file_window_super,
         physical_alt,
         chord_started,
         button = if event.kind == NativePointerKind::PrimaryPressed {
@@ -3975,42 +3960,6 @@ pub fn configure_launcher_window(window: &impl raw_window_handle::HasWindowHandl
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
         .is_ok()
-    }
-}
-
-pub fn observe_nickel_window_key(super_side: Option<u8>, pressed: bool) {
-    use std::sync::atomic::Ordering;
-
-    if pressed {
-        if let Some(side) = super_side {
-            let previous = NICKEL_WINDOW_SUPER_SIDES.fetch_or(side, Ordering::AcqRel);
-            if previous == 0 {
-                NICKEL_WINDOW_SUPER_CHORDED.store(false, Ordering::Release);
-                NICKEL_WINDOW_TOGGLE_GENERATION.store(
-                    SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire),
-                    Ordering::Release,
-                );
-            }
-        } else if NICKEL_WINDOW_SUPER_SIDES.load(Ordering::Acquire) != 0 {
-            NICKEL_WINDOW_SUPER_CHORDED.store(true, Ordering::Release);
-        }
-        return;
-    }
-    let Some(side) = super_side else {
-        return;
-    };
-    let previous = NICKEL_WINDOW_SUPER_SIDES.fetch_and(!side, Ordering::AcqRel);
-    if previous & side == 0 || previous & !side != 0 {
-        return;
-    }
-    let chorded = NICKEL_WINDOW_SUPER_CHORDED.swap(false, Ordering::AcqRel);
-    let hook_dispatched = SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire)
-        != NICKEL_WINDOW_TOGGLE_GENERATION.load(Ordering::Acquire);
-    if !chorded
-        && !hook_dispatched
-        && let Some(sender) = SHORTCUT_SENDER.get()
-    {
-        let _ = sender.send(GlobalShortcut::ToggleLauncher);
     }
 }
 
@@ -6317,12 +6266,12 @@ mod tests {
         WindowDragAdmission, WindowDragCoordinator, application_icon,
         apply_native_write_completion, apply_window_drag, clamp_preview_x,
         classify_window_drag_observation, contain_rect, contested_authority,
-        contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
-        internal_message_shortcut, is_nickel_host_terminal, is_shell_infrastructure,
-        native_hotkey_requests, native_system_drag_hit, parse_windows_command,
-        permits_contested_workflow, pointer_drag_rectangle, project_native_preview_diagnostics,
-        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
-        should_observe_tokenless_geometry, should_restore_on_activation,
+        contested_drag_within_bound, drag_target_owner_allowed, enqueue_issued_settlement,
+        executable_icon, internal_message_shortcut, is_nickel_host_terminal,
+        is_shell_infrastructure, native_hotkey_requests, native_system_drag_hit,
+        parse_windows_command, permits_contested_workflow, pointer_drag_rectangle,
+        project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
+        restore_legacy_icon_alpha, should_observe_tokenless_geometry, should_restore_on_activation,
         unknown_suspension_within_bound, window_icon, windows_pid_descends_from,
         work_area_above_panel,
     };
@@ -6341,6 +6290,33 @@ mod tests {
             Some((nickel_core::hotkeys::KeyCode::Tab, KeyEdge::Pressed))
         );
         assert_eq!(internal_message_shortcut(WM_KEYDOWN, 0x41, 1 << 30), None);
+    }
+
+    #[test]
+    fn shell_thread_windows_are_not_modifier_drag_targets() {
+        let nickel_process = 41;
+        let shell_thread = 7;
+        let file_thread = 8;
+        let internal_threads = HashSet::from([file_thread]);
+
+        assert!(!drag_target_owner_allowed(
+            nickel_process,
+            shell_thread,
+            nickel_process,
+            &internal_threads,
+        ));
+        assert!(drag_target_owner_allowed(
+            nickel_process,
+            file_thread,
+            nickel_process,
+            &internal_threads,
+        ));
+        assert!(drag_target_owner_allowed(
+            99,
+            shell_thread,
+            nickel_process,
+            &internal_threads,
+        ));
     }
 
     #[test]
