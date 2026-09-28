@@ -274,7 +274,11 @@ enum PanelNode {
     MenuItem {
         id: String,
         label: String,
-        action: usize,
+        action: Option<usize>,
+        children: Vec<Self>,
+        disabled_reason: Option<String>,
+        shortcut: Option<String>,
+        separator_before: bool,
     },
 }
 
@@ -908,7 +912,11 @@ impl PanelNode {
                     .get("id")
                     .and_then(Value::as_str)
                     .ok_or("menu item needs an id")?;
-                let label = child_text(children)?;
+                let label = if let Some(label) = value.get("label").and_then(Value::as_str) {
+                    label.to_owned()
+                } else {
+                    child_text(children)?
+                };
                 if id.is_empty()
                     || id.len() > 128
                     || label.is_empty()
@@ -919,16 +927,111 @@ impl PanelNode {
                 let action = value
                     .get("action")
                     .and_then(Value::as_u64)
-                    .and_then(|action| usize::try_from(action).ok())
-                    .ok_or("menu item needs an onClick handler")?;
+                    .and_then(|action| usize::try_from(action).ok());
+                let nested = children.iter().any(Value::is_object);
+                let items = if nested {
+                    if children.len() > 16 {
+                        return Err("menu item submenu needs at most 16 items".into());
+                    }
+                    children
+                        .iter()
+                        .map(Self::parse)
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    Vec::new()
+                };
+                if nested && (action.is_some() || items.is_empty()) {
+                    return Err("submenu needs children and no onClick handler".into());
+                }
+                if nested {
+                    let mut seen = HashSet::new();
+                    for item in &items {
+                        let Self::MenuItem { id, .. } = item else {
+                            return Err("submenu children must be MenuItem components".into());
+                        };
+                        if !seen.insert(id) {
+                            return Err("submenu item IDs must be unique".into());
+                        }
+                    }
+                }
+                let disabled_reason = value
+                    .get("disabledReason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                if !nested && action.is_none() && disabled_reason.is_none() {
+                    return Err("menu item needs an onClick handler or disabled reason".into());
+                }
+                if action.is_some() && disabled_reason.is_some() {
+                    return Err("disabled menu item cannot have an onClick handler".into());
+                }
+                if nested && disabled_reason.is_some() {
+                    return Err("submenu cannot have a disabled reason".into());
+                }
+                if disabled_reason
+                    .as_ref()
+                    .is_some_and(|reason| reason.is_empty() || reason.len() > 200)
+                {
+                    return Err("menu item disabled reason is invalid".into());
+                }
+                let shortcut = value
+                    .get("shortcut")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                if shortcut
+                    .as_ref()
+                    .is_some_and(|shortcut| shortcut.is_empty() || shortcut.len() > 40)
+                {
+                    return Err("menu item shortcut is invalid".into());
+                }
                 Ok(Self::MenuItem {
                     id: id.to_owned(),
                     label,
                     action,
+                    children: items,
+                    disabled_reason,
+                    shortcut,
+                    separator_before: value
+                        .get("separatorBefore")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 })
             }
             _ => Err(format!("unknown component {kind:?}")),
         }
+    }
+
+    fn overlay_menu_item(&self) -> Option<OverlayMenuItem<PluginMessage>> {
+        let Self::MenuItem {
+            id,
+            label,
+            action,
+            children,
+            disabled_reason,
+            shortcut,
+            separator_before,
+        } = self
+        else {
+            return None;
+        };
+        let mut item = if !children.is_empty() {
+            OverlayMenuItem::submenu(
+                id.clone(),
+                label.clone(),
+                children.iter().filter_map(Self::overlay_menu_item),
+            )
+        } else if let Some(action) = action {
+            OverlayMenuItem::action(id.clone(), label.clone(), PluginMessage::Click(*action))
+        } else {
+            OverlayMenuItem::disabled_with_reason(
+                id.clone(),
+                label.clone(),
+                disabled_reason.clone().unwrap_or_default(),
+            )
+        };
+        if let Some(shortcut) = shortcut {
+            item = item.shortcut(shortcut.clone());
+        }
+        Some(item.separator_before(*separator_before))
     }
 
     fn view(&self, images: &PluginImages) -> AnyView<PluginMessage> {
@@ -3767,12 +3870,8 @@ impl nickel_ui::Application for PluginPanelApplication {
                         OverlayAnchor::Node(UiId::from(anchor.clone())),
                     );
                     for item in items {
-                        if let PanelNode::MenuItem { id, label, action } = item {
-                            menu = menu.item(OverlayMenuItem::action(
-                                id.clone(),
-                                label.clone(),
-                                PluginMessage::Click(*action),
-                            ));
+                        if let Some(item) = item.overlay_menu_item() {
+                            menu = menu.item(item);
                         }
                     }
                     overlays.push(FrameOverlay::Menu(menu));
@@ -3816,6 +3915,33 @@ impl nickel_ui::Application for PluginPanelApplication {
 mod tests {
     use super::*;
     use nickel_ui::Application;
+
+    #[test]
+    fn jsx_menu_items_preserve_submenus_disabled_reasons_and_shortcuts() {
+        let source = r#"function App() { return h(Panel, {height: 80},
+            h(Menu, {id: 'actions', anchor: 'root', open: true},
+                h(MenuItem, {id: 'view', label: 'View', separatorBefore: true},
+                    h(MenuItem, {id: 'show', shortcut: 'Ctrl+D', onClick: () => nickel.request('show-launcher')}, 'Show'),
+                    h(MenuItem, {id: 'paste', disabledReason: 'Clipboard is empty'}, 'Paste')))); }"#;
+        let application = PluginPanelApplication::new(source).unwrap();
+        let Some(PanelNode::Menu { items, .. }) = application.node.menu("actions") else {
+            panic!("JSX menu must be present");
+        };
+        let view = items[0].overlay_menu_item().unwrap();
+        assert_eq!(view.label, "View");
+        assert!(view.separator_before);
+        assert_eq!(view.children.len(), 2);
+        assert_eq!(view.children[0].shortcut.as_deref(), Some("Ctrl+D"));
+        assert!(matches!(
+            view.children[0].action,
+            Some(PluginMessage::Click(_))
+        ));
+        assert_eq!(
+            view.children[1].disabled_reason.as_deref(),
+            Some("Clipboard is empty")
+        );
+        assert!(view.children[1].action.is_none());
+    }
 
     #[test]
     fn bundled_taskbar_drag_requests_validated_pin_move_without_click() {

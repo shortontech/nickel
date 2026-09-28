@@ -78,6 +78,11 @@ typed effect, as the bundled taskbar does when moving a pinned app.
 `Dialog` accepts `onClose`, called when the host dismisses an open dialog by
 Escape, outside input, or focus loss. The handler should clear the state that
 controls `open`; dialog buttons may still update state and request typed effects.
+`Menu` contains up to 16 `MenuItem` children. An item can have an `onClick`
+handler, a `disabledReason`, or nested `MenuItem` children with a `label` to
+form a submenu. Items can also declare `shortcut` text and `separatorBefore`.
+The host renders and navigates these as native menu rows, including the
+disabled state and submenu hierarchy.
 Nickel does not embed
 React, a browser DOM, or the TypeScript compiler. The host checks declared
 capabilities and current shell state before executing a requested effect.

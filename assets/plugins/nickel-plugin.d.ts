@@ -81,7 +81,11 @@ interface NickelMenuProps extends NickelProps {
 }
 interface NickelMenuItemProps extends NickelProps {
     id: string;
-    onClick: NickelClick;
+    label?: string;
+    onClick?: NickelClick;
+    disabledReason?: string;
+    shortcut?: string;
+    separatorBefore?: boolean;
 }
 interface NickelBadgeProps extends NickelProps {
     item?: string;
