@@ -290,7 +290,7 @@ jobs:
                       GetWindowText(handle, title, title.Capacity);
                       Rect rect;
                       if (title.ToString() != expectedTitle || !GetClientRect(handle, out rect)) return true;
-                      var point = new Point { X = (rect.Right - rect.Left) / 2, Y = rect.Bottom - 32 };
+                      var point = new Point { X = (rect.Right - rect.Left) / 2, Y = (rect.Bottom - rect.Top) / 2 };
                       if (!ClientToScreen(handle, ref point)) return true;
                       bool focused = SetForegroundWindow(handle);
                       if (!SetCursorPos(point.X, point.Y)) return true;

@@ -2233,6 +2233,21 @@ impl WinitShell {
                     let device = devices.get_or_insert(native_device);
                     let adapter = adapters.entry(window_id).or_default();
                     for input in adapter.normalize_at_scale(device, scale, &event) {
+                        #[cfg(target_os = "windows")]
+                        if surfaces[index].role == SurfaceRole::Panel
+                            && matches!(
+                                input,
+                                InputEvent::Pointer(nickel_input::PointerEvent::Button { .. })
+                            )
+                        {
+                            tracing::warn!(
+                                ?surface,
+                                ?device,
+                                ?input,
+                                scale,
+                                "plugin native pointer button"
+                            );
+                        }
                         queue_shell_input(pending, surface, input);
                     }
                     if let Some(event) = translate_window_event(surface, scale as f32, &event) {
