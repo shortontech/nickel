@@ -505,6 +505,8 @@ pub struct WinitShell {
     external_events: Arc<Mutex<VecDeque<ShellUserEvent>>>,
     #[cfg(target_os = "windows")]
     event_thread: u32,
+    #[cfg(target_os = "windows")]
+    _internal_window_thread: crate::platform::InternalWindowThreadGuard,
     pending_events: VecDeque<ShellEvent>,
     displays: Vec<(DisplayGeometry, String)>,
     input_adapters: HashMap<WindowId, nickel_input::winit::Adapter>,
@@ -549,6 +551,8 @@ impl WinitShell {
         }
         let events = builder.build().map_err(|error| error.to_string())?;
         #[cfg(target_os = "windows")]
+        let internal_window_thread = crate::platform::register_internal_window_thread();
+        #[cfg(target_os = "windows")]
         let external_events = Arc::new(Mutex::new(VecDeque::new()));
         tracing::info!(
             elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
@@ -565,6 +569,8 @@ impl WinitShell {
             #[cfg(target_os = "windows")]
             // SAFETY: querying the identifier of the current thread has no preconditions.
             event_thread: unsafe { GetCurrentThreadId() },
+            #[cfg(target_os = "windows")]
+            _internal_window_thread: internal_window_thread,
             pending_events: VecDeque::new(),
             displays: Vec::new(),
             input_adapters: HashMap::new(),
@@ -1934,37 +1940,6 @@ impl WinitShell {
                         return;
                     };
                     let surface = surfaces[index].id;
-                    #[cfg(target_os = "windows")]
-                    if let WindowEvent::KeyboardInput { event: key, .. } = &event {
-                        if key.physical_key
-                            == winit::keyboard::PhysicalKey::Code(
-                                winit::keyboard::KeyCode::PrintScreen,
-                            )
-                            && !key.repeat
-                        {
-                            crate::platform::handle_focused_shortcut(
-                                nickel_input::KeyCode::PrintScreen,
-                                if key.state == winit::event::ElementState::Pressed {
-                                    nickel_input::KeyEdge::Pressed
-                                } else {
-                                    nickel_input::KeyEdge::Released
-                                },
-                            );
-                        }
-                        let super_side = match key.physical_key {
-                            winit::keyboard::PhysicalKey::Code(
-                                winit::keyboard::KeyCode::SuperLeft,
-                            ) => Some(1),
-                            winit::keyboard::PhysicalKey::Code(
-                                winit::keyboard::KeyCode::SuperRight,
-                            ) => Some(2),
-                            _ => None,
-                        };
-                        crate::platform::observe_nickel_window_key(
-                            super_side,
-                            key.state == winit::event::ElementState::Pressed,
-                        );
-                    }
                     let scale = surfaces[index].window.scale_factor();
                     let native_device = window_event_device(&event);
                     // Winit omits a device on lifecycle and IME events. Its documented dummy

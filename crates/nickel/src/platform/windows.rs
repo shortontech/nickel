@@ -68,7 +68,7 @@ use windows::{
             Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
             Controls::MARGINS,
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
-            Input::KeyboardAndMouse::{GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture},
+            Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture},
             Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
             Shell::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
@@ -79,16 +79,16 @@ use windows::{
                 SHGetFileInfoW, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL, DefWindowProcW,
-                DestroyIcon, DrawIconEx, EVENT_OBJECT_DESTROY, EVENT_SYSTEM_MOVESIZEEND,
-                EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT, GA_ROOTOWNER, GCLP_HICON,
-                GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
-                GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+                CallNextHookEx, CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL,
+                DefWindowProcW, DestroyIcon, DrawIconEx, EVENT_OBJECT_DESTROY,
+                EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
+                GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor,
+                GetClassLongPtrW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
                 GetLastActivePopup, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW,
                 GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-                HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON, IsIconic,
-                IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
+                HHOOK, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP,
+                HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON,
+                IsIconic, IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
                 NID_INTEGRATED_TOUCH, NID_READY, PostMessageW, RegisterClassW,
                 RegisterShellHookWindow, RegisterWindowMessageW, SEND_MESSAGE_TIMEOUT_FLAGS,
                 SM_CXICON, SM_CYICON, SM_DIGITIZER, SMTO_ABORTIFHUNG, SPI_GETWORKAREA,
@@ -96,14 +96,15 @@ use windows::{
                 SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
                 SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW,
                 SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, ShowWindowAsync,
+                SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, ShowWindowAsync,
                 SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE,
-                WM_CONTEXTMENU, WM_COPYDATA, WM_GETICON, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
-                WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
-                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
-                WindowFromPoint,
+                UnhookWindowsHookEx, WH_GETMESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+                WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA,
+                WM_GETICON, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+                WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+                WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
             },
         },
     },
@@ -1177,8 +1178,21 @@ fn project_windows_shortcuts(
 }
 
 pub fn handle_focused_shortcut(key: KeyCode, edge: KeyEdge) {
+    handle_focused_shortcut_edge(key, edge, false);
+}
+
+fn handle_focused_shortcut_edge(key: KeyCode, edge: KeyEdge, synthesize_missing_tab_press: bool) {
     let actions = windows_input_adapter().lock().ok().map(|mut adapter| {
-        if key == KeyCode::PrintScreen
+        if synthesize_missing_tab_press
+            && key == KeyCode::Tab
+            && edge == KeyEdge::Released
+            && adapter.modifier_held(AggregateModifier::Alt)
+            && !adapter.key_held(KeyCode::Tab)
+        {
+            let mut outcomes = adapter.handle_key_code(key, KeyEdge::Pressed).outcomes;
+            outcomes.extend(adapter.handle_key_code(key, KeyEdge::Released).outcomes);
+            outcomes
+        } else if key == KeyCode::PrintScreen
             && edge == KeyEdge::Released
             && !adapter.key_held(KeyCode::PrintScreen)
         {
@@ -1356,6 +1370,8 @@ static WINDOWS_INPUT_ADAPTER: std::sync::OnceLock<Mutex<WindowsInputAdapter<Hotk
     std::sync::OnceLock::new();
 static WINDOW_SWITCH_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static LAST_HOOK_TAB_RELEASE_TICK: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 static SHOW_DESKTOP_WINDOWS: Mutex<Option<Vec<ShowDesktopWindow>>> = Mutex::new(None);
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -2413,13 +2429,18 @@ fn pointer_release_binding(
     })
 }
 
-fn completion_button_physically_held(binding: CompletionBinding) -> bool {
+fn completion_button_physically_held(
+    binding: CompletionBinding,
+    event: NativePointerEvent,
+) -> bool {
     let CompletionGesture::Button(button) = binding.gesture else {
         return false;
     };
-    let virtual_key = if button == 1 { 0x01 } else { 0x02 };
-    // SAFETY: this is a read-only physical button-state query on the hook thread.
-    unsafe { GetAsyncKeyState(virtual_key) < 0 }
+    if button == 1 {
+        event.primary_physically_held
+    } else {
+        event.secondary_physically_held
+    }
 }
 
 fn operation_kind(resize_edge: Option<u32>) -> Option<OperationKind> {
@@ -2479,6 +2500,7 @@ fn handle_native_keyboard_hook(
     event: NativeKeyboardEvent,
     registered_hotkey_owned: bool,
     alt_physically_held: bool,
+    super_physically_held: bool,
 ) -> HookDisposition {
     crate::windows_remote_control::observe_physical_key(event);
     // Alt changes the layout-translated virtual key for the physical grave key on some layouts
@@ -2488,6 +2510,10 @@ fn handle_native_keyboard_hook(
         PhysicalKey::Code(key) => Some(key),
         PhysicalKey::Native(_) => None,
     };
+    if key == Some(KeyCode::Tab) && event.edge == KeyEdge::Released {
+        // SAFETY: GetTickCount64 is a read-only monotonic clock query.
+        LAST_HOOK_TAB_RELEASE_TICK.store(unsafe { GetTickCount64() } as u32, Ordering::Release);
+    }
     let super_edge = matches!(key, Some(KeyCode::SuperLeft | KeyCode::SuperRight));
     if key == Some(KeyCode::KeyR) && registered_hotkey_owned {
         if let Ok(mut adapter) = windows_input_adapter().lock() {
@@ -2521,8 +2547,7 @@ fn handle_native_keyboard_hook(
             // A pointer-hook startup race must never leave a stale synthetic
             // Super side affecting later ordinary keys. Reconcile aggregate
             // state against Windows before interpreting a non-Super key.
-            if !super_edge && unsafe { GetAsyncKeyState(0x5b) >= 0 && GetAsyncKeyState(0x5c) >= 0 }
-            {
+            if !super_edge && !super_physically_held {
                 outcomes.extend(adapter.reconcile_modifier_release(AggregateModifier::Super));
             }
             // Windows can deliver Print Screen as a release without a press. Recover the
@@ -2735,20 +2760,94 @@ struct ForeignWindowAtPoint {
     found: HWND,
 }
 
-pub struct InternalWindowThreadGuard(u32);
+pub struct InternalWindowThreadGuard {
+    thread_id: u32,
+    message_hook: Option<HHOOK>,
+}
+
+unsafe extern "system" fn internal_window_message_hook(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0 {
+        // SAFETY: WH_GETMESSAGE supplies a readable MSG pointer for the duration of this call.
+        let message =
+            unsafe { &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSG) };
+        if let Some((key, edge)) =
+            internal_message_shortcut(message.message, message.wParam.0, message.lParam.0)
+        {
+            let hook_observed_release = if key == KeyCode::Tab && edge == KeyEdge::Released {
+                let hook_tick = LAST_HOOK_TAB_RELEASE_TICK.load(Ordering::Acquire);
+                let message_tick = message.time;
+                hook_tick != 0
+                    && (message_tick.wrapping_sub(hook_tick) <= 50
+                        || hook_tick.wrapping_sub(message_tick) <= 50)
+            } else {
+                false
+            };
+            handle_focused_shortcut_edge(key, edge, !hook_observed_release);
+        }
+    }
+    // SAFETY: forwarding preserves the hook chain; this hook does not own the message.
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn internal_message_shortcut(
+    message: u32,
+    virtual_key: usize,
+    metadata: isize,
+) -> Option<(KeyCode, KeyEdge)> {
+    let edge = match message {
+        WM_KEYDOWN | WM_SYSKEYDOWN => KeyEdge::Pressed,
+        WM_KEYUP | WM_SYSKEYUP => KeyEdge::Released,
+        _ => return None,
+    };
+    let metadata = metadata as usize;
+    if edge == KeyEdge::Pressed && metadata & (1 << 30) != 0 {
+        return None;
+    }
+    let scan_code = ((metadata >> 16) & 0xff) as u32;
+    let extended = metadata & (1 << 24) != 0;
+    let PhysicalKey::Code(key) = physical_key(virtual_key as u32, scan_code, extended) else {
+        return None;
+    };
+    Some((key, edge))
+}
 
 pub fn register_internal_window_thread() -> InternalWindowThreadGuard {
+    // SAFETY: this installs an in-process hook only for the current thread. The callback and
+    // owning guard both remain valid until the hook is removed on this same thread.
     let thread_id = unsafe { GetCurrentThreadId() };
+    let message_hook = unsafe {
+        SetWindowsHookExW(
+            WH_GETMESSAGE,
+            Some(internal_window_message_hook),
+            None,
+            thread_id,
+        )
+    }
+    .map_err(|error| {
+        tracing::warn!(%error, thread_id, "could not observe internal window messages");
+    })
+    .ok();
     if let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
         threads.insert(thread_id);
     }
-    InternalWindowThreadGuard(thread_id)
+    InternalWindowThreadGuard {
+        thread_id,
+        message_hook,
+    }
 }
 
 impl Drop for InternalWindowThreadGuard {
     fn drop(&mut self) {
+        if let Some(hook) = self.message_hook.take() {
+            // SAFETY: this guard owns the thread-local hook handle.
+            let _ = unsafe { UnhookWindowsHookEx(hook) };
+        }
         if let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
-            threads.remove(&self.0);
+            threads.remove(&self.thread_id);
         }
     }
 }
@@ -2957,7 +3056,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         if event.kind == NativePointerKind::Moved || current_release {
             if event.kind == NativePointerKind::Moved
                 && now.saturating_sub(operation.initiated_at) >= 250
-                && !completion_button_physically_held(operation.completion)
+                && !completion_button_physically_held(operation.completion, event)
             {
                 // Low-level button-up delivery is not infallible. Once another
                 // hook event proves the initiating button has been released,
@@ -3018,7 +3117,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     let file_window_super =
         NICKEL_WINDOW_SUPER_SIDES.load(std::sync::atomic::Ordering::Acquire) != 0;
     let physical_super = event.super_physically_held || file_window_super;
-    let physical_alt = unsafe { GetAsyncKeyState(0x12) < 0 };
+    let physical_alt = event.alt_physically_held;
     let (super_held, gesture, reconciled) = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
@@ -6197,7 +6296,7 @@ mod tests {
     use windows::Win32::Foundation::{POINT, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, IDI_APPLICATION, LoadIconW, SendMessageW, WINDOW_EX_STYLE,
-        WM_SETICON, WS_POPUP,
+        WM_KEYDOWN, WM_KEYUP, WM_SETICON, WM_SYSKEYDOWN, WS_POPUP,
     };
     use windows::core::w;
 
@@ -6207,6 +6306,7 @@ mod tests {
             ControlMode, FieldOwner, NativeRequest, NativeRequestId, Settlement, SettlementLimits,
             SettlementStatus,
         },
+        hotkeys::KeyEdge,
         window_operation::{CancellationReason, CompletionBinding, CompletionGesture, OperationId},
     };
 
@@ -6218,13 +6318,30 @@ mod tests {
         apply_native_write_completion, apply_window_drag, clamp_preview_x,
         classify_window_drag_observation, contain_rect, contested_authority,
         contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
-        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
-        native_system_drag_hit, parse_windows_command, permits_contested_workflow,
-        pointer_drag_rectangle, project_native_preview_diagnostics, project_windows_shortcuts,
-        rectangle_covers, restore_legacy_icon_alpha, should_observe_tokenless_geometry,
-        should_restore_on_activation, unknown_suspension_within_bound, window_icon,
-        windows_pid_descends_from, work_area_above_panel,
+        internal_message_shortcut, is_nickel_host_terminal, is_shell_infrastructure,
+        native_hotkey_requests, native_system_drag_hit, parse_windows_command,
+        permits_contested_workflow, pointer_drag_rectangle, project_native_preview_diagnostics,
+        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
+        should_observe_tokenless_geometry, should_restore_on_activation,
+        unknown_suspension_within_bound, window_icon, windows_pid_descends_from,
+        work_area_above_panel,
     };
+
+    #[test]
+    fn internal_message_observer_preserves_keys_winit_may_drop() {
+        assert_eq!(
+            internal_message_shortcut(WM_KEYUP, 0x2c, 0),
+            Some((
+                nickel_core::hotkeys::KeyCode::PrintScreen,
+                KeyEdge::Released
+            ))
+        );
+        assert_eq!(
+            internal_message_shortcut(WM_SYSKEYDOWN, 0x09, 0),
+            Some((nickel_core::hotkeys::KeyCode::Tab, KeyEdge::Pressed))
+        );
+        assert_eq!(internal_message_shortcut(WM_KEYDOWN, 0x41, 1 << 30), None);
+    }
 
     #[test]
     fn window_specific_icon_is_available_without_a_class_icon() {

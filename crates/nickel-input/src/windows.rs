@@ -491,6 +491,30 @@ fn observed_super_sides(current: u8, virtual_key: u32, edge: KeyEdge, injected: 
 }
 
 #[cfg(any(test, target_os = "windows"))]
+fn observed_alt_sides(
+    current: u8,
+    virtual_key: u32,
+    extended: bool,
+    edge: KeyEdge,
+    injected: bool,
+) -> u8 {
+    if injected {
+        return current;
+    }
+    let side = match virtual_key {
+        0xa4 => 1,
+        0xa5 => 2,
+        0x12 if extended => 2,
+        0x12 => 1,
+        _ => return current,
+    };
+    match edge {
+        KeyEdge::Pressed => current | side,
+        KeyEdge::Released => current & !side,
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
 fn registered_hotkey_owns_key(registered_id: usize, virtual_key: u32, super_held: bool) -> bool {
     registered_id != 0 && virtual_key == 0x52 && super_held
 }
@@ -505,9 +529,7 @@ mod native_runtime {
     use windows::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
         UI::{
-            Input::KeyboardAndMouse::{
-                GetAsyncKeyState, MOD_NOREPEAT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
-            },
+            Input::KeyboardAndMouse::{MOD_NOREPEAT, MOD_WIN, RegisterHotKey, UnregisterHotKey},
             WindowsAndMessaging::{
                 CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, KillTimer, MSG, MSLLHOOKSTRUCT,
                 SetTimer, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
@@ -546,6 +568,9 @@ mod native_runtime {
         pub y: i32,
         pub time: u32,
         pub super_physically_held: bool,
+        pub alt_physically_held: bool,
+        pub primary_physically_held: bool,
+        pub secondary_physically_held: bool,
         /// WH_MOUSE_LL attribution. Nickel-generated events must never count as
         /// local input or satisfy trusted emergency/control arbitration.
         pub injected: bool,
@@ -565,7 +590,8 @@ mod native_runtime {
 
     #[derive(Clone)]
     pub struct NativeHookCallbacks {
-        pub keyboard: Arc<dyn Fn(NativeKeyboardEvent, bool, bool) -> HookDisposition + Send + Sync>,
+        pub keyboard:
+            Arc<dyn Fn(NativeKeyboardEvent, bool, bool, bool) -> HookDisposition + Send + Sync>,
         pub modifier_released: Arc<dyn Fn(AggregateModifier) + Send + Sync>,
         pub pointer: Arc<dyn Fn(NativePointerEvent) -> HookDisposition + Send + Sync>,
         pub pointer_reconcile: Arc<dyn Fn(bool, bool) + Send + Sync>,
@@ -576,9 +602,9 @@ mod native_runtime {
     static CALLBACKS: OnceLock<Mutex<Option<NativeHookCallbacks>>> = OnceLock::new();
     static REGISTERED_HOTKEY_ID: AtomicUsize = AtomicUsize::new(0);
     static PHYSICAL_SUPER_SIDES: AtomicU8 = AtomicU8::new(0);
-    static ALT_RELEASE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
+    static PHYSICAL_ALT_SIDES: AtomicU8 = AtomicU8::new(0);
+    static PHYSICAL_POINTER_BUTTONS: AtomicU8 = AtomicU8::new(0);
     static POINTER_RECONCILE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
-    const ALT_RELEASE_TIMER: usize = 0x4e05;
     const POINTER_RECONCILE_TIMER: usize = 0x4e06;
 
     fn callbacks() -> &'static Mutex<Option<NativeHookCallbacks>> {
@@ -603,59 +629,65 @@ mod native_runtime {
         } else {
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         };
-        if edge == KeyEdge::Released {
-            let timer = match native_modifier_release(native.vkCode) {
-                // Super has distinct left/right virtual keys. Deliver its real release edge to
-                // the shortcut engine immediately; it already waits for the aggregate modifier
-                // to clear when both sides are held. Deferring this edge through a window timer
-                // can strand bare-Super state when focus changes as Launcher is activated.
-                Some(NativeModifierRelease::SuperOwned) => None,
-                Some(NativeModifierRelease::AltForwarded) => {
-                    Some((ALT_RELEASE_TIMER, &ALT_RELEASE_TIMER_ID, false))
-                }
-                _ => None,
-            };
-            if let Some((requested, retained, suppress)) = timer {
-                // SAFETY: this hook thread owns the message queue receiving the timer callback.
-                let timer_id = unsafe { SetTimer(None, requested, 10, None) };
-                retained.store(timer_id, Ordering::Release);
-                if timer_id == 0 {
-                    with_callbacks(|callbacks| {
-                        (callbacks.modifier_released)(AggregateModifier::Alt)
-                    });
-                }
-                // Alt remains visible to applications while its two physical sides settle.
-                if suppress {
-                    return LRESULT(1);
-                }
-                return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-            }
-        }
-        let event = NativeKeyboardEvent {
-            virtual_key: native.vkCode,
-            scan_code: native.scanCode,
-            extended: native.flags.0 & 1 != 0,
-            edge,
-            injected: native.flags.0 & 0x10 != 0,
-        };
+        let injected = native.flags.0 & 0x10 != 0;
+        let extended = native.flags.0 & 1 != 0;
         let _ = PHYSICAL_SUPER_SIDES.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             Some(super::observed_super_sides(
                 current,
                 native.vkCode,
                 edge,
-                event.injected,
+                injected,
             ))
         });
-        // SAFETY: these are read-only queries used to reconcile independent native delivery paths.
-        let alt_physically_held = unsafe { GetAsyncKeyState(0x12) < 0 };
+        let _ = PHYSICAL_ALT_SIDES.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(super::observed_alt_sides(
+                current,
+                native.vkCode,
+                extended,
+                edge,
+                injected,
+            ))
+        });
+        if edge == KeyEdge::Released {
+            match native_modifier_release(native.vkCode) {
+                // Super has distinct left/right virtual keys. Deliver its real release edge to
+                // the shortcut engine immediately; it already waits for the aggregate modifier
+                // to clear when both sides are held. Deferring this edge through a window timer
+                // can strand bare-Super state when focus changes as Launcher is activated.
+                Some(NativeModifierRelease::SuperOwned) => {}
+                Some(NativeModifierRelease::AltForwarded) => {
+                    if PHYSICAL_ALT_SIDES.load(Ordering::Acquire) == 0 {
+                        with_callbacks(|callbacks| {
+                            (callbacks.modifier_released)(AggregateModifier::Alt)
+                        });
+                    }
+                    return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+                }
+                None => {}
+            }
+        }
+        let event = NativeKeyboardEvent {
+            virtual_key: native.vkCode,
+            scan_code: native.scanCode,
+            extended,
+            edge,
+            injected,
+        };
+        let alt_physically_held = PHYSICAL_ALT_SIDES.load(Ordering::Acquire) != 0;
         let super_physically_held = PHYSICAL_SUPER_SIDES.load(Ordering::Acquire) != 0;
         let registered = registered_hotkey_owns_key(
             REGISTERED_HOTKEY_ID.load(Ordering::Acquire),
             native.vkCode,
             super_physically_held,
         );
-        if with_callbacks(|callbacks| (callbacks.keyboard)(event, registered, alt_physically_held))
-            == Some(HookDisposition::Suppress)
+        if with_callbacks(|callbacks| {
+            (callbacks.keyboard)(
+                event,
+                registered,
+                alt_physically_held,
+                super_physically_held,
+            )
+        }) == Some(HookDisposition::Suppress)
         {
             LRESULT(1)
         } else {
@@ -677,7 +709,22 @@ mod native_runtime {
         };
         // SAFETY: WH_MOUSE_LL supplies an MSLLHOOKSTRUCT pointer for the synchronous callback.
         let native = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-        // SAFETY: GetAsyncKeyState is a read-only query for the current desktop input state.
+        let button_bit = match kind {
+            NativePointerKind::PrimaryPressed | NativePointerKind::PrimaryReleased => 1,
+            NativePointerKind::SecondaryPressed | NativePointerKind::SecondaryReleased => 2,
+            NativePointerKind::Moved => 0,
+        };
+        if button_bit != 0 && native.flags & 1 == 0 {
+            if matches!(
+                kind,
+                NativePointerKind::PrimaryPressed | NativePointerKind::SecondaryPressed
+            ) {
+                PHYSICAL_POINTER_BUTTONS.fetch_or(button_bit, Ordering::AcqRel);
+            } else {
+                PHYSICAL_POINTER_BUTTONS.fetch_and(!button_bit, Ordering::AcqRel);
+            }
+        }
+        let pointer_buttons = PHYSICAL_POINTER_BUTTONS.load(Ordering::Acquire);
         let super_physically_held = PHYSICAL_SUPER_SIDES.load(Ordering::Acquire) != 0;
         let event = NativePointerEvent {
             kind,
@@ -685,6 +732,9 @@ mod native_runtime {
             y: native.pt.y,
             time: native.time,
             super_physically_held,
+            alt_physically_held: PHYSICAL_ALT_SIDES.load(Ordering::Acquire) != 0,
+            primary_physically_held: pointer_buttons & 1 != 0,
+            secondary_physically_held: pointer_buttons & 2 != 0,
             injected: native.flags & 1 != 0,
         };
         if with_callbacks(|callbacks| (callbacks.pointer)(event)) == Some(HookDisposition::Suppress)
@@ -695,34 +745,12 @@ mod native_runtime {
         }
     }
 
-    fn reconcile_modifier_release(timer: usize) {
-        let alt_timer = ALT_RELEASE_TIMER_ID.load(Ordering::Acquire);
-        // SAFETY: these are read-only physical key-state queries on the hook thread.
-        let released = unsafe {
-            if timer == alt_timer && alt_timer != 0 {
-                GetAsyncKeyState(0x12) >= 0
-            } else {
-                return;
-            }
-        };
-        if !released {
-            return;
-        }
-        // SAFETY: timer is a nonzero id returned by SetTimer on this thread.
-        unsafe {
-            let _ = KillTimer(None, timer);
-        }
-        ALT_RELEASE_TIMER_ID.store(0, Ordering::Release);
-        with_callbacks(|callbacks| (callbacks.modifier_released)(AggregateModifier::Alt));
-    }
-
     fn reconcile_pointer_buttons(timer: usize) {
         if timer != POINTER_RECONCILE_TIMER_ID.load(Ordering::Acquire) {
             return;
         }
-        // SAFETY: these are read-only physical button-state queries on the hook thread.
-        let (primary, secondary) =
-            unsafe { (GetAsyncKeyState(0x01) < 0, GetAsyncKeyState(0x02) < 0) };
+        let buttons = PHYSICAL_POINTER_BUTTONS.load(Ordering::Acquire);
+        let (primary, secondary) = (buttons & 1 != 0, buttons & 2 != 0);
         with_callbacks(|callbacks| (callbacks.pointer_reconcile)(primary, secondary));
     }
 
@@ -778,12 +806,13 @@ mod native_runtime {
             if message.message == WM_HOTKEY && message.wParam.0 as i32 == hotkey.id {
                 with_callbacks(|callbacks| (callbacks.registered_hotkey)(hotkey.id));
             } else if message.message == WM_TIMER {
-                reconcile_modifier_release(message.wParam.0);
                 reconcile_pointer_buttons(message.wParam.0);
             }
         }
         REGISTERED_HOTKEY_ID.store(0, Ordering::Release);
         PHYSICAL_SUPER_SIDES.store(0, Ordering::Release);
+        PHYSICAL_ALT_SIDES.store(0, Ordering::Release);
+        PHYSICAL_POINTER_BUTTONS.store(0, Ordering::Release);
         // SAFETY: these handles were returned to this thread and have not been unhooked.
         unsafe {
             if pointer_reconcile_timer != 0 {
@@ -944,6 +973,24 @@ mod tests {
         );
         assert_eq!(
             observed_super_sides(sides, 0x5c, KeyEdge::Released, false),
+            0
+        );
+    }
+
+    #[test]
+    fn physical_alt_sides_follow_real_edges_without_global_state_polling() {
+        let sides = observed_alt_sides(0, 0xa4, false, KeyEdge::Pressed, false);
+        assert_eq!(sides, 1);
+        let sides = observed_alt_sides(sides, 0x12, true, KeyEdge::Pressed, false);
+        assert_eq!(sides, 3);
+        let sides = observed_alt_sides(sides, 0xa4, false, KeyEdge::Released, false);
+        assert_eq!(sides, 2);
+        assert_eq!(
+            observed_alt_sides(sides, 0xa5, true, KeyEdge::Released, true),
+            2
+        );
+        assert_eq!(
+            observed_alt_sides(sides, 0xa5, true, KeyEdge::Released, false),
             0
         );
     }

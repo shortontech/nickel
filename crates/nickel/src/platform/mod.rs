@@ -1146,14 +1146,14 @@ pub(crate) use linux::{
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, active_display_point,
-    application_discovery, application_icon, applications, audio_status, bluetooth_status,
-    capture_active_window, capture_active_window_to_file, capture_desktop, capture_pointer,
-    configure_context_menu_window, configure_desktop_window, configure_launcher_window,
-    configure_notification_window, configure_panel_window, configure_preview_window,
-    configure_screenshot_window, configure_volume_osd_window, configured_primary_output,
-    copy_image_to_clipboard, copy_temp_image_path, execute_run_command, handle_consumer_control,
-    handle_focused_shortcut, hide_preview_window, launch_application,
+    InternalWindowThreadGuard, NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network,
+    active_display_point, application_discovery, application_icon, applications, audio_status,
+    bluetooth_status, capture_active_window, capture_active_window_to_file, capture_desktop,
+    capture_pointer, configure_context_menu_window, configure_desktop_window,
+    configure_launcher_window, configure_notification_window, configure_panel_window,
+    configure_preview_window, configure_screenshot_window, configure_volume_osd_window,
+    configured_primary_output, copy_image_to_clipboard, copy_temp_image_path, execute_run_command,
+    handle_consumer_control, handle_focused_shortcut, hide_preview_window, launch_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
     launcher_window_visible, lock_workstation, network_status, observe_nickel_window_key,
     register_internal_window_thread, register_session_shell, release_panel_window, release_pointer,
