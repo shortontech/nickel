@@ -581,9 +581,28 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
             name: "Reopen first".into(),
         })
         .unwrap();
-    assert!(shell.plugin_panel_host_ui_for(
+    let point = nickel_input::Point {
+        x: f64::from(button.bounds.origin.x + button.bounds.size.width / 2.0),
+        y: f64::from(button.bounds.origin.y + button.bounds.size.height / 2.0),
+    };
+    let pointer = |edge, order| {
+        nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            device: nickel_input::DeviceId(1),
+            order: nickel_input::EventOrder(order),
+            position: Some(point),
+            button: nickel_input::PointerButton::Primary,
+            edge,
+        })
+    };
+    shell.plugin_panel_host_input_for(
         &remaining[0].0,
-        nickel_ui::UiEvent::AccessibilityActivate(button.id),
+        pointer(nickel_input::KeyEdge::Pressed, 1),
+        remaining[0].1.width,
+        remaining[0].1.height,
+    );
+    assert!(shell.plugin_panel_host_input_for(
+        &remaining[0].0,
+        pointer(nickel_input::KeyEdge::Released, 2),
         remaining[0].1.width,
         remaining[0].1.height,
     ));
