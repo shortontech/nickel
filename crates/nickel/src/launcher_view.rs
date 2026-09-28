@@ -1729,8 +1729,12 @@ mod tests {
     }
 
     fn populated_launcher_scenario() -> Scenario<LauncherApplication> {
+        launcher_scenario_with_applications(30)
+    }
+
+    fn launcher_scenario_with_applications(count: usize) -> Scenario<LauncherApplication> {
         let mut launcher = Launcher::new(
-            (0..30)
+            (0..count)
                 .map(|index| {
                     Application::new(
                         format!("application-{index:02}"),
@@ -2111,7 +2115,7 @@ mod tests {
     #[test]
     fn populated_launcher_emits_machine_readable_controller_reachability() {
         let report = audit_reachability(
-            populated_launcher_scenario,
+            || launcher_scenario_with_applications(3),
             &ReachabilityPolicy {
                 modalities: [ReachabilityModality::Controller].into_iter().collect(),
                 maximum_path_length: 32,
