@@ -111,8 +111,8 @@ use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     Application as UiApplication, Column, Container, ControllerAction, HostBatch, HostChangeToken,
-    HostEvent, Insets, Layer, Point, SemanticRole, Shortcut, Size, Spacer, Text, TextAlign,
-    TextField, UiEvent, UiHostViewport, ViewContext,
+    HostEvent, Insets, Point, SemanticRole, Shortcut, Size, Spacer, Text, TextAlign, TextField,
+    UiEvent, UiHostViewport, ViewContext,
 };
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
@@ -247,74 +247,6 @@ pub struct LockApplication {
     status: Option<String>,
     palette: ThemePalette,
     effects: Vec<LockEffect>,
-}
-
-struct VolumeOsdApplication {
-    label: String,
-    percent: u8,
-    palette: ThemePalette,
-}
-
-impl nickel_ui::Application for VolumeOsdApplication {
-    type Message = ();
-
-    fn update(&mut self, (): Self::Message) {}
-
-    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let width = context.viewport.size.width;
-        let height = context.viewport.size.height;
-        let track_width = (width - 48.0).max(0.0);
-        Container::new()
-            .id("volume-osd")
-            .semantic_role(SemanticRole::Status)
-            .accessibility_label(self.label.clone())
-            .width(width)
-            .height(height)
-            .background(self.palette.panel)
-            .radius(14.0)
-            .child(
-                Layer::new()
-                    .width(width)
-                    .height(height)
-                    .child(
-                        Container::new()
-                            .position(Point { x: 24.0, y: 14.0 })
-                            .width(track_width)
-                            .height(32.0)
-                            .child(
-                                Text::new(self.label.clone())
-                                    .width(track_width)
-                                    .height(32.0)
-                                    .scale(1.15)
-                                    .color(self.palette.text)
-                                    .align(TextAlign::Center)
-                                    .bold(true),
-                            ),
-                    )
-                    .child(
-                        Container::new()
-                            .position(Point {
-                                x: 24.0,
-                                y: height - 28.0,
-                            })
-                            .width(track_width)
-                            .height(8.0)
-                            .background(self.palette.surface_hover)
-                            .radius(4.0),
-                    )
-                    .child(
-                        Container::new()
-                            .position(Point {
-                                x: 24.0,
-                                y: height - 28.0,
-                            })
-                            .width(track_width * f32::from(self.percent) / 100.0)
-                            .height(8.0)
-                            .background(self.palette.accent)
-                            .radius(4.0),
-                    ),
-            )
-    }
 }
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
@@ -550,7 +482,6 @@ pub struct LiveShell {
     audio: AudioStatus,
     audio_status_observed: bool,
     volume_osd_until: Option<Instant>,
-    volume_osd_host: nickel_ui::UiHost<VolumeOsdApplication>,
     plugin_volume_osd_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     launcher_visible: bool,
     run_visible: bool,
@@ -1453,15 +1384,6 @@ impl LiveShell {
         let network = platform::network_status();
         let bluetooth = platform::bluetooth_status();
         let audio = platform::audio_status();
-        let volume_osd_host = nickel_ui::UiHost::new(
-            VolumeOsdApplication {
-                label: String::new(),
-                percent: audio.volume_percent.min(100),
-                palette,
-            },
-            420,
-            96,
-        );
         #[cfg(target_os = "linux")]
         let (secure_storage_state, secure_storage_query_error) =
             match session_host.secure_storage_state() {
@@ -1804,7 +1726,6 @@ impl LiveShell {
             audio,
             volume_osd_until: None,
             audio_status_observed: false,
-            volume_osd_host,
             plugin_volume_osd_host,
             launcher_visible: false,
             run_visible: false,
@@ -2624,10 +2545,10 @@ impl LiveShell {
                         && (!self.remote_lease_notifications.is_empty()
                             || !self.codex_approval_notifications.is_empty()))
             }
-            SurfaceRole::VolumeOsd => self.plugin_volume_osd_host.as_ref().map_or_else(
-                || self.volume_osd_host.remote_access_protected(),
-                |host| host.remote_access_protected(),
-            ),
+            SurfaceRole::VolumeOsd => self
+                .plugin_volume_osd_host
+                .as_ref()
+                .is_none_or(|host| host.remote_access_protected()),
             SurfaceRole::WindowPreview => {
                 self.preview_plugin_active()
                     || self
@@ -3460,7 +3381,9 @@ impl LiveShell {
             SurfaceRole::Notification => {
                 self.notification.is_some() || self.notification_history_visible
             }
-            SurfaceRole::VolumeOsd => self.volume_osd_until.is_some(),
+            SurfaceRole::VolumeOsd => {
+                self.volume_osd_until.is_some() && self.plugin_volume_osd_host.is_some()
+            }
             SurfaceRole::WindowPreview => {
                 self.preview_group.is_some() || self.task_switcher_group.is_some()
             }
@@ -4415,6 +4338,7 @@ impl LiveShell {
                 self.plugin_notification_host = None;
             } else if id == crate::plugin_panel::volume_osd_manifest().id {
                 self.plugin_volume_osd_host = None;
+                self.volume_osd_until = None;
             } else if id == crate::plugin_panel::control_center_manifest().id {
                 self.plugin_control_host = None;
             } else if id == crate::plugin_panel::window_preview_manifest().id {
@@ -8517,7 +8441,6 @@ impl LiveShell {
                     || viewport.overlay_pointer_capture.is_some()
             })
             || self.desktop_overlay_pointer_capture.is_some()
-            || self.volume_osd_host.pointer_interaction_active()
             || self
                 .plugin_volume_osd_host
                 .as_ref()
@@ -9600,19 +9523,7 @@ impl LiveShell {
             );
             return commands;
         }
-        let application = self.volume_osd_host.application_mut();
-        let changed = application.label != projection.label
-            || application.percent != projection.percent
-            || application.palette != self.palette;
-        application.label = projection.label;
-        application.percent = projection.percent;
-        application.palette = self.palette;
-        self.volume_osd_host.step(HostBatch {
-            application_changed: changed,
-            surface_size: Some((width, height)),
-            ..HostBatch::default()
-        });
-        self.volume_osd_host.commands().to_vec()
+        Vec::new()
     }
 
     fn lock_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {

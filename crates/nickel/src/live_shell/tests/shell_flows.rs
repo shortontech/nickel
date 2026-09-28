@@ -187,7 +187,7 @@
     }
 
     #[test]
-    fn volume_osd_plugin_can_retire_and_restore_native_fallback() {
+    fn volume_osd_plugin_retires_without_native_fallback() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::volume_osd_manifest().id;
         assert!(shell.plugin_volume_osd_host.is_some());
@@ -199,8 +199,8 @@
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
         );
-        shell.scene(SurfaceRole::VolumeOsd, 420, 96);
-        assert!(!shell.volume_osd_host.commands().is_empty());
+        assert!(shell.scene(SurfaceRole::VolumeOsd, 420, 96).is_empty());
+        assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.plugin_volume_osd_host.is_some());
     }

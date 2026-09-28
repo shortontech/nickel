@@ -105,6 +105,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib run_plugin_can_start_render_and_retire
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib volume_osd_plugin_retires_without_native_fallback
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::jsx_taskbar_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::plugin_taskbar_

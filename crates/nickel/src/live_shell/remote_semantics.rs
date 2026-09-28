@@ -221,9 +221,7 @@ impl LiveShell {
                 if let Some(host) = self.plugin_volume_osd_host.as_ref() {
                     Ok(observe_only(plugin_projection(host, |_, _| false)?))
                 } else {
-                    project(&self.volume_osd_host, |_| {
-                        RemoteActionDisposition::Unavailable
-                    })
+                    Err("Volume overlay plugin is unavailable".into())
                 }
             }
             SurfaceRole::WindowPreview => {
@@ -467,16 +465,7 @@ impl LiveShell {
                 result?
             }
             SurfaceRole::VolumeOsd => {
-                if self.plugin_volume_osd_host.is_some() {
-                    return Err("volume overlay has no remote actions".into());
-                }
-                mutate(
-                    &mut self.volume_osd_host,
-                    generation,
-                    node,
-                    action,
-                    clipboard_limit,
-                )?
+                return Err("volume overlay has no remote actions".into());
             }
             // Desktop messages currently perform native file effects directly.
             // They require staging before the remote dispatcher can admit them.
@@ -671,9 +660,6 @@ mod tests {
 
         assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
         assert_advertised_actions_are_guarded(&shell.panel_host, panel_activate);
-        assert_advertised_actions_are_guarded(&shell.volume_osd_host, |_| {
-            RemoteActionDisposition::Unavailable
-        });
     }
 
     #[test]

@@ -2179,8 +2179,7 @@ fn native_audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_
     shell.volume_osd_scene(320, 88);
     assert!(
         shell
-            .volume_osd_host
-            .application()
+            .volume_osd_projection()
             .label
             .starts_with("Volume 36%")
     );
