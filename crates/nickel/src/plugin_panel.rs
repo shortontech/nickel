@@ -1728,6 +1728,7 @@ impl DesktopBackgroundAction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
+    ShowSettings,
     DesktopSelect {
         id: String,
     },
@@ -3154,6 +3155,15 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
                             approved.push(PluginEffect::ShowLauncher);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("show-settings")
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::SettingsShow) =>
+                        {
+                            approved.push(PluginEffect::ShowSettings);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("desktop-background-action")

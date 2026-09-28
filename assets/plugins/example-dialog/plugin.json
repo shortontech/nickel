@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.example.settings-dialog",
+  "name": "Settings Dialog Example",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "surfaces": [{"id":"main","kind":"panel","width":320,"height":120}],
+  "capabilities": ["settings-show"]
+}

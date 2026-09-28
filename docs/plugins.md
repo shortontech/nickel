@@ -8,6 +8,8 @@ Nickel loads a compiled JavaScript entry from a directory containing
 `plugin.json`. The [bundled hello panel](../assets/plugins/hello-panel/) is a
 minimal working example. The [taskbar](../assets/plugins/taskbar/) shows how a
 first-party plugin requests host actions.
+The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
+`onClose`, and a `show-settings` request guarded by the `settings-show` grant.
 
 Build the Rust development tools, then start an isolated nested session on
 Linux:
@@ -82,6 +84,8 @@ typed effect, as the bundled taskbar does when moving a pinned app.
 `Dialog` accepts `onClose`, called when the host dismisses an open dialog by
 Escape, outside input, or focus loss. The handler should clear the state that
 controls `open`; dialog buttons may still update state and request typed effects.
+For example, `{ type: "show-settings" }` opens Nickel Settings when the plugin
+has the `settings-show` capability.
 `Menu` contains up to 16 `MenuItem` children. An item can have an `onClick`
 handler, a `disabledReason`, or nested `MenuItem` children with a `label` to
 form a submenu. Items can also declare `shortcut` text and `separatorBefore`.

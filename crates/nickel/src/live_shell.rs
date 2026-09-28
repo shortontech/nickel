@@ -5204,6 +5204,9 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::ShowLauncher => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
                 }
+                crate::plugin_panel::PluginEffect::ShowSettings => {
+                    changed |= self.global_shortcut(platform::GlobalShortcut::OpenSettings);
+                }
                 crate::plugin_panel::PluginEffect::DesktopSelect { id } => {
                     let entry = id.split_once(':').and_then(|(first, second)| {
                         Some(nickel_file::desktop::DesktopEntryId(

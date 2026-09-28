@@ -43,6 +43,8 @@ The [task badge example](example-task-badge/) shows a surface-free extension
 that contributes UI to the bundled taskbar's declared slot.
 The [desktop widget example](example-desktop-widget/) contributes a bounded
 value and progress display to the bundled desktop plugin.
+The [dialog example](example-dialog/) opens a component dialog and requests
+Settings through a declared capability.
 The [task action example](example-task-action/) adds a callback to the
 taskbar's JSX application menu.
 The [control section example](example-control-section/) adds a callback row

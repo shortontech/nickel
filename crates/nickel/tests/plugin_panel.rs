@@ -58,6 +58,52 @@ fn directory_package_runs_in_the_same_jsx_host() {
 }
 
 #[test]
+fn installed_jsx_dialog_requests_settings_only_with_its_grant() {
+    let package = PluginPackage::load(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/plugins/example-dialog"
+    ))
+    .unwrap();
+    PluginPanelApplication::validate_package(&package).unwrap();
+    let activate = |host: &mut UiHost<PluginPanelApplication>, name: &str| {
+        let target = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .id;
+        host.perform_semantic_action(target, SemanticAction::Invoke(ActionKind::Activate));
+    };
+    let mut host = UiHost::new(
+        PluginPanelApplication::from_package(&package).unwrap(),
+        320,
+        120,
+    );
+    activate(&mut host, "Open a dialog");
+    assert!(host.inspect().open_overlay.is_some());
+    activate(&mut host, "Open Settings");
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ShowSettings]
+    );
+
+    let mut ungranted = package;
+    ungranted
+        .manifest
+        .capabilities
+        .retain(|capability| *capability != nickel_core::plugins::PluginCapability::SettingsShow);
+    let mut host = UiHost::new(
+        PluginPanelApplication::from_package(&ungranted).unwrap(),
+        320,
+        120,
+    );
+    activate(&mut host, "Open a dialog");
+    activate(&mut host, "Open Settings");
+    assert!(host.application_mut().take_effects().is_empty());
+}
+
+#[test]
 fn failed_jsx_render_keeps_previous_handlers_and_recovers() {
     let script = r#"
         function App() {
