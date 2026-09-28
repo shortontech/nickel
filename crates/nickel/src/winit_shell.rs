@@ -3167,14 +3167,6 @@ mod tests {
 
     #[test]
     fn installed_panel_geometry_uses_its_manifest() {
-        let panel = nickel_core::plugins::PluginSurface {
-            id: "main".into(),
-            kind: nickel_core::plugins::PluginSurfaceKind::Panel,
-            width: 360,
-            height: 96,
-            bottom_offset: 12,
-            output: nickel_core::plugins::PluginOutputScope::Primary,
-        };
         let geometry = DisplayGeometry {
             x: 100,
             y: 200,
@@ -3182,26 +3174,40 @@ mod tests {
             height: 1080,
             scale: 1.0,
         };
-        let (_, x, y, width, height, _) = super::surface_geometry_for_panel(
-            SurfaceRole::Panel,
-            geometry,
-            PanelEdge::Bottom,
-            &panel,
-        );
-        assert_eq!((x, y, width, height), (880, 1172, 360, 96));
-        let desired = desired_output_surfaces(
-            &["DP-1".into(), "DP-2".into()],
-            true,
-            true,
-            None,
-            true,
-            panel.output,
-        );
-        assert_eq!(
-            desired.contains(&("DP-1".into(), SurfaceRole::Panel)),
-            cfg!(target_os = "windows")
-        );
-        assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
+        for kind in [
+            nickel_core::plugins::PluginSurfaceKind::Panel,
+            nickel_core::plugins::PluginSurfaceKind::Dock,
+        ] {
+            let panel = nickel_core::plugins::PluginSurface {
+                id: "main".into(),
+                kind,
+                width: 360,
+                height: 96,
+                bottom_offset: 12,
+                output: nickel_core::plugins::PluginOutputScope::Primary,
+            };
+            let (_, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+                SurfaceRole::Panel,
+                geometry,
+                PanelEdge::Bottom,
+                &panel,
+            );
+            assert_eq!((x, y, width, height), (880, 1172, 360, 96));
+            assert!(hidden);
+            let desired = desired_output_surfaces(
+                &["DP-1".into(), "DP-2".into()],
+                true,
+                true,
+                None,
+                true,
+                panel.output,
+            );
+            assert_eq!(
+                desired.contains(&("DP-1".into(), SurfaceRole::Panel)),
+                cfg!(target_os = "windows")
+            );
+            assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
+        }
     }
 
     #[test]
