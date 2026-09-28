@@ -1234,8 +1234,13 @@ fn scene_for_native_surface(
     height: u32,
 ) -> Option<Vec<nickel_ui::backend::PaintCommand>> {
     let surface = shell.surface(id)?;
-    if surface.role() == SurfaceRole::Panel {
-        state.plugin_panel_scene(surface.plugin_key()?, width, height)
+    if matches!(surface.role(), SurfaceRole::Panel | SurfaceRole::Taskbar) {
+        state.plugin_panel_scene_for_output(
+            surface.plugin_key()?,
+            Some(surface.output_name()),
+            width,
+            height,
+        )
     } else {
         Some(state.scene(surface.role(), width, height))
     }
@@ -1247,7 +1252,7 @@ fn scene_change_token_for_native_surface(
     id: SurfaceId,
     role: SurfaceRole,
 ) -> Option<HostChangeToken> {
-    if role == SurfaceRole::Panel {
+    if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
         state.plugin_panel_change_token(shell.surface(id)?.plugin_key()?)
     } else {
         state.scene_change_token(role)
@@ -1901,7 +1906,7 @@ fn handle_shell_input(
         }
         return Ok(());
     }
-    if role == SurfaceRole::Panel {
+    if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
         let Some(entry) = shell.surface(surface) else {
             return Ok(());
         };
@@ -1913,14 +1918,56 @@ fn handle_shell_input(
         }
         let (width, height) = entry.window().size();
         let key = entry.plugin_key().unwrap().clone();
+        let taskbar = role == SurfaceRole::Taskbar;
+        let taskbar_motion =
+            taskbar && matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
+        if taskbar {
+            if matches!(
+                &event,
+                InputEvent::Pointer(PointerEvent::Button {
+                    edge: KeyEdge::Pressed,
+                    ..
+                }) | InputEvent::Touch(nickel_input::TouchEvent::Ended { .. })
+            ) {
+                shell.set_active_output_from_surface(surface);
+            }
+            if let Some(display) = shell.surface_display_geometry(surface) {
+                state.set_panel_origin_x(display.x);
+                state.set_panel_origin_y(display.y);
+            }
+        }
         let plugin_surface_count = state.plugin_panels().len();
         if state.plugin_panel_host_input_for(&key, event, width, height) {
             if state.plugin_panels().len() != plugin_surface_count {
                 shell.set_plugin_panels(state.plugin_panels())?;
             }
+            if taskbar {
+                sync_panel_popover_anchor(shell, state);
+                state.sync_transient_overlays();
+            }
             sync_visibility(shell, state);
-            render_role(shell, state, role)?;
+            if taskbar_motion {
+                *hover_repaint = Some((
+                    SurfaceRole::Taskbar,
+                    Instant::now() + Duration::from_millis(24),
+                ));
+            } else {
+                render_role(shell, state, role)?;
+            }
             render_role(shell, state, SurfaceRole::Launcher)?;
+            if taskbar {
+                render_role(shell, state, SurfaceRole::ControlCenter)?;
+                render_role(shell, state, SurfaceRole::WindowPreview)?;
+                render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+                if !taskbar_motion {
+                    focus_visible_overlay(shell, state);
+                    if state.surface_visible(SurfaceRole::CodexProjectMenu) {
+                        codex
+                            .present(shell, codex.project_menu)
+                            .map_err(|error| format!("{error:?}"))?;
+                    }
+                }
+            }
         }
         return Ok(());
     }
@@ -1996,7 +2043,6 @@ fn handle_shell_input(
                 SurfaceRole::WindowPreview => state.preview_key(keycode),
                 SurfaceRole::WindowContextMenu => false,
                 SurfaceRole::Notification => state.notification_key(keycode),
-                SurfaceRole::Taskbar => state.preview_key(keycode),
                 SurfaceRole::Launcher => false,
                 SurfaceRole::Screenshot => state.screenshot_key(keycode),
                 _ => false,
@@ -2004,7 +2050,7 @@ fn handle_shell_input(
             if changed {
                 sync_visibility(shell, state);
                 render_role(shell, state, role)?;
-                if matches!(role, SurfaceRole::Taskbar | SurfaceRole::WindowPreview) {
+                if role == SurfaceRole::WindowPreview {
                     render_role(shell, state, SurfaceRole::WindowPreview)?;
                     render_role(shell, state, SurfaceRole::WindowContextMenu)?;
                 }
@@ -2037,35 +2083,6 @@ fn handle_shell_input(
                     state.sync_transient_overlays();
                     render_role(shell, state, SurfaceRole::WindowPreview)?;
                     render_role(shell, state, SurfaceRole::WindowContextMenu)?;
-                }
-            } else if edge == KeyEdge::Pressed && role == SurfaceRole::Taskbar {
-                shell.set_active_output_from_surface(surface);
-                if let Some(output) = shell
-                    .surface(surface)
-                    .map(|entry| entry.output_name().to_owned())
-                {
-                    state.set_panel_output(output);
-                }
-                if let Some(display) = shell.surface_display_geometry(surface) {
-                    state.set_panel_origin_x(display.x);
-                    state.set_panel_origin_y(display.y);
-                }
-                let width = shell
-                    .surface(surface)
-                    .map(|entry| entry.window().size().0)
-                    .unwrap_or_default();
-                if state.panel_click(x, width, button == PointerButton::Secondary) {
-                    sync_panel_popover_anchor(shell, state);
-                    sync_visibility(shell, state);
-                    state.sync_transient_overlays();
-                    focus_visible_overlay(shell, state);
-                    render_role(shell, state, SurfaceRole::ControlCenter)?;
-                    render_role(shell, state, SurfaceRole::WindowPreview)?;
-                    if state.surface_visible(SurfaceRole::CodexProjectMenu) {
-                        codex
-                            .present(shell, codex.project_menu)
-                            .map_err(|error| format!("{error:?}"))?;
-                    }
                 }
             } else if edge == KeyEdge::Pressed && role == SurfaceRole::Notification {
                 let (width, height) = shell
@@ -2101,30 +2118,6 @@ fn handle_shell_input(
                 if state.screenshot_pointer_moved(x, y, width, height) {
                     render_role(shell, state, SurfaceRole::Screenshot)?;
                 }
-            } else if role == SurfaceRole::Taskbar {
-                if let Some(output) = shell
-                    .surface(surface)
-                    .map(|entry| entry.output_name().to_owned())
-                {
-                    state.set_panel_output(output);
-                }
-                if let Some(display) = shell.surface_display_geometry(surface) {
-                    state.set_panel_origin_x(display.x);
-                    state.set_panel_origin_y(display.y);
-                }
-                let width = shell
-                    .surface(surface)
-                    .map(|entry| entry.window().size().0)
-                    .unwrap_or_default();
-                if state.panel_pointer_moved(x, width) {
-                    sync_visibility(shell, state);
-                    state.sync_transient_overlays();
-                    render_role(shell, state, SurfaceRole::WindowPreview)?;
-                    *hover_repaint = Some((
-                        SurfaceRole::Taskbar,
-                        Instant::now() + Duration::from_millis(24),
-                    ));
-                }
             } else if role == SurfaceRole::WindowPreview && state.preview_pointer_moved(x, y) {
                 *hover_repaint = Some((
                     SurfaceRole::WindowPreview,
@@ -2143,26 +2136,6 @@ fn handle_shell_input(
                             started.elapsed().as_secs_f64() * 1_000.0
                         );
                     }
-                }
-            }
-        }
-        InputEvent::Touch(nickel_input::TouchEvent::Ended { position, .. })
-            if role == SurfaceRole::Taskbar =>
-        {
-            shell.set_active_output_from_surface(surface);
-            let width = shell
-                .surface(surface)
-                .map(|entry| entry.window().size().0)
-                .unwrap_or_default();
-            if state.panel_click(position.x as f32, width, false) {
-                sync_panel_popover_anchor(shell, state);
-                sync_visibility(shell, state);
-                focus_visible_overlay(shell, state);
-                render_role(shell, state, SurfaceRole::ControlCenter)?;
-                if state.surface_visible(SurfaceRole::CodexProjectMenu) {
-                    codex
-                        .present(shell, codex.project_menu)
-                        .map_err(|error| format!("{error:?}"))?;
                 }
             }
         }
@@ -2319,13 +2292,38 @@ fn handle_controller_action(
         return Ok(());
     }
     let (width, height) = entry.window().size();
+    if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar)
+        && let Some(key) = entry.plugin_key().cloned()
+    {
+        if role == SurfaceRole::Taskbar {
+            state.set_panel_output(entry.output_name().to_owned());
+            if let Some(display) = shell.surface_display_geometry(surface) {
+                state.set_panel_origin_x(display.x);
+                state.set_panel_origin_y(display.y);
+            }
+        }
+        if state.plugin_panel_host_controller_for(&key, action, width, height) {
+            if role == SurfaceRole::Taskbar {
+                sync_panel_popover_anchor(shell, state);
+                state.sync_transient_overlays();
+            }
+            sync_visibility(shell, state);
+            render_role(shell, state, role)?;
+            if role == SurfaceRole::Taskbar {
+                focus_visible_overlay(shell, state);
+                render_role(shell, state, SurfaceRole::ControlCenter)?;
+                render_role(shell, state, SurfaceRole::WindowPreview)?;
+                render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+            }
+        }
+        return Ok(());
+    }
     let changed = match role {
         SurfaceRole::Lock => state.lock_host_controller(action),
         SurfaceRole::ControlCenter => state.control_controller(action, width, height),
         SurfaceRole::WindowPreview => state.preview_controller(action),
         SurfaceRole::WindowContextMenu => state.window_menu_host_controller(action),
         SurfaceRole::Notification => state.notification_controller(action),
-        SurfaceRole::Taskbar => state.panel_controller(action, width),
         SurfaceRole::Desktop => state.desktop_controller(action),
         SurfaceRole::Launcher => unreachable!("launcher controller input is handled semantically"),
         SurfaceRole::Screenshot => state.screenshot_controller(action),

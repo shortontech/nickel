@@ -531,6 +531,21 @@ jobs:
               }
             }
             if (-not $closed) { throw "Installed component window did not retire after WM_CLOSE" }
+            if ([NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Launcher")) {
+              throw "Launcher was visible before the taskbar click"
+            }
+            if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Taskbar", 28, 28)) {
+              throw "Could not click the bundled taskbar launcher button"
+            }
+            $launcherOpened = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              if ([NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Launcher")) {
+                $launcherOpened = $true
+                break
+              }
+            }
+            if (-not $launcherOpened) { throw "Bundled taskbar did not open the native Windows launcher" }
           } finally {
             if ($dev) {
               if ($shell) {
