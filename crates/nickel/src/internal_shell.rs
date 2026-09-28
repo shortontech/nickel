@@ -251,7 +251,8 @@ impl InternalShellCoordinator {
         self.shell.cancel_keyboard_gestures();
         self.shell.retain_panel_outputs(outputs);
         let taskbar_height = self.shell.taskbar_reservation_height();
-        let taskbar_active = taskbar_height > 0;
+        let taskbar_key = self.shell.taskbar_surface_key();
+        let taskbar_active = taskbar_height > 0 && taskbar_key.is_some();
         // Reconcile file placement before any surface can render. Creating a desktop
         // slot alone leaves newly enumerated files without a live output assignment.
         self.shell.set_desktop_outputs(
@@ -295,7 +296,7 @@ impl InternalShellCoordinator {
             if taskbar_active && (self.bar_on_all_displays || index == 0) {
                 let role = SurfaceRole::Taskbar;
                 let size = (output.width, taskbar_height.min(output.height));
-                desired.push((role, None, Some(output.name.clone()), size));
+                desired.push((role, taskbar_key.clone(), Some(output.name.clone()), size));
             }
             for (key, surface) in self.shell.plugin_panels() {
                 if surface.output != nickel_core::plugins::PluginOutputScope::All && index != 0 {
@@ -525,13 +526,13 @@ impl InternalShellCoordinator {
         key: &nickel_core::plugins::PluginSurfaceKey,
         output: &str,
     ) -> Option<&InternalShellSurface> {
-        self.indices
-            .get(&(
-                SurfaceRole::Panel,
-                Some(key.clone()),
-                Some(output.to_owned()),
-            ))
-            .and_then(|index| self.entries.get(*index))
+        [SurfaceRole::Panel, SurfaceRole::Taskbar]
+            .into_iter()
+            .find_map(|role| {
+                self.indices
+                    .get(&(role, Some(key.clone()), Some(output.to_owned())))
+                    .and_then(|index| self.entries.get(*index))
+            })
     }
 
     pub fn visible(&self, id: InternalSurfaceId) -> bool {
@@ -587,15 +588,15 @@ impl InternalShellCoordinator {
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
-        let commands = if let Some(key) = surface.plugin.as_ref() {
-            self.shell
-                .plugin_panel_scene(key, surface.size.0, surface.size.1)?
-        } else if surface.role == SurfaceRole::Taskbar {
+        let commands = if surface.role == SurfaceRole::Taskbar {
             self.shell.panel_scene_for_output(
                 surface.output.as_deref(),
                 surface.size.0,
                 surface.size.1,
             )
+        } else if let Some(key) = surface.plugin.as_ref() {
+            self.shell
+                .plugin_panel_scene(key, surface.size.0, surface.size.1)?
         } else {
             self.shell
                 .scene(surface.role, surface.size.0, surface.size.1)
@@ -878,7 +879,10 @@ impl InternalShellCoordinator {
             } else {
                 nickel_ui::UiEvent::FocusLost
             };
-            changed |= if let Some(key) = entry.plugin.as_ref() {
+            changed |= if entry.role == SurfaceRole::Taskbar {
+                self.shell
+                    .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
+            } else if let Some(key) = entry.plugin.as_ref() {
                 self.shell
                     .plugin_panel_host_ui_for(key, event, entry.size.0, entry.size.1)
             } else {
@@ -1166,7 +1170,10 @@ impl InternalShellCoordinator {
                     batch.clipboard_text_limit,
                 )),
                 _ => {
-                    changed |= if let Some(key) = entry.plugin.as_ref() {
+                    changed |= if entry.role == SurfaceRole::Taskbar {
+                        self.shell
+                            .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
+                    } else if let Some(key) = entry.plugin.as_ref() {
                         self.shell
                             .plugin_panel_host_ui_for(key, event, entry.size.0, entry.size.1)
                     } else {
@@ -2001,8 +2008,56 @@ mod tests {
             .surface(SurfaceRole::Taskbar, Some("two"))
             .unwrap();
         assert_eq!(panel.size, (1280, PANEL_HEIGHT));
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: crate::plugin_panel::taskbar_manifest().id.clone(),
+            surface_id: "main".into(),
+        };
+        assert_eq!(panel.plugin.as_ref(), Some(&key));
+        assert_eq!(
+            coordinator.plugin_surface(&key, "two").unwrap().id,
+            panel.id
+        );
         assert!(coordinator.visible(panel.id));
         assert!(!coordinator.visible(coordinator.surface(SurfaceRole::Launcher, None).unwrap().id));
+    }
+
+    #[test]
+    fn taskbar_plugin_identity_retires_and_returns_with_its_surface() {
+        let mut coordinator = coordinator();
+        let output = InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        };
+        let plugin_id = crate::plugin_panel::taskbar_manifest().id.clone();
+        coordinator.set_outputs(&[output.clone()]);
+        let key = coordinator
+            .surface(SurfaceRole::Taskbar, Some("nested"))
+            .unwrap()
+            .plugin
+            .clone()
+            .unwrap();
+        let original_id = coordinator.plugin_surface(&key, "nested").unwrap().id;
+
+        coordinator
+            .shell_mut()
+            .set_plugin_enabled(&plugin_id, false)
+            .unwrap();
+        coordinator.set_outputs(&[output.clone()]);
+        assert!(coordinator.plugin_surface(&key, "nested").is_none());
+        assert!(coordinator.scene(original_id).is_none());
+
+        coordinator
+            .shell_mut()
+            .set_plugin_enabled(&plugin_id, true)
+            .unwrap();
+        coordinator.set_outputs(&[output]);
+        let restored = coordinator.plugin_surface(&key, "nested").unwrap();
+        assert_ne!(restored.id, original_id);
+        assert!(coordinator.visible(restored.id));
     }
 
     #[test]

@@ -3409,6 +3409,22 @@ impl LiveShell {
             .map_or(0, |surface| surface.height)
     }
 
+    pub(crate) fn taskbar_surface_key(&self) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+        self.plugin_taskbar_host.as_ref()?;
+        let manifest = &self
+            .plugin_registry
+            .get(&crate::plugin_panel::taskbar_manifest().id)?
+            .manifest;
+        let surface = manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.reserve_work_area)?;
+        Some(nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: manifest.id.clone(),
+            surface_id: surface.id.clone(),
+        })
+    }
+
     pub fn plugin_registry(&self) -> &nickel_core::plugins::PluginRegistry {
         &self.plugin_registry
     }
@@ -3421,9 +3437,10 @@ impl LiveShell {
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> bool {
-        (self.plugin_panel_host.is_some()
-            && self.plugin_panel_owner == key.plugin_id
-            && self.plugin_panel_surface.id == key.surface_id)
+        self.taskbar_surface_key().as_ref() == Some(key)
+            || (self.plugin_panel_host.is_some()
+                && self.plugin_panel_owner == key.plugin_id
+                && self.plugin_panel_surface.id == key.surface_id)
             || self.plugin_panel_extra_hosts.contains_key(key)
     }
 
