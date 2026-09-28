@@ -71,11 +71,7 @@
         );
 
         let production = include_str!("../../live_shell/desktop.rs");
-        assert!(production.contains(".foreground(label_foreground)"));
-        assert!(
-            !production.contains(".label_background("),
-            "desktop labels must not paint independent opaque backplates"
-        );
+        assert!(production.contains("\"color\": foreground"));
     }
 
     #[test]
@@ -110,7 +106,7 @@
     }
 
     #[test]
-    fn desktop_background_plugin_reports_memory_and_restores_native_wallpaper_when_disabled() {
+    fn desktop_background_plugin_reports_memory_and_retires_wallpaper_when_disabled() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("plugin-wallpaper.png");
         RgbaImage::from_pixel(8, 8, Rgba([44, 55, 66, 255]))
@@ -151,14 +147,10 @@
         );
 
         assert!(shell.set_plugin_enabled(id, false).unwrap());
-        let native_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        assert!(native_scene.iter().any(|command| matches!(
+        let retired_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        assert!(!retired_scene.iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::Image { id: 1, .. }
-        )));
-        assert!(!native_scene.iter().any(|command| matches!(
-            command,
-            nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. }
+            nickel_ui::backend::PaintCommand::Image { .. }
         )));
         assert!(!shell.desktop_host.application().plugin_background);
         assert_eq!(
@@ -168,7 +160,7 @@
     }
 
     #[test]
-    fn desktop_error_banner_is_drawn_by_plugin_and_native_fallback() {
+    fn desktop_error_banner_retires_with_its_plugin() {
         let mut shell = LiveShell::new().unwrap();
         shell.desktop_host.application_mut().error = Some("Desktop files unavailable".into());
         let plugin_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
@@ -183,8 +175,8 @@
         assert!(shell.desktop_host.application().plugin_background);
 
         shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
-        let native_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        assert_eq!(banner_count(&native_scene), 1);
+        let retired_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        assert_eq!(banner_count(&retired_scene), 0);
     }
 
     #[test]

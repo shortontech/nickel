@@ -13,9 +13,8 @@ use nickel_session_protocol::{
 };
 use nickel_ui::{
     ActionKind, Application as _, ControllerAction, FrameOverlay, HostBatch, HostEvent,
-    HostTelemetry, InputModality, OverlayAnchor, Point, Rect, SemanticAction, SemanticRole,
-    SemanticSelector, SemanticValueInput, SemanticValueSnapshot, Shortcut, UiEvent, UiHost,
-    ViewContext,
+    HostTelemetry, InputModality, Point, Rect, SemanticAction, SemanticRole, SemanticSelector,
+    SemanticValueInput, SemanticValueSnapshot, Shortcut, UiEvent, UiHost, ViewContext,
 };
 use nickel_ui_testkit::{Scenario, Selector};
 

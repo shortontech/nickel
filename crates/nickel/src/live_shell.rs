@@ -2727,79 +2727,17 @@ impl LiveShell {
         self.desktop_host_event_authorized(ingress, Some(authority))
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn desktop_native_context_menu(
-        &self,
-        width: u32,
-        height: u32,
-    ) -> Option<nickel_ui::OverlayMenu<desktop::DesktopMessage>> {
-        self.desktop_host
-            .application()
-            .frame_overlays(nickel_ui::ViewContext::new(
-                nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
-                nickel_ui::InputModality::Pointer,
-            ))
-            .into_iter()
-            .find_map(|overlay| match overlay {
-                nickel_ui::FrameOverlay::Menu(menu) => Some(menu),
-                _ => None,
-            })
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn begin_desktop_native_context_menu(&mut self) {
-        self.desktop_host.application_mut().context_popup_detached = true;
-        let outcome = self.desktop_host.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::Dismiss)],
-            application_changed: true,
-            ..HostBatch::default()
-        });
-        self.desktop_change_token = outcome.change_token;
-        self.desktop_deadline = outcome.next_deadline;
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn finish_desktop_native_context_menu(&mut self, action: Option<desktop::DesktopMessage>) {
-        if let Some(action) = action {
-            self.desktop_host.application_mut().update(action);
-            self.dispatch_desktop_plugin_open();
-            self.dispatch_desktop_plugin_file_action();
-        } else {
-            self.desktop_host
-                .application_mut()
-                .dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
-        }
-        self.desktop_host.application_mut().context_popup_detached = false;
-        self.desktop_overlay_pointer_capture = None;
-        let outcome = self.desktop_host.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::Dismiss)],
-            application_changed: true,
-            ..HostBatch::default()
-        });
-        self.desktop_change_token = outcome.change_token;
-        self.desktop_deadline = outcome.next_deadline;
-    }
-
     pub(crate) fn desktop_host_event_authorized(
         &mut self,
         ingress: HostEvent,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> bool {
+        if self.plugin_desktop_host.is_none() {
+            return false;
+        }
         let event = normalized_input(&ingress)
             .expect("desktop host event must be normalized")
             .clone();
-        #[cfg(target_os = "windows")]
-        if self.desktop_host.application().context_popup_detached
-            && matches!(event, nickel_input::InputEvent::FocusLost { .. })
-        {
-            // The detached popup owns focus while the desktop action still
-            // needs its invocation snapshot. Its completion dismisses the menu.
-            self.desktop_host
-                .application_mut()
-                .cancel_pointer_transaction();
-            self.desktop_overlay_pointer_capture = None;
-            return true;
-        }
         if matches!(
             event,
             nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Leave { .. })
@@ -2881,6 +2819,14 @@ impl LiveShell {
             }
             application.cancel_pointer_transaction();
             self.desktop_overlay_pointer_capture = None;
+            if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
+                if let Some(host) = self.plugin_desktop_host.as_mut() {
+                    host.step(HostBatch {
+                        events: vec![HostEvent::Ui(UiEvent::Dismiss)],
+                        ..HostBatch::default()
+                    });
+                }
+            }
         }
         let plugin_desktop_menu_open = !pointer_cancelled
             && self.desktop_host.application().plugin_background
@@ -3245,6 +3191,9 @@ impl LiveShell {
     }
 
     pub fn desktop_controller(&mut self, action: ControllerAction) -> bool {
+        if self.plugin_desktop_host.is_none() {
+            return false;
+        }
         let application = self.desktop_host.application_mut();
         let changed = match action {
             ControllerAction::Left => {
@@ -3298,6 +3247,9 @@ impl LiveShell {
     }
 
     pub fn desktop_file_drop(&mut self, source: &std::path::Path) -> bool {
+        if self.plugin_desktop_host.is_none() {
+            return false;
+        }
         let application = self.desktop_host.application_mut();
         let target = application
             .hit(application.pointer_position)
@@ -4420,6 +4372,20 @@ impl LiveShell {
                 }
             } else if id == crate::plugin_panel::desktop_manifest().id {
                 self.plugin_desktop_host = None;
+                self.wallpaper = None;
+                self.wallpaper_size = (0, 0);
+                self.wallpaper_loaded_source_fingerprint = None;
+                let desktop = self.desktop_host.application_mut();
+                desktop.watch = None;
+                desktop.wallpaper = None;
+                desktop.icon_cache.clear();
+                desktop.dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
+                desktop.cancel_pointer_transaction();
+                desktop.pending_plugin_open = None;
+                desktop.pending_plugin_select = None;
+                desktop.pending_plugin_move = None;
+                desktop.pending_plugin_file_action = None;
+                self.desktop_overlay_pointer_capture = None;
                 self.desktop_application_dirty = true;
             }
             if let Some((target, _)) = &extension_target {
@@ -4593,6 +4559,11 @@ impl LiveShell {
             }
         };
         if result.is_ok() {
+            if id == crate::plugin_panel::desktop_manifest().id {
+                // The directory watcher is parked while the plugin is disabled.
+                // Reconcile files before the first enabled frame is projected.
+                let _ = self.desktop_host.application_mut().refresh_directory(true);
+            }
             if let Some((target, _)) = &extension_target {
                 self.refresh_plugin_slot_hosts(target);
             }
@@ -8936,7 +8907,14 @@ impl LiveShell {
     }
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        self.load_wallpaper_for(width, height);
+        if self.plugin_desktop_host.is_some() {
+            self.load_wallpaper_for(width, height);
+            let desktop = self.desktop_host.application_mut();
+            if !desktop.plugin_background {
+                desktop.watch =
+                    nickel_file::DirectoryWatch::start(&nickel_file::desktop_directory()).ok();
+            }
+        }
         let widgets = compose_desktop_widgets(&self.plugin_desktop_widget_hosts);
         let application = self.desktop_host.application_mut();
         let wallpaper_changed = match (&application.wallpaper, &self.wallpaper) {
@@ -8953,7 +8931,7 @@ impl LiveShell {
             application.wallpaper_generation = application.wallpaper_generation.wrapping_add(1);
         }
         application.palette = self.palette;
-        let icons_changed = application.prepare_icons();
+        let icons_changed = self.plugin_desktop_host.is_some() && application.prepare_icons();
         let (tiles, tile_images) = if self.plugin_desktop_host.is_some() {
             application.plugin_tiles(width, height)
         } else {
@@ -9084,6 +9062,9 @@ impl LiveShell {
         let application = self.desktop_host.application_mut();
         let background_changed = application.plugin_background != plugin_commands.is_some();
         application.plugin_background = plugin_commands.is_some();
+        if !application.plugin_background {
+            application.watch = None;
+        }
         let application_changed = self.desktop_application_dirty
             || background_changed
             || wallpaper_changed
