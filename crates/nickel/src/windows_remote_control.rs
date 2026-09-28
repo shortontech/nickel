@@ -5235,9 +5235,7 @@ impl WindowsRemoteControl {
                                     Ok(changed) => {
                                         if changed
                                             && let Err(reason) = shell.set_plugin_surfaces(
-                                                state.surface_visible(
-                                                    crate::winit_shell::SurfaceRole::Desktop,
-                                                ),
+                                                state.shell_fixed_surface_keys(),
                                                 state.shell_panel_surfaces(),
                                             )
                                         {

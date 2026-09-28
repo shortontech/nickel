@@ -329,18 +329,24 @@ impl InternalShellCoordinator {
                 SurfaceRole::Screenshot,
                 SurfaceRole::OnScreenKeyboard,
             ] {
-                let maximum = role_size(role, primary.width, primary.height, self.panel_edge);
-                let size = if role == SurfaceRole::Launcher {
-                    self.shell.launcher_preferred_surface_size(maximum)
-                } else {
-                    maximum
-                };
                 let plugin = match role {
                     SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
                     SurfaceRole::WindowPreview => {
                         Some(crate::plugin_panel::window_preview_surface_key())
                     }
                     _ => None,
+                };
+                if plugin
+                    .as_ref()
+                    .is_some_and(|key| !self.shell.plugin_surface_matches(key))
+                {
+                    continue;
+                }
+                let maximum = role_size(role, primary.width, primary.height, self.panel_edge);
+                let size = if role == SurfaceRole::Launcher {
+                    self.shell.launcher_preferred_surface_size(maximum)
+                } else {
+                    maximum
                 };
                 desired.push((role, plugin, None, size));
             }
@@ -2365,6 +2371,44 @@ mod tests {
         );
         assert!(coordinator.visible(restored.id));
         assert!(coordinator.scene(restored.id).is_some());
+    }
+
+    #[test]
+    fn bundled_overlay_surfaces_follow_their_plugin_lifetimes() {
+        let mut coordinator = coordinator();
+        let output = InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        };
+        coordinator.set_outputs(&[output.clone()]);
+        for (role, plugin_id) in [
+            (
+                SurfaceRole::VolumeOsd,
+                crate::plugin_panel::volume_osd_manifest().id.clone(),
+            ),
+            (
+                SurfaceRole::WindowPreview,
+                crate::plugin_panel::window_preview_manifest().id.clone(),
+            ),
+        ] {
+            let initial = coordinator.surface(role, None).unwrap().id;
+            coordinator
+                .shell_mut()
+                .set_plugin_enabled(&plugin_id, false)
+                .unwrap();
+            coordinator.set_outputs(&[output.clone()]);
+            assert!(coordinator.surface(role, None).is_none());
+            coordinator
+                .shell_mut()
+                .set_plugin_enabled(&plugin_id, true)
+                .unwrap();
+            coordinator.set_outputs(&[output.clone()]);
+            assert_ne!(coordinator.surface(role, None).unwrap().id, initial);
+        }
     }
 
     #[test]

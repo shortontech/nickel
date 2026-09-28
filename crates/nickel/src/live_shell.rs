@@ -3446,6 +3446,19 @@ impl LiveShell {
         panels
     }
 
+    pub(crate) fn shell_fixed_surface_keys(
+        &self,
+    ) -> HashSet<nickel_core::plugins::PluginSurfaceKey> {
+        [
+            crate::plugin_panel::desktop_surface_key(),
+            crate::plugin_panel::volume_osd_surface_key(),
+            crate::plugin_panel::window_preview_surface_key(),
+        ]
+        .into_iter()
+        .filter(|key| self.plugin_surface_matches(key))
+        .collect()
+    }
+
     pub(crate) fn plugin_panel_bottom_offset(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,

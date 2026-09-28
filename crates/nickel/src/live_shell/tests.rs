@@ -538,6 +538,31 @@ fn taskbar_declaration_joins_active_shell_panel_surfaces() {
 }
 
 #[test]
+fn fixed_shell_surface_keys_follow_bundled_plugin_activation() {
+    let mut shell = LiveShell::new().unwrap();
+    for (key, id) in [
+        (
+            crate::plugin_panel::desktop_surface_key(),
+            crate::plugin_panel::desktop_manifest().id.clone(),
+        ),
+        (
+            crate::plugin_panel::volume_osd_surface_key(),
+            crate::plugin_panel::volume_osd_manifest().id.clone(),
+        ),
+        (
+            crate::plugin_panel::window_preview_surface_key(),
+            crate::plugin_panel::window_preview_manifest().id.clone(),
+        ),
+    ] {
+        assert!(shell.shell_fixed_surface_keys().contains(&key));
+        shell.set_plugin_enabled(&id, false).unwrap();
+        assert!(!shell.shell_fixed_surface_keys().contains(&key));
+        shell.set_plugin_enabled(&id, true).unwrap();
+        assert!(shell.shell_fixed_surface_keys().contains(&key));
+    }
+}
+
+#[test]
 fn installed_component_window_activates_and_retires_with_its_plugin() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/plugins/example-window");

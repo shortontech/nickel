@@ -217,6 +217,15 @@ fn desired_plugin_surfaces(
         .collect()
 }
 
+fn fixed_plugin_surface_key(role: SurfaceRole) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+    match role {
+        SurfaceRole::Desktop => Some(crate::plugin_panel::desktop_surface_key()),
+        SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
+        SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SurfaceId(WindowId);
 
@@ -575,7 +584,7 @@ pub struct WinitShell {
     options: ShellOptions,
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
-    desktop_plugin_enabled: bool,
+    active_fixed_plugins: HashSet<nickel_core::plugins::PluginSurfaceKey>,
     taskbar_panel_enabled: bool,
     plugin_panel_enabled: bool,
     plugin_panel_surface: nickel_core::plugins::PluginSurface,
@@ -644,7 +653,13 @@ impl WinitShell {
             options,
             primary_output_name: None,
             active_output_name: None,
-            desktop_plugin_enabled: true,
+            active_fixed_plugins: [
+                crate::plugin_panel::desktop_surface_key(),
+                crate::plugin_panel::volume_osd_surface_key(),
+                crate::plugin_panel::window_preview_surface_key(),
+            ]
+            .into_iter()
+            .collect(),
             taskbar_panel_enabled: true,
             plugin_panel_enabled: crate::plugin_panel::enabled(),
             plugin_panel_surface: crate::plugin_panel::surface().clone(),
@@ -746,7 +761,9 @@ impl WinitShell {
         self.output_creation_retry = OutputCreationRetry::default();
         let displays = require_displays(self.display_geometries()?)?;
         let output_names = self.display_names()?;
-        let create_desktops = self.desktop_plugin_enabled
+        let create_desktops = self
+            .active_fixed_plugins
+            .contains(&crate::plugin_panel::desktop_surface_key())
             && self.options.create_desktop_surfaces
             && crate::platform::renders_desktop_background();
         let desired = desired_output_surfaces(
@@ -812,8 +829,13 @@ impl WinitShell {
         self.create_surface(SurfaceRole::Launcher, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
-        self.create_surface(SurfaceRole::VolumeOsd, 0, primary, primary_name)?;
-        self.create_surface(SurfaceRole::WindowPreview, 0, primary, primary_name)?;
+        for role in [SurfaceRole::VolumeOsd, SurfaceRole::WindowPreview] {
+            if fixed_plugin_surface_key(role)
+                .is_some_and(|key| self.active_fixed_plugins.contains(&key))
+            {
+                self.create_surface(role, 0, primary, primary_name)?;
+            }
+        }
         self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Screenshot, 0, primary, primary_name)?;
@@ -846,7 +868,9 @@ impl WinitShell {
             tracing::info!("winit shell is dormant while no displays are available");
             return Ok(());
         }
-        let create_desktops = self.desktop_plugin_enabled
+        let create_desktops = self
+            .active_fixed_plugins
+            .contains(&crate::plugin_panel::desktop_surface_key())
             && self.options.create_desktop_surfaces
             && crate::platform::renders_desktop_background();
         let desired = desired_output_surfaces(
@@ -892,7 +916,10 @@ impl WinitShell {
         // dormant for the retirement grace period so a transient topology snapshot or a
         // quick reconnect can preserve their stable surface identities.
         self.surfaces.retain(|surface| match surface.role {
-            SurfaceRole::Desktop => self.desktop_plugin_enabled,
+            SurfaceRole::Desktop | SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
+                fixed_plugin_surface_key(surface.role)
+                    .is_some_and(|key| self.active_fixed_plugins.contains(&key))
+            }
             SurfaceRole::Panel => panel_expected(surface),
             SurfaceRole::Taskbar => desired.contains(&(surface.output_name.clone(), surface.role)),
             _ => true,
@@ -1027,14 +1054,23 @@ impl WinitShell {
             }
         }
         self.rebuild_surface_indices();
+        let primary = displays[0];
+        let primary_name = &output_names[0];
+        for role in [SurfaceRole::VolumeOsd, SurfaceRole::WindowPreview] {
+            if fixed_plugin_surface_key(role)
+                .is_some_and(|key| self.active_fixed_plugins.contains(&key))
+                && !self.surfaces.iter().any(|surface| surface.role == role)
+                && let Err(error) = self.create_surface(role, 0, primary, primary_name)
+            {
+                creation_failed = true;
+                tracing::warn!(?role, %error, "failed to create bundled plugin surface");
+            }
+        }
         if creation_failed {
             self.output_creation_retry.failed(Instant::now());
         } else {
             self.output_creation_retry.succeeded();
         }
-
-        let primary = displays[0];
-        let primary_name = &output_names[0];
         for surface in &mut self.surfaces {
             #[cfg(target_os = "windows")]
             if surface.role == SurfaceRole::TrustedControl {
@@ -1197,7 +1233,7 @@ impl WinitShell {
 
     pub fn set_plugin_surfaces(
         &mut self,
-        desktop_plugin_enabled: bool,
+        active_fixed_plugins: HashSet<nickel_core::plugins::PluginSurfaceKey>,
         mut panels: Vec<(
             nickel_core::plugins::PluginSurfaceKey,
             nickel_core::plugins::PluginSurface,
@@ -1248,7 +1284,7 @@ impl WinitShell {
         {
             return Err("duplicate plugin panel surface".into());
         }
-        if self.desktop_plugin_enabled == desktop_plugin_enabled
+        if self.active_fixed_plugins == active_fixed_plugins
             && self.taskbar_panel_enabled == taskbar_panel_enabled
             && self.plugin_panel_enabled == enabled
             && self.plugin_panel_owner == owner
@@ -1309,7 +1345,7 @@ impl WinitShell {
             )
             .map_err(|error| format!("failed to register plugin surface: {error}"))?;
         }
-        self.desktop_plugin_enabled = desktop_plugin_enabled;
+        self.active_fixed_plugins = active_fixed_plugins;
         self.plugin_panel_enabled = enabled;
         self.taskbar_panel_enabled = taskbar_panel_enabled;
         self.plugin_panel_owner = owner;

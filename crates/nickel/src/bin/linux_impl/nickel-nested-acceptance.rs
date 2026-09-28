@@ -390,6 +390,8 @@ fn exercise(
     wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
     verify_taskbar_plugin_retires(test_input, &environment)?;
     verify_desktop_plugin_retires(test_input, &environment)?;
+    verify_bundled_overlay_surface_retires(test_input, &environment, "org.nickel.volume-osd", "VolumeOsd")?;
+    verify_bundled_overlay_surface_retires(test_input, &environment, "org.nickel.window-preview", "Preview")?;
     verify_control_plugin_retires(test_input, &environment)?;
     verify_notification_plugin_retires(test_input, &environment)?;
     let panel_id = "org.example.acceptance-panel";
@@ -623,6 +625,39 @@ fn wait_for_desktop_presence(
         }
         if Instant::now() >= deadline {
             return Err(format!("desktop surface presence did not become {expected_present}: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn verify_bundled_overlay_surface_retires(
+    test_input: &Path,
+    environment: &[(String, String)],
+    plugin_id: &str,
+    role: &str,
+) -> Result<(), String> {
+    wait_for_role_presence(test_input, environment, role, true)?;
+    checked(test_input, environment, &["plugin-set", plugin_id, "disabled"])?;
+    wait_for_role_presence(test_input, environment, role, false)?;
+    checked(test_input, environment, &["plugin-set", plugin_id, "enabled"])?;
+    wait_for_role_presence(test_input, environment, role, true)
+}
+
+fn wait_for_role_presence(
+    test_input: &Path,
+    environment: &[(String, String)],
+    role: &str,
+    expected: bool,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        let present = surfaces.lines().any(|line| line.starts_with(&format!("{role}\t")));
+        if present == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("{role} surface presence did not become {expected}: {surfaces}"));
         }
         thread::sleep(POLL);
     }

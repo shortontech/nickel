@@ -139,6 +139,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib bundled_desktop_surface_retires_and_returns_with_its_plugin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib bundled_overlay_surfaces_follow_their_plugin_lifetimes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib fixed_shell_surface_keys_follow_bundled_plugin_activation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib desktop_secondary_press_opens_overlay_without_hiding_items_on_release_or_motion
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::notification_plugin_

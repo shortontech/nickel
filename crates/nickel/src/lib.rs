@@ -1904,7 +1904,7 @@ fn handle_shell_input(
         if state.plugin_panel_host_input_for(&key, event, width, height) {
             if state.shell_panel_surfaces().len() != plugin_surface_count {
                 shell.set_plugin_surfaces(
-                    state.surface_visible(SurfaceRole::Desktop),
+                    state.shell_fixed_surface_keys(),
                     state.shell_panel_surfaces(),
                 )?;
             }
@@ -2511,7 +2511,7 @@ pub fn run() -> Result<(), String> {
     wait_for_shell_readiness()?;
     let mut state = LiveShell::new_with_safe_mode(command_line.safe_mode)?;
     shell.set_plugin_surfaces(
-        state.surface_visible(SurfaceRole::Desktop),
+        state.shell_fixed_surface_keys(),
         state.shell_panel_surfaces(),
     )?;
     let mut feature_settings = OptionalFeatureSettings::load_default();
@@ -2896,7 +2896,7 @@ pub fn run() -> Result<(), String> {
                     shortcut == platform::GlobalShortcut::ShowNotifications;
                 if state.global_shortcut(shortcut) {
                     shell.set_plugin_surfaces(
-                        state.surface_visible(SurfaceRole::Desktop),
+                        state.shell_fixed_surface_keys(),
                         state.shell_panel_surfaces(),
                     )?;
                     sync_visibility(&mut shell, &state);
@@ -2972,7 +2972,7 @@ pub fn run() -> Result<(), String> {
                     tracing::warn!(plugin = %key.plugin_id, %error, "could not close plugin window");
                 } else {
                     shell.set_plugin_surfaces(
-                        state.surface_visible(SurfaceRole::Desktop),
+                        state.shell_fixed_surface_keys(),
                         state.shell_panel_surfaces(),
                     )?;
                     sync_visibility(&mut shell, &state);
