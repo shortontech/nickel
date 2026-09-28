@@ -4,22 +4,27 @@ use std::{
 };
 
 use jiff::Zoned;
+#[cfg(any(test, feature = "workbench-fixtures"))]
 use nickel_core::theme::ThemePalette;
+use nickel_ui::DragGesture;
 #[cfg(test)]
 use nickel_ui::Rect;
+#[cfg(any(test, feature = "workbench-fixtures"))]
 use nickel_ui::{
-    AnyView, Column, Container, DragGesture, DragPhase, FrameOverlay, Image, Insets, OverlayAnchor,
-    OverlayMenu, OverlayMenuItem, OverlayStyle, Row, SemanticRole, Spacer, Text, TextAlign, UiId,
-    ViewContext,
+    AnyView, Column, Container, DragPhase, FrameOverlay, Image, Insets, OverlayAnchor, OverlayMenu,
+    OverlayMenuItem, OverlayStyle, Row, SemanticRole, Spacer, Text, TextAlign, UiId, ViewContext,
 };
 
 #[cfg(test)]
 use super::PANEL_CONTROL_GAP;
+use super::PANEL_TRAY_ICON_SIZE;
+#[cfg(any(test, feature = "workbench-fixtures"))]
 use super::{
-    PANEL_CLOCK_WIDTH, PANEL_CODEX_ICON_SIZE, PANEL_CODEX_WIDTH, PANEL_ITEM_WIDTH,
-    PANEL_TRAY_ICON_SIZE, PANEL_TRAY_WIDTH,
+    PANEL_CLOCK_WIDTH, PANEL_CODEX_ICON_SIZE, PANEL_CODEX_WIDTH, PANEL_ITEM_WIDTH, PANEL_TRAY_WIDTH,
 };
-use crate::{launcher::TaskbarApplication, model::TrayItem};
+#[cfg(any(test, feature = "workbench-fixtures"))]
+use crate::launcher::TaskbarApplication;
+use crate::model::TrayItem;
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
 use crate::{launcher::Launcher, model::OpenWindow};
@@ -90,6 +95,7 @@ pub enum TaskbarAction {
     Control,
 }
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 #[derive(Clone)]
 pub struct TaskbarUi {
     pub(super) keyboard_enabled: bool,
@@ -113,6 +119,7 @@ pub struct TaskbarUi {
     pub(super) task_drag: Option<(usize, isize)>,
 }
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 fn map_task_drag(seed: TaskbarAction, gesture: DragGesture) -> TaskbarAction {
     let TaskbarAction::Task(index) = seed else {
         unreachable!("task drag seeds retain their task index")
@@ -120,6 +127,7 @@ fn map_task_drag(seed: TaskbarAction, gesture: DragGesture) -> TaskbarAction {
     TaskbarAction::TaskDrag(index, gesture)
 }
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 impl nickel_ui::Application for TaskbarUi {
     type Message = TaskbarAction;
 
@@ -353,6 +361,7 @@ pub(super) fn duration_until_next_minute() -> Duration {
         .max(Duration::from_millis(1))
 }
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 impl TaskbarUi {
     fn panel_view(&self, width: f32, height: f32) -> impl nickel_ui::View<TaskbarAction> {
         let interactive_background = |hovered: bool, active: bool| {

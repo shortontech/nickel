@@ -173,12 +173,16 @@ fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) 
 }
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
+#[cfg(any(test, feature = "workbench-fixtures"))]
 const PANEL_CLOCK_WIDTH: f32 = 96.0;
 #[cfg(test)]
 const PANEL_CONTROL_GAP: f32 = 8.0;
+#[cfg(any(test, feature = "workbench-fixtures"))]
 const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
+#[cfg(any(test, feature = "workbench-fixtures"))]
 const PANEL_CODEX_WIDTH: f32 = 36.0;
+#[cfg(any(test, feature = "workbench-fixtures"))]
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(300);
