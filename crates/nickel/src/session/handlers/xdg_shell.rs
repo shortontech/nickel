@@ -1095,6 +1095,11 @@ impl NickelSession {
         let is_context_menu = shell_role == Some(ShellRole::ContextMenu);
         let is_preview = shell_role == Some(ShellRole::Preview);
         let is_notification = shell_role == Some(ShellRole::Notification);
+        let is_passive_plugin_overlay = shell_role == Some(ShellRole::PluginSurface)
+            && identity
+                .as_ref()
+                .and_then(|identity| identity.plugin_surface.as_ref())
+                .is_some_and(|placement| placement.passive);
         let is_lock = shell_role == Some(ShellRole::Lock);
         let is_codex_project_chat = is_codex_project_chat(projected_app_id);
         let is_utility = matches!(
@@ -1244,7 +1249,16 @@ impl NickelSession {
                 if is_notification {
                     utility.override_z_index(45);
                 }
-                self.register_utility_window(utility, shell_role.expect("utility has shell role"));
+                self.register_utility_window(
+                    utility.clone(),
+                    shell_role.expect("utility has shell role"),
+                );
+                if is_passive_plugin_overlay {
+                    // Plugin surfaces normally sit at 40. A passive overlay
+                    // needs the notification layer without taking focus.
+                    utility.override_z_index(45);
+                    self.space.raise_element(&utility, false);
+                }
             }
         }
         if is_lock {

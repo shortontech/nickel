@@ -287,10 +287,16 @@ pub struct PluginSurfacePlacement {
     pub offset_x: i32,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub offset_y: i32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub passive: bool,
 }
 
 fn is_zero_i32(value: &i32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2423,6 +2429,7 @@ mod tests {
                 anchor: PluginSurfaceAnchor::Center,
                 offset_x: 0,
                 offset_y: 0,
+                passive: false,
             }),
         };
         let request = ClientEnvelope {
@@ -2439,11 +2446,12 @@ mod tests {
         assert_ne!(identity.role, ShellRole::Panel);
         let mut window = identity;
         let placement = window.plugin_surface.as_mut().unwrap();
-        placement.kind = PluginSurfacePlacementKind::Window;
+        placement.kind = PluginSurfacePlacementKind::Overlay;
         placement.bottom_offset = 0;
         placement.anchor = PluginSurfaceAnchor::TopRight;
         placement.offset_x = -18;
         placement.offset_y = 24;
+        placement.passive = true;
         assert_eq!(
             placement.anchor.position(
                 (100, 200, 800, 600),
@@ -2472,6 +2480,7 @@ mod tests {
                 anchor: PluginSurfaceAnchor::Center,
                 offset_x: 0,
                 offset_y: 0,
+                passive: false,
             }),
         };
         assert_eq!(
@@ -2496,6 +2505,7 @@ mod tests {
                 anchor: PluginSurfaceAnchor::Center,
                 offset_x: 0,
                 offset_y: 0,
+                passive: false,
             }),
         };
         assert_eq!(

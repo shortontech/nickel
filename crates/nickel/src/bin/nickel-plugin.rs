@@ -75,6 +75,9 @@ fn run_command() -> Result<(), String> {
                         surface.offset_y
                     );
                 }
+                if surface.passive {
+                    println!("  passive overlay: opens without activating the window");
+                }
             }
             for capability in &package.manifest.capabilities {
                 println!("access: {}", capability.as_str());

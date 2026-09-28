@@ -6338,6 +6338,7 @@ fn locked_test_output_disconnect_projects_readiness_to_live_topology() {
                     anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
                     offset_x: 0,
                     offset_y: 0,
+                    passive: false,
                 }),
             });
     }

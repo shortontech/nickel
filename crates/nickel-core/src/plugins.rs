@@ -664,12 +664,18 @@ pub struct PluginSurface {
     pub offset_x: i32,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub offset_y: i32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub passive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }
 
 fn is_zero_i32(value: &i32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
@@ -951,6 +957,12 @@ impl PluginManifest {
             {
                 return Err(format!(
                     "surface {:?} cannot use window anchoring",
+                    surface.id
+                ));
+            }
+            if surface.passive && surface.kind != PluginSurfaceKind::Overlay {
+                return Err(format!(
+                    "surface {:?} can be passive only as an overlay",
                     surface.id
                 ));
             }
@@ -1493,11 +1505,12 @@ mod tests {
             .replace("\"bottom_offset\":24,", "")
             .replace(
                 "\"height\":64,",
-                "\"height\":64,\"anchor\":\"top-right\",\"offset_x\":-18,\"offset_y\":24,",
+                "\"height\":64,\"anchor\":\"top-right\",\"offset_x\":-18,\"offset_y\":24,\"passive\":true,",
             );
         let manifest = PluginManifest::from_json(&source).unwrap();
         let surface = &manifest.surfaces[0];
         assert_eq!(surface.anchor, PluginSurfaceAnchor::TopRight);
+        assert!(surface.passive);
         assert_eq!(
             surface.anchor.position(
                 (100, 200, 800, 600),
@@ -1522,6 +1535,13 @@ mod tests {
             )
             .is_err()
         );
+        let window = source
+            .replace("\"kind\":\"overlay\"", "\"kind\":\"window\"")
+            .replace(
+                "\"anchor\":\"top-right\",\"offset_x\":-18,\"offset_y\":24,",
+                "",
+            );
+        assert!(PluginManifest::from_json(&window).is_err());
     }
 
     #[test]

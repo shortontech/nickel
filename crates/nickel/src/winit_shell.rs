@@ -478,6 +478,7 @@ pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
     plugin: Option<nickel_core::plugins::PluginSurfaceKey>,
+    passive_overlay: bool,
     application_id: String,
     display_index: usize,
     output_name: String,
@@ -556,7 +557,8 @@ fn show_surface_native(surface: &ShellSurface) {
     if matches!(
         surface.role,
         SurfaceRole::WindowPreview | SurfaceRole::Notification
-    ) {
+    ) || surface.passive_overlay
+    {
         crate::platform::show_overlay_window_without_activation(&surface.window);
         return;
     }
@@ -948,6 +950,9 @@ impl WinitShell {
         let panel_expected = |surface: &ShellSurface| {
             surface.plugin.as_ref().is_some_and(|key| {
                 desired_plugin_panels.contains(&(surface.output_name.clone(), key.clone()))
+                    && active_panels
+                        .get(key)
+                        .is_some_and(|panel| panel.passive == surface.passive_overlay)
             })
         };
         // A settings policy change is authoritative immediately. Missing outputs remain
@@ -1368,10 +1373,11 @@ impl WinitShell {
         self.set_plugin_dialog_owners_enabled(true);
         self.surfaces.retain(|existing| {
             existing.role != SurfaceRole::Panel
-                || existing
-                    .plugin
-                    .as_ref()
-                    .is_some_and(|key| active.contains_key(key))
+                || existing.plugin.as_ref().is_some_and(|key| {
+                    active
+                        .get(key)
+                        .is_some_and(|surface| surface.passive == existing.passive_overlay)
+                })
         });
         self.rebuild_surface_indices();
         #[cfg(target_os = "linux")]
@@ -1401,6 +1407,7 @@ impl WinitShell {
                         anchor: protocol_plugin_surface_anchor(surface.anchor),
                         offset_x: surface.offset_x,
                         offset_y: surface.offset_y,
+                        passive: surface.passive,
                     }),
                 },
             )
@@ -1765,6 +1772,7 @@ impl WinitShell {
             id,
             role: SurfaceRole::CodexChat,
             plugin: None,
+            passive_overlay: false,
             application_id: application_id.to_owned(),
             display_index: 0,
             output_name: String::new(),
@@ -1837,6 +1845,7 @@ impl WinitShell {
             id,
             role: SurfaceRole::TrustedControl,
             plugin: None,
+            passive_overlay: false,
             application_id: "nickel.trusted-remote-control".to_owned(),
             display_index,
             output_name: output_name.to_owned(),
@@ -2712,6 +2721,7 @@ impl WinitShell {
                         anchor: protocol_plugin_surface_anchor(panel.anchor),
                         offset_x: panel.offset_x,
                         offset_y: panel.offset_y,
+                        passive: panel.passive,
                     }),
                 },
             )
@@ -2876,6 +2886,7 @@ impl WinitShell {
             id,
             role,
             plugin: plugin_key,
+            passive_overlay: role == SurfaceRole::Panel && panel.passive,
             application_id,
             display_index,
             output_name: output_name.to_owned(),
@@ -3087,7 +3098,7 @@ fn surface_geometry_for_panel(
                 y,
                 width,
                 height,
-                false,
+                panel.passive,
             );
         }
         return (
@@ -3693,6 +3704,7 @@ mod tests {
                 anchor: nickel_core::plugins::PluginSurfaceAnchor::Center,
                 offset_x: 0,
                 offset_y: 0,
+                passive: false,
                 reserve_work_area: false,
                 output: nickel_core::plugins::PluginOutputScope::Primary,
                 owner: None,
@@ -3775,6 +3787,7 @@ mod tests {
             anchor: nickel_core::plugins::PluginSurfaceAnchor::Center,
             offset_x: 0,
             offset_y: 0,
+            passive: false,
             reserve_work_area: false,
             output: nickel_core::plugins::PluginOutputScope::Primary,
             owner: None,
@@ -3798,13 +3811,15 @@ mod tests {
         overlay.anchor = nickel_core::plugins::PluginSurfaceAnchor::TopRight;
         overlay.offset_x = -18;
         overlay.offset_y = 24;
-        let (_, x, y, width, height, _) = super::surface_geometry_for_panel(
+        overlay.passive = true;
+        let (_, x, y, width, height, hidden) = super::surface_geometry_for_panel(
             SurfaceRole::Panel,
             geometry,
             PanelEdge::Bottom,
             &overlay,
         );
         assert_eq!((x, y, width, height), (1482, 224, 520, 340));
+        assert!(hidden);
     }
 
     #[test]

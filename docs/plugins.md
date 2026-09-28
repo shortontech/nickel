@@ -6,6 +6,8 @@ offset; windows, dialogs, and overlays are centered on the selected output by
 default. Set `anchor` to `top-left`, `top-right`, `bottom-left`, or
 `bottom-right` and add signed `offset_x` and `offset_y` to place one at a
 corner. Placement is clamped to the output.
+An overlay can set `passive: true` to appear above ordinary windows without
+activating its native window on Windows.
 They do not replace the built-in taskbar readiness surface.
 
 Nickel loads a compiled JavaScript entry from a directory containing

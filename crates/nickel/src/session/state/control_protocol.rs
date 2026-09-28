@@ -66,6 +66,8 @@ fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurface
                 ) || (surface.anchor == nickel_session_protocol::PluginSurfaceAnchor::Center
                     && surface.offset_x == 0
                     && surface.offset_y == 0))
+                && (!surface.passive
+                    || surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Overlay)
         })
 }
 
@@ -92,6 +94,7 @@ mod shell_surface_identity_tests {
                 anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
                 offset_x: 0,
                 offset_y: 0,
+                passive: false,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));
@@ -123,6 +126,7 @@ mod shell_surface_identity_tests {
                 anchor: nickel_session_protocol::PluginSurfaceAnchor::TopRight,
                 offset_x: -18,
                 offset_y: 24,
+                passive: true,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));
@@ -151,6 +155,7 @@ mod shell_surface_identity_tests {
                 anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
                 offset_x: 0,
                 offset_y: 0,
+                passive: false,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));
@@ -181,6 +186,7 @@ mod shell_surface_identity_tests {
                 anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
                 offset_x: 0,
                 offset_y: 0,
+                passive: false,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));
@@ -206,6 +212,7 @@ mod shell_surface_identity_tests {
                 anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
                 offset_x: 0,
                 offset_y: 0,
+                passive: false,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));
