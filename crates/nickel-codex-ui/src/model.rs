@@ -309,6 +309,8 @@ pub struct ChatState {
     pub effective_sandbox_policy: Option<SandboxPolicy>,
     pub selected_sandbox_policy: Option<SandboxPolicy>,
     pub projects: Vec<Project>,
+    /// Changes whenever the accepted backend project snapshot changes.
+    pub project_revision: u64,
     pub threads: Vec<Thread>,
     pub thread_runtime: HashMap<ThreadId, nickel_codex::ThreadRuntime>,
     pub thread_error: Option<String>,
@@ -412,6 +414,7 @@ impl Default for ChatState {
             effective_sandbox_policy: None,
             selected_sandbox_policy: None,
             projects: Vec::new(),
+            project_revision: 0,
             threads: Vec::new(),
             thread_runtime: HashMap::new(),
             thread_error: None,
@@ -955,7 +958,11 @@ impl ChatState {
                         .find(|model| Some(model.id.as_str()) == self.selected_model.as_deref())
                         .and_then(|model| model.default_reasoning_effort.clone());
                 }
-                self.projects = projects.into_iter().take(100).collect();
+                let projects = projects.into_iter().take(100).collect::<Vec<_>>();
+                if self.projects != projects {
+                    self.project_revision = self.project_revision.wrapping_add(1);
+                    self.projects = projects;
+                }
                 let mut seen = HashSet::new();
                 self.threads = threads
                     .into_iter()
@@ -1299,7 +1306,10 @@ impl ChatState {
             ControllerEvent::Unavailable(message) => {
                 self.mark_unconfirmed_on_connection_loss();
                 self.status = ConnectionStatus::Unavailable;
-                self.projects.clear();
+                if !self.projects.is_empty() {
+                    self.project_revision = self.project_revision.wrapping_add(1);
+                    self.projects.clear();
+                }
                 self.threads.clear();
                 self.thread_runtime.clear();
                 self.push_diagnostic(message);
