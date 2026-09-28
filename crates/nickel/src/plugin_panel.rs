@@ -4879,6 +4879,54 @@ mod tests {
     }
 
     #[test]
+    fn two_window_example_requests_its_declared_sibling() {
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-two-windows"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        let home = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "home")
+            .unwrap();
+        let mut host = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package_surface(
+                &package,
+                &std::collections::BTreeMap::new(),
+                home,
+            )
+            .unwrap(),
+            home.width,
+            home.height,
+        );
+        let button = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Reopen details".into(),
+            })
+            .unwrap();
+        assert!(button.bounds.origin.x < 200.0);
+        assert!(button.bounds.origin.x + button.bounds.size.width > 200.0);
+        assert!(button.bounds.origin.y < 208.0);
+        assert!(button.bounds.origin.y + button.bounds.size.height > 208.0);
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(button.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ShowPluginSurface {
+                plugin_id: package.manifest.id.clone(),
+                surface_id: "details".into(),
+            }]
+        );
+    }
+
+    #[test]
     fn external_dialog_can_change_only_its_declared_setting_with_a_grant() {
         let directory = concat!(
             env!("CARGO_MANIFEST_DIR"),

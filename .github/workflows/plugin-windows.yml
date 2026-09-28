@@ -211,6 +211,8 @@ jobs:
               [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr handle, out Rect rect);
               [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr handle, ref Point point);
               [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr handle);
+              [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+              [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
               [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
               [DllImport("user32.dll")] private static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extraInfo);
               [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
@@ -290,9 +292,16 @@ jobs:
                       if (title.ToString() != expectedTitle || !GetClientRect(handle, out rect)) return true;
                       var point = new Point { X = (rect.Right - rect.Left) / 2, Y = rect.Bottom - 32 };
                       if (!ClientToScreen(handle, ref point)) return true;
-                      SetForegroundWindow(handle);
+                      bool focused = SetForegroundWindow(handle);
                       if (!SetCursorPos(point.X, point.Y)) return true;
                       System.Threading.Thread.Sleep(80);
+                      var hit = WindowFromPoint(point);
+                      uint hitOwner = 0;
+                      if (hit != IntPtr.Zero) GetWindowThreadProcessId(hit, out hitOwner);
+                      Console.WriteLine($"Plugin click target={handle}, focused={focused}, foreground={GetForegroundWindow()}, hit={hit}, hitOwner={hitOwner}, expectedOwner={processId}, point={point.X},{point.Y}, client={rect.Right}x{rect.Bottom}");
+                      mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+                      mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+                      System.Threading.Thread.Sleep(200);
                       mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
                       mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
                       clicked = true;
