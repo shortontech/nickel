@@ -6978,7 +6978,7 @@ fn first_native_launcher_open_accepts_typing(pointer: bool) {
             .internal_shell
             .as_ref()
             .unwrap()
-            .surface(crate::winit_shell::SurfaceRole::Taskbar, Some("file-test"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "file-test")
             .unwrap()
             .id;
         let runtime = session.internal_shell_surfaces[&panel];
@@ -8332,7 +8332,7 @@ fn applying_multi_output_fractional_scale_updates_internal_surfaces_at_native_sc
                 .surface(crate::winit_shell::SurfaceRole::Desktop, Some(name))
                 .unwrap();
             let panel = shell
-                .surface(crate::winit_shell::SurfaceRole::Taskbar, Some(name))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), name)
                 .unwrap();
             (
                 name,
@@ -8372,7 +8372,7 @@ fn applying_multi_output_fractional_scale_updates_internal_surfaces_at_native_sc
         assert_eq!(session.internal_ui.scale_factor(runtime), Some(expected));
 
         let panel = shell
-            .surface(crate::winit_shell::SurfaceRole::Taskbar, Some(name))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), name)
             .unwrap();
         let panel_runtime = session.internal_shell_surfaces[&panel.id];
         assert_eq!(
@@ -8385,7 +8385,7 @@ fn applying_multi_output_fractional_scale_updates_internal_surfaces_at_native_sc
         assert_eq!(
             placement.geometry.1,
             output.geometry.y + output.geometry.height
-                - i32::try_from(crate::winit_shell::PANEL_HEIGHT).unwrap()
+                - i32::try_from(crate::plugin_panel::taskbar_surface().height).unwrap()
         );
     }
 }
