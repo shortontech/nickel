@@ -119,6 +119,9 @@ prevent testing; `tsc -p` gives the stricter check before packaging.
 
 The runtime provides `h`, `Panel`, `Row`, `Column`, `Text`, `Button`, `Dialog`,
 `Image`, `ImageButton`, `useState`, `useRef`, and other small native components.
+JavaScript execution has a 100,000-iteration limit per call frame. A loop that
+exceeds it returns an error to the plugin host; a failed event rolls back its
+component state so the next input can still run.
 Images use a host-provided asset key and explicit `width` and `height` (1 to
 8192 logical pixels); `fit` is `contain`, `cover`, or `stretch`. `ImageButton`
 also needs an ID, an accessibility label, and an `onClick` handler. A missing

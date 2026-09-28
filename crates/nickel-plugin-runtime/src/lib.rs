@@ -8,6 +8,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 const BOOTSTRAP: &str = include_str!("../../../assets/plugin-runtime/bootstrap.js");
+// Boa enforces this per JavaScript call frame. It bounds accidental infinite
+// loops in plugin code without retaining an event or frame history.
+const MAX_JS_LOOP_ITERATIONS: u64 = 100_000;
 
 pub struct JsxRuntime {
     context: Context,
@@ -18,6 +21,10 @@ impl JsxRuntime {
         let mut runtime = Self {
             context: Context::default(),
         };
+        runtime
+            .context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(MAX_JS_LOOP_ITERATIONS);
         runtime.eval(BOOTSTRAP)?;
         if let Some(data) = data {
             runtime.set_data(data)?;
@@ -97,6 +104,31 @@ mod tests {
             .unwrap();
         assert_ne!(initial, changed);
         assert!(runtime.take_effects().unwrap().is_empty());
+        runtime.finish_event(false).unwrap();
+        let restored = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(initial, restored);
+    }
+
+    #[test]
+    fn infinite_loop_at_startup_returns_an_error() {
+        let result = JsxRuntime::new("while (true) {}", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn infinite_loop_in_handler_does_not_poison_the_runtime() {
+        let source = "function App() { return h(Panel, {}, h(Button, {onClick: () => { while (true) {} }}, 'Loop')); }";
+        let mut runtime = JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(
+            runtime
+                .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+                .is_err()
+        );
         runtime.finish_event(false).unwrap();
         let restored = runtime
             .render("__nickelRender()", |node| Ok(node.clone()))
