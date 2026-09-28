@@ -286,6 +286,7 @@ pub(crate) fn save_temp_image(image: &image::RgbaImage) -> Result<PathBuf, Strin
     let runtime = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
+    super::remove_stale_temp_screenshots(&runtime, "nickel-screenshot-");
     let sequence = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let path = runtime.join(format!(
         "nickel-screenshot-{}-{sequence}.png",

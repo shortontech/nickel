@@ -51,6 +51,31 @@ pub struct DesktopCapture {
     pub image: image::RgbaImage,
 }
 
+const TEMP_SCREENSHOT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+pub(crate) fn remove_stale_temp_screenshots(directory: &std::path::Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(prefix) || !name.ends_with(".png") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= TEMP_SCREENSHOT_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WifiNetworkStatus {
     pub id: String,

@@ -366,11 +366,13 @@ pub fn copy_image_to_clipboard(image: image::RgbaImage) -> Result<(), String> {
 }
 
 pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String> {
+    let directory = env::temp_dir();
+    super::remove_stale_temp_screenshots(&directory, "nickel-crop-");
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let path = env::temp_dir().join(format!("nickel-crop-{stamp}.png"));
+    let path = directory.join(format!("nickel-crop-{stamp}.png"));
     image
         .save(&path)
         .map_err(|error| format!("could not save temporary screenshot: {error}"))?;
