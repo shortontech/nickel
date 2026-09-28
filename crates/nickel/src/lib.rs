@@ -2937,6 +2937,7 @@ pub fn run() -> Result<(), String> {
                                 kind,
                                 nickel_core::plugins::PluginSurfaceKind::Window
                                     | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                    | nickel_core::plugins::PluginSurfaceKind::Overlay
                             )
                         })
                     })

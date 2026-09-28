@@ -2446,6 +2446,7 @@ impl WinitShell {
                 panel.kind,
                 nickel_core::plugins::PluginSurfaceKind::Panel
                     | nickel_core::plugins::PluginSurfaceKind::Dock
+                    | nickel_core::plugins::PluginSurfaceKind::Overlay
             ) {
             attributes.with_transparent(true)
         } else {
@@ -2511,10 +2512,13 @@ impl WinitShell {
                 {
                     tracing::warn!(?role, "failed to configure Windows plugin panel window");
                 }
-                if panel.kind == nickel_core::plugins::PluginSurfaceKind::Dialog
-                    && !crate::platform::configure_plugin_dialog_window(&window)
+                if matches!(
+                    panel.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Dialog
+                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                ) && !crate::platform::configure_plugin_dialog_window(&window)
                 {
-                    tracing::warn!(?role, "failed to configure Windows plugin dialog window");
+                    tracing::warn!(?role, "failed to configure Windows plugin transient window");
                 }
             }
             SurfaceRole::Launcher => {
@@ -2724,12 +2728,13 @@ fn surface_geometry_for_panel(
             panel.kind,
             nickel_core::plugins::PluginSurfaceKind::Window
                 | nickel_core::plugins::PluginSurfaceKind::Dialog
+                | nickel_core::plugins::PluginSurfaceKind::Overlay
         ) {
             return (
-                if panel.kind == nickel_core::plugins::PluginSurfaceKind::Dialog {
-                    "Nickel Plugin Dialog"
-                } else {
-                    "Nickel Plugin Window"
+                match panel.kind {
+                    nickel_core::plugins::PluginSurfaceKind::Dialog => "Nickel Plugin Dialog",
+                    nickel_core::plugins::PluginSurfaceKind::Overlay => "Nickel Plugin Overlay",
+                    _ => "Nickel Plugin Window",
                 },
                 geometry.x + geometry.width.saturating_sub(width) as i32 / 2,
                 geometry.y + geometry.height.saturating_sub(height) as i32 / 2,

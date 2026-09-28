@@ -30,7 +30,7 @@ cargo run -p nickel --no-default-features --features backend-winit \
 
 Each immediate child directory must match its manifest ID. Discovery reports
 invalid packages without hiding valid siblings. Settings can enable installed
-packages with up to 16 panel or dock surfaces, plus surface-free taskbar badge,
+packages with up to 16 panel, dock, window, dialog, or overlay surfaces, plus surface-free taskbar badge,
 taskbar action, desktop widget, and Control Center section extensions. Use
 `nickel --safe-mode` to start with installed
 packages inactive while keeping bundled shell plugins available.
@@ -45,6 +45,9 @@ The [desktop widget example](example-desktop-widget/) contributes a bounded
 value and progress display to the bundled desktop plugin.
 The [dialog example](example-dialog/) opens a component dialog and requests
 Settings through a declared capability.
+The [separate dialog example](example-surface-dialog/) opens an owned native
+dialog surface. The [overlay example](example-overlay/) opens a translucent
+surface from a component window and dismisses it independently.
 The [task action example](example-task-action/) adds a callback to the
 taskbar's JSX application menu.
 The [control section example](example-control-section/) adds a callback row

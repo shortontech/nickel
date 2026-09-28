@@ -186,13 +186,15 @@ mod platform {
                         | PluginSurfaceKind::Dock
                         | PluginSurfaceKind::Window
                         | PluginSurfaceKind::Dialog
+                        | PluginSurfaceKind::Overlay
                 )
             })
-            && package
-                .manifest
-                .surfaces
-                .iter()
-                .any(|surface| surface.kind != PluginSurfaceKind::Dialog)
+            && package.manifest.surfaces.iter().any(|surface| {
+                !matches!(
+                    surface.kind,
+                    PluginSurfaceKind::Dialog | PluginSurfaceKind::Overlay
+                )
+            })
             && package.manifest.contributes.is_empty();
         let extension = package.manifest.surfaces.is_empty()
             && matches!(package.manifest.contributes.as_slice(), [contribution]

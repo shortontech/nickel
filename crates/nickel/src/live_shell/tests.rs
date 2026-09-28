@@ -813,6 +813,94 @@ fn closing_dialog_owner_retires_its_dialog_but_preserves_sibling_window() {
 }
 
 #[test]
+fn declared_overlay_opens_and_hides_without_retiring_its_plugin() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/plugins/example-overlay");
+    let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let id = package.manifest.id.clone();
+    let mut shell = LiveShell::new().unwrap();
+    shell.plugin_registry.register(package.manifest).unwrap();
+    shell
+        .external_plugin_packages
+        .insert(id.clone(), descriptor);
+    shell.set_plugin_enabled(&id, true).unwrap();
+    let home = shell.plugin_panels();
+    assert_eq!(home.len(), 1);
+    assert_eq!(home[0].0.surface_id, "home");
+    shell
+        .plugin_panel_scene(&home[0].0, home[0].1.width, home[0].1.height)
+        .unwrap();
+    let home_bytes = shell
+        .plugin_registry
+        .get(&id)
+        .unwrap()
+        .memory
+        .native_ui_bytes
+        .unwrap();
+    let show = shell
+        .plugin_panel_host_for(&home[0].0)
+        .unwrap()
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Show overlay".into(),
+        })
+        .unwrap();
+    assert!(shell.plugin_panel_host_ui_for(
+        &home[0].0,
+        nickel_ui::UiEvent::AccessibilityActivate(show.id),
+        home[0].1.width,
+        home[0].1.height,
+    ));
+    let opened = shell.plugin_panels();
+    assert_eq!(opened.len(), 2);
+    let overlay = opened
+        .iter()
+        .find(|(key, _)| key.surface_id == "notice")
+        .unwrap();
+    assert_eq!(
+        overlay.1.kind,
+        nickel_core::plugins::PluginSurfaceKind::Overlay
+    );
+    shell
+        .plugin_panel_scene(&overlay.0, overlay.1.width, overlay.1.height)
+        .unwrap();
+    assert!(
+        shell
+            .plugin_registry
+            .get(&id)
+            .unwrap()
+            .memory
+            .native_ui_bytes
+            .unwrap()
+            > home_bytes
+    );
+    let hide = shell
+        .plugin_panel_host_for(&overlay.0)
+        .unwrap()
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Close overlay".into(),
+        })
+        .unwrap();
+    assert!(shell.plugin_panel_host_ui_for(
+        &overlay.0,
+        nickel_ui::UiEvent::AccessibilityActivate(hide.id),
+        overlay.1.width,
+        overlay.1.height,
+    ));
+    assert_eq!(shell.plugin_panels(), home);
+    let status = shell.plugin_registry.get(&id).unwrap();
+    assert!(status.desired_enabled);
+    assert_eq!(status.health, nickel_core::plugins::PluginHealth::Running);
+    assert_eq!(status.memory.native_ui_bytes, Some(home_bytes));
+}
+
+#[test]
 fn installed_dock_uses_declared_offset_and_translucent_panel() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.dock");

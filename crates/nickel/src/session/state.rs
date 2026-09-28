@@ -15700,8 +15700,13 @@ fn apply_internal_plugin_surface_placement(
         kind,
         nickel_core::plugins::PluginSurfaceKind::Window
             | nickel_core::plugins::PluginSurfaceKind::Dialog
+            | nickel_core::plugins::PluginSurfaceKind::Overlay
     ) {
-        placement.role = if kind == nickel_core::plugins::PluginSurfaceKind::Dialog {
+        placement.role = if matches!(
+            kind,
+            nickel_core::plugins::PluginSurfaceKind::Dialog
+                | nickel_core::plugins::PluginSurfaceKind::Overlay
+        ) {
             crate::session::InternalSurfaceRole::Overlay
         } else {
             crate::session::InternalSurfaceRole::Application

@@ -3728,6 +3728,7 @@ impl LiveShell {
                 kind,
                 nickel_core::plugins::PluginSurfaceKind::Window
                     | nickel_core::plugins::PluginSurfaceKind::Dialog
+                    | nickel_core::plugins::PluginSurfaceKind::Overlay
             )
         }) {
             return Ok(false);
@@ -3745,12 +3746,16 @@ impl LiveShell {
         for dialog in owned_dialogs {
             self.close_plugin_window(&dialog)?;
         }
-        // A dialog depends on an ordinary surface to open it. Retire the
-        // package when closing this surface would leave only dialogs alive.
+        // Transient surfaces depend on an ordinary surface to open them.
+        // Retire the package when closing this one would leave only transients.
         if !self.plugin_panels().iter().any(|(surface, placement)| {
             surface.plugin_id == key.plugin_id
                 && surface != key
-                && placement.kind != nickel_core::plugins::PluginSurfaceKind::Dialog
+                && !matches!(
+                    placement.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Dialog
+                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                )
         }) {
             return self.set_plugin_enabled(&key.plugin_id, false);
         }
@@ -3809,11 +3814,12 @@ impl LiveShell {
                         surface.kind,
                         nickel_core::plugins::PluginSurfaceKind::Window
                             | nickel_core::plugins::PluginSurfaceKind::Dialog
+                            | nickel_core::plugins::PluginSurfaceKind::Overlay
                     )
             })
             .cloned()
             .ok_or_else(|| {
-                format!("plugin {id:?} has no declared window or dialog {surface_id:?}")
+                format!("plugin {id:?} has no declared window, dialog, or overlay {surface_id:?}")
             })?;
         let key = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: id.to_owned(),
@@ -4249,10 +4255,15 @@ impl LiveShell {
                                     | nickel_core::plugins::PluginSurfaceKind::Dock
                                     | nickel_core::plugins::PluginSurfaceKind::Window
                                     | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                    | nickel_core::plugins::PluginSurfaceKind::Overlay
                             )
                         })
                         && surfaces.iter().any(|surface| {
-                            surface.kind != nickel_core::plugins::PluginSurfaceKind::Dialog
+                            !matches!(
+                                surface.kind,
+                                nickel_core::plugins::PluginSurfaceKind::Dialog
+                                    | nickel_core::plugins::PluginSurfaceKind::Overlay
+                            )
                         })
                     {
                         descriptor.load().and_then(|package| {
@@ -4268,7 +4279,11 @@ impl LiveShell {
                             surfaces
                                 .iter()
                                 .filter(|surface| {
-                                    surface.kind != nickel_core::plugins::PluginSurfaceKind::Dialog
+                                    !matches!(
+                                        surface.kind,
+                                        nickel_core::plugins::PluginSurfaceKind::Dialog
+                                            | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                    )
                                 })
                                 .map(|surface| {
                                     crate::plugin_panel::PluginPanelApplication::from_package_surface(
@@ -4279,7 +4294,7 @@ impl LiveShell {
                                 .collect::<Result<Vec<_>, _>>()
                         })
                     } else {
-                        Err("installed plugin needs a panel, dock, or window to open its declared dialogs".into())
+                        Err("installed plugin needs a panel, dock, or window to open its declared transient surfaces".into())
                     },
                 )
             } else {
@@ -5403,7 +5418,7 @@ impl LiveShell {
                     match self.close_plugin_window(&key) {
                         Ok(closed) => changed |= closed,
                         Err(error) => {
-                            tracing::warn!(plugin = key.plugin_id, surface = key.surface_id, %error, "plugin dialog close failed");
+                            tracing::warn!(plugin = key.plugin_id, surface = key.surface_id, %error, "plugin transient surface close failed");
                         }
                     }
                 }

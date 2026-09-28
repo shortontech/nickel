@@ -3295,10 +3295,12 @@ impl nickel_ui::Application for PluginPanelApplication {
                                         surface.kind,
                                         nickel_core::plugins::PluginSurfaceKind::Window
                                             | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                            | nickel_core::plugins::PluginSurfaceKind::Overlay
                                     )
                             }) {
-                                self.last_error =
-                                    Some("plugin window or dialog is not declared".into());
+                                self.last_error = Some(
+                                    "plugin window, dialog, or overlay is not declared".into(),
+                                );
                                 return;
                             }
                             approved.push(PluginEffect::ShowPluginSurface {
@@ -3316,10 +3318,14 @@ impl nickel_ui::Application for PluginPanelApplication {
                             };
                             if !self.manifest.surfaces.iter().any(|surface| {
                                 surface.id == surface_id
-                                    && surface.kind
-                                        == nickel_core::plugins::PluginSurfaceKind::Dialog
+                                    && matches!(
+                                        surface.kind,
+                                        nickel_core::plugins::PluginSurfaceKind::Dialog
+                                            | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                    )
                             }) {
-                                self.last_error = Some("plugin dialog is not declared".into());
+                                self.last_error =
+                                    Some("plugin dialog or overlay is not declared".into());
                                 return;
                             }
                             approved.push(PluginEffect::HidePluginSurface {
@@ -5037,6 +5043,84 @@ mod tests {
             vec![PluginEffect::HidePluginSurface {
                 plugin_id: package.manifest.id.clone(),
                 surface_id: "confirm".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn overlay_example_opens_and_hides_its_declared_surface() {
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-overlay"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        let home = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "home")
+            .unwrap();
+        let overlay = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "notice")
+            .unwrap();
+        let settings = std::collections::BTreeMap::new();
+        let mut home = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package_surface(&package, &settings, home).unwrap(),
+            home.width,
+            home.height,
+        );
+        let show = home
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Show overlay".into(),
+            })
+            .unwrap();
+        assert!(show.bounds.origin.x < 210.0);
+        assert!(show.bounds.origin.x + show.bounds.size.width > 210.0);
+        assert!(show.bounds.origin.y < 77.0);
+        assert!(show.bounds.origin.y + show.bounds.size.height > 77.0);
+        home.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(show.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            home.application_mut().take_effects(),
+            vec![PluginEffect::ShowPluginSurface {
+                plugin_id: package.manifest.id.clone(),
+                surface_id: "notice".into(),
+            }]
+        );
+        let mut overlay = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package_surface(&package, &settings, overlay).unwrap(),
+            overlay.width,
+            overlay.height,
+        );
+        let hide = overlay
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Close overlay".into(),
+            })
+            .unwrap();
+        assert!(hide.bounds.origin.x < 150.0);
+        assert!(hide.bounds.origin.x + hide.bounds.size.width > 150.0);
+        assert!(hide.bounds.origin.y < 77.0);
+        assert!(hide.bounds.origin.y + hide.bounds.size.height > 77.0);
+        overlay.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(hide.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            overlay.application_mut().take_effects(),
+            vec![PluginEffect::HidePluginSurface {
+                plugin_id: package.manifest.id.clone(),
+                surface_id: "notice".into(),
             }]
         );
     }
