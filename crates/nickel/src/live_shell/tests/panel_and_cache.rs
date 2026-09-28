@@ -355,60 +355,6 @@
     }
 
     #[test]
-    fn taskbar_drag_reorders_a_pin_without_emitting_activation() {
-        let mut launcher = crate::launcher::Launcher::new(vec![
-            crate::model::Application::new(
-                "first".into(),
-                "First".into(),
-                None,
-                None,
-                Some(vec!["first".into()]),
-            ),
-            crate::model::Application::new(
-                "second".into(),
-                "Second".into(),
-                None,
-                None,
-                Some(vec!["second".into()]),
-            ),
-        ]);
-        launcher.set_pins(vec![("first".into(), 0), ("second".into(), 1)]);
-        let mut panel = super::TaskbarUi::fixture(
-            launcher,
-            ThemePalette::from_appearance(Appearance::default()),
-        );
-        let bounds = Rect::new(100.0, 0.0, 48.0, 48.0);
-
-        nickel_ui::Application::update(
-            &mut panel,
-            super::TaskbarAction::TaskDrag(
-                0,
-                nickel_ui::DragGesture {
-                    phase: nickel_ui::DragPhase::Moved,
-                    position: Point { x: 170.0, y: 20.0 },
-                    bounds,
-                },
-            ),
-        );
-        nickel_ui::Application::update(
-            &mut panel,
-            super::TaskbarAction::TaskDrag(
-                0,
-                nickel_ui::DragGesture {
-                    phase: nickel_ui::DragPhase::Ended,
-                    position: Point { x: 170.0, y: 20.0 },
-                    bounds,
-                },
-            ),
-        );
-
-        assert_eq!(
-            panel.effects,
-            [super::TaskbarAction::MoveTaskPinRight("first".into())]
-        );
-    }
-
-    #[test]
     fn closed_taskbar_pin_opens_application_actions_and_unpins_once() {
         let directory = tempfile::tempdir().expect("temporary preferences directory");
         let mut shell = LiveShell::new().unwrap();

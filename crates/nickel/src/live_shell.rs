@@ -173,16 +173,16 @@ fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) 
 }
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
-#[cfg(any(test, feature = "workbench-fixtures"))]
+#[cfg(test)]
 const PANEL_CLOCK_WIDTH: f32 = 96.0;
 #[cfg(test)]
 const PANEL_CONTROL_GAP: f32 = 8.0;
-#[cfg(any(test, feature = "workbench-fixtures"))]
+#[cfg(test)]
 const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
-#[cfg(any(test, feature = "workbench-fixtures"))]
+#[cfg(test)]
 const PANEL_CODEX_WIDTH: f32 = 36.0;
-#[cfg(any(test, feature = "workbench-fixtures"))]
+#[cfg(test)]
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(300);
@@ -197,8 +197,6 @@ pub(crate) mod remote_semantics;
 #[path = "live_shell/taskbar.rs"]
 mod taskbar;
 pub use taskbar::TaskbarAction;
-#[cfg(any(test, feature = "workbench-fixtures"))]
-pub use taskbar::TaskbarUi;
 use taskbar::{
     TaskbarHover, normalize_tray_items, panel_clock_text, panel_tray_icons, tint_panel_icon,
 };
@@ -6258,7 +6256,6 @@ impl LiveShell {
                 }
             }
             // Drag gestures are reduced by `TaskbarApplication` into a typed move action.
-            TaskbarAction::TaskDrag(_, _) => {}
             TaskbarAction::Codex => {
                 if !self.launcher.codex_available() {
                     self.codex_project_menu_visible = false;

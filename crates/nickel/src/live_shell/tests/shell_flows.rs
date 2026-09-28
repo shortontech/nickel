@@ -616,7 +616,6 @@
         winit_shell::SurfaceRole,
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
-    use nickel_core::theme::{Appearance, ThemePalette};
 
     fn preferences_fixture(shell: &mut LiveShell, path: std::path::PathBuf) {
         let preferences = LauncherPreferences::load(&path).unwrap_or_default();

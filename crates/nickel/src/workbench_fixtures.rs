@@ -14,11 +14,15 @@ use crate::{
     control_view::ControlCenterApp,
     launcher::{Launcher, LauncherInput},
     launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
-    live_shell::{DesktopApplication, LockApplication, TaskbarUi},
+    live_shell::{DesktopApplication, LockApplication},
     model::{WindowGroup, WindowId},
     notification::{DesktopNotification, NotificationAction},
     notification_view::NotificationApp,
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
+    plugin_panel::{
+        PluginImages, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
+        TaskbarPluginTrayItem,
+    },
     screenshot::ScreenshotApp,
     window_preview::WindowPreviewApp,
 };
@@ -426,19 +430,73 @@ impl Fixture for DesktopFixture {
 }
 
 impl Fixture for PanelFixture {
-    type App = TaskbarUi;
+    type App = PluginPanelApplication;
     fn metadata() -> &'static FixtureMetadata {
         &PANEL_METADATA
     }
     fn create() -> Self::App {
-        TaskbarUi::fixture(Launcher::default(), palette())
+        Self::create_variant(&PANEL_VARIANTS[0])
     }
     fn create_variant(variant: &FixtureVariant) -> Self::App {
-        if variant.id == "status-items" {
-            TaskbarUi::populated_fixture(Launcher::default(), fixture_palette(variant.theme))
-        } else {
-            TaskbarUi::fixture(Launcher::default(), fixture_palette(variant.theme))
+        let populated = variant.id == "status-items";
+        let projection = TaskbarPluginProjection {
+            items: if populated {
+                vec![
+                    TaskbarPluginItem {
+                        index: 0,
+                        id: "fixture.browser".into(),
+                        name: "Fixture Browser".into(),
+                        active: true,
+                        pinned: true,
+                        icon: true,
+                        badges: Vec::new(),
+                    },
+                    TaskbarPluginItem {
+                        index: 1,
+                        id: "fixture.editor".into(),
+                        name: "Fixture Editor".into(),
+                        active: false,
+                        pinned: false,
+                        icon: true,
+                        badges: Vec::new(),
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
+            tray: if populated {
+                vec![TaskbarPluginTrayItem {
+                    id: "fixture-notification".into(),
+                    title: "Fixture notification icon".into(),
+                    icon: true,
+                }]
+            } else {
+                Vec::new()
+            },
+            clock: "12:34 PM".into(),
+            keyboard_enabled: populated,
+            codex_available: populated,
+        };
+        let mut app = PluginPanelApplication::taskbar_with_projection(&projection)
+            .expect("bundled taskbar fixture must compile");
+        let mut images = PluginImages::new();
+        for (key, id, color) in [
+            ("logo", 2, [120, 90, 220, 255]),
+            ("codex", 0x5000, [90, 190, 230, 255]),
+            ("task:0", 0x6000, [40, 140, 240, 255]),
+            ("task:1", 0x6001, [220, 90, 120, 255]),
+            ("tray:fixture-notification", 0x6002, [80, 210, 140, 255]),
+        ] {
+            images.insert(
+                key.into(),
+                (
+                    id,
+                    Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba(color))),
+                ),
+            );
         }
+        app.sync_images(images);
+        app
     }
     fn surface_size() -> (u32, u32) {
         (1200, 56)
