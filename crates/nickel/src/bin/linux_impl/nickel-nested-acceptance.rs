@@ -356,6 +356,7 @@ fn exercise(
     {
         return Err("launcher did not resume after re-enable".into());
     }
+    verify_run_plugin_owns_dialog(test_input, &environment)?;
     let panel_id = "org.example.acceptance-panel";
     let activated = checked(test_input, &environment, &["plugin-set", panel_id, "enabled"])?;
     let activated: nickel_session_protocol::PluginStatusSnapshot =
@@ -480,6 +481,45 @@ fn exercise(
         ));
     }
     verify_settings_memory_report(settings, test_input, &environment)?;
+    Ok(())
+}
+
+fn press_super_r(test_input: &Path, environment: &[(String, String)]) -> Result<(), String> {
+    checked(test_input, environment, &["key", "meta", "pressed"])?;
+    checked(test_input, environment, &["key", "r", "pressed"])?;
+    checked(test_input, environment, &["key", "r", "released"])?;
+    checked(test_input, environment, &["key", "meta", "released"])?;
+    Ok(())
+}
+
+fn verify_run_plugin_owns_dialog(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let id = "org.nickel.run";
+    press_super_r(test_input, environment)?;
+    wait_for_launcher_visibility(test_input, environment, true, Duration::from_secs(5))?;
+    wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    let disabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
+    let plugin = disabled.plugins.iter().find(|plugin| plugin.id == id).ok_or("Run plugin missing")?;
+    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
+        return Err("disabled Run plugin retained its UI memory".into());
+    }
+    wait_for_launcher_visibility(test_input, environment, false, Duration::from_secs(5))?;
+    press_super_r(test_input, environment)?;
+    thread::sleep(Duration::from_millis(250));
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if surfaces.lines().any(|line| line.starts_with("Launcher\t") && !line.ends_with("hidden")) {
+        return Err(format!("disabled Run opened a fallback dialog: {surfaces}"));
+    }
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    press_super_r(test_input, environment)?;
+    wait_for_launcher_visibility(test_input, environment, true, Duration::from_secs(5))?;
+    checked(test_input, environment, &["key", "escape", "pressed"])?;
+    checked(test_input, environment, &["key", "escape", "released"])?;
+    wait_for_launcher_visibility(test_input, environment, false, Duration::from_secs(5))?;
     Ok(())
 }
 

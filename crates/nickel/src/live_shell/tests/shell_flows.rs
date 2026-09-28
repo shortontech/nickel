@@ -483,6 +483,9 @@
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::run_manifest().id;
         shell.set_plugin_enabled(id, false).unwrap();
+        assert!(!shell.set_run_visible(true));
+        assert!(!shell.run_visible);
+        assert!(!shell.launcher_visible);
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.plugin_run_host.is_some());
         shell.apply_session_launcher_visibility(true);
@@ -492,6 +495,8 @@
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.plugin_run_host.is_none());
+        assert!(!shell.run_visible);
+        assert!(shell.run_scene(620, 180).is_empty());
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()

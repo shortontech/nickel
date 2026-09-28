@@ -100,13 +100,6 @@ fn launcher_activate(action: &LauncherAction) -> RemoteActionDisposition {
     }
 }
 
-fn run_activate(action: &RunAction) -> RemoteActionDisposition {
-    match action {
-        RunAction::SetCommand(_) | RunAction::Dismiss => RemoteActionDisposition::Guarded,
-        RunAction::Submit => RemoteActionDisposition::Unavailable,
-    }
-}
-
 fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
     match action {
         ControlAction::ToggleWifiSection
@@ -213,7 +206,7 @@ impl LiveShell {
                         leaf == "run-command" && action == nickel_ui::ActionKind::SetValue
                     })
                 } else {
-                    project(&self.run_host, run_activate)
+                    Err("Run plugin is unavailable".into())
                 }
             }
             SurfaceRole::Launcher => {
@@ -315,7 +308,6 @@ pub(crate) enum RemoteShellEffect {
     Launcher(LauncherShellEffect),
     Panel(TaskbarAction, Option<String>),
     Control(ControlAction),
-    Run(String),
 }
 
 pub(crate) struct RemoteShellOutcome {
@@ -383,29 +375,14 @@ impl LiveShell {
         }
         let mut effects = Vec::new();
         let host = match role {
-            SurfaceRole::Launcher if self.run_visible && self.plugin_run_host.is_some() => {
-                let plugin = self.plugin_run_host.as_mut().expect("run plugin exists");
+            SurfaceRole::Launcher if self.run_visible => {
+                let plugin = self
+                    .plugin_run_host
+                    .as_mut()
+                    .ok_or("Run plugin is unavailable")?;
                 let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
                 if !plugin.application_mut().take_effects().is_empty() {
                     return Err("run plugin requested an unguarded effect".into());
-                }
-                outcome
-            }
-            SurfaceRole::Launcher if self.run_visible => {
-                let outcome = mutate(
-                    &mut self.run_host,
-                    generation,
-                    node,
-                    action,
-                    clipboard_limit,
-                )?;
-                for effect in self.run_host.application_mut().take_effects() {
-                    match effect {
-                        RunEffect::Submit(command) => effects.push(RemoteShellEffect::Run(command)),
-                        RunEffect::Dismiss => {
-                            effects.push(RemoteShellEffect::Launcher(LauncherShellEffect::Dismiss))
-                        }
-                    }
                 }
                 outcome
             }
@@ -636,10 +613,6 @@ impl LiveShell {
                 drop(action);
                 Err("control native effect requires guarded delivery".into())
             }
-            RemoteShellEffect::Run(command) => {
-                drop(command);
-                Err("command launch requires guarded delivery".into())
-            }
         };
         self.session_host = original;
         result?;
@@ -751,24 +724,11 @@ mod tests {
         let shell = LiveShell::new().expect("live shell");
 
         assert_advertised_actions_are_guarded(&shell.launcher_host, launcher_activate);
-        assert_advertised_actions_are_guarded(&shell.run_host, run_activate);
         assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
         assert_advertised_actions_are_guarded(&shell.panel_host, panel_activate);
         assert_advertised_actions_are_guarded(&shell.volume_osd_host, |_| {
             RemoteActionDisposition::Unavailable
         });
-
-        let submit = shell
-            .run_host
-            .unique_semantic_target_for_message(&RunAction::Submit)
-            .expect("run submit target");
-        let (_, projected) = project(&shell.run_host, run_activate).expect("run semantics");
-        let submit = projected
-            .iter()
-            .find(|node| node.id == submit.id)
-            .expect("projected submit node");
-        assert!(!submit.actions.contains(&nickel_ui::ActionKind::Activate));
-        assert!(!submit.enabled);
     }
 
     #[test]

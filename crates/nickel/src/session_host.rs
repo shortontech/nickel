@@ -220,6 +220,12 @@ pub(crate) struct InProcessSessionHost {
 
 #[cfg(target_os = "linux")]
 impl SessionHost for InProcessSessionHost {
+    fn stages_effects(&self) -> bool {
+        // Dispatch queues a compositor command. The compositor must apply the
+        // visibility change before the shell observes its returned event.
+        true
+    }
+
     fn remote_pending_leases(&self) -> Vec<nickel_session_protocol::RemotePendingLease> {
         let control = self.remote_control.lock().unwrap();
         control

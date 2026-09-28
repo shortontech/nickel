@@ -976,6 +976,7 @@ fn linux_key_code(key: TestKey) -> u32 {
         TestKey::C => 46,
         TestKey::E => 18,
         TestKey::P => 25,
+        TestKey::R => 19,
         TestKey::S => 31,
         TestKey::T => 20,
         TestKey::U => 22,
@@ -1038,6 +1039,7 @@ mod tests {
         assert_eq!(linux_key_code(TestKey::C), 46);
         assert_eq!(linux_key_code(TestKey::E), 18);
         assert_eq!(linux_key_code(TestKey::P), 25);
+        assert_eq!(linux_key_code(TestKey::R), 19);
         assert_eq!(linux_key_code(TestKey::S), 31);
         assert_eq!(linux_key_code(TestKey::T), 20);
         assert_eq!(linux_key_code(TestKey::U), 22);

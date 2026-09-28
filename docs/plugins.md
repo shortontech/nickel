@@ -91,14 +91,17 @@ installing a second copy of that plugin. Keep its shipped `plugin.json`
 unchanged while developing it. Saving a sibling `.js` source such as the
 taskbar's `menu.js` also restarts the session. For external plugins, the
 developer command supports up to 16 panel, dock, window, dialog, or overlay surfaces in one package, or
-one surface-free taskbar badge, taskbar action, desktop widget, or Control
-Center section contribution;
+one surface-free taskbar badge, taskbar action, desktop widget, Control
+Center section, or installed-plugin widget/action contribution;
 `nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
 For bundled launcher, desktop, Control Center, preview, and volume surfaces,
 validation supplies bounded synthetic host data so their initial JSX tree can
 render without a live session. It checks the initial tree and manifest; use
 `dev` to exercise input, requested actions, and live state changes.
+The bundled Run dialog is wholly rendered by its JS plugin. Disabling that
+plugin closes an open Run dialog; its shortcut stays inactive until the plugin
+is enabled again in Settings.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `Panel` component's ARGB `background` can be translucent. Several installed

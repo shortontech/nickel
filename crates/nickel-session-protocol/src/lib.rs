@@ -542,6 +542,7 @@ pub enum TestKey {
     C,
     E,
     P,
+    R,
     S,
     T,
     U,

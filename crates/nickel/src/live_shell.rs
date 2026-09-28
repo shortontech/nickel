@@ -110,9 +110,9 @@ use nickel_ui::InternalSurfaceId;
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    Application as UiApplication, Button, Column, Container, ControllerAction, HostBatch,
-    HostChangeToken, HostEvent, Insets, Layer, Point, SemanticRole, Shortcut, Size, Spacer, Text,
-    TextAlign, TextField, UiEvent, UiHostViewport, ViewContext,
+    Application as UiApplication, Column, Container, ControllerAction, HostBatch, HostChangeToken,
+    HostEvent, Insets, Layer, Point, SemanticRole, Shortcut, Size, Spacer, Text, TextAlign,
+    TextField, UiEvent, UiHostViewport, ViewContext,
 };
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
@@ -161,129 +161,8 @@ pub(crate) enum CodexApprovalOwner {
     Winit(crate::winit_shell::SurfaceId),
 }
 
-const RUN_COMMAND_LIMIT: usize = 4096;
 const RUN_SURFACE_WIDTH: u32 = 620;
 const RUN_SURFACE_HEIGHT: u32 = 180;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum RunAction {
-    SetCommand(String),
-    Submit,
-    Dismiss,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum RunEffect {
-    Submit(String),
-    Dismiss,
-}
-
-struct RunApplication {
-    command: String,
-    status: Option<String>,
-    palette: ThemePalette,
-    effects: Vec<RunEffect>,
-    dirty: bool,
-}
-
-impl RunApplication {
-    fn new(palette: ThemePalette) -> Self {
-        Self {
-            command: String::new(),
-            status: None,
-            palette,
-            effects: Vec::new(),
-            dirty: false,
-        }
-    }
-
-    fn take_effects(&mut self) -> Vec<RunEffect> {
-        std::mem::take(&mut self.effects)
-    }
-}
-
-impl UiApplication for RunApplication {
-    type Message = RunAction;
-
-    fn update(&mut self, message: Self::Message) {
-        match message {
-            RunAction::SetCommand(command) => {
-                self.command = command.chars().take(RUN_COMMAND_LIMIT).collect();
-                self.status = None;
-                self.dirty = true;
-            }
-            RunAction::Submit if !self.command.trim().is_empty() => {
-                self.effects
-                    .push(RunEffect::Submit(self.command.trim().to_owned()));
-            }
-            RunAction::Submit => {}
-            RunAction::Dismiss => self.effects.push(RunEffect::Dismiss),
-        }
-    }
-
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
-        match shortcut {
-            Shortcut::Submit => self.update(RunAction::Submit),
-            Shortcut::Escape => self.update(RunAction::Dismiss),
-            _ => return nickel_ui::ShortcutOutcome::from_changed(false),
-        }
-        nickel_ui::ShortcutOutcome::handled(true)
-    }
-
-    fn poll(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
-    }
-
-    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let content_width = (context.viewport.size.width - 36.0).max(0.0);
-        let content_height = (context.viewport.size.height - 36.0).max(0.0);
-        let mut content = Column::new()
-            .width(content_width)
-            .height(content_height)
-            .gap(10.0)
-            .child(
-                Text::new(nickel_i18n::system_text("ui-live-shell-run"))
-                    .scale(22.0)
-                    .color(self.palette.text)
-                    .bold(true),
-            )
-            .child(
-                TextField::on_change_with_placeholder(
-                    &self.command,
-                    nickel_i18n::system_text("ui-live-shell-enter-a-command"),
-                    RunAction::SetCommand,
-                )
-                .id("run-command")
-                .accessibility_label("Command")
-                .single_line_height(40.0)
-                .color(self.palette.text)
-                .background(self.palette.panel)
-                .focus_background_tint(self.palette.accent)
-                .controller_focus_background_tint(self.palette.complement),
-            )
-            .child(
-                Button::new(
-                    RunAction::Submit,
-                    nickel_i18n::system_text("ui-live-shell-run-2"),
-                )
-                .id("run-submit")
-                .width(88.0)
-                .height(36.0),
-            );
-        if let Some(status) = &self.status {
-            content = content.child(Text::new(status).color(self.palette.complement));
-        }
-        Container::new()
-            .id("run-dialog")
-            .semantic_role(SemanticRole::Dialog)
-            .accessibility_label("Run command")
-            .width(context.viewport.size.width)
-            .height(context.viewport.size.height)
-            .padding(Insets::all(18.0))
-            .background(self.palette.panel)
-            .child(content)
-    }
-}
 
 #[cfg(any(test, target_os = "linux"))]
 fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) -> HostEvent {
@@ -675,7 +554,6 @@ pub struct LiveShell {
     plugin_volume_osd_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     launcher_visible: bool,
     run_visible: bool,
-    run_host: nickel_ui::UiHost<RunApplication>,
     locked: bool,
     lock_host: nickel_ui::UiHost<LockApplication>,
     lock_change_token: HostChangeToken,
@@ -1637,7 +1515,6 @@ impl LiveShell {
             920,
             680,
         );
-        let run_host = nickel_ui::UiHost::new(RunApplication::new(palette), 620, 150);
         let (clock, date) = panel_clock_text();
         let panel_host = nickel_ui::UiHost::new(
             TaskbarUi {
@@ -1942,7 +1819,6 @@ impl LiveShell {
             plugin_volume_osd_host,
             launcher_visible: false,
             run_visible: false,
-            run_host,
             locked: false,
             lock_host,
             lock_change_token: HostChangeToken::default(),
@@ -2746,10 +2622,10 @@ impl LiveShell {
                         .values()
                         .any(|host| host.remote_access_protected())
             }
-            SurfaceRole::Launcher if self.run_visible => self.plugin_run_host.as_ref().map_or_else(
-                || self.run_host.remote_access_protected(),
-                |host| host.remote_access_protected(),
-            ),
+            SurfaceRole::Launcher if self.run_visible => self
+                .plugin_run_host
+                .as_ref()
+                .is_none_or(|host| host.remote_access_protected()),
             SurfaceRole::Launcher => self.plugin_launcher_host.as_ref().map_or_else(
                 || self.launcher_host.remote_access_protected(),
                 |host| host.remote_access_protected(),
@@ -4547,6 +4423,10 @@ impl LiveShell {
                 self.launcher_plugin_dashboard_page = 0;
             } else if id == crate::plugin_panel::run_manifest().id {
                 self.plugin_run_host = None;
+                if self.run_visible {
+                    self.run_visible = false;
+                    self.set_launcher_visible(false);
+                }
             } else if id == crate::plugin_panel::taskbar_manifest().id {
                 self.plugin_taskbar_host = None;
                 self.plugin_taskbar_hosts.clear();
@@ -4851,11 +4731,10 @@ impl LiveShell {
                 .as_ref()
                 .map(|host| host_token(host.inspect())),
             SurfaceRole::Lock => Some(self.lock_change_token),
-            SurfaceRole::Launcher if self.run_visible => Some(host_token(
-                self.plugin_run_host
-                    .as_ref()
-                    .map_or_else(|| self.run_host.inspect(), |host| host.inspect()),
-            )),
+            SurfaceRole::Launcher if self.run_visible => self
+                .plugin_run_host
+                .as_ref()
+                .map(|host| host_token(host.inspect())),
             SurfaceRole::Launcher => Some(host_token(
                 self.plugin_launcher_host
                     .as_ref()
@@ -4913,9 +4792,10 @@ impl LiveShell {
         height: u32,
     ) -> nickel_ui::HostEventOutcome {
         let recipient = if self.run_visible {
-            self.plugin_run_host
-                .as_ref()
-                .map_or_else(|| self.run_host.inspect(), |host| host.inspect())
+            let Some(host) = self.plugin_run_host.as_ref() else {
+                return nickel_ui::HostEventOutcome::default();
+            };
+            host.inspect()
         } else if let Some(host) = &self.plugin_launcher_host {
             host.inspect()
         } else {
@@ -4958,16 +4838,7 @@ impl LiveShell {
                 self.host_runtime_samples.record(outcome.telemetry);
                 return outcome;
             }
-            let outcome = self.run_host.step(HostBatch {
-                clipboard_text_limit: limit,
-                surface_size: Some((width, height)),
-                events: vec![event],
-                normalized_authorities: authority.into_iter().collect(),
-                ..HostBatch::default()
-            });
-            self.apply_run_effects();
-            self.host_runtime_samples.record(outcome.telemetry);
-            return outcome;
+            return nickel_ui::HostEventOutcome::default();
         }
         if self.plugin_launcher_host.is_some() {
             let application_changed = self.sync_plugin_launcher();
@@ -5057,23 +4928,7 @@ impl LiveShell {
                 self.host_runtime_samples.record(outcome.telemetry);
                 return outcome.changed;
             }
-            let event = launcher_controller_host_event(
-                action,
-                self.run_host.inspect().open_overlay.is_some(),
-            );
-            let outcome = self.run_host.step(HostBatch {
-                events: vec![event],
-                ..HostBatch::default()
-            });
-            if action == ControllerAction::Confirm
-                && outcome.text_input_active
-                && self.run_host.controller_targets_text_input()
-            {
-                self.set_keyboard_visible(true);
-            }
-            self.apply_run_effects();
-            self.host_runtime_samples.record(outcome.telemetry);
-            return outcome.changed;
+            return false;
         }
         if self.plugin_launcher_host.is_some() {
             let application_changed = self.sync_plugin_launcher();
@@ -6269,10 +6124,7 @@ impl LiveShell {
     #[cfg(target_os = "linux")]
     pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(nickel_ui::UiId, u64)> {
         let inspection = match role {
-            SurfaceRole::Launcher if self.run_visible => self
-                .plugin_run_host
-                .as_ref()
-                .map_or_else(|| self.run_host.inspect(), |host| host.inspect()),
+            SurfaceRole::Launcher if self.run_visible => self.plugin_run_host.as_ref()?.inspect(),
             SurfaceRole::Launcher => self
                 .plugin_launcher_host
                 .as_ref()
@@ -8736,10 +8588,10 @@ impl LiveShell {
                 .plugin_volume_osd_host
                 .as_ref()
                 .is_some_and(|host| host.pointer_interaction_active())
-            || self.plugin_run_host.as_ref().map_or_else(
-                || self.run_host.pointer_interaction_active(),
-                |host| host.pointer_interaction_active(),
-            )
+            || self
+                .plugin_run_host
+                .as_ref()
+                .is_some_and(|host| host.pointer_interaction_active())
             || self.lock_host.pointer_interaction_active()
             || self.panel_host.pointer_interaction_active()
             || self
@@ -8952,6 +8804,12 @@ impl LiveShell {
     }
 
     fn set_launcher_visible(&mut self, visible: bool) {
+        if self.request_launcher_visibility(visible) {
+            self.run_visible = false;
+        }
+    }
+
+    fn request_launcher_visibility(&mut self, visible: bool) -> bool {
         if !self.send_session_command(
             "launcher-visibility",
             if visible {
@@ -8961,15 +8819,16 @@ impl LiveShell {
             },
         ) {
             self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
-            return;
+            return false;
         }
         self.clear_launcher_visibility_error();
         if self.session_host.stages_effects() {
-            return;
+            return true;
         }
         self.run_visible = false;
         self.apply_session_launcher_visibility(visible);
         platform::launcher_visibility_applied(visible);
+        true
     }
 
     fn clear_launcher_visibility_error(&mut self) {
@@ -8979,8 +8838,12 @@ impl LiveShell {
     }
 
     fn set_run_visible(&mut self, visible: bool) -> bool {
-        self.set_launcher_visible(visible);
-        if self.launcher_visible != visible {
+        if visible && self.plugin_run_host.is_none() {
+            return false;
+        }
+        if !self.request_launcher_visibility(visible)
+            || (!self.session_host.stages_effects() && self.launcher_visible != visible)
+        {
             return false;
         }
         self.run_visible = visible;
@@ -8997,17 +8860,6 @@ impl LiveShell {
                     let _ = host.request_focus(field.id);
                 }
                 return true;
-            }
-            self.run_host.application_mut().status = None;
-            self.run_host.step(HostBatch {
-                application_changed: true,
-                ..HostBatch::default()
-            });
-            if let Ok(field) = self
-                .run_host
-                .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-            {
-                let _ = self.run_host.request_focus(field.id);
             }
         }
         true
@@ -9070,13 +8922,7 @@ impl LiveShell {
                     })
                     .changed;
             }
-            return self
-                .run_host
-                .step(HostBatch {
-                    window_focused: Some(true),
-                    ..HostBatch::default()
-                })
-                .changed;
+            return false;
         }
         if self.plugin_launcher_host.is_some() {
             let application_changed = self.sync_plugin_launcher();
@@ -11001,36 +10847,7 @@ impl LiveShell {
             );
             return commands;
         }
-        self.run_host.application_mut().palette = self.palette;
-        self.run_host.step(HostBatch {
-            surface_size: Some((width, height)),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        self.apply_run_effects();
-        self.run_host.commands().to_vec()
-    }
-
-    fn apply_run_effects(&mut self) {
-        for effect in self.run_host.application_mut().take_effects() {
-            match effect {
-                RunEffect::Submit(command) => match platform::execute_run_command(&command) {
-                    Ok(()) => {
-                        self.run_host.application_mut().command.clear();
-                        self.set_launcher_visible(false);
-                    }
-                    Err(error) => {
-                        let app = self.run_host.application_mut();
-                        app.status = Some(format!(
-                            "Could not run command: {}",
-                            launch_error_summary(&error)
-                        ));
-                        app.dirty = true;
-                    }
-                },
-                RunEffect::Dismiss => self.set_launcher_visible(false),
-            }
-        }
+        Vec::new()
     }
 
     fn launcher_status_text(&self) -> Option<String> {
@@ -12354,75 +12171,6 @@ fn retain_preview_generation(
             .take(PREVIEW_CACHE_CAPACITY)
             .any(|candidate| candidate.id == *window)
     });
-}
-
-#[cfg(test)]
-mod run_application_tests {
-    use super::*;
-
-    fn application() -> RunApplication {
-        RunApplication::new(ThemePalette::from_appearance(Appearance::default()))
-    }
-
-    #[test]
-    fn command_input_is_unicode_safe_and_bounded() {
-        let mut app = application();
-        app.update(RunAction::SetCommand("🦀".repeat(RUN_COMMAND_LIMIT + 2)));
-
-        assert_eq!(app.command.chars().count(), RUN_COMMAND_LIMIT);
-        assert!(app.poll());
-    }
-
-    #[test]
-    fn submit_and_escape_emit_typed_boundary_effects() {
-        let mut app = application();
-        app.update(RunAction::SetCommand("  cargo test  ".into()));
-
-        assert!(app.shortcut_outcome(Shortcut::Submit).changed);
-        assert_eq!(app.take_effects(), [RunEffect::Submit("cargo test".into())]);
-        assert!(app.shortcut_outcome(Shortcut::Escape).changed);
-        assert_eq!(app.take_effects(), [RunEffect::Dismiss]);
-    }
-
-    #[test]
-    fn empty_command_does_not_cross_the_launch_boundary() {
-        let mut app = application();
-        app.update(RunAction::SetCommand("   ".into()));
-        assert!(app.shortcut_outcome(Shortcut::Submit).changed);
-        assert!(app.take_effects().is_empty());
-    }
-
-    #[test]
-    fn compact_run_surface_keeps_the_editor_and_submit_action_visible() {
-        let mut host = nickel_ui::UiHost::new(application(), RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT);
-        host.step(HostBatch {
-            application_changed: true,
-            surface_size: Some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT)),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-
-        let field = host
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-            .expect("run command field");
-        let submit = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Run".into(),
-            })
-            .expect("run submit button");
-        assert!(field.bounds.size.height > 0.0);
-        assert_eq!(submit.bounds.size.height, 36.0);
-        assert!(field.bounds.origin.y + field.bounds.size.height <= RUN_SURFACE_HEIGHT as f32);
-        assert!(submit.bounds.origin.y + submit.bounds.size.height <= RUN_SURFACE_HEIGHT as f32);
-        let focus = host.request_focus(field.id);
-        assert!(focus.changed && focus.failures.is_empty());
-        assert!(
-            host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-                .unwrap()
-                .focused
-        );
-    }
 }
 
 #[cfg(test)]
