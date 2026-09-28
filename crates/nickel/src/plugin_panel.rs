@@ -4852,6 +4852,13 @@ mod tests {
                 name: "Open dialog".into(),
             })
             .unwrap();
+        let contains = |bounds: nickel_ui::Rect, x: f32, y: f32| {
+            x >= bounds.origin.x
+                && x < bounds.origin.x + bounds.size.width
+                && y >= bounds.origin.y
+                && y < bounds.origin.y + bounds.size.height
+        };
+        assert!(contains(open.bounds, 260.0, 77.0));
         host.step(nickel_ui::HostBatch {
             events: vec![nickel_ui::HostEvent::Ui(
                 nickel_ui::UiEvent::AccessibilityActivate(open.id),
@@ -4865,6 +4872,7 @@ mod tests {
                 name: "Open Settings".into(),
             })
             .unwrap();
+        assert!(contains(settings.bounds, 80.0, 182.0));
         host.step(nickel_ui::HostBatch {
             events: vec![nickel_ui::HostEvent::Ui(
                 nickel_ui::UiEvent::AccessibilityActivate(settings.id),
