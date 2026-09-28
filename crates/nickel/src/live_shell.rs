@@ -3108,6 +3108,58 @@ impl LiveShell {
             application.cancel_pointer_transaction();
             self.desktop_overlay_pointer_capture = None;
         }
+        let plugin_file_menu_open = !pointer_cancelled
+            && self.desktop_host.application().plugin_background
+            && self
+                .desktop_host
+                .application()
+                .context_menu
+                .as_ref()
+                .and_then(|context| context.entry)
+                .is_some()
+            && self
+                .plugin_desktop_host
+                .as_ref()
+                .is_some_and(|host| host.inspect().open_overlay.is_some());
+        if plugin_file_menu_open {
+            let captured_release = matches!(
+                &event,
+                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                    button,
+                    edge: nickel_input::KeyEdge::Released,
+                    ..
+                }) if self.desktop_overlay_pointer_capture.as_ref() == Some(button)
+            );
+            let (outcome, effects, menu_still_open) = {
+                let host = self.plugin_desktop_host.as_mut().expect("menu host exists");
+                let outcome = host.step(HostBatch {
+                    events: vec![ingress],
+                    normalized_authorities: authority.into_iter().collect(),
+                    ..HostBatch::default()
+                });
+                let effects = host.application_mut().take_effects();
+                let menu_still_open = host.inspect().open_overlay.is_some();
+                (outcome, effects, menu_still_open)
+            };
+            if captured_release {
+                self.desktop_overlay_pointer_capture = None;
+            }
+            let effect_changed = self.apply_plugin_effects(effects);
+            let dismissed =
+                !menu_still_open && self.desktop_host.application().context_menu.is_some();
+            if dismissed {
+                self.desktop_host
+                    .application_mut()
+                    .dismiss_context_menu(desktop::DesktopMenuDismissReason::OutsidePress);
+                let outcome = self.desktop_host.step(HostBatch {
+                    application_changed: true,
+                    ..HostBatch::default()
+                });
+                self.desktop_change_token = outcome.change_token;
+                self.desktop_deadline = outcome.next_deadline;
+            }
+            return outcome.changed | effect_changed | dismissed;
+        }
         if let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
             button: nickel_input::PointerButton::Secondary,
             edge: nickel_input::KeyEdge::Pressed,
@@ -5215,7 +5267,9 @@ impl LiveShell {
                                 item.id == entry && item.output == desktop.active_output
                             });
                         if visible {
-                            self.desktop_host.application_mut().activate(entry);
+                            let desktop = self.desktop_host.application_mut();
+                            desktop.activate(entry);
+                            desktop.dismiss_context_menu(desktop::DesktopMenuDismissReason::Action);
                             changed = true;
                         }
                     }
@@ -8921,6 +8975,23 @@ impl LiveShell {
         } else {
             (Vec::new(), crate::plugin_panel::PluginImages::new())
         };
+        let context = application
+            .context_menu
+            .as_ref()
+            .filter(|context| context.output == application.active_output)
+            .and_then(|context| context.entry)
+            .map(|entry| format!("{}:{}", entry.0.0, entry.0.1))
+            .filter(|id| {
+                tiles
+                    .iter()
+                    .any(|tile| tile.get("id").and_then(serde_json::Value::as_str) == Some(id))
+            })
+            .map(|id| serde_json::json!({ "id": id }));
+        let menu_anchor = context
+            .as_ref()
+            .and_then(|context| context.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let plugin_commands = if let Some(host) = self.plugin_desktop_host.as_mut() {
             let data = serde_json::json!({
                 "width": width.clamp(1, 8192),
@@ -8931,6 +9002,7 @@ impl LiveShell {
                 "text": self.palette.text,
                 "error": self.desktop_host.application().error,
                 "tiles": tiles,
+                "context": context,
                 "widgets": widgets.iter().map(|widget| serde_json::json!({
                     "label": widget.label,
                     "value": widget.value,
@@ -8952,11 +9024,23 @@ impl LiveShell {
                         events: vec![HostEvent::Poll],
                         ..HostBatch::default()
                     });
+                    let retained_frame_bytes = if let Some(anchor) = menu_anchor.as_deref()
+                        && host.inspect().open_overlay.is_none()
+                    {
+                        host.open_transient(
+                            nickel_ui::OverlayId::new("plugin-menu-desktop-file-actions"),
+                            nickel_ui::UiId::new(anchor),
+                        )
+                        .telemetry
+                        .retained_frame_bytes
+                    } else {
+                        outcome.telemetry.retained_frame_bytes
+                    };
                     let commands = host.commands().to_vec();
                     let _ = self.plugin_registry.record_memory(
                         &crate::plugin_panel::desktop_manifest().id,
                         nickel_core::plugins::PluginMemory {
-                            native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                            native_ui_bytes: Some(retained_frame_bytes as u64),
                             ..Default::default()
                         },
                     );

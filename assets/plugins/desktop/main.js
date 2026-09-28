@@ -4,12 +4,20 @@
 /** @typedef {{ label: string, value: string, percent: number, color: number }} DesktopWidget */
 /** @typedef {{ width: number, height: number, background: number,
  * wallpaper: boolean, tiles: NickelFileTileProps[], widgets: DesktopWidget[], error: string | null,
+ * context: { id: string } | null,
  * surfaceColor: number, text: number }} DesktopData */
 function App() {
     const data = /** @type {DesktopData} */ ( /** @type {unknown} */(nickel.data));
     return h(Surface, { width: data.width, height: data.height, background: data.background },
         data.wallpaper ? h(Image, { asset: "wallpaper", width: data.width, height: data.height, fit: "stretch" }) : null,
         (data.tiles || []).map(tile => h(FileTile, { key: tile.id, ...tile, onSelect: () => nickel.request({ type: "desktop-select", id: tile.id }), onMove: ({ dx, dy }) => nickel.request({ type: "desktop-move", id: tile.id, dx, dy }), onFileAction: ({ action }) => nickel.request({ type: "desktop-file-action", id: tile.id, action }), onClick: () => nickel.request({ type: "desktop-open", id: tile.id }) })),
+        data.context ? h(Menu, { id: "desktop-file-actions", anchor: data.context.id, open: true },
+            h(MenuItem, { id: "open", onClick: () => nickel.request({ type: "desktop-open", id: data.context.id }) }, "Open"),
+            h(MenuItem, { id: "cut", onClick: () => nickel.request({ type: "desktop-file-action", id: data.context.id, action: "cut" }) }, "Cut"),
+            h(MenuItem, { id: "copy", onClick: () => nickel.request({ type: "desktop-file-action", id: data.context.id, action: "copy" }) }, "Copy"),
+            h(MenuItem, { id: "rename", onClick: () => nickel.request({ type: "desktop-file-action", id: data.context.id, action: "rename" }) }, "Rename"),
+            h(MenuItem, { id: "properties", onClick: () => nickel.request({ type: "desktop-file-action", id: data.context.id, action: "properties" }) }, "Properties"),
+            h(MenuItem, { id: "open-terminal", onClick: () => nickel.request({ type: "desktop-file-action", id: data.context.id, action: "open-terminal" }) }, "Open in Terminal")) : null,
         (data.widgets || []).slice(0, 3).map((widget, index) => h(Box, { key: index, x: Math.max(0, data.width - 224), y: 20 + index * 92, width: Math.min(204, data.width), height: 76, background: data.surfaceColor, radius: 10 },
             h(Column, null,
                 h(Text, { color: data.text }, widget.label),

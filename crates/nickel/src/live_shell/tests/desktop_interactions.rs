@@ -172,6 +172,72 @@
         shell.scene(SurfaceRole::Desktop, 400, 300);
         assert!(shell.desktop_host.application().plugin_background);
 
+        let entry_id = nickel_file::desktop::DesktopEntryId(nickel_file::FileIdentity(7, 9));
+        shell
+            .desktop_host
+            .application_mut()
+            .update(super::desktop::DesktopMessage::Context(entry_id));
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(shell
+            .desktop_host
+            .accessibility_nodes()
+            .iter()
+            .all(|node| node.label.as_deref() != Some("Rename")));
+        let menu_host = shell.plugin_desktop_host.as_ref().unwrap();
+        assert!(menu_host.inspect().open_overlay.is_some());
+        let rename = menu_host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Rename"))
+            .expect("JSX desktop menu shows Rename")
+            .rect;
+        let menu_point = nickel_input::Point {
+            x: f64::from(rename.origin.x + rename.size.width / 2.0),
+            y: f64::from(rename.origin.y + rename.size.height / 2.0),
+        };
+        for (order, edge) in [
+            (1, nickel_input::KeyEdge::Pressed),
+            (2, nickel_input::KeyEdge::Released),
+        ] {
+            shell.desktop_input(nickel_input::InputEvent::Pointer(
+                nickel_input::PointerEvent::Button {
+                    device: nickel_input::DeviceId(1),
+                    order: nickel_input::EventOrder(order),
+                    button: nickel_input::PointerButton::Primary,
+                    edge,
+                    position: Some(menu_point),
+                },
+            ));
+        }
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            nickel_file::FileWindowRequest::Open(nickel_file::FileLaunch::Rename(path.clone()))
+        );
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        shell
+            .desktop_host
+            .application_mut()
+            .update(super::desktop::DesktopMessage::Context(entry_id));
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_some());
+        for (order, edge) in [
+            (3, nickel_input::KeyEdge::Pressed),
+            (4, nickel_input::KeyEdge::Released),
+        ] {
+            shell.desktop_input(nickel_input::InputEvent::Pointer(
+                nickel_input::PointerEvent::Button {
+                    device: nickel_input::DeviceId(1),
+                    order: nickel_input::EventOrder(order),
+                    button: nickel_input::PointerButton::Primary,
+                    edge,
+                    position: Some(nickel_input::Point { x: 390.0, y: 290.0 }),
+                },
+            ));
+        }
+        assert!(shell.desktop_host.application().context_menu.is_none());
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_none());
+
         let now = Instant::now();
         for click in 0..2 {
             assert!(shell.desktop_host.application_mut().pointer_press(point, false, Default::default()));
@@ -961,16 +1027,22 @@
                 .map(|viewport| viewport.change_token.frame_generation),
             Some(right_generation)
         );
+        let native_menu_visible = shell
+            .desktop_host
+            .application()
+            .frame_overlays(ViewContext::new(
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                InputModality::Pointer,
+            ))
+            .iter()
+            .any(|overlay| matches!(overlay, FrameOverlay::Menu(_)));
+        let plugin_menu_visible = shell
+            .plugin_desktop_host
+            .as_ref()
+            .is_some_and(|host| host.inspect().open_overlay.is_some());
         assert!(
-            shell
-                .desktop_host
-                .application()
-                .frame_overlays(ViewContext::new(
-                    Rect::new(0.0, 0.0, 800.0, 600.0),
-                    InputModality::Pointer,
-                ))
-                .iter()
-                .any(|overlay| matches!(overlay, FrameOverlay::Menu(_)))
+            native_menu_visible || plugin_menu_visible,
+            "the owner output must restore its native background or plugin file menu"
         );
         let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Motion {

@@ -4,6 +4,7 @@
 /** @typedef {{ label: string, value: string, percent: number, color: number }} DesktopWidget */
 /** @typedef {{ width: number, height: number, background: number,
  * wallpaper: boolean, tiles: NickelFileTileProps[], widgets: DesktopWidget[], error: string | null,
+ * context: { id: string } | null,
  * surfaceColor: number, text: number }} DesktopData */
 function App() {
     const data = /** @type {DesktopData} */ (/** @type {unknown} */ (nickel.data));
@@ -14,6 +15,14 @@ function App() {
             onMove={({dx, dy}) => nickel.request({type: "desktop-move", id: tile.id, dx, dy})}
             onFileAction={({action}) => nickel.request({type: "desktop-file-action", id: tile.id, action})}
             onClick={() => nickel.request({type: "desktop-open", id: tile.id})} />)}
+        {data.context ? <Menu id="desktop-file-actions" anchor={data.context.id} open={true}>
+            <MenuItem id="open" onClick={() => nickel.request({type: "desktop-open", id: data.context.id})}>Open</MenuItem>
+            <MenuItem id="cut" onClick={() => nickel.request({type: "desktop-file-action", id: data.context.id, action: "cut"})}>Cut</MenuItem>
+            <MenuItem id="copy" onClick={() => nickel.request({type: "desktop-file-action", id: data.context.id, action: "copy"})}>Copy</MenuItem>
+            <MenuItem id="rename" onClick={() => nickel.request({type: "desktop-file-action", id: data.context.id, action: "rename"})}>Rename</MenuItem>
+            <MenuItem id="properties" onClick={() => nickel.request({type: "desktop-file-action", id: data.context.id, action: "properties"})}>Properties</MenuItem>
+            <MenuItem id="open-terminal" onClick={() => nickel.request({type: "desktop-file-action", id: data.context.id, action: "open-terminal"})}>Open in Terminal</MenuItem>
+        </Menu> : null}
         {(data.widgets || []).slice(0, 3).map((widget, index) =>
             <Box key={index} x={Math.max(0, data.width - 224)} y={20 + index * 92}
                 width={Math.min(204, data.width)} height={76}

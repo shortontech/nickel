@@ -85,8 +85,9 @@ The bundled desktop's `FileTile` registers `onFileAction({ action })` for Cut,
 Copy, Rename, Properties, and Open in Terminal. It requests
 `{ type: "desktop-file-action", id, action }` with the tile's projected ID and
 declares `desktop-files-manage`. Nickel checks the grant, rendered tile, current
-file identity, and output before carrying out the request. Native file menus
-and file windows still present these actions.
+file identity, and output before carrying out the request. The bundled JSX
+desktop presents the file context menu; native menus remain available when the
+plugin is disabled, and file windows retain their own presentation.
 
 Manifests may declare typed composition relationships. A target declares a
 `provides_slots` entry with an ID, a `badge`, `widget`, `action`, or `section`

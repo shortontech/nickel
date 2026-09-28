@@ -1360,6 +1360,9 @@ impl nickel_ui::Application for DesktopApplication {
         if context.output != self.active_output {
             return selection_marquee.into_iter().collect();
         }
+        if self.plugin_background && context.entry.is_some() {
+            return selection_marquee.into_iter().collect();
+        }
         if context.entry.is_none() {
             let anchor = context.anchor.map_or_else(
                 || OverlayAnchor::InvocationTargetCenter(UiId::new("desktop")),
