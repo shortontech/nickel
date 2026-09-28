@@ -31,9 +31,15 @@ temporary Nickel profile, and launches the test shell. Saving `plugin.json`,
 the declared JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the test shell. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
-profile. The developer command supports up to 16 panel or dock surfaces in one
-package, or one surface-free taskbar badge, taskbar action, desktop widget,
-or Control Center section contribution;
+profile. For first-party shell plugins, pass a bundled directory such as
+`assets/plugins/launcher`, `assets/plugins/desktop`, or `assets/plugins/taskbar`.
+The developer command runs edited JavaScript in the isolated shell without
+installing a second copy of that plugin. Keep its shipped `plugin.json`
+unchanged while developing it. Saving a sibling `.js` source such as the
+taskbar's `menu.js` also restarts the session. For external plugins, the
+developer command supports up to 16 panel or dock surfaces in one package, or
+one surface-free taskbar badge, taskbar action, desktop widget, or Control
+Center section contribution;
 `nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
 For bundled launcher, desktop, Control Center, preview, and volume surfaces,

@@ -2,6 +2,7 @@
 //! component vocabulary as an external plugin; native surfaces remain shell-owned.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashSet},
     sync::{Arc, OnceLock},
 };
@@ -116,6 +117,39 @@ pub fn run_manifest() -> &'static PluginManifest {
         PluginManifest::from_json(include_str!("../../../assets/plugins/run/plugin.json"))
             .expect("bundled run plugin manifest must be valid")
     })
+}
+
+fn bundled_source(
+    manifest: &PluginManifest,
+    entry: &str,
+    fallback: &'static str,
+) -> Result<Cow<'static, str>, String> {
+    let Some(root) = std::env::var_os("NICKEL_DEV_BUNDLED_PLUGIN_ROOT") else {
+        return Ok(Cow::Borrowed(fallback));
+    };
+    if !std::path::Path::new(&root).join(&manifest.id).exists() {
+        return Ok(Cow::Borrowed(fallback));
+    }
+    read_bundled_source(std::path::Path::new(&root), manifest, entry).map(Cow::Owned)
+}
+
+fn read_bundled_source(
+    root: &std::path::Path,
+    manifest: &PluginManifest,
+    entry: &str,
+) -> Result<String, String> {
+    let path = root.join(&manifest.id).join(entry);
+    let bytes =
+        nickel_storage::read_regular_file(&path, nickel_core::plugins::MAX_PLUGIN_ENTRY_BYTES)
+            .map_err(|error| {
+                format!(
+                    "could not read development source {}: {error}",
+                    path.display()
+                )
+            })?
+            .ok_or_else(|| format!("development source {} is missing", path.display()))?;
+    String::from_utf8(bytes)
+        .map_err(|_| format!("development source {} is not UTF-8", path.display()))
 }
 
 pub fn run_enabled() -> bool {
@@ -2499,7 +2533,8 @@ impl PluginPanelApplication {
                 "main.js" => include_str!("../../../assets/plugins/hello-panel/main.js"),
                 entry => return Err(format!("bundled plugin entry {entry:?} is unavailable")),
             };
-            Self::new(source)
+            let source = bundled_source(manifest(), &manifest().entry, source)?;
+            Self::new(source.as_ref())
         }
     }
 
@@ -2689,38 +2724,74 @@ impl PluginPanelApplication {
     }
 
     pub fn launcher_with_projection(projection: &LauncherPluginProjection) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/launcher/main.js");
+        let source = bundled_source(
+            launcher_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/launcher/main.js"),
+        )?;
         let data = projection.to_json();
-        let mut application = Self::new_with_manifest(source, launcher_manifest(), Some(data))?;
+        let mut application =
+            Self::new_with_manifest(source.as_ref(), launcher_manifest(), Some(data))?;
         application.launcher_shortcuts = Some(projection.into());
         Ok(application)
     }
 
     pub fn taskbar_with_projection(projection: &TaskbarPluginProjection) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/taskbar/main.js");
-        Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
+        let source = bundled_source(
+            taskbar_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/taskbar/main.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            taskbar_manifest(),
+            Some(projection.to_json()),
+        )
     }
 
     pub fn taskbar_menu_with_projection(
         projection: &TaskbarMenuPluginProjection,
     ) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/taskbar/menu.js");
-        Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
+        let source = bundled_source(
+            taskbar_manifest(),
+            "menu.js",
+            include_str!("../../../assets/plugins/taskbar/menu.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            taskbar_manifest(),
+            Some(projection.to_json()),
+        )
     }
 
     pub fn taskbar_window_menu_with_projection(
         projection: &TaskbarWindowMenuPluginProjection,
     ) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/taskbar/window-menu.js");
-        Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
+        let source = bundled_source(
+            taskbar_manifest(),
+            "window-menu.js",
+            include_str!("../../../assets/plugins/taskbar/window-menu.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            taskbar_manifest(),
+            Some(projection.to_json()),
+        )
     }
 
     pub fn notification_with_projection(
         projection: &NotificationPluginProjection,
     ) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/notification/main.js");
-        let mut application =
-            Self::new_with_manifest(source, notification_manifest(), Some(projection.to_json()))?;
+        let source = bundled_source(
+            notification_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/notification/main.js"),
+        )?;
+        let mut application = Self::new_with_manifest(
+            source.as_ref(),
+            notification_manifest(),
+            Some(projection.to_json()),
+        )?;
         application.notification_shortcuts = Some((
             projection.notification.as_ref().map(|item| item.id),
             projection.history_visible,
@@ -2731,29 +2802,61 @@ impl PluginPanelApplication {
     pub fn volume_osd_with_projection(
         projection: &VolumeOsdPluginProjection,
     ) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/volume-osd/main.js");
-        Self::new_with_manifest(source, volume_osd_manifest(), Some(projection.to_json()))
+        let source = bundled_source(
+            volume_osd_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/volume-osd/main.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            volume_osd_manifest(),
+            Some(projection.to_json()),
+        )
     }
 
     pub fn control_center_with_data(data: &Value) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/control-center/main.js");
-        Self::new_with_manifest(source, control_center_manifest(), Some(data.to_string()))
+        let source = bundled_source(
+            control_center_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/control-center/main.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            control_center_manifest(),
+            Some(data.to_string()),
+        )
     }
 
     pub fn window_preview_with_data(data: &Value) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/window-preview/main.js");
-        Self::new_with_manifest(source, window_preview_manifest(), Some(data.to_string()))
+        let source = bundled_source(
+            window_preview_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/window-preview/main.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            window_preview_manifest(),
+            Some(data.to_string()),
+        )
     }
 
     pub fn desktop_with_data(data: &Value) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/desktop/main.js");
-        Self::new_with_manifest(source, desktop_manifest(), Some(data.to_string()))
+        let source = bundled_source(
+            desktop_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/desktop/main.js"),
+        )?;
+        Self::new_with_manifest(source.as_ref(), desktop_manifest(), Some(data.to_string()))
     }
 
     pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
-        let source = include_str!("../../../assets/plugins/run/main.js");
+        let source = bundled_source(
+            run_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/run/main.js"),
+        )?;
         let data = serde_json::json!({ "status": status }).to_string();
-        Self::new_with_manifest(source, run_manifest(), Some(data))
+        Self::new_with_manifest(source.as_ref(), run_manifest(), Some(data))
     }
 
     pub fn sync_run_status(&mut self, status: Option<&str>) -> Result<bool, String> {
@@ -4140,6 +4243,23 @@ impl nickel_ui::Application for PluginPanelApplication {
 mod tests {
     use super::*;
     use nickel_ui::Application;
+
+    #[test]
+    fn staged_bundled_source_reads_isolated_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin = root.path().join(&launcher_manifest().id);
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("main.js"),
+            "function App() { return h(Panel, {}); }",
+        )
+        .unwrap();
+        assert_eq!(
+            read_bundled_source(root.path(), launcher_manifest(), "main.js").unwrap(),
+            "function App() { return h(Panel, {}); }"
+        );
+        assert!(read_bundled_source(root.path(), launcher_manifest(), "menu.js").is_err());
+    }
 
     #[test]
     fn bundled_plugin_packages_validate_with_surface_projection_fixtures() {

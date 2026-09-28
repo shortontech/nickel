@@ -125,10 +125,30 @@ mod platform {
 
     use super::load_package;
     use nickel_core::plugins::{
-        PluginActivationSettings, PluginContributionMode, PluginManifest, PluginPackage,
-        PluginSlotContract, PluginSurfaceKind,
+        MAX_PLUGIN_ENTRY_BYTES, PluginActivationSettings, PluginContributionMode, PluginManifest,
+        PluginPackage, PluginSlotContract, PluginSurfaceKind,
     };
-    use nickel_shell::plugin_panel::PluginPanelApplication;
+    use nickel_shell::plugin_panel::{
+        PluginPanelApplication, control_center_manifest, desktop_manifest, launcher_manifest,
+        manifest, notification_manifest, run_manifest, taskbar_manifest, volume_osd_manifest,
+        window_preview_manifest,
+    };
+
+    fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
+        [
+            manifest(),
+            taskbar_manifest(),
+            launcher_manifest(),
+            desktop_manifest(),
+            notification_manifest(),
+            run_manifest(),
+            control_center_manifest(),
+            window_preview_manifest(),
+            volume_osd_manifest(),
+        ]
+        .into_iter()
+        .find(|manifest| manifest.id == id)
+    }
 
     fn staged_config_directory(root: &Path) -> PathBuf {
         #[cfg(target_os = "linux")]
@@ -140,6 +160,14 @@ mod platform {
 
     fn load_dev_package(directory: &Path) -> Result<PluginPackage, String> {
         let package = load_package(directory)?;
+        let bundled = if let Some(manifest) = bundled_manifest(&package.manifest.id) {
+            if *manifest != package.manifest {
+                return Err("bundled plugin dev requires its shipped manifest".into());
+            }
+            true
+        } else {
+            false
+        };
         let panel = !package.manifest.surfaces.is_empty()
             && package.manifest.surfaces.iter().all(|surface| {
                 matches!(
@@ -156,9 +184,9 @@ mod platform {
                     | ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget)
                     | ("org.nickel.control-center", "control-section", PluginSlotContract::Section))
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
-        if !panel && !extension {
+        if !bundled && !panel && !extension {
             return Err(
-                "dev needs panel or dock surfaces, or one supported surface-free contribution"
+                "dev needs an unchanged bundled manifest, panel or dock surfaces, or one supported surface-free contribution"
                     .into(),
             );
         }
@@ -191,10 +219,62 @@ mod platform {
                 .unwrap_or_default()
                 .hash(&mut hasher);
         }
+        let mut siblings = std::fs::read_dir(directory)
+            .map_err(|error| format!("could not watch plugin sources: {error}"))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "js"))
+            .collect::<Vec<_>>();
+        siblings.sort();
+        for sibling in siblings {
+            sibling.file_name().hash(&mut hasher);
+            std::fs::read(sibling).unwrap_or_default().hash(&mut hasher);
+        }
         Ok(hasher.finish())
     }
 
     fn stage(package: &PluginPackage, directory: &Path, root: &Path) -> Result<(), String> {
+        if bundled_manifest(&package.manifest.id).is_some() {
+            let target = root.join("bundled-source").join(&package.manifest.id);
+            if target.exists() {
+                std::fs::remove_dir_all(&target)
+                    .map_err(|error| format!("could not replace staged bundled source: {error}"))?;
+            }
+            std::fs::create_dir_all(&target)
+                .map_err(|error| format!("could not stage bundled source: {error}"))?;
+            for entry in std::fs::read_dir(directory)
+                .map_err(|error| format!("could not read bundled plugin directory: {error}"))?
+            {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let path = entry.path();
+                if path.extension().is_none_or(|extension| extension != "js")
+                    || path.file_name().is_some_and(|name| {
+                        Some(name) == Path::new(&package.manifest.entry).file_name()
+                    })
+                {
+                    continue;
+                }
+                let metadata = std::fs::symlink_metadata(&path)
+                    .map_err(|error| format!("could not inspect bundled JavaScript: {error}"))?;
+                if !metadata.is_file()
+                    || metadata.file_type().is_symlink()
+                    || metadata.len() > MAX_PLUGIN_ENTRY_BYTES as u64
+                {
+                    return Err(
+                        "bundled JavaScript must be an ordinary file of at most 2 MiB".into(),
+                    );
+                }
+                std::fs::copy(&path, target.join(entry.file_name()))
+                    .map_err(|error| format!("could not stage bundled JavaScript: {error}"))?;
+            }
+            let entry = target.join(&package.manifest.entry);
+            if let Some(parent) = entry.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("could not stage bundled entry: {error}"))?;
+            }
+            return std::fs::write(entry, &package.source)
+                .map_err(|error| format!("could not stage bundled entry: {error}"));
+        }
         let manifest_bytes = std::fs::read(directory.join("plugin.json"))
             .map_err(|error| format!("could not read plugin manifest: {error}"))?;
         let manifest_source = std::str::from_utf8(&manifest_bytes)
@@ -236,8 +316,14 @@ mod platform {
         }
     }
 
-    fn launch(binary: &Path, config_root: &Path) -> Result<Child, String> {
+    fn launch(binary: &Path, config_root: &Path, bundled: bool) -> Result<Child, String> {
         let mut command = Command::new(binary);
+        if bundled {
+            command.env(
+                "NICKEL_DEV_BUNDLED_PLUGIN_ROOT",
+                config_root.join("bundled-source"),
+            );
+        }
         #[cfg(target_os = "linux")]
         command.env("XDG_CONFIG_HOME", config_root);
         #[cfg(target_os = "windows")]
@@ -279,7 +365,11 @@ mod platform {
             "Testing {} in isolated Nickel. Save plugin.json, JSX source, or {} to reload; Ctrl+C stops.",
             package.manifest.id, package.manifest.entry
         );
-        let mut child = launch(&shell, config.path())?;
+        let mut child = launch(
+            &shell,
+            config.path(),
+            bundled_manifest(&package.manifest.id).is_some(),
+        )?;
         let mut child_exited = false;
         while running.load(Ordering::SeqCst) {
             if !child_exited {
@@ -322,7 +412,11 @@ mod platform {
             stage(&next, &directory, config.path())?;
             package = next;
             current_fingerprint = source_fingerprint(&directory, &package.manifest.entry)?;
-            child = launch(&shell, config.path())?;
+            child = launch(
+                &shell,
+                config.path(),
+                bundled_manifest(&package.manifest.id).is_some(),
+            )?;
             child_exited = false;
             println!("Reloaded {}", package.manifest.id);
         }
@@ -347,6 +441,78 @@ mod platform {
                 assert!(package.manifest.surfaces.is_empty());
                 assert_eq!(package.manifest.contributes.len(), 1);
             }
+        }
+
+        #[test]
+        fn stages_bundled_shell_sources_without_installing_duplicate_packages() {
+            let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
+            for name in ["launcher", "desktop", "taskbar"] {
+                let directory = root.join(name);
+                let package = load_dev_package(&directory).unwrap();
+                let profile = tempfile::tempdir().unwrap();
+                stage(&package, &directory, profile.path()).unwrap();
+                let staged = profile
+                    .path()
+                    .join("bundled-source")
+                    .join(&package.manifest.id);
+                assert_eq!(
+                    std::fs::read_to_string(staged.join(&package.manifest.entry)).unwrap(),
+                    package.source
+                );
+                assert!(
+                    !staged_config_directory(profile.path())
+                        .join("plugins")
+                        .join(&package.manifest.id)
+                        .exists()
+                );
+                if name == "taskbar" {
+                    assert!(staged.join("menu.js").is_file());
+                    assert!(staged.join("window-menu.js").is_file());
+                }
+            }
+        }
+
+        #[test]
+        fn reload_fingerprint_tracks_bundled_sibling_javascript() {
+            let directory = tempfile::tempdir().unwrap();
+            let root = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/taskbar"
+            ));
+            std::fs::copy(
+                root.join("plugin.json"),
+                directory.path().join("plugin.json"),
+            )
+            .unwrap();
+            std::fs::copy(root.join("main.js"), directory.path().join("main.js")).unwrap();
+            std::fs::write(directory.path().join("menu.js"), "first").unwrap();
+            let first = source_fingerprint(directory.path(), "main.js").unwrap();
+            std::fs::write(directory.path().join("menu.js"), "second").unwrap();
+            assert_ne!(
+                first,
+                source_fingerprint(directory.path(), "main.js").unwrap()
+            );
+        }
+
+        #[test]
+        fn bundled_dev_requires_the_shipped_manifest() {
+            let directory = tempfile::tempdir().unwrap();
+            let root = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/launcher"
+            ));
+            let manifest = std::fs::read_to_string(root.join("plugin.json")).unwrap();
+            std::fs::write(
+                directory.path().join("plugin.json"),
+                manifest.replace("Nickel Launcher", "Renamed Launcher"),
+            )
+            .unwrap();
+            std::fs::copy(root.join("main.js"), directory.path().join("main.js")).unwrap();
+            assert!(
+                load_dev_package(directory.path())
+                    .unwrap_err()
+                    .contains("shipped manifest")
+            );
         }
 
         #[test]
