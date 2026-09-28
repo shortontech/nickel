@@ -33,6 +33,10 @@ profile. It checks that enabling the package maps an ordinary window with a
 retained UI memory report, sends a scoped pointer click to open its component
 dialog, and observes the larger retained native tree. Disabling it unregisters
 the window and clears that report, and re-enabling creates a fresh window identity.
+It then installs a two-window package, focuses one window and sends Alt+F4
+through the same scoped test-control socket. The test checks that the other
+declared window remains, the package stays running, and its reported native UI
+memory falls after the close.
 
 This is a live graphical acceptance check, so it requires a working host display.
 On hosts where GLVND's default vendor cannot create a nested EGL display, an installed Mesa software

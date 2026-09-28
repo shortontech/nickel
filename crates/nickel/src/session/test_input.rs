@@ -996,6 +996,7 @@ fn linux_key_code(key: TestKey) -> u32 {
         TestKey::Space => 57,
         TestKey::Backspace => 14,
         TestKey::Delete => 111,
+        TestKey::F4 => 62,
         TestKey::F11 => 87,
         TestKey::PrintScreen => 99,
         TestKey::VolumeMute => 113,
@@ -1054,6 +1055,7 @@ mod tests {
         assert_eq!(linux_key_code(TestKey::Space), 57);
         assert_eq!(linux_key_code(TestKey::Backspace), 14);
         assert_eq!(linux_key_code(TestKey::Delete), 111);
+        assert_eq!(linux_key_code(TestKey::F4), 62);
         assert_eq!(linux_key_code(TestKey::F11), 87);
         assert_eq!(linux_key_code(TestKey::PrintScreen), 99);
     }

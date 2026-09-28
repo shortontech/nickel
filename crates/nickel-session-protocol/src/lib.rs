@@ -575,6 +575,7 @@ pub enum TestKey {
     MediaPrevious,
     MediaFastForward,
     MediaRewind,
+    F4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

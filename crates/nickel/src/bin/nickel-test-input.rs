@@ -60,7 +60,7 @@ Usage:
   nickel-test-input wheel HORIZONTAL_V120 VERTICAL_V120
   nickel-test-input button left|right pressed|released
   nickel-test-input emergency-control synthetic|physical-fixture left|right pressed|released
-  nickel-test-input key a|c|e|p|s|t|u|v|x|slash|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
+  nickel-test-input key a|c|e|p|s|t|u|v|x|slash|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f4|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
 ";
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -479,6 +479,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 "space" => TestKey::Space,
                 "backspace" => TestKey::Backspace,
                 "delete" => TestKey::Delete,
+                "f4" => TestKey::F4,
                 "f11" => TestKey::F11,
                 "print-screen" => TestKey::PrintScreen,
                 "volume-up" => TestKey::VolumeUp,

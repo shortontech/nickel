@@ -81,6 +81,19 @@ fn run() -> Result<(), String> {
         include_str!("../../../../../assets/plugins/example-window/main.js"),
     )
     .map_err(|error| error.to_string())?;
+    let windows = runtime
+        .join("config/nickel/plugins/org.example.acceptance-windows");
+    fs::create_dir_all(&windows).map_err(|error| error.to_string())?;
+    fs::write(
+        windows.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.acceptance-windows","name":"Acceptance Windows","entry":"main.js","surfaces":[{"id":"first","kind":"window","width":360,"height":220},{"id":"second","kind":"window","width":420,"height":240}]}"#,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        windows.join("main.js"),
+        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.surface.id)); }",
+    )
+    .map_err(|error| error.to_string())?;
     let capability_file = runtime.join("shell-environment");
 
     let mut command = Command::new(&nickel);
@@ -153,7 +166,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, an installed panel, and a component window with a dialog; checked plugin activation, memory retirement, launcher fallback, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, an installed panel, a component dialog, and sibling plugin windows; checked activation, memory retirement, launcher fallback, and clean shutdown"
     );
     Ok(())
 }
@@ -380,6 +393,7 @@ fn exercise(
         return Err("installed panel did not release its reported UI memory".into());
     }
     verify_component_window(test_input, &environment)?;
+    verify_sibling_windows(test_input, &environment)?;
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
     let toggled = checked(test_input, &environment, &["surfaces"])?;
@@ -533,6 +547,83 @@ fn wait_for_component_dialog_memory(
         }
         thread::sleep(POLL);
     }
+}
+
+fn verify_sibling_windows(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let id = "org.example.acceptance-windows";
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (_first, second) = loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        let installed = windows
+            .lines()
+            .filter(|line| line.contains("\torg.example.acceptance-windows\t"))
+            .collect::<Vec<_>>();
+        let find = |size: &str| {
+            installed.iter().find_map(|line| {
+                line.ends_with(size)
+                    .then(|| line.split('\t').next()?.parse::<u64>().ok())
+                    .flatten()
+            })
+        };
+        if let (Some(first), Some(second)) = (find("360x220"), find("420x240")) {
+            break (first, second);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("sibling plugin windows did not map: {windows}"));
+        }
+        thread::sleep(POLL);
+    };
+    let before = wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    checked(
+        test_input,
+        environment,
+        &["semantic", "window", &second.to_string(), "click"],
+    )?;
+    checked(test_input, environment, &["key", "alt", "pressed"])?;
+    checked(test_input, environment, &["key", "f4", "pressed"])?;
+    checked(test_input, environment, &["key", "f4", "released"])?;
+    checked(test_input, environment, &["key", "alt", "released"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        let installed = windows
+            .lines()
+            .filter(|line| line.contains("\torg.example.acceptance-windows\t"))
+            .collect::<Vec<_>>();
+        if installed.len() == 1 && installed[0].ends_with("360x220") {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("closing one window did not preserve its sibling: {windows}"));
+        }
+        thread::sleep(POLL);
+    }
+    let status = checked(test_input, environment, &["plugins"])?;
+    let status: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&status).map_err(|error| error.to_string())?;
+    let plugin = status
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .ok_or("sibling window plugin disappeared after one close")?;
+    if !plugin.desired_enabled
+        || plugin.health != nickel_session_protocol::PluginRuntimeHealth::Running
+        || !plugin
+            .memory
+            .native_ui_bytes
+            .is_some_and(|bytes| bytes > 0 && bytes < before)
+    {
+        return Err(format!(
+            "sibling window plugin lost health or its memory account: before={before}, after={:?}",
+            plugin.memory.native_ui_bytes
+        ));
+    }
+    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    Ok(())
 }
 
 fn verify_settings_memory_report(
