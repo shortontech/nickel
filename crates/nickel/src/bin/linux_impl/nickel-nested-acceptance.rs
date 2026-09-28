@@ -268,12 +268,18 @@ fn exercise(
         ));
     }
     let surfaces = checked(test_input, &environment, &["surfaces"])?;
-    for role in ["Desktop", "Panel", "Lock", "Launcher"] {
+    for role in ["Desktop", "Lock", "Launcher"] {
         if !surfaces.contains(role) {
             return Err(format!(
                 "surface inventory does not contain {role}: {surfaces:?}"
             ));
         }
+    }
+    if !surfaces.lines().any(|line| {
+        line.starts_with("PluginSurface\twinit\t")
+            && line.ends_with("org.nickel.taskbar/main")
+    }) {
+        return Err(format!("taskbar plugin surface is missing: {surfaces:?}"));
     }
     let plugin_output = checked(test_input, &environment, &["plugins"])?;
     let plugins: nickel_session_protocol::PluginStatusSnapshot =
@@ -664,7 +670,10 @@ fn wait_for_taskbar_presence(
     let deadline = Instant::now() + timeout;
     loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let present = surfaces.lines().any(|line| line.starts_with("Panel\t"));
+        let present = surfaces.lines().any(|line| {
+            line.starts_with("PluginSurface\t")
+                && line.ends_with("org.nickel.taskbar/main")
+        });
         if present == expected {
             return Ok(());
         }

@@ -7069,10 +7069,10 @@ impl NickelSession {
         shell.set_file_clipboard_available(file_clipboard_available);
         let mut changed = Vec::new();
         for (runtime_id, batch, modifiers) in events {
-            let Some((shell_id, role, output)) = reverse.get(&runtime_id).cloned() else {
+            let Some((shell_id, _role, output)) = reverse.get(&runtime_id).cloned() else {
                 continue;
             };
-            if role == crate::winit_shell::SurfaceRole::Taskbar
+            if shell.is_taskbar_surface_id(shell_id)
                 && let Some(output) = output
             {
                 let origin = output_origins.get(&output).copied().unwrap_or_default();
@@ -7223,7 +7223,9 @@ impl NickelSession {
                     self.invalidate_remote_shell_surface(runtime_id);
                     self.unregister_internal_application(runtime_id);
                     self.internal_ui.remove(runtime_id);
-                    if let Some(role) = remote_shell_event_role(surface.role) {
+                    if let Some(role) =
+                        remote_shell_surface_event_role(surface.role, surface.id, &shell)
+                    {
                         self.remote_desktop_events.record(
                             nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
                                 surface_generation: runtime_id.snapshot_token(),
@@ -7418,7 +7420,7 @@ impl NickelSession {
             {
                 plugin_windows.push((runtime_id, key));
             }
-            if let Some(role) = remote_shell_event_role(surface.role) {
+            if let Some(role) = remote_shell_surface_event_role(surface.role, surface.id, &shell) {
                 self.remote_desktop_events.record(
                     nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
                         surface_generation: runtime_id.snapshot_token(),
@@ -7873,6 +7875,18 @@ fn remote_shell_event_role(
         SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat | SurfaceRole::Lock => None,
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => None,
+    }
+}
+
+fn remote_shell_surface_event_role(
+    role: crate::winit_shell::SurfaceRole,
+    id: nickel_ui::InternalSurfaceId,
+    shell: &crate::internal_shell::InternalShellCoordinator,
+) -> Option<nickel_remote_control::desktop_events::ShellEventRole> {
+    if shell.is_taskbar_surface_id(id) {
+        Some(nickel_remote_control::desktop_events::ShellEventRole::Panel)
+    } else {
+        remote_shell_event_role(role)
     }
 }
 struct DisplacedWindow {
@@ -15701,10 +15715,35 @@ fn adjust_internal_plugin_surface_placement(
     shell: &crate::internal_shell::InternalShellCoordinator,
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
 ) {
+    if shell.plugin_panel_reserves_work_area(key) {
+        place_reserved_plugin_panel(placement, shell.panel_edge(), outputs);
+        return;
+    }
     let Some((kind, bottom_offset)) = shell.plugin_panel_placement(key) else {
         return;
     };
     apply_internal_plugin_surface_placement(placement, kind, bottom_offset, outputs);
+}
+
+fn place_reserved_plugin_panel(
+    placement: &mut crate::session::InternalSurfacePlacement,
+    edge: crate::winit_shell::PanelEdge,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) {
+    let Some((output, x, y)) = outputs
+        .iter()
+        .find(|(output, _, _)| placement.output.as_deref() == Some(output.name.as_str()))
+    else {
+        return;
+    };
+    placement.role = crate::session::InternalSurfaceRole::Taskbar;
+    placement.geometry.0 = *x;
+    placement.geometry.1 = *y
+        + if edge == crate::winit_shell::PanelEdge::Top {
+            0
+        } else {
+            output.height.saturating_sub(placement.geometry.3) as i32
+        };
 }
 
 fn apply_internal_plugin_surface_placement(

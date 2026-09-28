@@ -1,7 +1,7 @@
 use super::{
     apply_internal_plugin_surface_placement, avoid_trusted_control_collision,
     internal_codex_chat_placement, internal_codex_project_menu_placement,
-    internal_shell_surface_placement,
+    internal_shell_surface_placement, place_reserved_plugin_panel,
 };
 use crate::{
     internal_shell::InternalOutput,
@@ -60,6 +60,24 @@ fn taskbar_placement_uses_its_plugin_surface_height() {
         PanelEdge::Top,
     );
     assert_eq!(top.geometry, (0, 240, 2560, 80));
+}
+
+#[test]
+fn reserved_plugin_panel_uses_taskbar_layer_and_output_edge() {
+    let outputs = outputs();
+    for (edge, expected_y) in [(PanelEdge::Bottom, 1600), (PanelEdge::Top, 240)] {
+        let mut placement = internal_shell_surface_placement(
+            SurfaceRole::Panel,
+            Some("right"),
+            (2560, 80),
+            &outputs,
+            None,
+            edge,
+        );
+        place_reserved_plugin_panel(&mut placement, edge, &outputs);
+        assert_eq!(placement.geometry, (0, expected_y, 2560, 80));
+        assert_eq!(placement.role, crate::session::InternalSurfaceRole::Taskbar);
+    }
 }
 
 #[test]

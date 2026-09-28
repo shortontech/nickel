@@ -317,11 +317,7 @@ impl InternalShellCoordinator {
                     surface.height.min(output.height),
                 );
                 desired.push((
-                    if taskbar {
-                        SurfaceRole::Taskbar
-                    } else {
-                        SurfaceRole::Panel
-                    },
+                    SurfaceRole::Panel,
                     Some(key.clone()),
                     Some(output.name.clone()),
                     size,
@@ -445,8 +441,13 @@ impl InternalShellCoordinator {
         {
             return Err("plugin surface has retired".into());
         }
+        let semantics_role = if self.is_taskbar_surface(entry) {
+            SurfaceRole::Taskbar
+        } else {
+            entry.role
+        };
         self.shell
-            .bounded_shell_semantics(entry.role, entry.output.as_deref())
+            .bounded_shell_semantics(semantics_role, entry.output.as_deref())
     }
 
     pub(crate) fn perform_bounded_shell_action(
@@ -469,8 +470,13 @@ impl InternalShellCoordinator {
         {
             return Err("plugin surface has retired".into());
         }
+        let semantics_role = if self.is_taskbar_surface(entry) {
+            SurfaceRole::Taskbar
+        } else {
+            entry.role
+        };
         let outcome = self.shell.perform_bounded_shell_action(
-            entry.role,
+            semantics_role,
             entry.output.as_deref(),
             generation,
             node,
@@ -540,13 +546,23 @@ impl InternalShellCoordinator {
         key: &nickel_core::plugins::PluginSurfaceKey,
         output: &str,
     ) -> Option<&InternalShellSurface> {
-        [SurfaceRole::Panel, SurfaceRole::Taskbar]
-            .into_iter()
-            .find_map(|role| {
-                self.indices
-                    .get(&(role, Some(key.clone()), Some(output.to_owned())))
-                    .and_then(|index| self.entries.get(*index))
-            })
+        self.indices
+            .get(&(
+                SurfaceRole::Panel,
+                Some(key.clone()),
+                Some(output.to_owned()),
+            ))
+            .and_then(|index| self.entries.get(*index))
+    }
+
+    fn is_taskbar_surface(&self, surface: &InternalShellSurface) -> bool {
+        surface.plugin.as_ref() == self.shell.taskbar_surface_key().as_ref()
+            && surface.plugin.is_some()
+    }
+
+    fn redraws_surface(&self, surface: &InternalShellSurface, roles: &[SurfaceRole]) -> bool {
+        roles.contains(&surface.role)
+            || (roles.contains(&SurfaceRole::Taskbar) && self.is_taskbar_surface(surface))
     }
 
     pub fn visible(&self, id: InternalSurfaceId) -> bool {
@@ -554,11 +570,10 @@ impl InternalShellCoordinator {
             .iter()
             .find(|surface| surface.id == id)
             .is_some_and(|surface| {
-                surface
-                    .plugin
-                    .as_ref()
-                    .is_none_or(|key| self.shell.plugin_panel_matches(key))
-                    && self.shell.surface_visible(surface.role)
+                surface.plugin.as_ref().map_or_else(
+                    || self.shell.surface_visible(surface.role),
+                    |key| self.shell.plugin_panel_matches(key),
+                )
             })
     }
 
@@ -581,7 +596,10 @@ impl InternalShellCoordinator {
             // whole output. Undo only the top reservation so it stays visible in
             // local icon coordinates rather than being subtracted a second time.
             let top_reservation = if self.panel_edge == PanelEdge::Top
-                && let Some(panel) = self.surface(SurfaceRole::Taskbar, Some(output))
+                && let Some(panel) = self
+                    .shell
+                    .taskbar_surface_key()
+                    .and_then(|key| self.plugin_surface(&key, output))
             {
                 panel.size.1.min(entry.size.1) as f32
             } else {
@@ -656,8 +674,8 @@ impl InternalShellCoordinator {
             .zip(visibility.iter().copied())
             .filter(|(surface, was_visible)| {
                 self.visible(surface.id) != *was_visible
-                    || outcome.redraw.contains(&surface.role)
-                    || (outcome.visibility_changed && surface.role == SurfaceRole::Taskbar)
+                    || self.redraws_surface(surface, &outcome.redraw)
+                    || (outcome.visibility_changed && self.is_taskbar_surface(surface))
             })
             .map(|(surface, _)| surface.id)
             .collect()
@@ -719,7 +737,7 @@ impl InternalShellCoordinator {
         let roles = self.shell.refresh_fast_changes();
         self.entries
             .iter()
-            .filter(|surface| roles.contains(&surface.role))
+            .filter(|surface| self.redraws_surface(surface, &roles))
             .map(|surface| surface.id)
             .collect()
     }
@@ -744,7 +762,7 @@ impl InternalShellCoordinator {
         Ok(self
             .entries
             .iter()
-            .filter(|entry| matches!(entry.role, SurfaceRole::Launcher | SurfaceRole::Taskbar))
+            .filter(|entry| entry.role == SurfaceRole::Launcher || self.is_taskbar_surface(entry))
             .map(|entry| entry.id)
             .collect())
     }
@@ -757,7 +775,7 @@ impl InternalShellCoordinator {
         let changed = self
             .entries
             .iter()
-            .filter(|entry| matches!(entry.role, SurfaceRole::Launcher | SurfaceRole::Taskbar))
+            .filter(|entry| entry.role == SurfaceRole::Launcher || self.is_taskbar_surface(entry))
             .map(|entry| entry.id)
             .collect();
         (changed, applications, partial)
@@ -797,7 +815,7 @@ impl InternalShellCoordinator {
         }
         self.entries
             .iter()
-            .filter(|surface| roles.is_none_or(|roles| roles.contains(&surface.role)))
+            .filter(|surface| roles.is_none_or(|roles| self.redraws_surface(surface, roles)))
             .map(|surface| surface.id)
             .collect()
     }
@@ -861,6 +879,7 @@ impl InternalShellCoordinator {
         let Some(entry) = self.entries.iter().find(|surface| surface.id == id) else {
             return Vec::new();
         };
+        let taskbar_surface = self.is_taskbar_surface(entry);
         if entry
             .plugin
             .as_ref()
@@ -940,7 +959,7 @@ impl InternalShellCoordinator {
             };
             if let Some(action) = controller_action {
                 match entry.role {
-                    SurfaceRole::Taskbar => dependent_roles.extend([
+                    SurfaceRole::Panel if taskbar_surface => dependent_roles.extend([
                         SurfaceRole::Taskbar,
                         SurfaceRole::WindowPreview,
                         SurfaceRole::WindowContextMenu,
@@ -1153,7 +1172,7 @@ impl InternalShellCoordinator {
                     | nickel_ui::UiEvent::KeyboardNavigateBack
             );
             match entry.role {
-                SurfaceRole::Taskbar if action => dependent_roles.extend([
+                SurfaceRole::Panel if taskbar_surface && action => dependent_roles.extend([
                     SurfaceRole::Taskbar,
                     SurfaceRole::WindowPreview,
                     SurfaceRole::WindowContextMenu,
@@ -1216,8 +1235,8 @@ impl InternalShellCoordinator {
             .any(|(surface, was_visible)| self.visible(surface.id) != *was_visible);
         for (surface, was_visible) in self.entries.iter().zip(visibility) {
             if self.visible(surface.id) != was_visible
-                || (visibility_changed && surface.role == SurfaceRole::Taskbar)
-                || (changed && dependent_roles.contains(&surface.role))
+                || (visibility_changed && self.is_taskbar_surface(surface))
+                || (changed && self.redraws_surface(surface, &dependent_roles))
             {
                 changes.push(surface.id);
             }
@@ -1368,7 +1387,24 @@ impl InternalShellCoordinator {
     }
 
     pub(crate) fn plugin_surface_count(&self) -> usize {
-        self.shell.plugin_panels().len()
+        self.shell.shell_panel_surfaces().len()
+    }
+
+    pub(crate) fn is_taskbar_surface_id(&self, id: InternalSurfaceId) -> bool {
+        self.entries
+            .iter()
+            .find(|surface| surface.id == id)
+            .is_some_and(|surface| self.is_taskbar_surface(surface))
+    }
+
+    pub(crate) fn plugin_panel_reserves_work_area(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> bool {
+        self.shell
+            .shell_panel_surfaces()
+            .iter()
+            .any(|(candidate, surface)| candidate == key && surface.reserve_work_area)
     }
 
     pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
@@ -2019,9 +2055,15 @@ mod tests {
 
         assert_eq!(coordinator.surfaces().len(), 15);
         let panel = coordinator
-            .surface(SurfaceRole::Taskbar, Some("two"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "two")
             .unwrap();
         assert_eq!(panel.size, (1280, PANEL_HEIGHT));
+        assert_eq!(panel.role, SurfaceRole::Panel);
+        assert!(
+            coordinator
+                .surface(SurfaceRole::Taskbar, Some("two"))
+                .is_none()
+        );
         let key = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: crate::plugin_panel::taskbar_manifest().id.clone(),
             surface_id: "main".into(),
@@ -2049,7 +2091,7 @@ mod tests {
         let plugin_id = crate::plugin_panel::taskbar_manifest().id.clone();
         coordinator.set_outputs(&[output.clone()]);
         let key = coordinator
-            .surface(SurfaceRole::Taskbar, Some("nested"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
             .unwrap()
             .plugin
             .clone()
@@ -2099,12 +2141,12 @@ mod tests {
 
         assert!(
             coordinator
-                .surface(SurfaceRole::Taskbar, Some("primary"))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "primary")
                 .is_some()
         );
         assert!(
             coordinator
-                .surface(SurfaceRole::Taskbar, Some("secondary"))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "secondary")
                 .is_none()
         );
         assert!(
@@ -2139,7 +2181,7 @@ mod tests {
         ]);
         assert!(
             coordinator
-                .surface(SurfaceRole::Taskbar, Some("secondary"))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "secondary")
                 .is_some()
         );
     }
@@ -2166,7 +2208,7 @@ mod tests {
             },
         ]);
         let left_panel = coordinator
-            .surface(SurfaceRole::Taskbar, Some("left"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "left")
             .unwrap()
             .id;
         let right_desktop = coordinator
@@ -2196,7 +2238,7 @@ mod tests {
 
         assert!(
             coordinator
-                .surface(SurfaceRole::Taskbar, Some("left"))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "left")
                 .is_none()
         );
         assert_eq!(
@@ -2212,7 +2254,7 @@ mod tests {
         );
         assert_eq!(
             coordinator
-                .surface(SurfaceRole::Taskbar, Some("right"))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "right")
                 .unwrap()
                 .size,
             (1600, PANEL_HEIGHT)
@@ -2237,7 +2279,7 @@ mod tests {
             scale: 1.0,
         }]);
         let panel = coordinator
-            .surface(SurfaceRole::Taskbar, Some("nested"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
             .unwrap()
             .id;
         assert!(!coordinator.scene(panel).unwrap().is_empty());
@@ -2507,7 +2549,7 @@ mod tests {
             .unwrap()
             .id;
         let panel = coordinator
-            .surface(SurfaceRole::Taskbar, Some("nested"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
             .unwrap()
             .id;
         let control = coordinator
@@ -2563,7 +2605,7 @@ mod tests {
         );
         assert_eq!(
             coordinator
-                .surface(SurfaceRole::Taskbar, Some("nested"))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
                 .unwrap()
                 .scene_generation,
             1
@@ -2611,11 +2653,11 @@ mod tests {
             .unwrap()
             .id;
         let left_panel = coordinator
-            .surface(SurfaceRole::Taskbar, Some("left"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "left")
             .unwrap()
             .id;
         let right_panel = coordinator
-            .surface(SurfaceRole::Taskbar, Some("right"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "right")
             .unwrap()
             .id;
         for id in [desktop, right_panel, left_panel] {
@@ -2650,7 +2692,7 @@ mod tests {
         }
         assert_eq!(
             coordinator
-                .surface(SurfaceRole::Taskbar, Some("right"))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "right")
                 .unwrap()
                 .scene_generation,
             1
@@ -2741,7 +2783,7 @@ mod tests {
         );
         assert_eq!(
             coordinator
-                .surface(SurfaceRole::Taskbar, Some("left"))
+                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "left")
                 .unwrap()
                 .scene_generation,
             2
@@ -2791,7 +2833,7 @@ mod tests {
             scale: 1.0,
         }]);
         let panel = coordinator
-            .surface(SurfaceRole::Taskbar, Some("nested"))
+            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
             .unwrap()
             .id;
         let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
