@@ -38,6 +38,9 @@ profile when dev mode stops.
 `nickel-settings --plugin-status` prints the live plugin status as JSON when
 run as an authorized Settings companion. It lets Windows development sessions
 inspect which first-party plugins actually started.
+On Windows, `nickel-settings.exe --plugin-status --plugin-status-file status.json`
+writes the same snapshot to a file, including when the GUI executable has no
+console output handle.
 
 On Windows, build `nickel-plugin.exe` and `nickel.exe` beside each other, then
 run `nickel-plugin.exe dev assets/plugins/hello-panel`. The command starts a
