@@ -80,6 +80,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::desktop_plugin_opens_only_the_current_projected_tile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::desktop_background_menu_uses_jsx_submenu_and_typed_visibility_action
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::desktop_plugin_background_action_rejects_unavailable_and_stale_commands
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::notification_plugin_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::control_center_plugin_renders_and_dispatches_typed_desktop_action
@@ -92,6 +96,12 @@ jobs:
       - name: Validate shipped extension examples
         shell: pwsh
         run: |
+          foreach ($package in @("hello-panel", "taskbar", "launcher", "desktop", "notification", "run", "control-center", "window-preview", "volume-osd")) {
+            cargo run --locked -p nickel --bin nickel-plugin -- validate "assets/plugins/$package"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-dialog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-task-action
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-control-section
