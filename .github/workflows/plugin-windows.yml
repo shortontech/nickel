@@ -118,3 +118,43 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-control-section
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Smoke test the live Windows shell plugins
+        shell: pwsh
+        run: |
+          cargo build --locked -p nickel --bin nickel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked -p nickel-settings --bin nickel-settings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nickel-plugin-smoke"
+          $env:LOCALAPPDATA = Join-Path $smokeRoot "local"
+          $env:APPDATA = Join-Path $smokeRoot "roaming"
+          New-Item -ItemType Directory -Force -Path @($env:LOCALAPPDATA, $env:APPDATA) | Out-Null
+          $stdout = Join-Path $smokeRoot "shell.stdout"
+          $stderr = Join-Path $smokeRoot "shell.stderr"
+          $shell = Start-Process -FilePath "target/debug/nickel.exe" -ArgumentList "--no-desktop-windows" -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          try {
+            $snapshot = $null
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              $shell.Refresh()
+              if ($shell.HasExited) { throw "Nickel shell exited before plugin status was available (exit $($shell.ExitCode))" }
+              $json = & "target/debug/nickel-settings.exe" --plugin-status 2>$null
+              if ($LASTEXITCODE -eq 0 -and $json) {
+                try { $snapshot = $json | ConvertFrom-Json } catch { $snapshot = $null }
+                if ($snapshot -and $snapshot.plugins) { break }
+              }
+            }
+            if (-not $snapshot) { throw "Nickel Settings could not query the live shell plugin status" }
+            foreach ($id in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop")) {
+              $plugin = $snapshot.plugins | Where-Object { $_.id -eq $id } | Select-Object -First 1
+              if (-not $plugin -or $plugin.health.state -ne "running") {
+                throw "$id did not start as a Windows shell plugin"
+              }
+            }
+            Write-Host "Live Windows launcher, taskbar, and desktop plugins are running."
+          } finally {
+            $shell.Refresh()
+            if (-not $shell.HasExited) { Stop-Process -Id $shell.Id -Force }
+            if (Test-Path $stderr) { Get-Content $stderr -Tail 30 }
+          }

@@ -3274,6 +3274,17 @@ fn request_session_text_entry() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (initial_page, initial_output) = match cli::parse(std::env::args_os().skip(1)) {
         Ok(cli::Action::Run { page, output }) => (page, output),
+        Ok(cli::Action::PluginStatus) => {
+            let response = session_request(SessionRequest::Query(SessionQuery::Plugins))?;
+            let ServerMessage::Plugins(snapshot) = response else {
+                return Err(std::io::Error::other(format!(
+                    "Nickel shell did not return plugin status: {response:?}"
+                ))
+                .into());
+            };
+            println!("{}", serde_json::to_string(&snapshot)?);
+            return Ok(());
+        }
         Ok(cli::Action::Help) => {
             print!("{}", cli::HELP);
             return Ok(());

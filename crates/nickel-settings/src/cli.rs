@@ -2,7 +2,7 @@ use std::ffi::OsString;
 
 use crate::SettingsPage;
 
-pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, bluetooth-pair, default-apps, optional-features, keyboard-shortcuts, about]\n      --output <OUTPUT>  Select this display connector when opening Display\n  -h, --help             Print help\n";
+pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, bluetooth-pair, default-apps, optional-features, plugins, keyboard-shortcuts, about]\n      --output <OUTPUT>  Select this display connector when opening Display\n      --plugin-status    Print the live plugin status as JSON and exit\n  -h, --help             Print help\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Action {
@@ -10,6 +10,7 @@ pub(super) enum Action {
         page: SettingsPage,
         output: Option<String>,
     },
+    PluginStatus,
     Help,
 }
 
@@ -17,6 +18,7 @@ pub(super) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, 
     let mut args = args.into_iter();
     let mut screen = None;
     let mut output = None;
+    let mut plugin_status = false;
 
     while let Some(argument) = args.next() {
         let argument = argument
@@ -25,6 +27,7 @@ pub(super) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, 
 
         match argument.as_str() {
             "-h" | "--help" => return Ok(Action::Help),
+            "--plugin-status" if !plugin_status => plugin_status = true,
             "-s" | "--screen" => {
                 if screen.is_some() {
                     return Err("--screen may only be specified once".to_owned());
@@ -63,6 +66,13 @@ pub(super) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, 
         }
     }
 
+    if plugin_status {
+        if screen.is_some() || output.is_some() {
+            return Err("--plugin-status cannot be combined with --screen or --output".into());
+        }
+        return Ok(Action::PluginStatus);
+    }
+
     Ok(Action::Run {
         page: screen.unwrap_or(SettingsPage::Display),
         output,
@@ -83,7 +93,7 @@ fn parse_screen(value: &str) -> Result<SettingsPage, String> {
         "keyboard" | "keyboard-shortcuts" => Ok(SettingsPage::KeyboardShortcuts),
         "about" => Ok(SettingsPage::About),
         _ => Err(format!(
-            "unknown screen '{value}'; expected display, nickel-bar, appearance, network, bluetooth, bluetooth-pair, default-apps, optional-features, keyboard-shortcuts, or about"
+            "unknown screen '{value}'; expected display, nickel-bar, appearance, network, bluetooth, bluetooth-pair, default-apps, optional-features, plugins, keyboard-shortcuts, or about"
         )),
     }
 }
@@ -168,6 +178,17 @@ mod tests {
         assert_eq!(parse_strings(&["--help"]), Ok(Action::Help));
         assert!(HELP.contains("--screen <SCREEN>"));
         assert!(HELP.contains("nickel-bar"));
+    }
+
+    #[test]
+    fn plugin_status_is_a_read_only_terminal_action() {
+        assert_eq!(
+            parse_strings(&["--plugin-status"]),
+            Ok(Action::PluginStatus)
+        );
+        assert!(parse_strings(&["--plugin-status", "--screen", "plugins"]).is_err());
+        assert!(parse_strings(&["--plugin-status", "--output", "DP-1"]).is_err());
+        assert!(parse_strings(&["--plugin-status", "--plugin-status"]).is_err());
     }
 
     #[test]

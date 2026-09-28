@@ -35,6 +35,10 @@ This targets the nested session, so it does not press a controller Guide button
 or toggle the host desktop's launcher. The file is removed with the temporary
 profile when dev mode stops.
 
+`nickel-settings --plugin-status` prints the live plugin status as JSON when
+run as an authorized Settings companion. It lets Windows development sessions
+inspect which first-party plugins actually started.
+
 On Windows, build `nickel-plugin.exe` and `nickel.exe` beside each other, then
 run `nickel-plugin.exe dev assets/plugins/hello-panel`. The command starts a
 separate Nickel shell without desktop windows and gives it a temporary
