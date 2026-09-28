@@ -280,7 +280,7 @@ jobs:
                   }, IntPtr.Zero);
                   return widest != IntPtr.Zero && PostMessage(widest, 0x0010, IntPtr.Zero, IntPtr.Zero);
               }
-              public static bool ClickVisibleWindowBottom(uint processId, string expectedTitle) {
+              public static bool ClickVisibleWindowAt(uint processId, string expectedTitle, int x, int y) {
                   bool clicked = false;
                   EnumWindows((handle, context) => {
                       uint owner;
@@ -290,7 +290,8 @@ jobs:
                       GetWindowText(handle, title, title.Capacity);
                       Rect rect;
                       if (title.ToString() != expectedTitle || !GetClientRect(handle, out rect)) return true;
-                      var point = new Point { X = (rect.Right - rect.Left) / 2, Y = (rect.Bottom - rect.Top) / 2 };
+                      if (x < rect.Left || x >= rect.Right || y < rect.Top || y >= rect.Bottom) return true;
+                      var point = new Point { X = x, Y = y };
                       if (!ClientToScreen(handle, ref point)) return true;
                       bool focused = SetForegroundWindow(handle);
                       if (!SetCursorPos(point.X, point.Y)) return true;
@@ -299,9 +300,6 @@ jobs:
                       uint hitOwner = 0;
                       if (hit != IntPtr.Zero) GetWindowThreadProcessId(hit, out hitOwner);
                       Console.WriteLine($"Plugin click target={handle}, focused={focused}, foreground={GetForegroundWindow()}, hit={hit}, hitOwner={hitOwner}, expectedOwner={processId}, point={point.X},{point.Y}, client={rect.Right}x{rect.Bottom}");
-                      mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
-                      mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
-                      System.Threading.Thread.Sleep(200);
                       mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
                       mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
                       clicked = true;
@@ -349,6 +347,59 @@ jobs:
               }
             }
             if (-not $ready) { throw "Installed component window did not become visible with a valid plugin memory report" }
+            $initialBytes = [long]$plugin.memory.native_ui_bytes
+            if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Window", 260, 77)) {
+              throw "Could not click the component window's dialog button"
+            }
+            $dialogOpen = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $plugin = $snapshot.plugins | Where-Object { $_.id -eq "org.example.component-window" } | Select-Object -First 1
+              if ($plugin -and [long]$plugin.memory.native_ui_bytes -gt $initialBytes) {
+                $dialogOpen = $true
+                break
+              }
+            }
+            if (-not $dialogOpen) { throw "Component dialog did not increase its plugin UI memory" }
+            if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Window", 80, 182)) {
+              throw "Could not click the component dialog's Settings button"
+            }
+            $settingsOpened = $false
+            for ($attempt = 0; $attempt -lt 80; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              $settingsProcess = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($shell.ProcessId)" | Where-Object { $_.Name -eq "nickel-settings.exe" } | Select-Object -First 1
+              if (-not $settingsProcess) { continue }
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $settingsPlugin = $snapshot.plugins | Where-Object { $_.id -eq "org.nickel.settings" } | Select-Object -First 1
+              if ($settingsPlugin -and [long]$settingsPlugin.memory.native_ui_bytes -gt 0) {
+                $settingsOpened = $true
+                break
+              }
+            }
+            if (-not $settingsOpened) { throw "Component dialog did not launch a reporting Settings plugin" }
+            Write-Host "Component dialog launched Settings with $($settingsPlugin.memory.native_ui_bytes) retained UI bytes."
+            Stop-Process -Id $settingsProcess.ProcessId -Force
+            $settingsRetired = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $settingsPlugin = $snapshot.plugins | Where-Object { $_.id -eq "org.nickel.settings" } | Select-Object -First 1
+              if ($settingsPlugin -and $null -eq $settingsPlugin.memory.native_ui_bytes) {
+                $settingsRetired = $true
+                break
+              }
+            }
+            if (-not $settingsRetired) { throw "Settings plugin memory did not expire after its process closed" }
             if (-not [NickelWindowProbe]::CloseVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window")) {
               throw "Could not send WM_CLOSE to the installed component window"
             }
@@ -373,6 +424,9 @@ jobs:
             if (-not $closed) { throw "Installed component window did not retire after WM_CLOSE" }
           } finally {
             if ($dev) {
+              if ($shell) {
+                Get-CimInstance Win32_Process -Filter "ParentProcessId=$($shell.ProcessId)" | Where-Object { $_.Name -eq "nickel-settings.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+              }
               Get-CimInstance Win32_Process -Filter "ParentProcessId=$($dev.Id)" | Where-Object { $_.Name -eq "nickel.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
               $dev.Refresh()
               if (-not $dev.HasExited) { Stop-Process -Id $dev.Id -Force }
@@ -437,7 +491,7 @@ jobs:
               }
             }
             if (-not $closed) { throw "Closing details did not preserve home and reduce plugin memory" }
-            if (-not [NickelWindowProbe]::ClickVisibleWindowBottom([uint32]$shell.ProcessId, "Nickel Plugin Window")) {
+            if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Window", 200, 120)) {
               throw "Could not click the home window's reopen button"
             }
             $reopened = $false
