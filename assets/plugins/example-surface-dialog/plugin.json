@@ -7,7 +7,7 @@
   "entry": "main.js",
   "surfaces": [
     {"id": "home", "kind": "window", "width": 420, "height": 280},
-    {"id": "confirm", "kind": "dialog", "width": 360, "height": 180}
+    {"id": "confirm", "kind": "dialog", "width": 360, "height": 180, "owner": "home"}
   ],
   "capabilities": ["settings-show"]
 }

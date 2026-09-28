@@ -3732,6 +3732,19 @@ impl LiveShell {
         }) {
             return Ok(false);
         }
+        let owned_dialogs = self
+            .plugin_panels()
+            .into_iter()
+            .filter(|(surface, placement)| {
+                surface.plugin_id == key.plugin_id
+                    && placement.kind == nickel_core::plugins::PluginSurfaceKind::Dialog
+                    && placement.owner.as_deref() == Some(key.surface_id.as_str())
+            })
+            .map(|(surface, _)| surface)
+            .collect::<Vec<_>>();
+        for dialog in owned_dialogs {
+            self.close_plugin_window(&dialog)?;
+        }
         // A dialog depends on an ordinary surface to open it. Retire the
         // package when closing this surface would leave only dialogs alive.
         if !self.plugin_panels().iter().any(|(surface, placement)| {
@@ -3808,6 +3821,15 @@ impl LiveShell {
         };
         if self.plugin_panel_matches(&key) {
             return Ok(false);
+        }
+        if let Some(owner) = &surface.owner {
+            let owner_key = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: id.to_owned(),
+                surface_id: owner.clone(),
+            };
+            if !self.plugin_panel_matches(&owner_key) {
+                return Err(format!("dialog owner {owner:?} is closed"));
+            }
         }
         let package = descriptor.load()?;
         let settings = self
@@ -3905,7 +3927,15 @@ impl LiveShell {
                         .manifest
                         .surfaces
                         .iter()
-                        .map(|surface| format!("{}: {}", surface.id, surface.kind.as_str()))
+                        .map(|surface| match &surface.owner {
+                            Some(owner) => format!(
+                                "{}: {} (owned by {})",
+                                surface.id,
+                                surface.kind.as_str(),
+                                owner
+                            ),
+                            None => format!("{}: {}", surface.id, surface.kind.as_str()),
+                        })
                         .collect(),
                     composition: entry
                         .manifest

@@ -77,6 +77,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel-session-protocol
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel-core dialog_owner_must_be_a_window_on_the_same_output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel-settings --bin nickel-settings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --test plugin_panel
@@ -116,6 +118,8 @@ jobs:
           cargo test --locked -p nickel --lib live_shell::tests::disabling_plugin_retires_host_and_clears_reported_memory
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::closing_dialog_owner_retires_its_dialog_but_preserves_sibling_window
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --bin nickel-plugin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -217,6 +221,7 @@ jobs:
               [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr handle);
               [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
               [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
+              [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr handle, uint command);
               [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
               [DllImport("user32.dll")] private static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extraInfo);
               [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
@@ -264,6 +269,21 @@ jobs:
                       return true;
                   }, IntPtr.Zero);
                   return count;
+              }
+              public static bool IsOwnedByVisibleWindow(uint processId, string dialogTitle, string ownerTitle) {
+                  IntPtr owner = IntPtr.Zero;
+                  IntPtr dialog = IntPtr.Zero;
+                  EnumWindows((handle, context) => {
+                      uint process;
+                      GetWindowThreadProcessId(handle, out process);
+                      if (process != processId || !IsWindowVisible(handle)) return true;
+                      var title = new StringBuilder(256);
+                      GetWindowText(handle, title, title.Capacity);
+                      if (title.ToString() == ownerTitle) owner = handle;
+                      if (title.ToString() == dialogTitle) dialog = handle;
+                      return true;
+                  }, IntPtr.Zero);
+                  return owner != IntPtr.Zero && dialog != IntPtr.Zero && GetWindow(dialog, 4) == owner;
               }
               public static bool CloseWidestVisibleWindow(uint processId, string expectedTitle) {
                   IntPtr widest = IntPtr.Zero;
@@ -495,6 +515,9 @@ jobs:
               }
             }
             if (-not $opened) { throw "Declared plugin dialog did not appear with increased retained UI memory" }
+            if (-not [NickelWindowProbe]::IsOwnedByVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Dialog", "Nickel Plugin Window")) {
+              throw "Declared dialog is not owned by its home window"
+            }
             if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Dialog", 180, 119)) {
               throw "Could not click the dialog's Dismiss button"
             }

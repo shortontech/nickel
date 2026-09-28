@@ -920,11 +920,15 @@ impl WinitShell {
             }
         }
         if cfg!(target_os = "windows") {
-            let extra = self
+            let mut extra = self
                 .extra_plugin_panels
                 .iter()
                 .map(|(key, surface)| (key.clone(), surface.clone()))
                 .collect::<Vec<_>>();
+            // A dialog with an owner needs its ordinary window created first.
+            extra.sort_by_key(|(_, surface)| {
+                surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog
+            });
             for (key, panel) in extra {
                 for (display_index, geometry) in displays.iter().copied().enumerate() {
                     let output_name = &output_names[display_index];
@@ -2398,6 +2402,34 @@ impl WinitShell {
         } else {
             attributes
         };
+        #[cfg(target_os = "windows")]
+        let attributes = if panel.kind == nickel_core::plugins::PluginSurfaceKind::Dialog {
+            if let Some(owner_id) = &panel.owner {
+                use raw_window_handle::RawWindowHandle;
+                use winit::platform::windows::WindowAttributesExtWindows;
+                let owner = self.surfaces.iter().find(|surface| {
+                    surface.display_connected
+                        && surface.output_name == output_name
+                        && surface.plugin.as_ref().is_some_and(|key| {
+                            plugin_key.as_ref().is_some_and(|dialog_key| {
+                                key.plugin_id == dialog_key.plugin_id && key.surface_id == *owner_id
+                            })
+                        })
+                });
+                let hwnd = owner
+                    .and_then(|surface| surface.window.window_handle().ok())
+                    .and_then(|handle| match handle.as_raw() {
+                        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| format!("plugin dialog owner {owner_id:?} is unavailable"))?;
+                attributes.with_owner_window(hwnd)
+            } else {
+                attributes
+            }
+        } else {
+            attributes
+        };
         #[cfg(target_os = "linux")]
         let attributes = attributes.with_name(application_id.clone(), application_id.clone());
         #[allow(deprecated)]
@@ -3243,6 +3275,7 @@ mod tests {
                 height: 96,
                 bottom_offset: 12,
                 output: nickel_core::plugins::PluginOutputScope::Primary,
+                owner: None,
             };
             let (_, x, y, width, height, hidden) = super::surface_geometry_for_panel(
                 SurfaceRole::Panel,
@@ -3284,6 +3317,7 @@ mod tests {
             height: 340,
             bottom_offset: 0,
             output: nickel_core::plugins::PluginOutputScope::Primary,
+            owner: None,
         };
         let (title, x, y, width, height, hidden) = super::surface_geometry_for_panel(
             SurfaceRole::Panel,

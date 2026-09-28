@@ -664,6 +664,18 @@ fn declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin() {
         .insert(id.clone(), descriptor);
 
     shell.set_plugin_enabled(&id, true).unwrap();
+    let status = shell.plugin_status_snapshot();
+    let reviewed = status
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .unwrap();
+    assert!(
+        reviewed
+            .surfaces
+            .iter()
+            .any(|surface| surface == "confirm: dialog (owned by home)")
+    );
     let home = shell.plugin_panels();
     assert_eq!(home.len(), 1);
     assert_eq!(home[0].0.surface_id, "home");
@@ -742,6 +754,62 @@ fn declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin() {
     assert!(!status.desired_enabled);
     assert_eq!(status.health, nickel_core::plugins::PluginHealth::Disabled);
     assert_eq!(status.memory.native_ui_bytes, None);
+}
+
+#[test]
+fn closing_dialog_owner_retires_its_dialog_but_preserves_sibling_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../assets/plugins/example-surface-dialog/plugin.json"
+    ))
+    .unwrap();
+    manifest["surfaces"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "spare",
+            "kind": "window",
+            "width": 420,
+            "height": 280
+        }));
+    std::fs::write(
+        directory.path().join("plugin.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("main.js"),
+        include_str!("../../../../assets/plugins/example-surface-dialog/main.js"),
+    )
+    .unwrap();
+    let package = nickel_core::plugins::PluginPackage::load(directory.path()).unwrap();
+    let id = package.manifest.id.clone();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory: directory.path().to_path_buf(),
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let mut shell = LiveShell::new().unwrap();
+    shell.plugin_registry.register(package.manifest).unwrap();
+    shell
+        .external_plugin_packages
+        .insert(id.clone(), descriptor);
+    shell.set_plugin_enabled(&id, true).unwrap();
+    assert!(shell.show_plugin_window(&id, "confirm").unwrap());
+    assert_eq!(shell.plugin_panels().len(), 3);
+    let home = shell
+        .plugin_panels()
+        .into_iter()
+        .find(|(key, _)| key.surface_id == "home")
+        .unwrap();
+    assert!(shell.close_plugin_window(&home.0).unwrap());
+    let remaining = shell.plugin_panels();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].0.surface_id, "spare");
+    assert!(shell.show_plugin_window(&id, "confirm").is_err());
+    let status = shell.plugin_registry.get(&id).unwrap();
+    assert!(status.desired_enabled);
+    assert_eq!(status.health, nickel_core::plugins::PluginHealth::Running);
 }
 
 #[test]

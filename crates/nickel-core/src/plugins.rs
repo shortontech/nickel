@@ -592,6 +592,8 @@ pub struct PluginSurface {
     pub bottom_offset: u32,
     #[serde(default)]
     pub output: PluginOutputScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// Stable manifest identity for a plugin-owned surface. The host pairs this
@@ -791,6 +793,26 @@ impl PluginManifest {
                     "surface {:?} cannot use a bottom offset",
                     surface.id
                 ));
+            }
+        }
+        for surface in &self.surfaces {
+            if let Some(owner) = &surface.owner {
+                if surface.kind != PluginSurfaceKind::Dialog {
+                    return Err(format!(
+                        "only a dialog can declare an owner: {:?}",
+                        surface.id
+                    ));
+                }
+                if !self.surfaces.iter().any(|candidate| {
+                    candidate.id == *owner
+                        && candidate.kind == PluginSurfaceKind::Window
+                        && candidate.output == surface.output
+                }) {
+                    return Err(format!(
+                        "dialog {:?} must name a window on the same output as its owner",
+                        surface.id
+                    ));
+                }
             }
         }
         let mut capabilities = HashSet::new();
@@ -1251,6 +1273,28 @@ mod tests {
             PluginManifest::from_json(&VALID.replace("\"kind\":\"panel\"", "\"kind\":\"window\""))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn dialog_owner_must_be_a_window_on_the_same_output() {
+        let mut manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-surface-dialog/plugin.json"
+        ))
+        .unwrap();
+        assert_eq!(manifest.surfaces[1].owner.as_deref(), Some("home"));
+        manifest.surfaces[1].owner = Some("missing".into());
+        assert!(
+            manifest
+                .validate()
+                .unwrap_err()
+                .contains("must name a window")
+        );
+        manifest.surfaces[1].owner = Some("home".into());
+        manifest.surfaces[0].output = PluginOutputScope::All;
+        assert!(manifest.validate().unwrap_err().contains("same output"));
+        manifest.surfaces[0].output = PluginOutputScope::Primary;
+        manifest.surfaces[0].owner = Some("home".into());
+        assert!(manifest.validate().unwrap_err().contains("only a dialog"));
     }
 
     #[test]
