@@ -1,7 +1,7 @@
 //! The bounded, path-free boundary for a JavaScript project menu.
 
 use nickel_codex::Project;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{ChatState, ConnectionStatus};
 
@@ -9,7 +9,7 @@ const MAX_PROJECTS: usize = 100;
 const MAX_PROJECT_ID_BYTES: usize = 256;
 const MAX_PROJECT_NAME_CHARS: usize = 160;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectMenuRevision {
     pub connection: u64,

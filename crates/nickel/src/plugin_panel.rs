@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::control_view::ControlAction;
 use crate::platform::SessionAction;
-use nickel_codex_ui::ProjectMenuProjection;
+use nickel_codex_ui::{ProjectMenuProjection, ProjectMenuRevision};
 use nickel_core::display_projection::ProjectionMode;
 
 pub use crate::launcher::LauncherView;
@@ -2041,6 +2041,12 @@ pub enum PluginEffect {
     ToggleLauncher,
     ToggleOnScreenKeyboard,
     ToggleCodexProjects,
+    CodexProjectRefresh,
+    CodexProjectClose,
+    CodexProjectOpen {
+        token: String,
+        revision: ProjectMenuRevision,
+    },
     SetLauncherQuery(String),
     SetLauncherPage {
         dashboard: bool,
@@ -3532,6 +3538,10 @@ impl nickel_ui::Application for PluginPanelApplication {
             self.effects.push(PluginEffect::ToggleControlCenter);
             return nickel_ui::ShortcutOutcome::handled(true);
         }
+        if self.manifest.id == codex_projects_manifest().id && shortcut == Shortcut::Escape {
+            self.effects.push(PluginEffect::CodexProjectClose);
+            return nickel_ui::ShortcutOutcome::handled(true);
+        }
         let Some(shortcuts) = &self.launcher_shortcuts else {
             return nickel_ui::ShortcutOutcome::from_changed(false);
         };
@@ -4288,6 +4298,68 @@ impl nickel_ui::Application for PluginPanelApplication {
                                     return;
                                 }
                             }
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("codex-project-refresh")
+                            && self.manifest.id == codex_projects_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ProjectsRead) =>
+                        {
+                            approved.push(PluginEffect::CodexProjectRefresh);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("codex-project-close")
+                            && self.manifest.id == codex_projects_manifest().id =>
+                        {
+                            approved.push(PluginEffect::CodexProjectClose);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("codex-project-open")
+                            && self.manifest.id == codex_projects_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ProjectsOpen) =>
+                        {
+                            let token = effect.get("id").and_then(Value::as_str);
+                            let revision = effect.get("revision").cloned().and_then(|value| {
+                                serde_json::from_value::<ProjectMenuRevision>(value).ok()
+                            });
+                            let projected = self
+                                .projection_data
+                                .as_deref()
+                                .and_then(|data| serde_json::from_str::<Value>(data).ok());
+                            let valid = token.is_some_and(|token| {
+                                token.len() <= 3
+                                    && token.parse::<usize>().ok().is_some_and(|index| index < 100)
+                                    && projected.as_ref().is_some_and(|data| {
+                                        data.get("status").and_then(Value::as_str) == Some("ready")
+                                            && data.get("revision").cloned().and_then(|value| {
+                                                serde_json::from_value::<ProjectMenuRevision>(value)
+                                                    .ok()
+                                            }) == revision
+                                            && data
+                                                .get("projects")
+                                                .and_then(Value::as_array)
+                                                .is_some_and(|projects| {
+                                                    projects.iter().any(|project| {
+                                                        project.get("id").and_then(Value::as_str)
+                                                            == Some(token)
+                                                    })
+                                                })
+                                    })
+                            });
+                            if !valid {
+                                self.last_error =
+                                    Some("Codex project request is stale or invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::CodexProjectOpen {
+                                token: token.unwrap().to_owned(),
+                                revision: revision.unwrap(),
+                            });
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
@@ -5993,6 +6065,39 @@ mod tests {
         disconnected.projects.clear();
         assert!(panel.sync_codex_projects_projection(&disconnected).unwrap());
         assert!(!format!("{:?}", panel.node).contains("Example project"));
+
+        let mut host = nickel_ui::UiHost::new(
+            PluginPanelApplication::codex_projects_with_projection(&projection).unwrap(),
+            520,
+            680,
+        );
+        let open = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Example project".into(),
+            })
+            .unwrap();
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(open.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::CodexProjectOpen {
+                token: "0".into(),
+                revision: projection.revision,
+            }]
+        );
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Shortcut(Shortcut::Escape)],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::CodexProjectClose]
+        );
     }
 
     #[test]

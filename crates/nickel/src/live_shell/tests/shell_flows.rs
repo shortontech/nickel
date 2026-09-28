@@ -508,6 +508,56 @@
     }
 
     #[test]
+    fn codex_project_menu_uses_a_plugin_surface_and_retires_on_disable() {
+        let mut shell = LiveShell::new().unwrap();
+        let id = &crate::plugin_panel::codex_projects_manifest().id;
+        let key = crate::plugin_panel::codex_projects_surface_key();
+        shell.launcher.set_codex_available(true);
+        assert!(shell.plugin_surface_matches(&key));
+        assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
+        shell.apply_panel_action(super::TaskbarAction::Codex);
+        assert!(shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
+        assert!(!shell.native_surface_visible(SurfaceRole::CodexProjectMenu, None));
+        let mut state = nickel_codex_ui::ChatState::default();
+        state.status = nickel_codex_ui::ConnectionStatus::Ready;
+        state.account.authenticated = true;
+        state.projects.push(nickel_codex::Project {
+            id: "private-backend-id".into(),
+            name: "Example project".into(),
+            roots: vec![std::path::PathBuf::from("/private/work")],
+        });
+        let projection = nickel_codex_ui::ProjectMenuProjection::from_state(&state);
+        assert!(shell.apply_codex_menu_projection(&projection));
+        let scene = shell
+            .plugin_surface_scene_for_output(&key, Some("primary"), 520, 680)
+            .unwrap();
+        assert!(format!("{scene:?}").contains("Example project"));
+        assert!(shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::CodexProjectOpen {
+                token: "0".into(),
+                revision: projection.revision,
+            }
+        ]));
+        assert_eq!(
+            shell.take_codex_menu_requests(),
+            vec![super::CodexMenuRequest::Open {
+                token: "0".into(),
+                revision: projection.revision,
+            }]
+        );
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(!shell.plugin_surface_matches(&key));
+        assert!(!shell.codex_project_menu_visible);
+        assert_eq!(
+            shell.plugin_registry().get(id).unwrap().memory,
+            nickel_core::plugins::PluginMemory::default()
+        );
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.plugin_surface_matches(&key));
+        assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
+    }
+
+    #[test]
     fn display_projection_recovery_survives_control_plugin_disablement() {
         let mut shell = LiveShell::new().unwrap();
         shell.control_host.application_mut().show_projection_chooser();

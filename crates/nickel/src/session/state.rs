@@ -5435,7 +5435,9 @@ impl NickelSession {
             );
             if let Some(key) = surface.plugin.as_ref() {
                 adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
-                if *key == crate::plugin_panel::control_center_surface_key() {
+                if *key == crate::plugin_panel::control_center_surface_key()
+                    || *key == crate::plugin_panel::codex_projects_surface_key()
+                {
                     let preferred = match shell.panel_edge() {
                         crate::winit_shell::PanelEdge::Top => {
                             nickel_session_protocol::AnchorSide::Below
@@ -5444,8 +5446,11 @@ impl NickelSession {
                             nickel_session_protocol::AnchorSide::Above
                         }
                     };
-                    if let Some((nickel_session_protocol::ShellRole::ControlCenter, anchor)) =
-                        shell.popover_anchor(preferred)
+                    if let Some((role, anchor)) = shell.popover_anchor(preferred)
+                        && ((role == nickel_session_protocol::ShellRole::ControlCenter
+                            && *key == crate::plugin_panel::control_center_surface_key())
+                            || (role == nickel_session_protocol::ShellRole::ProjectMenu
+                                && *key == crate::plugin_panel::codex_projects_surface_key()))
                     {
                         apply_internal_anchored_plugin_surface_placement(
                             &mut placement,
@@ -5520,12 +5525,14 @@ impl NickelSession {
             let actions = shell.drain_file_actions();
             let shell_changed = !changed.is_empty();
             let codex_menu_visible = shell.codex_project_menu_visible();
+            let codex_menu_plugin_active = shell.codex_menu_plugin_active();
             let codex_menu_anchor = shell
                 .popover_anchor(nickel_session_protocol::AnchorSide::Above)
                 .and_then(|(role, anchor)| {
                     (role == nickel_session_protocol::ShellRole::ProjectMenu).then_some(anchor)
                 });
             let requested_codex_project = shell.take_requested_codex_project();
+            let codex_menu_requests = shell.take_codex_menu_requests();
             let _ = shell;
             let outputs = self.internal_outputs();
             let menu_output = codex_menu_anchor
@@ -5546,7 +5553,7 @@ impl NickelSession {
             for action in actions {
                 self.apply_internal_file_action(action);
             }
-            if codex_menu_visible {
+            if codex_menu_visible && !codex_menu_plugin_active {
                 let placement = internal_codex_project_menu_placement(
                     codex_menu_anchor.as_ref(),
                     &outputs,
@@ -5576,6 +5583,43 @@ impl NickelSession {
                     }
                     Err(error) => {
                         tracing::warn!(%error, %project_id, "could not open internal Codex project");
+                    }
+                }
+            }
+            for request in codex_menu_requests {
+                match request {
+                    crate::live_shell::CodexMenuRequest::Refresh => {
+                        if let Some(host) = self.internal_codex.as_ref() {
+                            host.refresh_project_menu(&mut self.internal_ui);
+                        }
+                    }
+                    crate::live_shell::CodexMenuRequest::Open { token, revision } => {
+                        let Some(mut host) = self.internal_codex.take() else {
+                            continue;
+                        };
+                        let placement = internal_codex_chat_placement(
+                            &outputs,
+                            menu_output.as_deref().or(fallback.as_deref()),
+                        );
+                        let opened = host.open_project_by_token(
+                            &mut self.internal_ui,
+                            placement,
+                            &token,
+                            revision,
+                        );
+                        self.internal_codex = Some(host);
+                        match opened {
+                            Ok(surface) => {
+                                if let Some(shell) = self.internal_shell.as_mut() {
+                                    shell.close_codex_project_menu();
+                                }
+                                self.register_internal_application(surface);
+                                self.sync_internal_shell_changes(None);
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "Codex menu plugin open request rejected");
+                            }
+                        }
                     }
                 }
             }

@@ -9,6 +9,7 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/nickel/**"
+      - "crates/nickel-codex-ui/**"
       - "crates/nickel-core/**"
       - "crates/nickel-plugin-runtime/**"
       - "crates/nickel-session-protocol/**"
@@ -22,6 +23,7 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/nickel/**"
+      - "crates/nickel-codex-ui/**"
       - "crates/nickel-core/**"
       - "crates/nickel-plugin-runtime/**"
       - "crates/nickel-session-protocol/**"
@@ -162,6 +164,10 @@ jobs:
           cargo test --locked -p nickel --lib live_shell::tests::control_center_plugin_renders_and_dispatches_typed_desktop_action
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib control_center_plugin_can_be_disabled_and_reenabled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib bundled_codex_project_menu_renders_only_the_bounded_projection
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib codex_project_menu_uses_a_plugin_surface_and_retires_on_disable
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib display_projection_recovery_survives_control_plugin_disablement
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

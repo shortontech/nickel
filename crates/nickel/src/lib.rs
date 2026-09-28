@@ -49,7 +49,8 @@ mod windows_shell_diagnostics;
 mod windows_virtual_workspaces;
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{
-    ChatApplication, ConnectionStatus, ShellRequest, shell_application_with_backend,
+    ChatApplication, ConnectionStatus, ProjectMenuProjection, ProjectMenuRevision, ShellRequest,
+    shell_application_with_backend,
 };
 use nickel_core::optional_features::{
     CodexAvailabilityProjection, CodexSource, FeatureEffectiveState, FeatureHealth,
@@ -1136,6 +1137,36 @@ impl CodexSurfaces {
         result
     }
 
+    fn refresh_project_menu(&mut self) -> bool {
+        let Some(host) = self.project_menu_host.as_mut() else {
+            return false;
+        };
+        host.application_mut()
+            .update(nickel_codex_ui::ChatMessage::Refresh);
+        true
+    }
+
+    fn open_project_by_token(
+        &mut self,
+        shell: &mut WinitShell,
+        token: &str,
+        revision: ProjectMenuRevision,
+    ) -> Result<(), String> {
+        let state = &self
+            .project_menu_host
+            .as_mut()
+            .ok_or_else(|| "Codex project data is still loading".to_owned())?
+            .application_mut()
+            .state;
+        let projection = ProjectMenuProjection::from_state(state);
+        let project_id = projection
+            .resolve_open(state, revision, token)
+            .ok_or_else(|| "Codex project menu request is stale".to_owned())?
+            .id
+            .clone();
+        self.open_project_by_id(shell, &project_id)
+    }
+
     fn open_project_by_id(
         &mut self,
         shell: &mut WinitShell,
@@ -1595,6 +1626,21 @@ fn sync_panel_popover_anchor(shell: &WinitShell, state: &LiveShell) {
         );
         return;
     }
+    if role == nickel_session_protocol::ShellRole::ProjectMenu
+        && state.native_surface_visible(
+            SurfaceRole::Panel,
+            Some(&plugin_panel::codex_projects_surface_key()),
+        )
+    {
+        let _ = state.dispatch_session_command(
+            "place-anchored-codex-plugin-popover",
+            platform::ShellCommand::ShowAnchoredPluginSurface {
+                key: plugin_panel::codex_projects_surface_key(),
+                anchor,
+            },
+        );
+        return;
+    }
     let _ = state.dispatch_session_command(
         "place-anchored-shell-popover",
         platform::ShellCommand::ShowAnchoredShellRole { role, anchor },
@@ -1673,6 +1719,13 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
     ) {
         shell.raise_plugin_surface(&plugin_panel::control_center_surface_key());
     }
+    #[cfg(target_os = "windows")]
+    if state.native_surface_visible(
+        SurfaceRole::Panel,
+        Some(&plugin_panel::codex_projects_surface_key()),
+    ) {
+        shell.raise_plugin_surface(&plugin_panel::codex_projects_surface_key());
+    }
 }
 
 fn handle_codex_event(
@@ -1724,7 +1777,9 @@ fn handle_codex_event(
         return Ok(true);
     }
     if matches!(event, ShellEvent::Shown(_)) {
-        if surface == codex.project_menu && !state.surface_visible(SurfaceRole::CodexProjectMenu) {
+        if surface == codex.project_menu
+            && !state.native_surface_visible(SurfaceRole::CodexProjectMenu, None)
+        {
             set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
             return Ok(true);
         }
@@ -1752,7 +1807,9 @@ fn handle_codex_event(
         event,
         ShellEvent::LogicalResize { .. } | ShellEvent::PixelResize { .. }
     ) {
-        if surface == codex.project_menu && !state.surface_visible(SurfaceRole::CodexProjectMenu) {
+        if surface == codex.project_menu
+            && !state.native_surface_visible(SurfaceRole::CodexProjectMenu, None)
+        {
             return Ok(true);
         }
         let (width, height) = shell
@@ -1959,7 +2016,7 @@ fn handle_shell_input(
                 render_role(shell, state, SurfaceRole::WindowContextMenu)?;
                 if !taskbar_motion {
                     focus_visible_overlay(shell, state);
-                    if state.surface_visible(SurfaceRole::CodexProjectMenu) {
+                    if state.native_surface_visible(SurfaceRole::CodexProjectMenu, None) {
                         codex
                             .present(shell, codex.project_menu)
                             .map_err(|error| format!("{error:?}"))?;
@@ -2755,7 +2812,7 @@ pub fn run() -> Result<(), String> {
         project_menu_changed_since_refresh |= project_menu_changed;
         for surface in due_codex_redraw {
             if surface == codex.project_menu
-                && !state.surface_visible(SurfaceRole::CodexProjectMenu)
+                && !state.native_surface_visible(SurfaceRole::CodexProjectMenu, None)
             {
                 continue;
             }
@@ -3204,6 +3261,21 @@ pub fn run() -> Result<(), String> {
             codex.open_project_by_id(&mut shell, &project_id)?;
             sync_visibility(&mut shell, &state);
         }
+        for request in state.take_codex_menu_requests() {
+            match request {
+                live_shell::CodexMenuRequest::Refresh => {
+                    codex.refresh_project_menu();
+                }
+                live_shell::CodexMenuRequest::Open { token, revision } => {
+                    if let Err(error) = codex.open_project_by_token(&mut shell, &token, revision) {
+                        tracing::warn!(%error, "Codex menu plugin open request rejected");
+                    } else {
+                        state.hide_overlay(SurfaceRole::CodexProjectMenu);
+                        sync_visibility(&mut shell, &state);
+                    }
+                }
+            }
+        }
         let deadline_outcome = state.poll_deadlines(Instant::now());
         diagnostic_overdue_after_poll = state
             .host_deadline_sources()
@@ -3264,6 +3336,8 @@ pub fn run() -> Result<(), String> {
                     snapshot.account.authenticated,
                     (!snapshot.provenance.is_empty()).then(|| snapshot.provenance.clone()),
                 ));
+                let menu_changed =
+                    state.apply_codex_menu_projection(&ProjectMenuProjection::from_state(snapshot));
                 let projects = match snapshot.status {
                     ConnectionStatus::Loading => DashboardSection::Loading,
                     ConnectionStatus::Ready if !snapshot.account.authenticated => {
@@ -3314,7 +3388,7 @@ pub fn run() -> Result<(), String> {
                 {
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                 }
-                if availability_changed {
+                if availability_changed || menu_changed {
                     sync_visibility(&mut shell, &state);
                     render_all(&mut shell, &mut state)?;
                 }
@@ -3323,7 +3397,7 @@ pub fn run() -> Result<(), String> {
             let codex_changed = !codex_redraw.is_empty();
             for surface in codex_redraw {
                 if surface == codex.project_menu
-                    && !state.surface_visible(SurfaceRole::CodexProjectMenu)
+                    && !state.native_surface_visible(SurfaceRole::CodexProjectMenu, None)
                 {
                     continue;
                 }
