@@ -4732,6 +4732,49 @@ mod tests {
     }
 
     #[test]
+    fn external_dialog_example_requests_settings_only_with_its_grant() {
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-dialog"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        for granted in [true, false] {
+            let mut package = package.clone();
+            if !granted {
+                package.manifest.capabilities.clear();
+            }
+            let mut host = nickel_ui::UiHost::new(
+                PluginPanelApplication::from_package(&package).unwrap(),
+                320,
+                120,
+            );
+            for name in ["Open a dialog", "Open Settings"] {
+                let button = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: nickel_ui::SemanticRole::Button,
+                        name: name.into(),
+                    })
+                    .unwrap();
+                host.step(nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(
+                        nickel_ui::UiEvent::AccessibilityActivate(button.id),
+                    )],
+                    ..Default::default()
+                });
+            }
+            if granted {
+                assert_eq!(
+                    host.application_mut().take_effects(),
+                    vec![PluginEffect::ShowSettings]
+                );
+            } else {
+                assert!(host.application_mut().take_effects().is_empty());
+                assert!(host.application_mut().last_error().is_some());
+            }
+        }
+    }
+
+    #[test]
     fn host_dismissal_calls_dialog_on_close_and_allows_reopen() {
         let package = PluginPackage {
             manifest: manifest().clone(),
