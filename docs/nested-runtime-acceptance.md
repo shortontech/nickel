@@ -15,7 +15,7 @@ compositor-owned shell readiness. It asserts that no
 shell PID is expected or authenticated and no `--role shell` child exists,
 checks the internal surface inventory and live health of eight bundled UI
 plugins, measures the launcher's rendered native UI memory, then disables and
-re-enables it while checking memory cleanup and the native fallback. It injects
+re-enables it while checking memory cleanup and surface retirement. It injects
 Meta through the nested session's test-control socket and verifies that the
 internal launcher becomes visible and closes again. It then samples compositor
 CPU ticks across a two-second idle interval. After the idle sample it opens
@@ -72,7 +72,7 @@ to catch an unbounded redraw loop without imposing a benchmark-grade threshold.
 On the Wayland host display, the Mesa software command above passed after the
 shared JSX evaluator extraction. The nested compositor ran bundled plugin UI
 and an installed panel, changed a live plugin setting, measured plugin UI
-memory, disabled and re-enabled the launcher with its native fallback, accepted
+memory, disabled and re-enabled the launcher, accepted
 Meta input through the private test-control socket, and shut down cleanly. The
 two-second idle sample used 14 compositor CPU ticks. The harness did not create
 a uinput controller or send a Guide button to the host.
@@ -89,6 +89,10 @@ It disables Taskbar, verifies the bar surface retires and its native UI memory
 clears, then re-enables it before exercising installed plugin panels.
 It also opens Control Center with Super+A, disables it while visible, checks
 that Super+A cannot reopen a native fallback, then re-enables it.
+It opens notification history with Super+N, disables Notifications while visible,
+checks that Super+N cannot reopen it, then re-enables the plugin and opens it
+again. The shortcut keys are sent to the private nested session through its
+test-control socket, including the Super key for Launcher; no Guide input is sent.
 
 The X11 host command reached the nested test-control listener but the host X
 server returned an XIO error. Readiness then failed with `WouldBlock`, so this

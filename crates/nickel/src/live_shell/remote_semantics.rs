@@ -213,10 +213,12 @@ impl LiveShell {
             SurfaceRole::Notification => {
                 if let Some(host) = self.plugin_notification_host.as_ref() {
                     Ok(observe_only(plugin_projection(host, |_, _| false)?))
-                } else {
+                } else if self.trusted_notification_visible() {
                     Ok(observe_only(project(&self.notification_host, |_| {
                         RemoteActionDisposition::Unavailable
                     })?))
+                } else {
+                    Err("Notification plugin is unavailable".into())
                 }
             }
             SurfaceRole::VolumeOsd => {

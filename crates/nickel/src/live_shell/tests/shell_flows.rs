@@ -62,8 +62,20 @@
         assert!(shell.plugin_notification_host.is_some());
         shell.scene(super::SurfaceRole::Notification, 420, 180);
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
+        shell.notification_feed.notify_internal(NotificationRequest {
+            app_name: "Test".into(),
+            summary: "Ready".into(),
+            body: "Ordinary notification".into(),
+            actions: vec![],
+            expire_timeout_ms: 0,
+        });
+        shell.notification = shell.notification_feed.snapshot();
+        assert!(shell.surface_visible(SurfaceRole::Notification));
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.plugin_notification_host.is_none());
+        assert!(!shell.surface_visible(SurfaceRole::Notification));
+        assert!(shell.scene(SurfaceRole::Notification, 420, 180).is_empty());
+        assert!(!shell.notification_click(20.0, 20.0, 420, 180));
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
@@ -577,7 +589,7 @@
     use crate::{
         launcher_view::{LauncherAction, LauncherApplication},
         model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
-        notification::{NotificationAction, NotificationRequest, NotificationStore},
+        notification::{NotificationAction, NotificationRequest},
         window_preview::{MenuAction, build_preview_frame},
         winit_shell::SurfaceRole,
     };
@@ -2174,126 +2186,6 @@
                 .controller_target,
             first_target
         );
-    }
-
-    #[test]
-    fn notification_host_effects_stay_at_the_transport_boundary() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::notification_manifest().id, false)
-            .unwrap();
-        shell.notification_feed.notify_internal(NotificationRequest {
-            app_name: "Test".into(),
-            summary: "Ready".into(),
-            body: "Choose".into(),
-            actions: vec![NotificationAction {
-                key: "open".into(),
-                label: "Open".into(),
-            }],
-            expire_timeout_ms: 0,
-        });
-        shell.notification = shell.notification_feed.snapshot();
-        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
-        let target = shell
-            .notification_host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open".into(),
-            })
-            .unwrap();
-        let point = Point {
-            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
-            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
-        };
-
-        assert!(shell.notification_click(point.x, point.y, 420, 180));
-        assert!(shell.notification.is_none());
-        assert!(
-            shell
-                .notification_host
-                .query(&nickel_ui::SemanticSelector::Role(
-                    nickel_ui::SemanticRole::Dialog
-                ))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn notification_controller_cancel_uses_the_typed_host_effect() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::notification_manifest().id, false)
-            .unwrap();
-        let mut store = NotificationStore::default();
-        store.notify(
-            0,
-            NotificationRequest {
-                app_name: "Test".into(),
-                summary: "Ready".into(),
-                body: "Choose".into(),
-                actions: vec![],
-                expire_timeout_ms: 0,
-            },
-            Instant::now(),
-        );
-        shell.notification = store.newest();
-        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
-
-        assert!(shell.notification_controller(ControllerAction::Cancel));
-        assert!(shell.notification.is_none());
-        assert!(
-            shell
-                .notification_host
-                .query(&nickel_ui::SemanticSelector::Role(
-                    nickel_ui::SemanticRole::Dialog
-                ))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn compositor_owned_notification_ui_uses_production_effect_reducer() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .set_plugin_enabled(&crate::plugin_panel::notification_manifest().id, false)
-            .unwrap();
-        shell.notification_feed.notify_internal(NotificationRequest {
-            app_name: "Test".into(),
-            summary: "Ready".into(),
-            body: "Choose".into(),
-            actions: vec![NotificationAction {
-                key: "open".into(),
-                label: "Open".into(),
-            }],
-            expire_timeout_ms: 0,
-        });
-        shell.notification = shell.notification_feed.snapshot();
-        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
-        let target = shell
-            .notification_host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open".into(),
-            })
-            .unwrap();
-        let point = Point {
-            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
-            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
-        };
-
-        assert!(shell.shell_role_host_ui(
-            SurfaceRole::Notification,
-            UiEvent::PointerPressed(point),
-            420,
-            180,
-        ));
-        assert!(shell.shell_role_host_ui(
-            SurfaceRole::Notification,
-            UiEvent::PointerReleased(point),
-            420,
-            180,
-        ));
-        assert!(shell.notification.is_none());
     }
 
     #[test]

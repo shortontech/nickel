@@ -1910,6 +1910,12 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
 
     let notification_id = notification.id;
     shell.notification = Some(notification);
+    assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Notification));
+    assert!(
+        !shell
+            .scene(crate::winit_shell::SurfaceRole::Notification, 420, 180)
+            .is_empty()
+    );
     shell.sync_notification_host(420, 180);
     let approve = shell
         .notification_host

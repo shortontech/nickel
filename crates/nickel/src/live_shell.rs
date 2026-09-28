@@ -2537,16 +2537,7 @@ impl LiveShell {
                 }),
             SurfaceRole::Notification => {
                 self.notification_host.remote_access_protected()
-                    || self.notification.as_ref().is_some_and(|notification| {
-                        self.remote_lease_notifications
-                            .contains_key(&notification.id)
-                            || self
-                                .codex_approval_notifications
-                                .contains_key(&notification.id)
-                    })
-                    || (self.notification_history_visible
-                        && (!self.remote_lease_notifications.is_empty()
-                            || !self.codex_approval_notifications.is_empty()))
+                    || self.trusted_notification_visible()
             }
             SurfaceRole::VolumeOsd => self
                 .plugin_volume_osd_host
@@ -2634,9 +2625,11 @@ impl LiveShell {
                     self.plugin_notification_host
                         .as_ref()
                         .map_or_else(Vec::new, |host| host.commands().to_vec())
-                } else {
+                } else if self.trusted_notification_visible() {
                     self.sync_notification_host(width, height);
                     self.notification_host.commands().to_vec()
+                } else {
+                    Vec::new()
                 }
             }
             SurfaceRole::VolumeOsd => self.volume_osd_scene(width, height),
@@ -3384,7 +3377,9 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible && self.control_surface_available(),
             SurfaceRole::Notification => {
-                self.notification.is_some() || self.notification_history_visible
+                (self.notification.is_some() || self.notification_history_visible)
+                    && (self.plugin_notification_host.is_some()
+                        || self.trusted_notification_visible())
             }
             SurfaceRole::VolumeOsd => {
                 self.volume_osd_until.is_some() && self.plugin_volume_osd_host.is_some()
@@ -4341,6 +4336,10 @@ impl LiveShell {
                 self.window_menu_plugin_host = None;
             } else if id == crate::plugin_panel::notification_manifest().id {
                 self.plugin_notification_host = None;
+                if !self.trusted_notification_visible() {
+                    self.notification = None;
+                    self.notification_history_visible = false;
+                }
             } else if id == crate::plugin_panel::volume_osd_manifest().id {
                 self.plugin_volume_osd_host = None;
                 self.volume_osd_until = None;
@@ -5057,7 +5056,7 @@ impl LiveShell {
     }
 
     pub fn notification_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
         if self.plugin_notification_host.is_some() {
@@ -5095,7 +5094,7 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
         if let Some(host) = self.plugin_notification_host.as_ref() {
@@ -5126,7 +5125,7 @@ impl LiveShell {
         height: u32,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
         if self.plugin_notification_host.is_some() {
@@ -5149,7 +5148,7 @@ impl LiveShell {
     }
 
     pub fn notification_key(&mut self, key: Option<KeyCode>) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
         let event = match key {
@@ -5182,7 +5181,7 @@ impl LiveShell {
     }
 
     pub fn notification_controller(&mut self, action: ControllerAction) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
         let event = if action == ControllerAction::Cancel {
@@ -6057,7 +6056,7 @@ impl LiveShell {
                 changed
             }
             SurfaceRole::Notification => {
-                if self.notification.is_none() && !self.notification_history_visible {
+                if !self.surface_visible(SurfaceRole::Notification) {
                     return false;
                 }
                 if self.plugin_notification_host.is_some() {
@@ -8222,6 +8221,9 @@ impl LiveShell {
                 true
             }
             platform::GlobalShortcut::ShowNotifications => {
+                if self.plugin_notification_host.is_none() && !self.trusted_notification_visible() {
+                    return false;
+                }
                 let history = self.notification_feed.history();
                 self.notification_host
                     .application_mut()
@@ -9697,6 +9699,18 @@ impl LiveShell {
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+    }
+
+    fn trusted_notification_visible(&self) -> bool {
+        self.notification.as_ref().is_some_and(|notification| {
+            self.remote_lease_notifications
+                .contains_key(&notification.id)
+                || self
+                    .codex_approval_notifications
+                    .contains_key(&notification.id)
+        }) || (self.notification_history_visible
+            && (!self.remote_lease_notifications.is_empty()
+                || !self.codex_approval_notifications.is_empty()))
     }
 
     fn notification_plugin_projection(&self) -> crate::plugin_panel::NotificationPluginProjection {
