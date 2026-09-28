@@ -13965,6 +13965,7 @@ impl NickelSession {
             let width = placement.width.min(output.size.w as u32) as i32;
             let height = placement.height.min(output.size.h as u32) as i32;
             let y = match placement.kind {
+                nickel_session_protocol::PluginSurfacePlacementKind::Desktop => output.loc.y,
                 nickel_session_protocol::PluginSurfacePlacementKind::Panel
                 | nickel_session_protocol::PluginSurfacePlacementKind::Dock => {
                     output.loc.y + (output.size.h - height - placement.bottom_offset as i32).max(0)

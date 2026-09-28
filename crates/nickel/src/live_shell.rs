@@ -3353,11 +3353,12 @@ impl LiveShell {
         &self.plugin_panel_surface
     }
 
-    pub(crate) fn plugin_panel_matches(
+    pub(crate) fn plugin_surface_matches(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> bool {
-        self.taskbar_surface_key().as_ref() == Some(key)
+        (self.plugin_desktop_host.is_some() && crate::plugin_panel::desktop_surface_key() == *key)
+            || self.taskbar_surface_key().as_ref() == Some(key)
             || (self.plugin_panel_host.is_some()
                 && self.plugin_panel_owner == key.plugin_id
                 && self.plugin_panel_surface.id == key.surface_id)
@@ -3751,7 +3752,7 @@ impl LiveShell {
             plugin_id: id.to_owned(),
             surface_id: surface_id.to_owned(),
         };
-        if self.plugin_panel_matches(&key) {
+        if self.plugin_surface_matches(&key) {
             return Ok(false);
         }
         if let Some(owner) = &surface.owner {
@@ -3759,7 +3760,7 @@ impl LiveShell {
                 plugin_id: id.to_owned(),
                 surface_id: owner.clone(),
             };
-            if !self.plugin_panel_matches(&owner_key) {
+            if !self.plugin_surface_matches(&owner_key) {
                 return Err(format!("dialog owner {owner:?} is closed"));
             }
         }

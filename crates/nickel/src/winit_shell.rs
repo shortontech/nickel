@@ -2475,8 +2475,15 @@ impl WinitShell {
     ) -> Result<(), String> {
         let panel = plugin
             .map(|(_, surface)| surface.clone())
-            .unwrap_or_else(|| self.plugin_panel_surface.clone());
+            .unwrap_or_else(|| {
+                if role == SurfaceRole::Desktop {
+                    crate::plugin_panel::desktop_surface().clone()
+                } else {
+                    self.plugin_panel_surface.clone()
+                }
+            });
         let plugin_key = match role {
+            SurfaceRole::Desktop => Some(crate::plugin_panel::desktop_surface_key()),
             SurfaceRole::Taskbar => Some(crate::plugin_panel::taskbar_surface_key()),
             SurfaceRole::Panel => Some(plugin.map_or_else(
                 || nickel_core::plugins::PluginSurfaceKey {
@@ -2532,16 +2539,16 @@ impl WinitShell {
                     application_id: application_id.clone(),
                     role: session_role,
                     output,
-                    plugin_surface: (role == SurfaceRole::Panel).then(|| {
-                        nickel_session_protocol::PluginSurfacePlacement {
+                    plugin_surface: matches!(role, SurfaceRole::Desktop | SurfaceRole::Panel).then(
+                        || nickel_session_protocol::PluginSurfacePlacement {
                             plugin_id: plugin_key.as_ref().unwrap().plugin_id.clone(),
                             surface_id: panel.id.clone(),
                             kind: protocol_plugin_surface_kind(panel.kind),
                             width: panel.width,
                             height: panel.height,
                             bottom_offset: panel.bottom_offset,
-                        }
-                    }),
+                        },
+                    ),
                 },
             )
             .map_err(|error| format!("failed to register shell surface: {error}"))?;
@@ -2842,7 +2849,7 @@ fn protocol_plugin_surface_kind(
         PluginSurfaceKind::Window => PluginSurfacePlacementKind::Window,
         PluginSurfaceKind::Dialog => PluginSurfacePlacementKind::Dialog,
         PluginSurfaceKind::Overlay => PluginSurfacePlacementKind::Overlay,
-        PluginSurfaceKind::Desktop => unreachable!("desktop surfaces use their own shell role"),
+        PluginSurfaceKind::Desktop => PluginSurfacePlacementKind::Desktop,
     }
 }
 

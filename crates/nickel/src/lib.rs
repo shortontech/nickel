@@ -1557,7 +1557,7 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
             state.surface_visible(role)
                 && plugin
                     .as_ref()
-                    .is_none_or(|key| state.plugin_panel_matches(key)),
+                    .is_none_or(|key| state.plugin_surface_matches(key)),
         );
     }
 }
@@ -1881,7 +1881,7 @@ fn handle_shell_input(
         };
         if !entry
             .plugin_key()
-            .is_some_and(|key| state.plugin_panel_matches(key))
+            .is_some_and(|key| state.plugin_surface_matches(key))
         {
             return Ok(());
         }

@@ -288,6 +288,7 @@ pub struct PluginSurfacePlacement {
 pub enum PluginSurfacePlacementKind {
     #[default]
     Panel,
+    Desktop,
     Dock,
     Window,
     Dialog,
@@ -2398,6 +2399,27 @@ mod tests {
                 kind: PluginSurfacePlacementKind::Panel,
                 width: 1920,
                 height: 56,
+                bottom_offset: 0,
+            }),
+        };
+        assert_eq!(
+            decode::<ShellSurfaceIdentity>(&encode(&identity).unwrap()).unwrap(),
+            identity
+        );
+    }
+
+    #[test]
+    fn desktop_identity_carries_its_plugin_surface_key() {
+        let identity = ShellSurfaceIdentity {
+            application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.10"),
+            role: ShellRole::Desktop,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.nickel.desktop".into(),
+                surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Desktop,
+                width: 1920,
+                height: 1080,
                 bottom_offset: 0,
             }),
         };

@@ -127,6 +127,21 @@ pub fn desktop_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn desktop_surface() -> &'static PluginSurface {
+    desktop_manifest()
+        .surfaces
+        .iter()
+        .find(|surface| surface.kind == PluginSurfaceKind::Desktop)
+        .expect("bundled desktop needs a desktop surface")
+}
+
+pub fn desktop_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: desktop_manifest().id.clone(),
+        surface_id: desktop_surface().id.clone(),
+    }
+}
+
 pub fn run_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {

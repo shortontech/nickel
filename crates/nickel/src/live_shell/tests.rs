@@ -690,7 +690,7 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
         remaining[0].1.height,
     ));
     assert_eq!(shell.plugin_panels().len(), 2);
-    assert!(shell.plugin_panel_matches(&panels[0].0));
+    assert!(shell.plugin_surface_matches(&panels[0].0));
     assert!(!shell.show_plugin_window(id, "first").unwrap());
     assert!(shell.show_plugin_window(id, "missing").is_err());
 
@@ -1038,7 +1038,7 @@ fn two_installed_panels_render_and_retire_independently() {
     assert_eq!(shell.plugin_panel_bottom_offset(&panels[0].0), Some(12));
     assert_eq!(shell.plugin_panel_bottom_offset(&panels[1].0), Some(36));
     for (key, surface) in &panels {
-        assert!(shell.plugin_panel_matches(key));
+        assert!(shell.plugin_surface_matches(key));
         let commands = shell
             .plugin_panel_scene(key, surface.width, surface.height)
             .unwrap();
@@ -1068,8 +1068,8 @@ fn two_installed_panels_render_and_retire_independently() {
             .unwrap()
     );
     assert_eq!(shell.plugin_panels().len(), 1);
-    assert!(!shell.plugin_panel_matches(&panels[0].0));
-    assert!(shell.plugin_panel_matches(&panels[1].0));
+    assert!(!shell.plugin_surface_matches(&panels[0].0));
+    assert!(shell.plugin_surface_matches(&panels[1].0));
     assert!(shell.plugin_panel_scene(&panels[0].0, 360, 64).is_none());
     assert!(shell.plugin_panel_scene(&panels[1].0, 360, 64).is_some());
 }

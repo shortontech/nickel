@@ -298,7 +298,9 @@ impl InternalShellCoordinator {
         for (index, output) in outputs.iter().enumerate() {
             for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
                 let size = role_size(role, output.width, output.height, self.panel_edge);
-                desired.push((role, None, Some(output.name.clone()), size));
+                let plugin =
+                    (role == SurfaceRole::Desktop).then(crate::plugin_panel::desktop_surface_key);
+                desired.push((role, plugin, Some(output.name.clone()), size));
             }
             for (key, surface) in &panel_surfaces {
                 let taskbar = taskbar_key.as_ref() == Some(key);
@@ -419,7 +421,7 @@ impl InternalShellCoordinator {
                 entry
                     .plugin
                     .as_ref()
-                    .is_some_and(|key| !self.shell.plugin_panel_matches(key))
+                    .is_some_and(|key| !self.shell.plugin_surface_matches(key))
                     || !self.shell.surface_visible(entry.role)
                     || self.shell.surface_remote_access_protected(entry.role)
             })
@@ -437,7 +439,7 @@ impl InternalShellCoordinator {
         if entry
             .plugin
             .as_ref()
-            .is_some_and(|key| !self.shell.plugin_panel_matches(key))
+            .is_some_and(|key| !self.shell.plugin_surface_matches(key))
         {
             return Err("plugin surface has retired".into());
         }
@@ -466,7 +468,7 @@ impl InternalShellCoordinator {
         if entry
             .plugin
             .as_ref()
-            .is_some_and(|key| !self.shell.plugin_panel_matches(key))
+            .is_some_and(|key| !self.shell.plugin_surface_matches(key))
         {
             return Err("plugin surface has retired".into());
         }
@@ -572,7 +574,7 @@ impl InternalShellCoordinator {
             .is_some_and(|surface| {
                 surface.plugin.as_ref().map_or_else(
                     || self.shell.surface_visible(surface.role),
-                    |key| self.shell.plugin_panel_matches(key),
+                    |key| self.shell.plugin_surface_matches(key),
                 )
             })
     }
@@ -620,7 +622,10 @@ impl InternalShellCoordinator {
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
-        let commands = if let Some(key) = surface.plugin.as_ref() {
+        let commands = if surface.role == SurfaceRole::Desktop {
+            self.shell
+                .scene(surface.role, surface.size.0, surface.size.1)
+        } else if let Some(key) = surface.plugin.as_ref() {
             self.shell.plugin_panel_scene_for_output(
                 key,
                 surface.output.as_deref(),
@@ -883,7 +888,7 @@ impl InternalShellCoordinator {
         if entry
             .plugin
             .as_ref()
-            .is_some_and(|key| !self.shell.plugin_panel_matches(key))
+            .is_some_and(|key| !self.shell.plugin_surface_matches(key))
         {
             return Vec::new();
         }
@@ -976,7 +981,9 @@ impl InternalShellCoordinator {
                     }
                     _ => {}
                 }
-                changed |= if let Some(key) = entry.plugin.as_ref() {
+                changed |= if entry.role == SurfaceRole::Desktop {
+                    self.shell.desktop_controller(action)
+                } else if let Some(key) = entry.plugin.as_ref() {
                     self.shell.plugin_panel_host_controller_for(
                         key,
                         action,
@@ -2152,6 +2159,59 @@ mod tests {
         let restored = coordinator.plugin_surface(&key, "nested").unwrap();
         assert_ne!(restored.id, original_id);
         assert!(coordinator.visible(restored.id));
+    }
+
+    #[test]
+    fn bundled_desktop_keeps_its_plugin_identity_across_reactivation() {
+        let mut coordinator = coordinator();
+        let output = InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        };
+        coordinator.set_outputs(&[output.clone()]);
+        let desktop = coordinator
+            .surface(SurfaceRole::Desktop, Some("nested"))
+            .unwrap();
+        let id = desktop.id;
+        assert_eq!(
+            desktop.plugin,
+            Some(crate::plugin_panel::desktop_surface_key())
+        );
+        assert!(coordinator.visible(id));
+
+        let plugin_id = crate::plugin_panel::desktop_manifest().id.clone();
+        coordinator
+            .shell_mut()
+            .set_plugin_enabled(&plugin_id, false)
+            .unwrap();
+        coordinator.set_outputs(&[output.clone()]);
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Desktop, Some("nested"))
+                .unwrap()
+                .id,
+            id
+        );
+        assert!(!coordinator.visible(id));
+
+        coordinator
+            .shell_mut()
+            .set_plugin_enabled(&plugin_id, true)
+            .unwrap();
+        coordinator.set_outputs(&[output]);
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Desktop, Some("nested"))
+                .unwrap()
+                .id,
+            id
+        );
+        assert!(coordinator.visible(id));
+        assert!(coordinator.scene(id).is_some());
     }
 
     #[test]

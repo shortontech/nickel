@@ -292,6 +292,12 @@ fn exercise(
     }) {
         return Err(format!("taskbar plugin surface is missing: {surfaces:?}"));
     }
+    if !surfaces.lines().any(|line| {
+        line.starts_with("Desktop\twinit\t")
+            && line.ends_with("org.nickel.desktop/main")
+    }) {
+        return Err(format!("desktop plugin surface is missing: {surfaces:?}"));
+    }
     let plugin_output = checked(test_input, &environment, &["plugins"])?;
     let plugins: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&plugin_output).map_err(|error| error.to_string())?;
@@ -607,7 +613,8 @@ fn wait_for_desktop_visibility(
             .lines()
             .find(|line| line.starts_with("Desktop\twinit\t"))
             .ok_or("internal desktop disappeared from surface inventory")?;
-        if desktop.ends_with("hidden") != expected_visible {
+        let geometry = desktop.split('\t').nth(2).ok_or("desktop has no geometry field")?;
+        if (geometry != "hidden") == expected_visible {
             return Ok(());
         }
         if Instant::now() >= deadline {
