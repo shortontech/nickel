@@ -4,10 +4,10 @@ use nickel_core::theme::ThemePalette;
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    ActionKind, Align, AnyView, Application, Button, Collection, CollectionPresentation,
-    CollectionState, ComponentBuilderExt, Container, HostBatch, HostChangeToken, HostEvent,
-    HostEventOutcome, Image, ImageFit, ImagePresentation, Insets, Point, Row, SemanticAction,
-    SemanticRole, SemanticTheme, Text, TextAlign, UiEvent, UiHost, UiId, ViewContext,
+    ActionKind, Align, AnyView, Application, Collection, CollectionPresentation, CollectionState,
+    ComponentBuilderExt, Container, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, Image,
+    ImageFit, ImagePresentation, Insets, Point, Row, SemanticAction, SemanticRole, SemanticTheme,
+    Text, TextAlign, UiEvent, UiHost, UiId, ViewContext,
 };
 
 use crate::{
@@ -102,161 +102,6 @@ pub(crate) fn window_menu_action_is_current(
     }
 }
 
-pub struct WindowMenuApp {
-    window: OpenWindow,
-    workspaces: Vec<WorkspaceSummary>,
-    outputs: Vec<String>,
-    palette: ThemePalette,
-    effects: Vec<MenuAction>,
-    dirty: bool,
-    page: WindowMenuPage,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum WindowMenuPage {
-    #[default]
-    Root,
-    Workspaces,
-    Displays,
-}
-
-impl WindowMenuApp {
-    pub fn new(
-        window: OpenWindow,
-        workspaces: Vec<WorkspaceSummary>,
-        outputs: Vec<String>,
-        palette: ThemePalette,
-    ) -> Self {
-        Self {
-            window,
-            workspaces,
-            outputs,
-            palette,
-            effects: Vec::new(),
-            dirty: false,
-            page: WindowMenuPage::Root,
-        }
-    }
-
-    pub fn sync(
-        &mut self,
-        window: &OpenWindow,
-        workspaces: &[WorkspaceSummary],
-        outputs: &[String],
-        palette: ThemePalette,
-    ) {
-        debug_assert_eq!(self.window.id, window.id);
-        self.window.state = window.state.clone();
-        self.window.title.clone_from(&window.title);
-        self.window.active = window.active;
-        self.workspaces = workspaces.to_vec();
-        self.outputs = outputs.to_vec();
-        self.palette = palette;
-        self.dirty = true;
-    }
-
-    pub fn take_effects(&mut self) -> Vec<MenuAction> {
-        std::mem::take(&mut self.effects)
-    }
-}
-
-impl Application for WindowMenuApp {
-    type Message = MenuAction;
-
-    fn update(&mut self, message: Self::Message) {
-        match message {
-            MenuAction::ShowWorkspaces => {
-                self.page = WindowMenuPage::Workspaces;
-                self.dirty = true;
-                return;
-            }
-            MenuAction::ShowDisplays => {
-                self.page = WindowMenuPage::Displays;
-                self.dirty = true;
-                return;
-            }
-            MenuAction::Back => {
-                self.page = WindowMenuPage::Root;
-                self.dirty = true;
-                return;
-            }
-            MenuAction::MoveToWorkspace(_, workspace)
-                if self.window.state.workspace == Some(workspace) =>
-            {
-                return;
-            }
-            MenuAction::MoveToDisplay(_, ref output)
-                if self.window.state.output.as_ref() == Some(output) =>
-            {
-                return;
-            }
-            _ => {}
-        }
-        self.effects.push(message);
-    }
-
-    fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let theme = semantic_theme_from_palette(self.palette);
-        let entries = match self.page {
-            WindowMenuPage::Root => {
-                window_menu_entries(&self.window, &self.workspaces, &self.outputs)
-            }
-            WindowMenuPage::Workspaces => workspace_menu_entries(&self.window, &self.workspaces),
-            WindowMenuPage::Displays => display_menu_entries(&self.window, &self.outputs),
-        };
-        let content = entries.into_iter().enumerate().fold(
-            nickel_ui::Column::new().gap(MENU_ROW_GAP),
-            |column, (index, (label, action))| {
-                column.child(
-                    Button::new(action, label)
-                        .id(format!("window-menu-action-{index}"))
-                        .width(MENU_WIDTH - MENU_PADDING * 2.0)
-                        .height(MENU_ROW_HEIGHT)
-                        .padding(Insets {
-                            top: 4.0,
-                            right: 10.0,
-                            bottom: 4.0,
-                            left: 10.0,
-                        })
-                        .center_label_vertically()
-                        .label_align(TextAlign::Start)
-                        .background(theme.surfaces.raised)
-                        .focus_background_tint(theme.borders.focus)
-                        .controller_focus_background_tint(theme.borders.controller_focus)
-                        .color(theme.text.primary),
-                )
-            },
-        );
-        Container::new()
-            .id("window-menu-anchor")
-            .width(MENU_WIDTH)
-            .height(menu_height_for_rows(window_menu_max_rows(
-                &self.window,
-                &self.workspaces,
-                &self.outputs,
-            )))
-            .padding(Insets::all(MENU_PADDING))
-            .background(theme.surfaces.raised)
-            .border(theme.borders.ordinary, theme.sizing.border)
-            .radius(theme.radii.overlay)
-            .semantic_role(SemanticRole::Menu)
-            .accessibility_label(format!("Window menu for {}", self.window.title))
-            .child(content)
-    }
-
-    fn poll(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
-    }
-
-    fn shortcut_outcome(&mut self, shortcut: nickel_ui::Shortcut) -> nickel_ui::ShortcutOutcome {
-        if shortcut != nickel_ui::Shortcut::Escape {
-            return nickel_ui::ShortcutOutcome::from_changed(false);
-        }
-        self.effects.push(MenuAction::Dismiss);
-        nickel_ui::ShortcutOutcome::handled(true)
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplicationMenuTarget {
     pub application_id: Option<ApplicationId>,
@@ -308,36 +153,6 @@ pub enum ApplicationMenuAction {
     CloseAll,
 }
 
-pub struct ApplicationMenuApp {
-    target: ApplicationMenuTarget,
-    pinned: bool,
-    palette: ThemePalette,
-    effects: Vec<ApplicationMenuAction>,
-    dirty: bool,
-}
-
-impl ApplicationMenuApp {
-    pub fn new(target: ApplicationMenuTarget, pinned: bool, palette: ThemePalette) -> Self {
-        Self {
-            target,
-            pinned,
-            palette,
-            effects: Vec::new(),
-            dirty: false,
-        }
-    }
-
-    pub fn sync(&mut self, pinned: bool, palette: ThemePalette) {
-        self.pinned = pinned;
-        self.palette = palette;
-        self.dirty = true;
-    }
-
-    pub fn take_effects(&mut self) -> Vec<ApplicationMenuAction> {
-        std::mem::take(&mut self.effects)
-    }
-}
-
 pub(crate) fn application_menu_entries(
     target: &ApplicationMenuTarget,
     pinned: bool,
@@ -376,70 +191,6 @@ pub(crate) fn validated_application_close_targets(
             })
         })
         .collect()
-}
-
-impl Application for ApplicationMenuApp {
-    type Message = ApplicationMenuAction;
-
-    fn update(&mut self, message: Self::Message) {
-        self.effects.push(message);
-    }
-
-    fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let theme = semantic_theme_from_palette(self.palette);
-        let entries = application_menu_entries(&self.target, self.pinned);
-        let content = entries.into_iter().enumerate().fold(
-            nickel_ui::Column::new().gap(MENU_ROW_GAP),
-            |column, (index, (label, action))| {
-                column.child(
-                    Button::new(action, label)
-                        .id(format!("application-menu-action-{index}"))
-                        .width(MENU_WIDTH - MENU_PADDING * 2.0)
-                        .height(MENU_ROW_HEIGHT)
-                        .padding(Insets {
-                            top: 4.0,
-                            right: 10.0,
-                            bottom: 4.0,
-                            left: 10.0,
-                        })
-                        .center_label_vertically()
-                        .label_align(TextAlign::Start)
-                        .background(theme.surfaces.raised)
-                        .focus_background_tint(theme.borders.focus)
-                        .controller_focus_background_tint(theme.borders.controller_focus)
-                        .color(theme.text.primary),
-                )
-            },
-        );
-        Container::new()
-            .id("application-menu-anchor")
-            .width(MENU_WIDTH)
-            .height(menu_height_for_rows(
-                application_menu_entries(&self.target, self.pinned).len(),
-            ))
-            .padding(Insets::all(MENU_PADDING))
-            .background(theme.surfaces.raised)
-            .border(theme.borders.ordinary, theme.sizing.border)
-            .radius(theme.radii.overlay)
-            .semantic_role(SemanticRole::Menu)
-            .accessibility_label(format!(
-                "Application menu for {}",
-                self.target.application_name
-            ))
-            .child(content)
-    }
-
-    fn poll(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
-    }
-
-    fn shortcut_outcome(&mut self, shortcut: nickel_ui::Shortcut) -> nickel_ui::ShortcutOutcome {
-        if shortcut != nickel_ui::Shortcut::Escape {
-            return nickel_ui::ShortcutOutcome::from_changed(false);
-        }
-        self.effects.push(ApplicationMenuAction::Dismiss);
-        nickel_ui::ShortcutOutcome::handled(true)
-    }
 }
 
 pub(crate) fn window_menu_entries(
@@ -1332,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_targets_route_every_action_to_the_selected_window() {
+    fn menu_model_targets_the_selected_window_and_exposes_submenus() {
         let workspaces = [
             WorkspaceSummary {
                 id: 1,
@@ -1365,16 +1116,7 @@ mod tests {
             },
         };
         let outputs = vec!["left".into(), "right".into()];
-        let mut host = UiHost::new(
-            WindowMenuApp::new(
-                window.clone(),
-                workspaces.to_vec(),
-                outputs.clone(),
-                ThemePalette::from_appearance(Appearance::default()),
-            ),
-            MENU_WIDTH as u32,
-            menu_height_for_rows(window_menu_max_rows(&window, &workspaces, &outputs)) as u32,
-        );
+        let root = window_menu_entries(&window, &workspaces, &outputs);
         for action in [
             MenuAction::Activate(WindowId(9)),
             MenuAction::Minimize(WindowId(9)),
@@ -1382,24 +1124,8 @@ mod tests {
             MenuAction::FullscreenRestore(WindowId(9)),
             MenuAction::Close(WindowId(9)),
         ] {
-            let target = host
-                .semantic_targets_for_message(&action)
-                .into_iter()
-                .next()
-                .expect("menu target exists");
-            host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
-            assert_eq!(host.application_mut().take_effects(), vec![action]);
+            assert!(root.iter().any(|(_, candidate)| *candidate == action));
         }
-        assert!(
-            host.application_mut()
-                .shortcut_outcome(nickel_ui::Shortcut::Escape)
-                .changed
-        );
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![MenuAction::Dismiss]
-        );
-        let root = window_menu_entries(&window, &workspaces, &outputs);
         assert!(
             root.iter()
                 .any(|(_, action)| *action == MenuAction::ShowWorkspaces)
@@ -1416,15 +1142,10 @@ mod tests {
         );
         let display_entries = display_menu_entries(&window, &outputs);
         assert!(display_entries.iter().any(|(label, _)| label == "✓ left"));
-        host.application_mut()
-            .update(MenuAction::MoveToWorkspace(WindowId(9), 7));
-        host.application_mut()
-            .update(MenuAction::MoveToDisplay(WindowId(9), "left".into()));
-        assert!(host.application_mut().take_effects().is_empty());
     }
 
     #[test]
-    fn open_menu_refreshes_state_and_topology_without_retargeting() {
+    fn menu_model_uses_current_window_state_and_topology() {
         let mut captured = OpenWindow {
             id: WindowId(9),
             application_id: Some(ApplicationId::new("editor")),
@@ -1432,12 +1153,6 @@ mod tests {
             title: "Old title".into(),
             state: crate::model::WindowState::default(),
         };
-        let mut menu = WindowMenuApp::new(
-            captured.clone(),
-            vec![],
-            vec!["left".into()],
-            ThemePalette::from_appearance(Appearance::default()),
-        );
         captured.active = true;
         captured.title = "New title".into();
         captured.state.maximized = true;
@@ -1451,28 +1166,19 @@ mod tests {
         }];
         let outputs = vec!["left".into(), "right".into()];
 
-        menu.sync(
-            &captured,
-            &workspaces,
-            &outputs,
-            ThemePalette::from_appearance(Appearance::default()),
-        );
-
-        assert_eq!(menu.window.id, WindowId(9));
-        assert_eq!(menu.window.title, "New title");
         assert!(
-            window_menu_entries(&menu.window, &menu.workspaces, &menu.outputs,)
+            window_menu_entries(&captured, &workspaces, &outputs,)
                 .iter()
                 .any(|(label, action)| label == "Restore from Maximized"
                     && *action == MenuAction::MaximizeRestore(WindowId(9)))
         );
         assert!(
-            workspace_menu_entries(&menu.window, &menu.workspaces)
+            workspace_menu_entries(&captured, &workspaces)
                 .iter()
                 .any(|(label, _)| label == "✓ Workspace 1")
         );
         assert!(
-            display_menu_entries(&menu.window, &menu.outputs)
+            display_menu_entries(&captured, &outputs)
                 .iter()
                 .any(|(label, _)| label == "✓ right")
         );
