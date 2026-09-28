@@ -19,7 +19,9 @@ re-enable the package to reopen all its declared surfaces. A running sibling
 can reopen one declared window with
 `nickel.request({ type: "show-plugin-surface", surfaceId: "details" })`. The
 host accepts only a window ID from that plugin's own manifest and ignores a
-request for a window that is already open.
+request for a window that is already open. The
+[two-window example](../assets/plugins/example-two-windows/) shows the request
+in a working package.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
 

@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "id": "org.example.two-windows",
+  "name": "Two Window Example",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "surfaces": [
+    {"id":"home","kind":"window","width":400,"height":240},
+    {"id":"details","kind":"window","width":450,"height":260}
+  ]
+}
