@@ -1828,23 +1828,13 @@ fn handle_shell_input(
     {
         state.set_panel_output(output);
     }
-    if role == SurfaceRole::Desktop {
+    if shell
+        .surface(surface)
+        .is_some_and(|entry| entry.is_desktop_plugin())
+    {
         let coalesce_motion = matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
-        if let Some(entry) = shell.surface(surface) {
-            let output = entry.output_name().to_owned();
-            let (width, height) = entry.window().size();
-            if let Some(display) = shell.surface_display_geometry(surface) {
-                state.set_desktop_output(
-                    output,
-                    display.x as f32 / display.scale,
-                    display.y as f32 / display.scale,
-                    display.scale,
-                );
-                // Rendering another output may have left the shared host with
-                // that output's tree. Rebuild the invoking surface projection
-                // before hit testing or overlay dispatch.
-                let _ = state.scene(SurfaceRole::Desktop, width, height);
-            }
+        if !select_desktop_surface_for_input(shell, state, surface) {
+            return Ok(());
         }
         let changed = state.desktop_input(event);
         if changed {
@@ -1858,6 +1848,9 @@ fn handle_shell_input(
                 render_role(shell, state, SurfaceRole::Desktop)?;
             }
         }
+        return Ok(());
+    }
+    if role == SurfaceRole::Desktop {
         return Ok(());
     }
     if role == SurfaceRole::Lock {
@@ -2118,6 +2111,41 @@ fn handle_shell_input(
     Ok(())
 }
 
+fn select_desktop_surface_for_input(
+    shell: &WinitShell,
+    state: &mut LiveShell,
+    surface: SurfaceId,
+) -> bool {
+    let Some(entry) = shell
+        .surface(surface)
+        .filter(|entry| entry.is_desktop_plugin())
+    else {
+        return false;
+    };
+    let Some(key) = entry
+        .plugin_key()
+        .filter(|key| state.plugin_surface_matches(key))
+    else {
+        return false;
+    };
+    let Some(display) = shell.surface_display_geometry(surface) else {
+        return false;
+    };
+    let output = entry.output_name();
+    let (width, height) = entry.window().size();
+    state.set_desktop_output(
+        output.to_owned(),
+        display.x as f32 / display.scale,
+        display.y as f32 / display.scale,
+        display.scale,
+    );
+    // Another output may have left the shared host with a different tree.
+    // Rebuild the invoking surface before hit testing or dispatching a menu.
+    state
+        .plugin_surface_scene_for_output(key, Some(output), width, height)
+        .is_some()
+}
+
 fn log_unroutable_launcher_input(
     role: SurfaceRole,
     event_class: &'static str,
@@ -2257,6 +2285,15 @@ fn handle_controller_action(
     }
     let (width, height) = entry.window().size();
     let taskbar = entry.is_taskbar_plugin();
+    if entry.is_desktop_plugin() {
+        if select_desktop_surface_for_input(shell, state, surface)
+            && state.desktop_controller(action)
+        {
+            sync_visibility(shell, state);
+            render_role(shell, state, SurfaceRole::Desktop)?;
+        }
+        return Ok(());
+    }
     if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar)
         && let Some(key) = entry.plugin_key().cloned()
     {
@@ -2289,7 +2326,7 @@ fn handle_controller_action(
         SurfaceRole::WindowPreview => state.preview_controller(action),
         SurfaceRole::WindowContextMenu => state.window_menu_host_controller(action),
         SurfaceRole::Notification => state.notification_controller(action),
-        SurfaceRole::Desktop => state.desktop_controller(action),
+        SurfaceRole::Desktop => false,
         SurfaceRole::Launcher => unreachable!("launcher controller input is handled semantically"),
         SurfaceRole::Screenshot => state.screenshot_controller(action),
         SurfaceRole::OnScreenKeyboard => state.keyboard_controller(action),
@@ -2882,9 +2919,7 @@ pub fn run() -> Result<(), String> {
                 result?;
             }
             Some(ShellEvent::FileDrop { surface, path }) => {
-                if shell
-                    .surface(surface)
-                    .is_some_and(|entry| entry.role() == SurfaceRole::Desktop)
+                if select_desktop_surface_for_input(&shell, &mut state, surface)
                     && state.desktop_file_drop(&path)
                 {
                     render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;

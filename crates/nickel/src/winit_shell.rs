@@ -496,6 +496,11 @@ impl ShellSurface {
             && self.plugin.as_ref() == Some(&crate::plugin_panel::taskbar_surface_key())
     }
 
+    pub fn is_desktop_plugin(&self) -> bool {
+        self.role == SurfaceRole::Desktop
+            && self.plugin.as_ref() == Some(&crate::plugin_panel::desktop_surface_key())
+    }
+
     fn diagnostic_role(&self) -> SurfaceRole {
         if self.is_taskbar_plugin() {
             SurfaceRole::Taskbar

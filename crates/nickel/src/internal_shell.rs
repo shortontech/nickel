@@ -592,6 +592,9 @@ impl InternalShellCoordinator {
     fn select_desktop_viewport(&mut self, id: InternalSurfaceId) -> Option<()> {
         let entry = self.entries.iter().find(|surface| surface.id == id)?;
         if entry.role == SurfaceRole::Desktop {
+            if entry.plugin.as_ref() != Some(&crate::plugin_panel::desktop_surface_key()) {
+                return None;
+            }
             let output = entry.output.as_deref()?;
             let (origin, scale) = self.shell.desktop_output_projection(output)?;
             // Layout reports the usable area's origin, but this surface covers the
@@ -882,6 +885,8 @@ impl InternalShellCoordinator {
             return Vec::new();
         };
         let taskbar_surface = self.is_taskbar_surface(entry);
+        let desktop_surface = entry.role == SurfaceRole::Desktop
+            && entry.plugin.as_ref() == Some(&crate::plugin_panel::desktop_surface_key());
         if entry
             .plugin
             .as_ref()
@@ -920,7 +925,7 @@ impl InternalShellCoordinator {
                     .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
             };
         }
-        if entry.role == SurfaceRole::Desktop && batch.window_focused == Some(false) {
+        if desktop_surface && batch.window_focused == Some(false) {
             // Host focus changes are lifecycle notifications, not device events;
             // they still must cancel the production desktop transaction and keys.
             changed |= self
@@ -978,7 +983,7 @@ impl InternalShellCoordinator {
                     }
                     _ => {}
                 }
-                changed |= if entry.role == SurfaceRole::Desktop {
+                changed |= if desktop_surface {
                     self.shell.desktop_controller(action)
                 } else if let Some(key) = entry.plugin.as_ref() {
                     self.shell.plugin_panel_host_controller_for(
@@ -1002,7 +1007,7 @@ impl InternalShellCoordinator {
                             self.shell.window_menu_host_controller(action)
                         }
                         SurfaceRole::Notification => self.shell.notification_controller(action),
-                        SurfaceRole::Desktop => self.shell.desktop_controller(action),
+                        SurfaceRole::Desktop => false,
                         SurfaceRole::Screenshot => self.shell.screenshot_controller(action),
                         SurfaceRole::OnScreenKeyboard => self.shell.keyboard_controller(action),
                         _ => false,
@@ -1078,7 +1083,8 @@ impl InternalShellCoordinator {
                     &event,
                     nickel_ui::HostEvent::Normalized { .. }
                         | nickel_ui::HostEvent::NormalizedIngress(_)
-                ) {
+                ) && desktop_surface
+                {
                     changed |= self
                         .shell
                         .desktop_host_event_authorized(event, normalized_authority);
