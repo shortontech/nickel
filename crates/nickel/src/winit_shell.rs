@@ -1062,12 +1062,8 @@ impl WinitShell {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
-    fn set_plugin_dialog_owners_enabled(&self, enabled: bool) {
-        use winit::platform::windows::WindowExtWindows;
-
-        let owners = self
-            .surfaces
+    fn active_plugin_dialog_owners(&self) -> HashSet<(String, String, String)> {
+        self.surfaces
             .iter()
             .filter_map(|dialog| {
                 if !dialog.display_connected || dialog.role != SurfaceRole::Panel {
@@ -1091,7 +1087,14 @@ impl WinitShell {
                     dialog.output_name.clone(),
                 ))
             })
-            .collect::<HashSet<_>>();
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_plugin_dialog_owners_enabled(&self, enabled: bool) {
+        use winit::platform::windows::WindowExtWindows;
+
+        let owners = self.active_plugin_dialog_owners();
         for surface in &self.surfaces {
             if surface.role == SurfaceRole::Panel
                 && surface.plugin.as_ref().is_some_and(|key| {
@@ -2204,6 +2207,8 @@ impl WinitShell {
     }
 
     fn pump_events(&mut self, timeout: Option<Duration>) {
+        #[cfg(target_os = "linux")]
+        let modal_owners = self.active_plugin_dialog_owners();
         let indices = &self.native_surface_indices;
         let surfaces = &self.surfaces;
         let adapters = &mut self.input_adapters;
@@ -2285,10 +2290,32 @@ impl WinitShell {
                     let native_device = native_device.unwrap_or_else(winit::event::DeviceId::dummy);
                     let device = devices.get_or_insert(native_device);
                     let adapter = adapters.entry(window_id).or_default();
+                    #[cfg(target_os = "linux")]
+                    let blocked_by_dialog = surfaces[index].role == SurfaceRole::Panel
+                        && surfaces[index].plugin.as_ref().is_some_and(|key| {
+                            modal_owners.contains(&(
+                                key.plugin_id.clone(),
+                                key.surface_id.clone(),
+                                surfaces[index].output_name.clone(),
+                            ))
+                        });
                     for input in adapter.normalize_at_scale(device, scale, &event) {
+                        #[cfg(target_os = "linux")]
+                        if blocked_by_dialog {
+                            continue;
+                        }
                         queue_shell_input(pending, surface, input);
                     }
                     if let Some(event) = translate_window_event(surface, scale as f32, &event) {
+                        #[cfg(target_os = "linux")]
+                        if blocked_by_dialog
+                            && matches!(
+                                event,
+                                ShellEvent::PointerEntered { .. } | ShellEvent::FileDrop { .. }
+                            )
+                        {
+                            return;
+                        }
                         pending.push_back(event);
                     }
                 }

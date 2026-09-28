@@ -834,6 +834,20 @@ fn verify_separate_plugin_dialog(
     if opened_bytes <= home_bytes {
         return Err("plugin dialog did not increase its retained UI memory".into());
     }
+    // The dialog is narrower than its owner. Aim inside the owner's button
+    // padding, just outside the dialog's left edge.
+    let owner_probe_x = dialog_x - 4;
+    if owner_probe_x < home_x + 24 || owner_probe_x >= home_x + 420 {
+        return Err("dialog leaves no owner button space for the input probe".into());
+    }
+    click_at(test_input, environment, owner_probe_x, home_y + 119)?;
+    thread::sleep(Duration::from_millis(500));
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if dialog_surface_line(&surfaces).is_none()
+        || !surfaces.contains("org.example.surface-dialog/home")
+    {
+        return Err(format!("owned dialog allowed input to close its owner: {surfaces}"));
+    }
     click_at(test_input, environment, dialog_x + 180, dialog_y + 119)?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

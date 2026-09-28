@@ -14,5 +14,9 @@ function App() {
             h(Button, { id: "open-dialog", onClick: () => nickel.request({
                     type: "show-plugin-surface",
                     surfaceId: "confirm",
-                }) }, "Open dialog")));
+                }) }, "Open dialog"),
+            h(Button, { id: "close-home", onClick: () => nickel.request({
+                    type: "hide-plugin-surface",
+                    surfaceId: "home",
+                }) }, "Close home")));
 }
