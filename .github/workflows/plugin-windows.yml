@@ -51,6 +51,14 @@ jobs:
           rustup toolchain install 1.94.1 --profile minimal
           rustup default 1.94.1
 
+      - name: Install the JSX compiler
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install TypeScript
+        shell: pwsh
+        run: npm install --global typescript@5.9.3
+
       - name: Test the JSX host and plugin packages
         shell: pwsh
         run: |
