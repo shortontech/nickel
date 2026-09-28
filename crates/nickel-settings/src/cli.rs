@@ -1,8 +1,8 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, path::PathBuf};
 
 use crate::SettingsPage;
 
-pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, bluetooth-pair, default-apps, optional-features, plugins, keyboard-shortcuts, about]\n      --output <OUTPUT>  Select this display connector when opening Display\n      --plugin-status    Print the live plugin status as JSON and exit\n  -h, --help             Print help\n";
+pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, bluetooth-pair, default-apps, optional-features, plugins, keyboard-shortcuts, about]\n      --output <OUTPUT>  Select this display connector when opening Display\n      --plugin-status    Print the live plugin status as JSON and exit\n      --plugin-status-file <PATH>  Write that JSON to a file instead\n  -h, --help             Print help\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Action {
@@ -10,7 +10,9 @@ pub(super) enum Action {
         page: SettingsPage,
         output: Option<String>,
     },
-    PluginStatus,
+    PluginStatus {
+        file: Option<PathBuf>,
+    },
     Help,
 }
 
@@ -19,6 +21,7 @@ pub(super) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, 
     let mut screen = None;
     let mut output = None;
     let mut plugin_status = false;
+    let mut plugin_status_file = None;
 
     while let Some(argument) = args.next() {
         let argument = argument
@@ -28,6 +31,15 @@ pub(super) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, 
         match argument.as_str() {
             "-h" | "--help" => return Ok(Action::Help),
             "--plugin-status" if !plugin_status => plugin_status = true,
+            "--plugin-status-file" => {
+                if plugin_status_file.is_some() {
+                    return Err("--plugin-status-file may only be specified once".into());
+                }
+                plugin_status_file =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--plugin-status-file requires a path".to_owned()
+                    })?));
+            }
             "-s" | "--screen" => {
                 if screen.is_some() {
                     return Err("--screen may only be specified once".to_owned());
@@ -70,7 +82,12 @@ pub(super) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, 
         if screen.is_some() || output.is_some() {
             return Err("--plugin-status cannot be combined with --screen or --output".into());
         }
-        return Ok(Action::PluginStatus);
+        return Ok(Action::PluginStatus {
+            file: plugin_status_file,
+        });
+    }
+    if plugin_status_file.is_some() {
+        return Err("--plugin-status-file requires --plugin-status".into());
     }
 
     Ok(Action::Run {
@@ -184,8 +201,15 @@ mod tests {
     fn plugin_status_is_a_read_only_terminal_action() {
         assert_eq!(
             parse_strings(&["--plugin-status"]),
-            Ok(Action::PluginStatus)
+            Ok(Action::PluginStatus { file: None })
         );
+        assert_eq!(
+            parse_strings(&["--plugin-status", "--plugin-status-file", "status.json"]),
+            Ok(Action::PluginStatus {
+                file: Some(PathBuf::from("status.json")),
+            })
+        );
+        assert!(parse_strings(&["--plugin-status-file", "status.json"]).is_err());
         assert!(parse_strings(&["--plugin-status", "--screen", "plugins"]).is_err());
         assert!(parse_strings(&["--plugin-status", "--output", "DP-1"]).is_err());
         assert!(parse_strings(&["--plugin-status", "--plugin-status"]).is_err());

@@ -3274,7 +3274,7 @@ fn request_session_text_entry() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (initial_page, initial_output) = match cli::parse(std::env::args_os().skip(1)) {
         Ok(cli::Action::Run { page, output }) => (page, output),
-        Ok(cli::Action::PluginStatus) => {
+        Ok(cli::Action::PluginStatus { file }) => {
             let response = session_request(SessionRequest::Query(SessionQuery::Plugins))?;
             let ServerMessage::Plugins(snapshot) = response else {
                 return Err(std::io::Error::other(format!(
@@ -3282,7 +3282,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))
                 .into());
             };
-            println!("{}", serde_json::to_string(&snapshot)?);
+            let json = serde_json::to_string(&snapshot)?;
+            if let Some(file) = file {
+                std::fs::write(file, json)?;
+            } else {
+                println!("{json}");
+            }
             return Ok(());
         }
         Ok(cli::Action::Help) => {
