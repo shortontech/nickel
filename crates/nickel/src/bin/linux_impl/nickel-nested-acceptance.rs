@@ -135,6 +135,11 @@ fn run() -> Result<(), String> {
             include_str!("../../../../../assets/plugins/example-widget-contributor/plugin.json"),
             include_str!("../../../../../assets/plugins/example-widget-contributor/main.js"),
         ),
+        (
+            "org.example.action-contributor",
+            include_str!("../../../../../assets/plugins/example-action-contributor/plugin.json"),
+            include_str!("../../../../../assets/plugins/example-action-contributor/main.js"),
+        ),
     ] {
         let directory = runtime.join("config/nickel/plugins").join(id);
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -548,6 +553,39 @@ fn verify_generic_widget_slot(
         }
         thread::sleep(POLL);
     }
+    let action = "org.example.action-contributor";
+    checked(test_input, environment, &["plugin-set", action, "enabled"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = checked(test_input, environment, &["plugins"])?;
+        let status: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&status).map_err(|error| error.to_string())?;
+        let provider = status.plugins.iter().find(|plugin| plugin.id == host);
+        let extension = status.plugins.iter().find(|plugin| plugin.id == action);
+        if let (Some(provider), Some(extension)) = (provider, extension)
+            && provider.memory.native_ui_bytes.is_some_and(|bytes| bytes > base)
+            && extension.health == nickel_session_protocol::PluginRuntimeHealth::Running
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("generic action did not enter its provider: {status:?}"));
+        }
+        thread::sleep(POLL);
+    }
+    let window = wait_for_plugin_window(
+        test_input,
+        environment,
+        "org.example.widget-host",
+        "Widget Host Example",
+        Duration::from_secs(5),
+    )?;
+    click_at(test_input, environment, window.1 + 210, window.2 + 77)?;
+    wait_for_launcher_visibility(test_input, environment, true, Duration::from_secs(5))?;
+    checked(test_input, environment, &["key", "meta", "pressed"])?;
+    checked(test_input, environment, &["key", "meta", "released"])?;
+    wait_for_launcher_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    checked(test_input, environment, &["plugin-set", action, "disabled"])?;
     checked(test_input, environment, &["plugin-set", host, "disabled"])?;
     Ok(())
 }
@@ -639,11 +677,27 @@ fn wait_for_component_window(
     environment: &[(String, String)],
     timeout: Duration,
 ) -> Result<(u64, i32, i32), String> {
+    wait_for_plugin_window(
+        test_input,
+        environment,
+        "org.example.component-window",
+        "Component Window Example",
+        timeout,
+    )
+}
+
+fn wait_for_plugin_window(
+    test_input: &Path,
+    environment: &[(String, String)],
+    plugin_id: &str,
+    title: &str,
+    timeout: Duration,
+) -> Result<(u64, i32, i32), String> {
     let deadline = Instant::now() + timeout;
     loop {
         let windows = checked(test_input, environment, &["windows"])?;
         if let Some(window) = windows.lines().find_map(|line| {
-            (line.contains("\torg.example.component-window\tComponent Window Example\t")
+            (line.contains(&format!("\t{plugin_id}\t{title}\t"))
                 && line.contains("\tshown\t")
                 && !line.ends_with("\tunmapped"))
             .then(|| {
@@ -657,7 +711,7 @@ fn wait_for_component_window(
             return Ok(window);
         }
         if Instant::now() >= deadline {
-            return Err(format!("component window did not enter the window registry: {windows}"));
+            return Err(format!("plugin window {plugin_id} did not enter the window registry: {windows}"));
         }
         thread::sleep(POLL);
     }

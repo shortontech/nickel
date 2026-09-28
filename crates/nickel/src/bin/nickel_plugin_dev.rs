@@ -204,7 +204,8 @@ mod platform {
                     | ("org.nickel.taskbar", "task-action", PluginSlotContract::Action)
                     | ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget)
                     | ("org.nickel.control-center", "control-section", PluginSlotContract::Section)
-                    | (_, _, PluginSlotContract::Widget))
+                    | (_, _, PluginSlotContract::Widget)
+                    | (_, _, PluginSlotContract::Action))
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
         if !bundled && !panel && !extension {
             return Err(
@@ -609,16 +610,22 @@ mod platform {
         }
 
         #[test]
-        fn stages_a_widget_provider_and_contributor_together() {
+        fn stages_a_provider_and_multiple_contributors_together() {
             let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
             let host = root.join("example-widget-host");
             let contributor = root.join("example-widget-contributor");
+            let action = root.join("example-action-contributor");
             assert!(
                 load_dev_packages(&[contributor.clone()])
                     .unwrap_err()
                     .contains("target package directory")
             );
-            let directories = vec![host, contributor];
+            assert!(
+                load_dev_packages(&[action.clone()])
+                    .unwrap_err()
+                    .contains("target package directory")
+            );
+            let directories = vec![host, contributor, action];
             let packages = load_dev_packages(&directories).unwrap();
             let profile = tempfile::tempdir().unwrap();
             stage_all(&packages, &directories, profile.path()).unwrap();

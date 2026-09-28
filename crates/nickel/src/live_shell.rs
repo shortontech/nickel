@@ -749,6 +749,16 @@ pub struct LiveShell {
             crate::plugin_panel::PluginPanelApplication,
         ),
     >,
+    plugin_action_slot_hosts: std::collections::BTreeMap<
+        String,
+        (
+            String,
+            String,
+            i16,
+            nickel_core::plugins::PluginContributionMode,
+            crate::plugin_panel::PluginPanelApplication,
+        ),
+    >,
     plugin_notification_host:
         Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_hosts:
@@ -1033,6 +1043,7 @@ enum ExecutableExtensionKind {
     DesktopWidget,
     ControlSection,
     PluginWidget,
+    PluginAction,
 }
 
 fn should_auto_start_installed_plugin(desired_enabled: bool, safe_mode: bool) -> bool {
@@ -1072,6 +1083,7 @@ fn executable_extension_priority(
             ExecutableExtensionKind::ControlSection
         }
         (_, _, PluginSlotContract::Widget) => ExecutableExtensionKind::PluginWidget,
+        (_, _, PluginSlotContract::Action) => ExecutableExtensionKind::PluginAction,
         _ => return Err("this runtime cannot compose the declared extension".into()),
     };
     if !manifest.surfaces.is_empty() {
@@ -1959,6 +1971,7 @@ impl LiveShell {
             plugin_control_section_hosts: std::collections::BTreeMap::new(),
             plugin_desktop_widget_hosts: std::collections::BTreeMap::new(),
             plugin_widget_slot_hosts: std::collections::BTreeMap::new(),
+            plugin_action_slot_hosts: std::collections::BTreeMap::new(),
             plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
             plugin_taskbar_memory: HashMap::new(),
@@ -2798,7 +2811,7 @@ impl LiveShell {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Taskbar => self.panel_scene(width, height),
             SurfaceRole::Panel => {
-                let slots = self.plugin_widget_slot_projection(&self.plugin_panel_owner);
+                let slots = self.plugin_slot_projection(&self.plugin_panel_owner);
                 let Some(host) = self.plugin_panel_host.as_mut() else {
                     return Vec::new();
                 };
@@ -3701,19 +3714,18 @@ impl LiveShell {
         })
     }
 
-    fn plugin_widget_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
+    fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
         use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
 
         let target = self.plugin_registry.get(target_id)?;
         let mut slots = serde_json::Map::new();
-        for slot in target
-            .manifest
-            .provides_slots
-            .iter()
-            .filter(|slot| slot.contract == PluginSlotContract::Widget)
-        {
-            let mut contributors = self
-                .plugin_widget_slot_hosts
+        for slot in &target.manifest.provides_slots {
+            let hosts = match slot.contract {
+                PluginSlotContract::Widget => &self.plugin_widget_slot_hosts,
+                PluginSlotContract::Action => &self.plugin_action_slot_hosts,
+                _ => continue,
+            };
+            let mut contributors = hosts
                 .iter()
                 .filter(|(_, (plugin, name, _, _, _))| plugin == target_id && name == &slot.id)
                 .collect::<Vec<_>>();
@@ -3729,30 +3741,50 @@ impl LiveShell {
                     .into_iter()
                     .filter(|(_, (_, _, _, mode, _))| *mode == PluginContributionMode::Add),
             );
-            let mut widgets = Vec::new();
+            let mut items = Vec::new();
             for (id, (_, _, _, _, application)) in ordered {
-                if let Ok(items) = application.desktop_widgets() {
-                    for item in items.into_iter().take(8 - widgets.len()) {
-                        widgets.push(serde_json::json!({
-                            "pluginId": id,
-                            "label": item.label,
-                            "value": item.value,
-                            "percent": item.percent,
-                            "color": item.color,
-                        }));
+                match slot.contract {
+                    PluginSlotContract::Widget => {
+                        if let Ok(widgets) = application.desktop_widgets() {
+                            for widget in widgets.into_iter().take(8 - items.len()) {
+                                items.push(serde_json::json!({
+                                    "pluginId": id,
+                                    "label": widget.label,
+                                    "value": widget.value,
+                                    "percent": widget.percent,
+                                    "color": widget.color,
+                                }));
+                            }
+                        }
                     }
+                    PluginSlotContract::Action => {
+                        if let Ok(actions) = application.taskbar_actions() {
+                            for action in actions
+                                .into_iter()
+                                .filter(|action| action.item.is_none())
+                                .take(8 - items.len())
+                            {
+                                items.push(serde_json::json!({
+                                    "pluginId": id,
+                                    "id": action.id,
+                                    "label": action.label,
+                                }));
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
                 }
-                if widgets.len() == 8 {
+                if items.len() == 8 {
                     break;
                 }
             }
-            slots.insert(slot.id.clone(), serde_json::Value::Array(widgets));
+            slots.insert(slot.id.clone(), serde_json::Value::Array(items));
         }
         (!slots.is_empty()).then_some(serde_json::Value::Object(slots))
     }
 
-    fn refresh_plugin_widget_slot_hosts(&mut self, target_id: &str) {
-        let Some(slots) = self.plugin_widget_slot_projection(target_id) else {
+    fn refresh_plugin_slot_hosts(&mut self, target_id: &str) {
+        let Some(slots) = self.plugin_slot_projection(target_id) else {
             return;
         };
         let keys = self
@@ -3799,7 +3831,7 @@ impl LiveShell {
         {
             return Some(self.scene(SurfaceRole::Panel, width, height));
         }
-        let slots = self.plugin_widget_slot_projection(&key.plugin_id);
+        let slots = self.plugin_slot_projection(&key.plugin_id);
         let (_, host) = self.plugin_panel_extra_hosts.get_mut(key)?;
         let slots_changed = slots.is_some_and(|slots| {
             match host.application_mut().sync_external_slots(&slots) {
@@ -4126,6 +4158,7 @@ impl LiveShell {
                                             || self
                                                 .plugin_widget_slot_hosts
                                                 .iter()
+                                                .chain(self.plugin_action_slot_hosts.iter())
                                                 .filter(|(_, (target, slot, _, mode, _))| {
                                                     target == &contribution.target_plugin
                                                         && slot == &contribution.target_slot
@@ -4324,6 +4357,11 @@ impl LiveShell {
                 {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
+                } else if let Some((_, _, _, _, current)) =
+                    self.plugin_action_slot_hosts.get_mut(id)
+                {
+                    extension_bytes = Some(application.retained_contribution_bytes());
+                    *current = application;
                 } else if let Some((_, _, current)) = self.plugin_control_section_hosts.get_mut(id)
                 {
                     extension_bytes = Some(application.retained_contribution_bytes());
@@ -4353,7 +4391,11 @@ impl LiveShell {
         }
         if let Some((target, _, _, _, _)) = self.plugin_widget_slot_hosts.get(id) {
             let target = target.clone();
-            self.refresh_plugin_widget_slot_hosts(&target);
+            self.refresh_plugin_slot_hosts(&target);
+        }
+        if let Some((target, _, _, _, _)) = self.plugin_action_slot_hosts.get(id) {
+            let target = target.clone();
+            self.refresh_plugin_slot_hosts(&target);
         }
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
@@ -4489,6 +4531,7 @@ impl LiveShell {
             }
             self.plugin_desktop_widget_hosts.remove(id);
             self.plugin_widget_slot_hosts.remove(id);
+            self.plugin_action_slot_hosts.remove(id);
             self.plugin_control_section_hosts.remove(id);
             self.plugin_panel_extra_hosts
                 .retain(|key, _| key.plugin_id != id);
@@ -4525,7 +4568,7 @@ impl LiveShell {
                 self.desktop_application_dirty = true;
             }
             if let Some((target, _)) = &extension_target {
-                self.refresh_plugin_widget_slot_hosts(target);
+                self.refresh_plugin_slot_hosts(target);
             }
             self.maybe_publish_plugin_status();
             return Ok(true);
@@ -4557,6 +4600,15 @@ impl LiveShell {
                         .clone()
                         .expect("validated extension has a target");
                     self.plugin_widget_slot_hosts.insert(
+                        id.to_owned(),
+                        (target_plugin, target_slot, priority, mode, application),
+                    );
+                }
+                ExecutableExtensionKind::PluginAction => {
+                    let (target_plugin, target_slot) = extension_target
+                        .clone()
+                        .expect("validated extension has a target");
+                    self.plugin_action_slot_hosts.insert(
                         id.to_owned(),
                         (target_plugin, target_slot, priority, mode, application),
                     );
@@ -4687,9 +4739,9 @@ impl LiveShell {
         };
         if result.is_ok() {
             if let Some((target, _)) = &extension_target {
-                self.refresh_plugin_widget_slot_hosts(target);
+                self.refresh_plugin_slot_hosts(target);
             }
-            self.refresh_plugin_widget_slot_hosts(id);
+            self.refresh_plugin_slot_hosts(id);
         }
         self.maybe_publish_plugin_status();
         result
@@ -5841,6 +5893,62 @@ impl LiveShell {
                                 ..Default::default()
                             },
                         );
+                        changed = true;
+                        changed |= self.apply_plugin_effects(extension_effects);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::InvokePluginSlotAction {
+                    target_plugin,
+                    slot_id,
+                    plugin_id,
+                    id,
+                } => {
+                    if !self
+                        .plugin_panels()
+                        .iter()
+                        .any(|(key, _)| key.plugin_id == target_plugin)
+                    {
+                        continue;
+                    }
+                    let visible = self
+                        .plugin_slot_projection(&target_plugin)
+                        .and_then(|slots| {
+                            slots
+                                .get(&slot_id)
+                                .and_then(serde_json::Value::as_array)
+                                .cloned()
+                        })
+                        .is_some_and(|actions| {
+                            actions.iter().any(|action| {
+                                action.get("pluginId").and_then(serde_json::Value::as_str)
+                                    == Some(plugin_id.as_str())
+                                    && action.get("id").and_then(serde_json::Value::as_str)
+                                        == Some(id.as_str())
+                            })
+                        });
+                    if !visible {
+                        continue;
+                    }
+                    let Some((target, slot, _, _, extension)) =
+                        self.plugin_action_slot_hosts.get_mut(&plugin_id)
+                    else {
+                        continue;
+                    };
+                    if target != &target_plugin || slot != &slot_id {
+                        continue;
+                    }
+                    let handled = extension.activate_taskbar_action(&id, "");
+                    let extension_effects = extension.take_effects();
+                    let retained_bytes = extension.retained_contribution_bytes();
+                    if handled {
+                        let _ = self.plugin_registry.record_memory(
+                            &plugin_id,
+                            nickel_core::plugins::PluginMemory {
+                                native_ui_bytes: Some(retained_bytes),
+                                ..Default::default()
+                            },
+                        );
+                        self.refresh_plugin_slot_hosts(&target_plugin);
                         changed = true;
                         changed |= self.apply_plugin_effects(extension_effects);
                     }

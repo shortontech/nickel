@@ -223,6 +223,15 @@ nickel-plugin dev assets/plugins/example-widget-host assets/plugins/example-widg
 
 Saving either package restarts that session. For an installed plugin, Settings
 shows the declared target and slot before enablement.
+An installed provider may also declare an `action` slot. It receives bounded
+`{pluginId, id, label}` entries in `nickel.data.slots[slotId]` and can render
+them as buttons. On click it requests
+`{type: "invoke-plugin-slot-action", slot, pluginId, id}`. Nickel checks that
+the action is still projected and dispatches the callback in the contributing
+plugin's own JS instance, where its declared grants apply. The
+[action contributor](../assets/plugins/example-action-contributor/) adds an
+Open launcher button to the widget host's `commands` slot. Run the host and
+both contributors together with one `nickel-plugin dev` command.
 The taskbar also provides a `task-action` slot with the `action` contract. A
 surface-free extension can return
 `h(Action, { id: "find-apps", item: "org.example.app", label: "Find apps", onClick: applicationId => nickel.request("show-launcher") })`.

@@ -46,6 +46,9 @@ value and progress display to the bundled desktop plugin.
 The [widget host](example-widget-host/) declares a slot that another installed
 plugin can fill. Run it with the [widget contributor](example-widget-contributor/)
 using `nickel-plugin dev assets/plugins/example-widget-host assets/plugins/example-widget-contributor`.
+The [action contributor](example-action-contributor/) adds a callback button to
+that host's `commands` slot; run the three directories together to inspect both
+display and interactive composition.
 The [dialog example](example-dialog/) opens a component dialog and requests
 Settings through a declared capability.
 The [separate dialog example](example-surface-dialog/) opens an owned native
