@@ -2238,6 +2238,8 @@ impl WinitShell {
                             && matches!(
                                 input,
                                 InputEvent::Pointer(nickel_input::PointerEvent::Button { .. })
+                                    | InputEvent::FocusGained { .. }
+                                    | InputEvent::FocusLost { .. }
                             )
                         {
                             eprintln!(
