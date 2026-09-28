@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.codex-projects",
+  "name": "Nickel Codex Projects",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "surfaces": [{"id":"main","kind":"overlay","width":520,"height":680}],
+  "capabilities": ["projects-read", "projects-open"]
+}

@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use crate::control_view::ControlAction;
 use crate::platform::SessionAction;
+use nickel_codex_ui::ProjectMenuProjection;
 use nickel_core::display_projection::ProjectionMode;
 
 pub use crate::launcher::LauncherView;
@@ -167,6 +168,23 @@ pub fn control_center_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     nickel_core::plugins::PluginSurfaceKey {
         plugin_id: control_center_manifest().id.clone(),
         surface_id: control_center_surface().id.clone(),
+    }
+}
+
+pub fn codex_projects_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/codex-projects/plugin.json"
+        ))
+        .expect("bundled Codex projects plugin manifest must be valid")
+    })
+}
+
+pub fn codex_projects_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: codex_projects_manifest().id.clone(),
+        surface_id: codex_projects_manifest().surfaces[0].id.clone(),
     }
 }
 
@@ -3100,6 +3118,38 @@ impl PluginPanelApplication {
         )
     }
 
+    pub fn codex_projects_with_projection(
+        projection: &ProjectMenuProjection,
+    ) -> Result<Self, String> {
+        let source = bundled_source(
+            codex_projects_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/codex-projects/main.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            codex_projects_manifest(),
+            Some(serde_json::to_string(projection).map_err(|error| error.to_string())?),
+        )
+    }
+
+    pub fn sync_codex_projects_projection(
+        &mut self,
+        projection: &ProjectMenuProjection,
+    ) -> Result<bool, String> {
+        if self.manifest.id != codex_projects_manifest().id {
+            return Err("this plugin is not Codex projects".into());
+        }
+        let data = serde_json::to_string(projection).map_err(|error| error.to_string())?;
+        if self.projection_data.as_deref() == Some(data.as_str()) {
+            return Ok(false);
+        }
+        self.runtime.set_data(&data)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.projection_data = Some(data);
+        Ok(true)
+    }
+
     pub fn window_preview_with_data(data: &Value) -> Result<Self, String> {
         let source = bundled_source(
             window_preview_manifest(),
@@ -5911,6 +5961,38 @@ mod tests {
                 .unwrap()
         );
         assert!(!format!("{:?}", panel.node).contains("Could not launch Demo"));
+    }
+
+    #[test]
+    fn bundled_codex_project_menu_renders_only_the_bounded_projection() {
+        let package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/codex-projects"
+        ))
+        .unwrap();
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let projection = ProjectMenuProjection {
+            revision: nickel_codex_ui::ProjectMenuRevision {
+                connection: 3,
+                projects: 7,
+            },
+            status: "ready",
+            projects: vec![nickel_codex_ui::ProjectMenuEntry {
+                id: "0".into(),
+                name: "Example project".into(),
+            }],
+        };
+        let mut panel =
+            PluginPanelApplication::codex_projects_with_projection(&projection).unwrap();
+        let rendered = format!("{:?}", panel.node);
+        assert!(rendered.contains("Example project"));
+        assert!(!rendered.contains("/private/work"));
+        assert!(!panel.sync_codex_projects_projection(&projection).unwrap());
+        let mut disconnected = projection.clone();
+        disconnected.status = "disconnected";
+        disconnected.projects.clear();
+        assert!(panel.sync_codex_projects_projection(&disconnected).unwrap());
+        assert!(!format!("{:?}", panel.node).contains("Example project"));
     }
 
     #[test]

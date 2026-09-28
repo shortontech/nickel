@@ -1,7 +1,6 @@
 //! The bounded, path-free boundary for a JavaScript project menu.
 
-use std::path::Path;
-
+use nickel_codex::Project;
 use serde::Serialize;
 
 use crate::{ChatState, ConnectionStatus};
@@ -47,7 +46,8 @@ impl ProjectMenuProjection {
                 .projects
                 .iter()
                 .take(MAX_PROJECTS)
-                .filter(|project| {
+                .enumerate()
+                .filter(|(_, project)| {
                     !project.id.is_empty()
                         && project.id.len() <= MAX_PROJECT_ID_BYTES
                         && project
@@ -55,8 +55,8 @@ impl ProjectMenuProjection {
                             .first()
                             .is_some_and(|root| !root.as_os_str().is_empty())
                 })
-                .map(|project| ProjectMenuEntry {
-                    id: project.id.clone(),
+                .map(|(index, project)| ProjectMenuEntry {
+                    id: index.to_string(),
                     name: project.name.chars().take(MAX_PROJECT_NAME_CHARS).collect(),
                 })
                 .collect()
@@ -73,13 +73,13 @@ impl ProjectMenuProjection {
         }
     }
 
-    /// Resolve a plugin request to a host-owned path after rechecking its snapshot.
+    /// Resolve a plugin request to a host-owned project after rechecking its snapshot.
     pub fn resolve_open<'a>(
         &self,
         state: &'a ChatState,
         observed: ProjectMenuRevision,
         project_id: &str,
-    ) -> Option<&'a Path> {
+    ) -> Option<&'a Project> {
         if self.revision != observed
             || self.revision.connection != state.generation
             || self.revision.projects != state.project_revision
@@ -89,23 +89,28 @@ impl ProjectMenuProjection {
         {
             return None;
         }
+        let index = project_id.parse::<usize>().ok()?;
         let entry = self
             .projects
             .iter()
             .find(|project| project.id == project_id)?;
+        if entry.id != index.to_string() {
+            return None;
+        }
+        let project = state.projects.get(index)?;
         let mut matches = state
             .projects
             .iter()
-            .filter(|project| project.id == entry.id);
-        let project = matches.next()?;
+            .filter(|candidate| candidate.id == project.id);
+        matches.next()?;
         if matches.next().is_some() {
             return None;
         }
         project
             .roots
             .first()
-            .filter(|root| !root.as_os_str().is_empty())
-            .map(std::path::PathBuf::as_path)
+            .filter(|root| !root.as_os_str().is_empty())?;
+        Some(project)
     }
 }
 
@@ -123,17 +128,20 @@ mod tests {
         state.status = ConnectionStatus::Ready;
         state.account.authenticated = true;
         state.projects = vec![Project {
-            id: "project-1".into(),
+            id: "/private/backend-id".into(),
             name: "Example".into(),
             roots: vec![PathBuf::from("/private/work")],
         }];
         let projection = ProjectMenuProjection::from_state(&state);
         let json = serde_json::to_string(&projection).unwrap();
-        assert!(json.contains("project-1"));
+        assert!(json.contains("\"id\":\"0\""));
+        assert!(!json.contains("/private/backend-id"));
         assert!(!json.contains("/private/work"));
         assert_eq!(
-            projection.resolve_open(&state, projection.revision, "project-1"),
-            Some(Path::new("/private/work"))
+            projection
+                .resolve_open(&state, projection.revision, "0")
+                .map(|project| project.roots[0].as_path()),
+            Some(std::path::Path::new("/private/work"))
         );
         assert!(
             projection
@@ -143,14 +151,14 @@ mod tests {
         state.project_revision += 1;
         assert!(
             projection
-                .resolve_open(&state, projection.revision, "project-1")
+                .resolve_open(&state, projection.revision, "0")
                 .is_none()
         );
         state.project_revision -= 1;
         state.account.authenticated = false;
         assert!(
             projection
-                .resolve_open(&state, projection.revision, "project-1")
+                .resolve_open(&state, projection.revision, "0")
                 .is_none()
         );
     }
@@ -179,13 +187,15 @@ mod tests {
         let projection = ProjectMenuProjection::from_state(&state);
         state.apply(state.generation, ready("/first"));
         assert_eq!(
-            projection.resolve_open(&state, projection.revision, "project-1"),
-            Some(Path::new("/first"))
+            projection
+                .resolve_open(&state, projection.revision, "0")
+                .map(|project| project.roots[0].as_path()),
+            Some(std::path::Path::new("/first"))
         );
         state.apply(state.generation, ready("/second"));
         assert!(
             projection
-                .resolve_open(&state, projection.revision, "project-1")
+                .resolve_open(&state, projection.revision, "0")
                 .is_none()
         );
     }
