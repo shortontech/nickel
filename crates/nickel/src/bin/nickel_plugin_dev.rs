@@ -495,7 +495,7 @@ mod platform {
             let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
             for name in ["launcher", "desktop", "taskbar"] {
                 let directory = root.join(name);
-                let package = load_dev_package(&directory).unwrap();
+                let package = PluginPackage::load(&directory).unwrap();
                 let profile = tempfile::tempdir().unwrap();
                 stage(&package, &directory, profile.path()).unwrap();
                 let staged = profile
