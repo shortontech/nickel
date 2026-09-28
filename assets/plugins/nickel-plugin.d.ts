@@ -168,6 +168,11 @@ declare function MenuItem(props: NickelMenuItemProps): JSX.Element;
 declare function useState<T>(initial: T | (() => T)): [T, (next: T | ((previous: T) => T)) => void];
 declare function useRef<T>(initial: T): { current: T };
 
+type NickelSurfaceRequest = Readonly<
+    | { type: "show-plugin-surface"; surfaceId: string }
+    | { type: "hide-plugin-surface"; surfaceId: string }
+>;
+
 declare const nickel: Readonly<{
     readonly data: Readonly<Record<string, unknown> & {
         settings?: Readonly<Record<string, boolean | number | string>>;
@@ -178,6 +183,7 @@ declare const nickel: Readonly<{
             height: number;
         }>;
     }>;
+    request(effect: NickelSurfaceRequest): void;
     request(effect: string | Readonly<{ type: string; [key: string]: unknown }>): void;
     openDialog(id: string): void;
     openMenu(id: string): void;

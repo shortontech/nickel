@@ -3813,6 +3813,32 @@ pub fn configure_launcher_window(window: &impl raw_window_handle::HasWindowHandl
     }
 }
 
+pub fn configure_plugin_dialog_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    // Plugin dialogs are user-invoked, focusable tools above ordinary windows.
+    // They do not replace the launcher handle or participate in Alt+Tab.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            ((style | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0 & !WS_EX_NOACTIVATE.0) as isize,
+        );
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        .is_ok()
+    }
+}
+
 pub fn observe_nickel_window_key(super_side: Option<u8>, pressed: bool) {
     use std::sync::atomic::Ordering;
 

@@ -2933,7 +2933,11 @@ pub fn run() -> Result<(), String> {
                 if shell.surface(surface).is_some_and(|entry| {
                     entry.plugin_key().is_some_and(|key| {
                         state.plugin_panel_placement(key).is_some_and(|(kind, _)| {
-                            kind == nickel_core::plugins::PluginSurfaceKind::Window
+                            matches!(
+                                kind,
+                                nickel_core::plugins::PluginSurfaceKind::Window
+                                    | nickel_core::plugins::PluginSurfaceKind::Dialog
+                            )
                         })
                     })
                 }) =>

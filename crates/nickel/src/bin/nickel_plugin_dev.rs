@@ -182,9 +182,17 @@ mod platform {
             && package.manifest.surfaces.iter().all(|surface| {
                 matches!(
                     surface.kind,
-                    PluginSurfaceKind::Panel | PluginSurfaceKind::Dock | PluginSurfaceKind::Window
+                    PluginSurfaceKind::Panel
+                        | PluginSurfaceKind::Dock
+                        | PluginSurfaceKind::Window
+                        | PluginSurfaceKind::Dialog
                 )
             })
+            && package
+                .manifest
+                .surfaces
+                .iter()
+                .any(|surface| surface.kind != PluginSurfaceKind::Dialog)
             && package.manifest.contributes.is_empty();
         let extension = package.manifest.surfaces.is_empty()
             && matches!(package.manifest.contributes.as_slice(), [contribution]
@@ -196,7 +204,7 @@ mod platform {
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
         if !bundled && !panel && !extension {
             return Err(
-                "dev needs an unchanged bundled manifest, panel, dock, or window surfaces, or one supported surface-free contribution"
+                "dev needs an unchanged bundled manifest, a panel, dock, or window that may declare dialogs, or one supported surface-free contribution"
                     .into(),
             );
         }

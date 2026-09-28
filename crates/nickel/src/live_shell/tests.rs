@@ -647,6 +647,95 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
 }
 
 #[test]
+fn declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/plugins/example-surface-dialog");
+    let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let id = package.manifest.id.clone();
+    let mut shell = LiveShell::new().unwrap();
+    shell.plugin_registry.register(package.manifest).unwrap();
+    shell
+        .external_plugin_packages
+        .insert(id.clone(), descriptor);
+
+    shell.set_plugin_enabled(&id, true).unwrap();
+    let home = shell.plugin_panels();
+    assert_eq!(home.len(), 1);
+    assert_eq!(home[0].0.surface_id, "home");
+    shell
+        .plugin_panel_scene(&home[0].0, home[0].1.width, home[0].1.height)
+        .unwrap();
+    let home_bytes = shell
+        .plugin_registry
+        .get(&id)
+        .unwrap()
+        .memory
+        .native_ui_bytes
+        .unwrap();
+    let open = shell
+        .plugin_panel_host_for(&home[0].0)
+        .unwrap()
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Open dialog".into(),
+        })
+        .unwrap();
+    assert!(shell.plugin_panel_host_ui_for(
+        &home[0].0,
+        nickel_ui::UiEvent::AccessibilityActivate(open.id),
+        home[0].1.width,
+        home[0].1.height,
+    ));
+    let opened = shell.plugin_panels();
+    assert_eq!(opened.len(), 2);
+    let dialog = opened
+        .iter()
+        .find(|(key, _)| key.surface_id == "confirm")
+        .unwrap();
+    assert_eq!(
+        dialog.1.kind,
+        nickel_core::plugins::PluginSurfaceKind::Dialog
+    );
+    shell
+        .plugin_panel_scene(&dialog.0, dialog.1.width, dialog.1.height)
+        .unwrap();
+    assert!(
+        shell
+            .plugin_registry
+            .get(&id)
+            .unwrap()
+            .memory
+            .native_ui_bytes
+            .unwrap()
+            > home_bytes
+    );
+    let dismiss = shell
+        .plugin_panel_host_for(&dialog.0)
+        .unwrap()
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Dismiss".into(),
+        })
+        .unwrap();
+    assert!(shell.plugin_panel_host_ui_for(
+        &dialog.0,
+        nickel_ui::UiEvent::AccessibilityActivate(dismiss.id),
+        dialog.1.width,
+        dialog.1.height,
+    ));
+    assert_eq!(shell.plugin_panels(), home);
+    let status = shell.plugin_registry.get(&id).unwrap();
+    assert!(status.desired_enabled);
+    assert_eq!(status.health, nickel_core::plugins::PluginHealth::Running);
+    assert_eq!(status.memory.native_ui_bytes, Some(home_bytes));
+}
+
+#[test]
 fn installed_dock_uses_declared_offset_and_translucent_panel() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.dock");

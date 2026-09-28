@@ -115,6 +115,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::disabling_plugin_retires_host_and_clears_reported_memory
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --bin nickel-plugin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -130,6 +132,8 @@ jobs:
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-window
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-two-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-surface-dialog
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-task-action
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -427,6 +431,93 @@ jobs:
               if ($shell) {
                 Get-CimInstance Win32_Process -Filter "ParentProcessId=$($shell.ProcessId)" | Where-Object { $_.Name -eq "nickel-settings.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
               }
+              Get-CimInstance Win32_Process -Filter "ParentProcessId=$($dev.Id)" | Where-Object { $_.Name -eq "nickel.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+              $dev.Refresh()
+              if (-not $dev.HasExited) { Stop-Process -Id $dev.Id -Force }
+            }
+            if (Test-Path $stderr) { Get-Content $stderr -Tail 30 }
+            if ($profileDir -and (Test-Path $profileDir)) { Remove-Item $profileDir -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nickel-surface-dialog-smoke"
+          New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+          $stdout = Join-Path $smokeRoot "dev.stdout"
+          $stderr = Join-Path $smokeRoot "dev.stderr"
+          $statusFile = Join-Path $smokeRoot "plugin-status.json"
+          $dev = Start-Process -FilePath "target/debug/nickel-plugin.exe" -ArgumentList @("dev", "assets/plugins/example-surface-dialog") -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $profileDir = $null
+          $shell = $null
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 120; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              $dev.Refresh()
+              if ($dev.HasExited) { throw "Dialog development shell exited early (exit $($dev.ExitCode))" }
+              if (-not $profileDir -and (Test-Path $stdout)) {
+                $log = Get-Content $stdout -Raw
+                if ($log -match '(?m)^Isolated plugin profile: (.+?)\r?$') {
+                  $profileDir = $Matches[1].Trim()
+                  $env:LOCALAPPDATA = $profileDir
+                  $env:APPDATA = $profileDir
+                }
+              }
+              if (-not $profileDir) { continue }
+              $shell = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($dev.Id)" | Where-Object { $_.Name -eq "nickel.exe" } | Select-Object -First 1
+              if (-not $shell) { continue }
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $plugin = $snapshot.plugins | Where-Object { $_.id -eq "org.example.surface-dialog" } | Select-Object -First 1
+              if ($plugin -and $plugin.health.state -eq "running" -and [long]$plugin.memory.native_ui_bytes -gt 0 -and
+                  [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window") -and
+                  -not [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Dialog")) {
+                $homeBytes = [long]$plugin.memory.native_ui_bytes
+                $ready = $true
+                break
+              }
+            }
+            if (-not $ready) { throw "Declared plugin dialog did not start closed beside a running home window" }
+            if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Window", 210, 77)) {
+              throw "Could not click the home window's Open dialog button"
+            }
+            $opened = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $plugin = $snapshot.plugins | Where-Object { $_.id -eq "org.example.surface-dialog" } | Select-Object -First 1
+              if ($plugin -and [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Dialog") -and
+                  [long]$plugin.memory.native_ui_bytes -gt $homeBytes) {
+                $opened = $true
+                break
+              }
+            }
+            if (-not $opened) { throw "Declared plugin dialog did not appear with increased retained UI memory" }
+            if (-not [NickelWindowProbe]::ClickVisibleWindowAt([uint32]$shell.ProcessId, "Nickel Plugin Dialog", 180, 119)) {
+              throw "Could not click the dialog's Dismiss button"
+            }
+            $dismissed = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              Remove-Item $statusFile -ErrorAction SilentlyContinue
+              & "target/debug/nickel-settings.exe" --plugin-status --plugin-status-file $statusFile 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $statusFile)) { continue }
+              try { $snapshot = Get-Content $statusFile -Raw | ConvertFrom-Json } catch { continue }
+              $plugin = $snapshot.plugins | Where-Object { $_.id -eq "org.example.surface-dialog" } | Select-Object -First 1
+              if ($plugin -and $plugin.desired_enabled -and $plugin.health.state -eq "running" -and
+                  [long]$plugin.memory.native_ui_bytes -le $homeBytes -and
+                  [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Window") -and
+                  -not [NickelWindowProbe]::HasVisibleWindow([uint32]$shell.ProcessId, "Nickel Plugin Dialog")) {
+                $dismissed = $true
+                break
+              }
+            }
+            if (-not $dismissed) { throw "Dismissing the dialog did not preserve home and retire dialog memory" }
+            Write-Host "Native Windows dialog opened and dismissed independently; home retained $homeBytes UI bytes."
+          } finally {
+            if ($dev) {
               Get-CimInstance Win32_Process -Filter "ParentProcessId=$($dev.Id)" | Where-Object { $_.Name -eq "nickel.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
               $dev.Refresh()
               if (-not $dev.HasExited) { Stop-Process -Id $dev.Id -Force }

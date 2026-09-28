@@ -94,6 +94,19 @@ fn run() -> Result<(), String> {
         "function App() { return h(Panel, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second')); }",
     )
     .map_err(|error| error.to_string())?;
+    let dialog = runtime
+        .join("config/nickel/plugins/org.example.surface-dialog");
+    fs::create_dir_all(&dialog).map_err(|error| error.to_string())?;
+    fs::write(
+        dialog.join("plugin.json"),
+        include_str!("../../../../../assets/plugins/example-surface-dialog/plugin.json"),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        dialog.join("main.js"),
+        include_str!("../../../../../assets/plugins/example-surface-dialog/main.js"),
+    )
+    .map_err(|error| error.to_string())?;
     let capability_file = runtime.join("shell-environment");
 
     let mut command = Command::new(&nickel);
@@ -166,7 +179,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, an installed panel, a component dialog, and sibling plugin windows; checked activation, memory retirement, launcher fallback, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, an installed panel, component and standalone dialogs, and sibling plugin windows; checked activation, memory retirement, launcher fallback, and clean shutdown"
     );
     Ok(())
 }
@@ -394,6 +407,7 @@ fn exercise(
     }
     verify_component_window(test_input, &environment)?;
     verify_sibling_windows(test_input, &environment)?;
+    verify_separate_plugin_dialog(test_input, &environment)?;
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
     let toggled = checked(test_input, &environment, &["surfaces"])?;
@@ -697,6 +711,97 @@ fn verify_sibling_windows(
             ));
         }
         thread::sleep(POLL);
+    }
+    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    Ok(())
+}
+
+fn dialog_surface_line(surfaces: &str) -> Option<&str> {
+    surfaces
+        .lines()
+        .find(|line| line.ends_with("org.example.surface-dialog/confirm"))
+}
+
+fn verify_separate_plugin_dialog(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let id = "org.example.surface-dialog";
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (home_x, home_y) = loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        let home = windows.lines().find(|line| {
+            line.contains("\torg.example.surface-dialog\tSurface Dialog Example\t")
+                && line.ends_with("420x280")
+        });
+        if let Some(location) = home
+            .and_then(|line| line.rsplit('\t').next())
+            .and_then(|field| field.split_whitespace().next())
+            && let Some((x, y)) = location.split_once(',')
+            && let (Ok(x), Ok(y)) = (x.parse::<i32>(), y.parse::<i32>())
+        {
+            break (x, y);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("plugin dialog home window did not map: {windows}"));
+        }
+        thread::sleep(POLL);
+    };
+    let home_bytes = wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if dialog_surface_line(&surfaces).is_some() {
+        return Err(format!("plugin dialog started open: {surfaces}"));
+    }
+    click_at(test_input, environment, home_x + 210, home_y + 77)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (dialog_x, dialog_y) = loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        if let Some(location) = dialog_surface_line(&surfaces)
+            .and_then(|line| line.split('\t').nth(2))
+            .and_then(|field| field.split_whitespace().next())
+            && let Some((x, y)) = location.split_once(',')
+            && let (Ok(x), Ok(y)) = (x.parse::<i32>(), y.parse::<i32>())
+        {
+            break (x, y);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("plugin dialog did not map: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    };
+    let opened_bytes = wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    if opened_bytes <= home_bytes {
+        return Err("plugin dialog did not increase its retained UI memory".into());
+    }
+    click_at(test_input, environment, dialog_x + 180, dialog_y + 119)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        if dialog_surface_line(&surfaces).is_none() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("plugin dialog did not dismiss: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
+    let status = checked(test_input, environment, &["plugins"])?;
+    let status: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&status).map_err(|error| error.to_string())?;
+    let plugin = status
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .ok_or("dialog plugin disappeared after dismissal")?;
+    if !plugin.desired_enabled
+        || plugin.health != nickel_session_protocol::PluginRuntimeHealth::Running
+        || plugin.memory.native_ui_bytes != Some(home_bytes)
+    {
+        return Err(format!(
+            "dialog dismissal did not preserve its home and memory account: {:?}",
+            plugin.memory.native_ui_bytes
+        ));
     }
     checked(test_input, environment, &["plugin-set", id, "disabled"])?;
     Ok(())

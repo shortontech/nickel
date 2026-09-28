@@ -1767,6 +1767,10 @@ pub enum PluginEffect {
         plugin_id: String,
         surface_id: String,
     },
+    HidePluginSurface {
+        plugin_id: String,
+        surface_id: String,
+    },
     SetPluginSetting {
         plugin_id: String,
         key: String,
@@ -3287,13 +3291,38 @@ impl nickel_ui::Application for PluginPanelApplication {
                             };
                             if !self.manifest.surfaces.iter().any(|surface| {
                                 surface.id == surface_id
-                                    && surface.kind
-                                        == nickel_core::plugins::PluginSurfaceKind::Window
+                                    && matches!(
+                                        surface.kind,
+                                        nickel_core::plugins::PluginSurfaceKind::Window
+                                            | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                    )
                             }) {
-                                self.last_error = Some("plugin window is not declared".into());
+                                self.last_error =
+                                    Some("plugin window or dialog is not declared".into());
                                 return;
                             }
                             approved.push(PluginEffect::ShowPluginSurface {
+                                plugin_id: self.manifest.id.clone(),
+                                surface_id: surface_id.to_owned(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("hide-plugin-surface") =>
+                        {
+                            let Some(surface_id) = effect.get("surfaceId").and_then(Value::as_str)
+                            else {
+                                self.last_error = Some("plugin surface ID is invalid".into());
+                                return;
+                            };
+                            if !self.manifest.surfaces.iter().any(|surface| {
+                                surface.id == surface_id
+                                    && surface.kind
+                                        == nickel_core::plugins::PluginSurfaceKind::Dialog
+                            }) {
+                                self.last_error = Some("plugin dialog is not declared".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::HidePluginSurface {
                                 plugin_id: self.manifest.id.clone(),
                                 surface_id: surface_id.to_owned(),
                             });
@@ -4930,6 +4959,84 @@ mod tests {
             vec![PluginEffect::ShowPluginSurface {
                 plugin_id: package.manifest.id.clone(),
                 surface_id: "details".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn separate_dialog_example_opens_and_dismisses_its_declared_surface() {
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-surface-dialog"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        let home = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "home")
+            .unwrap();
+        let dialog = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "confirm")
+            .unwrap();
+        let settings = std::collections::BTreeMap::new();
+        let mut home = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package_surface(&package, &settings, home).unwrap(),
+            home.width,
+            home.height,
+        );
+        let open = home
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open dialog".into(),
+            })
+            .unwrap();
+        assert!(open.bounds.origin.x < 210.0);
+        assert!(open.bounds.origin.x + open.bounds.size.width > 210.0);
+        assert!(open.bounds.origin.y < 77.0);
+        assert!(open.bounds.origin.y + open.bounds.size.height > 77.0);
+        home.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(open.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            home.application_mut().take_effects(),
+            vec![PluginEffect::ShowPluginSurface {
+                plugin_id: package.manifest.id.clone(),
+                surface_id: "confirm".into(),
+            }]
+        );
+        let mut dialog = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package_surface(&package, &settings, dialog).unwrap(),
+            dialog.width,
+            dialog.height,
+        );
+        let dismiss = dialog
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Dismiss".into(),
+            })
+            .unwrap();
+        assert!(dismiss.bounds.origin.x < 180.0);
+        assert!(dismiss.bounds.origin.x + dismiss.bounds.size.width > 180.0);
+        assert!(dismiss.bounds.origin.y < 119.0);
+        assert!(dismiss.bounds.origin.y + dismiss.bounds.size.height > 119.0);
+        dialog.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(dismiss.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            dialog.application_mut().take_effects(),
+            vec![PluginEffect::HidePluginSurface {
+                plugin_id: package.manifest.id.clone(),
+                surface_id: "confirm".into(),
             }]
         );
     }

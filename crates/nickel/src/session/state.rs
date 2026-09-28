@@ -15696,8 +15696,16 @@ fn apply_internal_plugin_surface_placement(
     bottom_offset: u32,
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
 ) {
-    if kind == nickel_core::plugins::PluginSurfaceKind::Window {
-        placement.role = crate::session::InternalSurfaceRole::Application;
+    if matches!(
+        kind,
+        nickel_core::plugins::PluginSurfaceKind::Window
+            | nickel_core::plugins::PluginSurfaceKind::Dialog
+    ) {
+        placement.role = if kind == nickel_core::plugins::PluginSurfaceKind::Dialog {
+            crate::session::InternalSurfaceRole::Overlay
+        } else {
+            crate::session::InternalSurfaceRole::Application
+        };
         if let Some((output, x, y)) = outputs
             .iter()
             .find(|(output, _, _)| placement.output.as_deref() == Some(output.name.as_str()))

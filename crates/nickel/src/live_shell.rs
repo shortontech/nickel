@@ -3723,10 +3723,13 @@ impl LiveShell {
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Result<bool, String> {
-        if !self
-            .plugin_panel_placement(key)
-            .is_some_and(|(kind, _)| kind == nickel_core::plugins::PluginSurfaceKind::Window)
-        {
+        if !self.plugin_panel_placement(key).is_some_and(|(kind, _)| {
+            matches!(
+                kind,
+                nickel_core::plugins::PluginSurfaceKind::Window
+                    | nickel_core::plugins::PluginSurfaceKind::Dialog
+            )
+        }) {
             return Ok(false);
         }
         if self
@@ -3789,10 +3792,16 @@ impl LiveShell {
             .iter()
             .find(|surface| {
                 surface.id == surface_id
-                    && surface.kind == nickel_core::plugins::PluginSurfaceKind::Window
+                    && matches!(
+                        surface.kind,
+                        nickel_core::plugins::PluginSurfaceKind::Window
+                            | nickel_core::plugins::PluginSurfaceKind::Dialog
+                    )
             })
             .cloned()
-            .ok_or_else(|| format!("plugin {id:?} has no declared window {surface_id:?}"))?;
+            .ok_or_else(|| {
+                format!("plugin {id:?} has no declared window or dialog {surface_id:?}")
+            })?;
         let key = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: id.to_owned(),
             surface_id: surface_id.to_owned(),
@@ -4209,10 +4218,17 @@ impl LiveShell {
                                 nickel_core::plugins::PluginSurfaceKind::Panel
                                     | nickel_core::plugins::PluginSurfaceKind::Dock
                                     | nickel_core::plugins::PluginSurfaceKind::Window
+                                    | nickel_core::plugins::PluginSurfaceKind::Dialog
                             )
+                        })
+                        && surfaces.iter().any(|surface| {
+                            surface.kind != nickel_core::plugins::PluginSurfaceKind::Dialog
                         })
                     {
                         descriptor.load().and_then(|package| {
+                            crate::plugin_panel::PluginPanelApplication::validate_package(
+                                &package,
+                            )?;
                             let settings = self
                                 .plugin_settings
                                 .get(id)
@@ -4221,6 +4237,9 @@ impl LiveShell {
                                 .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
                             surfaces
                                 .iter()
+                                .filter(|surface| {
+                                    surface.kind != nickel_core::plugins::PluginSurfaceKind::Dialog
+                                })
                                 .map(|surface| {
                                     crate::plugin_panel::PluginPanelApplication::from_package_surface(
                                         &package, &settings, surface,
@@ -4230,7 +4249,7 @@ impl LiveShell {
                                 .collect::<Result<Vec<_>, _>>()
                         })
                     } else {
-                        Err("installed plugin needs panel, dock, or window surfaces in this runtime".into())
+                        Err("installed plugin needs a panel, dock, or window to open its declared dialogs".into())
                     },
                 )
             } else {
@@ -5343,6 +5362,21 @@ impl LiveShell {
                         tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin window request failed");
                     }
                 },
+                crate::plugin_panel::PluginEffect::HidePluginSurface {
+                    plugin_id,
+                    surface_id,
+                } => {
+                    let key = nickel_core::plugins::PluginSurfaceKey {
+                        plugin_id,
+                        surface_id,
+                    };
+                    match self.close_plugin_window(&key) {
+                        Ok(closed) => changed |= closed,
+                        Err(error) => {
+                            tracing::warn!(plugin = key.plugin_id, surface = key.surface_id, %error, "plugin dialog close failed");
+                        }
+                    }
+                }
                 crate::plugin_panel::PluginEffect::SetPluginSetting {
                     plugin_id,
                     key,

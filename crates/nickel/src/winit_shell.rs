@@ -2374,7 +2374,11 @@ impl WinitShell {
             .with_decorations(
                 !surface_is_borderless(role)
                     || (role == SurfaceRole::Panel
-                        && panel.kind == nickel_core::plugins::PluginSurfaceKind::Window),
+                        && matches!(
+                            panel.kind,
+                            nickel_core::plugins::PluginSurfaceKind::Window
+                                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                        )),
             )
             .with_resizable(matches!(
                 role,
@@ -2425,6 +2429,11 @@ impl WinitShell {
                 ) && !crate::platform::configure_preview_window(&window)
                 {
                     tracing::warn!(?role, "failed to configure Windows plugin panel window");
+                }
+                if panel.kind == nickel_core::plugins::PluginSurfaceKind::Dialog
+                    && !crate::platform::configure_plugin_dialog_window(&window)
+                {
+                    tracing::warn!(?role, "failed to configure Windows plugin dialog window");
                 }
             }
             SurfaceRole::Launcher => {
@@ -2630,9 +2639,17 @@ fn surface_geometry_for_panel(
     if role == SurfaceRole::Panel {
         let width = panel.width.min(geometry.width);
         let height = panel.height.min(geometry.height);
-        if panel.kind == nickel_core::plugins::PluginSurfaceKind::Window {
+        if matches!(
+            panel.kind,
+            nickel_core::plugins::PluginSurfaceKind::Window
+                | nickel_core::plugins::PluginSurfaceKind::Dialog
+        ) {
             return (
-                "Nickel Plugin Window",
+                if panel.kind == nickel_core::plugins::PluginSurfaceKind::Dialog {
+                    "Nickel Plugin Dialog"
+                } else {
+                    "Nickel Plugin Window"
+                },
                 geometry.x + geometry.width.saturating_sub(width) as i32 / 2,
                 geometry.y + geometry.height.saturating_sub(height) as i32 / 2,
                 width,
