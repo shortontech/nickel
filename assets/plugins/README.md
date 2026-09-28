@@ -57,7 +57,7 @@ The [reserved panel example](example-reserved-panel/) spans each output and
 stacks with the bundled taskbar while reserving desktop work area.
 The [separate dialog example](example-surface-dialog/) opens an owned native
 dialog surface. The [overlay example](example-overlay/) opens a translucent
-surface from a component window and dismisses it independently.
+top-right surface from a component window and dismisses it independently.
 The [task action example](example-task-action/) adds a callback to the
 taskbar's JSX application menu.
 The [control section example](example-control-section/) adds a callback row

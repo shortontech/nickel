@@ -2,7 +2,10 @@
 
 On Linux, panel, dock, window, dialog, and overlay plugins register their own
 shell surface identity. Panels and docks use their declared size and bottom
-offset; windows, dialogs, and overlays are centered on the selected output.
+offset; windows, dialogs, and overlays are centered on the selected output by
+default. Set `anchor` to `top-left`, `top-right`, `bottom-left`, or
+`bottom-right` and add signed `offset_x` and `offset_y` to place one at a
+corner. Placement is clamped to the output.
 They do not replace the built-in taskbar readiness surface.
 
 Nickel loads a compiled JavaScript entry from a directory containing
@@ -128,7 +131,9 @@ For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `Panel` component's ARGB `background` can be translucent. Several installed
 panel, dock, and window plugins can be enabled together. A `"window"` surface
 uses its declared size, is centered on its output, and has no bottom offset.
-A package can declare several
+A window, dialog, or overlay can declare an `anchor` and offsets, for example
+`"anchor":"top-right","offset_x":-18,"offset_y":24`. Other surface kinds
+cannot use window anchoring. A package can declare several
 surfaces, each with a unique ID. Nickel starts a separate component instance for
 each and exposes `nickel.data.surface` with its `id`, `kind`, `width`, and
 `height`; the same entry can return different layouts for each ID. Surface

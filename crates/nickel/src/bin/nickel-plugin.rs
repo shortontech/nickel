@@ -67,6 +67,14 @@ fn run_command() -> Result<(), String> {
                     surface.width,
                     surface.height
                 );
+                if !surface.anchor.is_center() || surface.offset_x != 0 || surface.offset_y != 0 {
+                    println!(
+                        "  placement: {} ({:+}, {:+})",
+                        surface.anchor.as_str(),
+                        surface.offset_x,
+                        surface.offset_y
+                    );
+                }
             }
             for capability in &package.manifest.capabilities {
                 println!("access: {}", capability.as_str());

@@ -104,6 +104,15 @@ pub fn notification_manifest() -> &'static PluginManifest {
     })
 }
 
+pub fn notification_surface() -> &'static PluginSurface {
+    let surface = notification_manifest()
+        .surfaces
+        .first()
+        .expect("bundled notifications need a surface");
+    assert_eq!(surface.kind, PluginSurfaceKind::Overlay);
+    surface
+}
+
 pub fn volume_osd_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {

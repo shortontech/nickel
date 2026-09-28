@@ -7,6 +7,6 @@
   "entry": "main.js",
   "surfaces": [
     {"id": "home", "kind": "window", "width": 420, "height": 250},
-    {"id": "notice", "kind": "overlay", "width": 300, "height": 120}
+    {"id": "notice", "kind": "overlay", "width": 300, "height": 120, "anchor": "top-right", "offset_x": -18, "offset_y": 24}
   ]
 }

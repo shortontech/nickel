@@ -658,8 +658,73 @@ pub struct PluginSurface {
     pub reserve_work_area: bool,
     #[serde(default)]
     pub output: PluginOutputScope,
+    #[serde(default, skip_serializing_if = "PluginSurfaceAnchor::is_center")]
+    pub anchor: PluginSurfaceAnchor,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub offset_x: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub offset_y: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginSurfaceAnchor {
+    #[default]
+    Center,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl PluginSurfaceAnchor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Center => "center",
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+
+    pub fn is_center(&self) -> bool {
+        *self == Self::Center
+    }
+
+    pub fn position(
+        self,
+        output: (i32, i32, u32, u32),
+        size: (u32, u32),
+        offset: (i32, i32),
+    ) -> (i32, i32) {
+        let (x, y, output_width, output_height) = output;
+        let (width, height) = size;
+        let remaining_x = output_width.saturating_sub(width).min(i32::MAX as u32) as i32;
+        let remaining_y = output_height.saturating_sub(height).min(i32::MAX as u32) as i32;
+        let anchor_x = match self {
+            Self::TopLeft | Self::BottomLeft => 0,
+            Self::TopRight | Self::BottomRight => remaining_x,
+            Self::Center => remaining_x / 2,
+        };
+        let anchor_y = match self {
+            Self::TopLeft | Self::TopRight => 0,
+            Self::BottomLeft | Self::BottomRight => remaining_y,
+            Self::Center => remaining_y / 2,
+        };
+        (
+            x.saturating_add(anchor_x.saturating_add(offset.0))
+                .clamp(x, x.saturating_add(remaining_x)),
+            y.saturating_add(anchor_y.saturating_add(offset.1))
+                .clamp(y, y.saturating_add(remaining_y)),
+        )
+    }
 }
 
 /// Stable manifest identity for a plugin-owned surface. The host pairs this
@@ -866,6 +931,26 @@ impl PluginManifest {
             if surface.bottom_offset > 8192 {
                 return Err(format!(
                     "surface {:?} has an invalid bottom offset",
+                    surface.id
+                ));
+            }
+            if !(-8192..=8192).contains(&surface.offset_x)
+                || !(-8192..=8192).contains(&surface.offset_y)
+            {
+                return Err(format!(
+                    "surface {:?} has an invalid anchor offset",
+                    surface.id
+                ));
+            }
+            if !matches!(
+                surface.kind,
+                PluginSurfaceKind::Window | PluginSurfaceKind::Dialog | PluginSurfaceKind::Overlay
+            ) && (surface.anchor != PluginSurfaceAnchor::Center
+                || surface.offset_x != 0
+                || surface.offset_y != 0)
+            {
+                return Err(format!(
+                    "surface {:?} cannot use window anchoring",
                     surface.id
                 ));
             }
@@ -1400,6 +1485,44 @@ mod tests {
         "surfaces": [{"id":"main","kind":"panel","width":360,"height":64,"bottom_offset":24,"output":"all"}],
         "capabilities": []
     }"#;
+
+    #[test]
+    fn anchored_overlay_manifest_is_bounded_and_placed_inside_output() {
+        let source = VALID
+            .replace("\"kind\":\"panel\"", "\"kind\":\"overlay\"")
+            .replace("\"bottom_offset\":24,", "")
+            .replace(
+                "\"height\":64,",
+                "\"height\":64,\"anchor\":\"top-right\",\"offset_x\":-18,\"offset_y\":24,",
+            );
+        let manifest = PluginManifest::from_json(&source).unwrap();
+        let surface = &manifest.surfaces[0];
+        assert_eq!(surface.anchor, PluginSurfaceAnchor::TopRight);
+        assert_eq!(
+            surface.anchor.position(
+                (100, 200, 800, 600),
+                (360, 64),
+                (surface.offset_x, surface.offset_y)
+            ),
+            (522, 224)
+        );
+        assert_eq!(
+            surface
+                .anchor
+                .position((100, 200, 200, 60), (360, 64), (-18, 24)),
+            (100, 200),
+        );
+        assert!(
+            PluginManifest::from_json(&source.replace("\"offset_x\":-18", "\"offset_x\":-9000"))
+                .is_err()
+        );
+        assert!(
+            PluginManifest::from_json(
+                &source.replace("\"kind\":\"overlay\"", "\"kind\":\"panel\"")
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn accepts_a_portable_panel_manifest() {

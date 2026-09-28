@@ -1398,6 +1398,9 @@ impl WinitShell {
                         width: surface.width,
                         height: surface.height,
                         bottom_offset: surface.bottom_offset,
+                        anchor: protocol_plugin_surface_anchor(surface.anchor),
+                        offset_x: surface.offset_x,
+                        offset_y: surface.offset_y,
                     }),
                 },
             )
@@ -2706,6 +2709,9 @@ impl WinitShell {
                         width: panel.width,
                         height: panel.height,
                         bottom_offset: panel.bottom_offset,
+                        anchor: protocol_plugin_surface_anchor(panel.anchor),
+                        offset_x: panel.offset_x,
+                        offset_y: panel.offset_y,
                     }),
                 },
             )
@@ -3011,6 +3017,20 @@ fn protocol_plugin_surface_kind(
     }
 }
 
+fn protocol_plugin_surface_anchor(
+    anchor: nickel_core::plugins::PluginSurfaceAnchor,
+) -> nickel_session_protocol::PluginSurfaceAnchor {
+    use nickel_core::plugins::PluginSurfaceAnchor as Core;
+    use nickel_session_protocol::PluginSurfaceAnchor as Protocol;
+    match anchor {
+        Core::Center => Protocol::Center,
+        Core::TopLeft => Protocol::TopLeft,
+        Core::TopRight => Protocol::TopRight,
+        Core::BottomLeft => Protocol::BottomLeft,
+        Core::BottomRight => Protocol::BottomRight,
+    }
+}
+
 fn surface_geometry_for_panel(
     role: SurfaceRole,
     geometry: DisplayGeometry,
@@ -3052,14 +3072,19 @@ fn surface_geometry_for_panel(
                 | nickel_core::plugins::PluginSurfaceKind::Dialog
                 | nickel_core::plugins::PluginSurfaceKind::Overlay
         ) {
+            let (x, y) = panel.anchor.position(
+                (geometry.x, geometry.y, geometry.width, geometry.height),
+                (width, height),
+                (panel.offset_x, panel.offset_y),
+            );
             return (
                 match panel.kind {
                     nickel_core::plugins::PluginSurfaceKind::Dialog => "Nickel Plugin Dialog",
                     nickel_core::plugins::PluginSurfaceKind::Overlay => "Nickel Plugin Overlay",
                     _ => "Nickel Plugin Window",
                 },
-                geometry.x + geometry.width.saturating_sub(width) as i32 / 2,
-                geometry.y + geometry.height.saturating_sub(height) as i32 / 2,
+                x,
+                y,
                 width,
                 height,
                 false,
@@ -3154,14 +3179,19 @@ fn surface_geometry(
             600.min(geometry.height),
             true,
         ),
-        SurfaceRole::Notification => (
-            NOTIFICATION_TITLE,
-            geometry.x + geometry.width.saturating_sub(438) as i32,
-            geometry.y + 24,
-            420.min(geometry.width),
-            180.min(geometry.height),
-            true,
-        ),
+        SurfaceRole::Notification => {
+            let notification = crate::plugin_panel::notification_surface();
+            let size = (
+                notification.width.min(geometry.width),
+                notification.height.min(geometry.height),
+            );
+            let (x, y) = notification.anchor.position(
+                (geometry.x, geometry.y, geometry.width, geometry.height),
+                size,
+                (notification.offset_x, notification.offset_y),
+            );
+            (NOTIFICATION_TITLE, x, y, size.0, size.1, true)
+        }
         SurfaceRole::VolumeOsd => (
             VOLUME_OSD_TITLE,
             geometry.x + (geometry.width.saturating_sub(320) / 2) as i32,
@@ -3660,6 +3690,9 @@ mod tests {
                 width: 360,
                 height: 96,
                 bottom_offset: 12,
+                anchor: nickel_core::plugins::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
                 reserve_work_area: false,
                 output: nickel_core::plugins::PluginOutputScope::Primary,
                 owner: None,
@@ -3739,6 +3772,9 @@ mod tests {
             width: 520,
             height: 340,
             bottom_offset: 0,
+            anchor: nickel_core::plugins::PluginSurfaceAnchor::Center,
+            offset_x: 0,
+            offset_y: 0,
             reserve_work_area: false,
             output: nickel_core::plugins::PluginOutputScope::Primary,
             owner: None,
@@ -3756,6 +3792,49 @@ mod tests {
             super::protocol_plugin_surface_kind(window.kind),
             nickel_session_protocol::PluginSurfacePlacementKind::Window
         );
+
+        let mut overlay = window;
+        overlay.kind = nickel_core::plugins::PluginSurfaceKind::Overlay;
+        overlay.anchor = nickel_core::plugins::PluginSurfaceAnchor::TopRight;
+        overlay.offset_x = -18;
+        overlay.offset_y = 24;
+        let (_, x, y, width, height, _) = super::surface_geometry_for_panel(
+            SurfaceRole::Panel,
+            geometry,
+            PanelEdge::Bottom,
+            &overlay,
+        );
+        assert_eq!((x, y, width, height), (1482, 224, 520, 340));
+    }
+
+    #[test]
+    fn bundled_notification_placement_comes_from_its_surface_declaration() {
+        let geometry = DisplayGeometry {
+            x: 100,
+            y: 200,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+        };
+        let (_, x, y, width, height, _) = super::surface_geometry_for_panel(
+            SurfaceRole::Notification,
+            geometry,
+            PanelEdge::Bottom,
+            crate::plugin_panel::notification_surface(),
+        );
+        assert_eq!((x, y, width, height), (1582, 224, 420, 180));
+        let small = DisplayGeometry {
+            width: 300,
+            height: 120,
+            ..geometry
+        };
+        let (_, x, y, width, height, _) = super::surface_geometry_for_panel(
+            SurfaceRole::Notification,
+            small,
+            PanelEdge::Bottom,
+            crate::plugin_panel::notification_surface(),
+        );
+        assert_eq!((x, y, width, height), (100, 200, 300, 120));
     }
 
     #[test]

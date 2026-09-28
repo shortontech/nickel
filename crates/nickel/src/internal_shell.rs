@@ -1535,7 +1535,13 @@ impl InternalShellCoordinator {
     pub(crate) fn plugin_panel_placement(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<(nickel_core::plugins::PluginSurfaceKind, u32)> {
+    ) -> Option<(
+        nickel_core::plugins::PluginSurfaceKind,
+        u32,
+        nickel_core::plugins::PluginSurfaceAnchor,
+        i32,
+        i32,
+    )> {
         self.shell.plugin_panel_placement(key)
     }
 

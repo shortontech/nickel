@@ -281,6 +281,61 @@ pub struct PluginSurfacePlacement {
     pub width: u32,
     pub height: u32,
     pub bottom_offset: u32,
+    #[serde(default, skip_serializing_if = "PluginSurfaceAnchor::is_center")]
+    pub anchor: PluginSurfaceAnchor,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub offset_x: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub offset_y: i32,
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginSurfaceAnchor {
+    #[default]
+    Center,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl PluginSurfaceAnchor {
+    pub fn is_center(&self) -> bool {
+        *self == Self::Center
+    }
+
+    pub fn position(
+        self,
+        output: (i32, i32, u32, u32),
+        size: (u32, u32),
+        offset: (i32, i32),
+    ) -> (i32, i32) {
+        let (x, y, output_width, output_height) = output;
+        let (width, height) = size;
+        let remaining_x = output_width.saturating_sub(width).min(i32::MAX as u32) as i32;
+        let remaining_y = output_height.saturating_sub(height).min(i32::MAX as u32) as i32;
+        let anchor_x = match self {
+            Self::TopLeft | Self::BottomLeft => 0,
+            Self::TopRight | Self::BottomRight => remaining_x,
+            Self::Center => remaining_x / 2,
+        };
+        let anchor_y = match self {
+            Self::TopLeft | Self::TopRight => 0,
+            Self::BottomLeft | Self::BottomRight => remaining_y,
+            Self::Center => remaining_y / 2,
+        };
+        (
+            x.saturating_add(anchor_x.saturating_add(offset.0))
+                .clamp(x, x.saturating_add(remaining_x)),
+            y.saturating_add(anchor_y.saturating_add(offset.1))
+                .clamp(y, y.saturating_add(remaining_y)),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2365,6 +2420,9 @@ mod tests {
                 width: 360,
                 height: 64,
                 bottom_offset: 24,
+                anchor: PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
             }),
         };
         let request = ClientEnvelope {
@@ -2383,6 +2441,17 @@ mod tests {
         let placement = window.plugin_surface.as_mut().unwrap();
         placement.kind = PluginSurfacePlacementKind::Window;
         placement.bottom_offset = 0;
+        placement.anchor = PluginSurfaceAnchor::TopRight;
+        placement.offset_x = -18;
+        placement.offset_y = 24;
+        assert_eq!(
+            placement.anchor.position(
+                (100, 200, 800, 600),
+                (360, 64),
+                (placement.offset_x, placement.offset_y)
+            ),
+            (522, 224),
+        );
         let encoded = encode(&window).unwrap();
         assert_eq!(decode::<ShellSurfaceIdentity>(&encoded).unwrap(), window);
     }
@@ -2400,6 +2469,9 @@ mod tests {
                 width: 1920,
                 height: 56,
                 bottom_offset: 0,
+                anchor: PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
             }),
         };
         assert_eq!(
@@ -2421,6 +2493,9 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 bottom_offset: 0,
+                anchor: PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
             }),
         };
         assert_eq!(

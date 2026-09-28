@@ -606,9 +606,13 @@ fn verify_taskbar_plugin_retires(
 }
 
 fn panel_geometry(surfaces: &str, key: &str) -> Option<(i32, i32, u32, u32)> {
+    surface_geometry(surfaces, "Panel", key)
+}
+
+fn surface_geometry(surfaces: &str, role: &str, key: &str) -> Option<(i32, i32, u32, u32)> {
     let geometry = surfaces
         .lines()
-        .find(|line| line.starts_with("Panel\twinit\t") && line.ends_with(key))?
+        .find(|line| line.starts_with(&format!("{role}\twinit\t")) && line.ends_with(key))?
         .split('\t')
         .nth(2)?;
     let (origin, size) = geometry.split_once(' ')?;
@@ -1511,6 +1515,16 @@ fn verify_separate_plugin_overlay(
         }
         thread::sleep(POLL);
     };
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    let (output_x, output_y, output_width, _) =
+        surface_geometry(&surfaces, "Desktop", "org.nickel.desktop/main")
+            .ok_or("nested desktop output geometry is unavailable")?;
+    let expected = (output_x + output_width as i32 - 300 - 18, output_y + 24);
+    if (overlay_x, overlay_y) != expected {
+        return Err(format!(
+            "anchored plugin overlay is at ({overlay_x}, {overlay_y}), expected {expected:?}: {surfaces}"
+        ));
+    }
     let opened_bytes =
         wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
     if opened_bytes <= home_bytes {

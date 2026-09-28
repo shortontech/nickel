@@ -6,7 +6,7 @@
   "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [
-    {"id":"main","kind":"overlay","width":420,"height":180}
+    {"id":"main","kind":"overlay","width":420,"height":180,"anchor":"top-right","offset_x":-18,"offset_y":24}
   ],
   "capabilities": ["notifications-read", "notifications-act"]
 }

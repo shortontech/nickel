@@ -7,7 +7,7 @@ use crate::{
     internal_shell::InternalOutput,
     winit_shell::{PanelEdge, SurfaceRole},
 };
-use nickel_core::plugins::PluginSurfaceKind;
+use nickel_core::plugins::{PluginSurfaceAnchor, PluginSurfaceKind};
 use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 
 fn outputs() -> Vec<(InternalOutput, i32, i32)> {
@@ -96,7 +96,14 @@ fn internal_plugin_window_centers_while_dock_uses_bottom_offset() {
         None,
         PanelEdge::Bottom,
     );
-    apply_internal_plugin_surface_placement(&mut window, PluginSurfaceKind::Window, 0, &outputs);
+    apply_internal_plugin_surface_placement(
+        &mut window,
+        PluginSurfaceKind::Window,
+        0,
+        PluginSurfaceAnchor::Center,
+        (0, 0),
+        &outputs,
+    );
     assert_eq!(window.geometry, (1020, 790, 520, 340));
     assert_eq!(
         window.role,
@@ -111,8 +118,26 @@ fn internal_plugin_window_centers_while_dock_uses_bottom_offset() {
         None,
         PanelEdge::Bottom,
     );
-    apply_internal_plugin_surface_placement(&mut dock, PluginSurfaceKind::Dock, 36, &outputs);
+    apply_internal_plugin_surface_placement(
+        &mut dock,
+        PluginSurfaceKind::Dock,
+        36,
+        PluginSurfaceAnchor::Center,
+        (0, 0),
+        &outputs,
+    );
     assert_eq!(dock.geometry, (1020, 1304, 520, 340));
+
+    let mut overlay = window;
+    apply_internal_plugin_surface_placement(
+        &mut overlay,
+        PluginSurfaceKind::Overlay,
+        0,
+        PluginSurfaceAnchor::TopRight,
+        (-18, 24),
+        &outputs,
+    );
+    assert_eq!(overlay.geometry, (2022, 264, 520, 340));
 }
 
 pub(super) fn receive_x11_clipboard(

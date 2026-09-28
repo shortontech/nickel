@@ -51,11 +51,21 @@ fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurface
                 && (1..=8192).contains(&surface.width)
                 && (1..=8192).contains(&surface.height)
                 && surface.bottom_offset <= 8192
+                && (-8192..=8192).contains(&surface.offset_x)
+                && (-8192..=8192).contains(&surface.offset_y)
                 && (matches!(
                     surface.kind,
                     nickel_session_protocol::PluginSurfacePlacementKind::Panel
                         | nickel_session_protocol::PluginSurfacePlacementKind::Dock
                 ) || surface.bottom_offset == 0)
+                && (matches!(
+                    surface.kind,
+                    nickel_session_protocol::PluginSurfacePlacementKind::Window
+                        | nickel_session_protocol::PluginSurfacePlacementKind::Dialog
+                        | nickel_session_protocol::PluginSurfacePlacementKind::Overlay
+                ) || (surface.anchor == nickel_session_protocol::PluginSurfaceAnchor::Center
+                    && surface.offset_x == 0
+                    && surface.offset_y == 0))
         })
 }
 
@@ -79,6 +89,9 @@ mod shell_surface_identity_tests {
                 width: 1920,
                 height: 56,
                 bottom_offset: 0,
+                anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));
@@ -92,6 +105,32 @@ mod shell_surface_identity_tests {
         assert!(!shell_surface_identity_valid(&identity));
         identity.role = ShellRole::PluginSurface;
         assert!(shell_surface_identity_valid(&identity));
+    }
+
+    #[test]
+    fn anchored_plugin_overlay_is_valid_but_panel_anchor_is_rejected() {
+        let mut identity = ShellSurfaceIdentity {
+            application_id: "io.nickel.shell.surface.42.13".into(),
+            role: ShellRole::PluginSurface,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.example.notice".into(),
+                surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Overlay,
+                width: 420,
+                height: 180,
+                bottom_offset: 0,
+                anchor: nickel_session_protocol::PluginSurfaceAnchor::TopRight,
+                offset_x: -18,
+                offset_y: 24,
+            }),
+        };
+        assert!(shell_surface_identity_valid(&identity));
+        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Panel;
+        assert!(!shell_surface_identity_valid(&identity));
+        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Overlay;
+        identity.plugin_surface.as_mut().unwrap().offset_y = 8193;
+        assert!(!shell_surface_identity_valid(&identity));
     }
 
     #[test]
@@ -109,6 +148,9 @@ mod shell_surface_identity_tests {
                 width: surface.width,
                 height: surface.height,
                 bottom_offset: 0,
+                anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));
@@ -136,6 +178,9 @@ mod shell_surface_identity_tests {
                 width: surface.width,
                 height: surface.height,
                 bottom_offset: 0,
+                anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));
@@ -158,6 +203,9 @@ mod shell_surface_identity_tests {
                 width: surface.width,
                 height: surface.height,
                 bottom_offset: 0,
+                anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
             }),
         };
         assert!(shell_surface_identity_valid(&identity));

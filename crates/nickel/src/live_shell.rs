@@ -3465,13 +3465,20 @@ impl LiveShell {
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Option<u32> {
-        self.plugin_panel_placement(key).map(|(_, offset)| offset)
+        self.plugin_panel_placement(key)
+            .map(|(_, offset, _, _, _)| offset)
     }
 
     pub(crate) fn plugin_panel_placement(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<(nickel_core::plugins::PluginSurfaceKind, u32)> {
+    ) -> Option<(
+        nickel_core::plugins::PluginSurfaceKind,
+        u32,
+        nickel_core::plugins::PluginSurfaceAnchor,
+        i32,
+        i32,
+    )> {
         if self.plugin_panel_host.is_some()
             && self.plugin_panel_owner == key.plugin_id
             && self.plugin_panel_surface.id == key.surface_id
@@ -3479,11 +3486,20 @@ impl LiveShell {
             return Some((
                 self.plugin_panel_surface.kind,
                 self.plugin_panel_surface.bottom_offset,
+                self.plugin_panel_surface.anchor,
+                self.plugin_panel_surface.offset_x,
+                self.plugin_panel_surface.offset_y,
             ));
         }
-        self.plugin_panel_extra_hosts
-            .get(key)
-            .map(|(surface, _)| (surface.kind, surface.bottom_offset))
+        self.plugin_panel_extra_hosts.get(key).map(|(surface, _)| {
+            (
+                surface.kind,
+                surface.bottom_offset,
+                surface.anchor,
+                surface.offset_x,
+                surface.offset_y,
+            )
+        })
     }
 
     pub(crate) fn plugin_panel_change_token(
@@ -3784,14 +3800,17 @@ impl LiveShell {
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Result<bool, String> {
-        if !self.plugin_panel_placement(key).is_some_and(|(kind, _)| {
-            matches!(
-                kind,
-                nickel_core::plugins::PluginSurfaceKind::Window
-                    | nickel_core::plugins::PluginSurfaceKind::Dialog
-                    | nickel_core::plugins::PluginSurfaceKind::Overlay
-            )
-        }) {
+        if !self
+            .plugin_panel_placement(key)
+            .is_some_and(|(kind, _, _, _, _)| {
+                matches!(
+                    kind,
+                    nickel_core::plugins::PluginSurfaceKind::Window
+                        | nickel_core::plugins::PluginSurfaceKind::Dialog
+                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                )
+            })
+        {
             return Ok(false);
         }
         let owned_dialogs = self
