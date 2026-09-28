@@ -526,6 +526,15 @@ impl ShellSurface {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl Drop for ShellSurface {
+    fn drop(&mut self) {
+        if matches!(self.role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
+            crate::platform::release_panel_window(&self.window);
+        }
+    }
+}
+
 fn show_surface_native(surface: &ShellSurface) {
     #[cfg(target_os = "windows")]
     if matches!(
@@ -883,6 +892,17 @@ impl WinitShell {
             SurfaceRole::Taskbar => desired.contains(&(surface.output_name.clone(), surface.role)),
             _ => true,
         });
+        #[cfg(target_os = "windows")]
+        if let Some(surface) = self.surfaces.iter().find(|surface| {
+            surface.role == SurfaceRole::Panel
+                && surface
+                    .plugin
+                    .as_ref()
+                    .and_then(|key| active_panels.get(key))
+                    .is_some_and(|panel| panel.reserve_work_area)
+        }) {
+            crate::platform::ensure_panel_tray_host(&surface.window);
+        }
         for surface in &mut self.surfaces {
             #[cfg(target_os = "windows")]
             if surface.role == SurfaceRole::TrustedControl {
@@ -1092,6 +1112,21 @@ impl WinitShell {
             let _ = surface
                 .window
                 .request_inner_size(LogicalSize::new(width, height));
+            #[cfg(target_os = "windows")]
+            if (surface.role == SurfaceRole::Taskbar
+                || (surface.role == SurfaceRole::Panel
+                    && surface
+                        .plugin
+                        .as_ref()
+                        .and_then(|key| active_panels.get(key))
+                        .is_some_and(|panel| panel.reserve_work_area)))
+                && !crate::platform::reposition_panel_window(
+                    &surface.window,
+                    self.options.panel_edge,
+                )
+            {
+                tracing::warn!(role = ?surface.role, "failed to reposition Windows reserved panel");
+            }
         }
         #[cfg(target_os = "windows")]
         self.set_plugin_dialog_owners_enabled(false);
@@ -2654,13 +2689,13 @@ impl WinitShell {
                 }
             }
             SurfaceRole::Taskbar => {
-                if !crate::platform::configure_panel_window(&window) {
+                if !crate::platform::configure_panel_window(&window, self.options.panel_edge) {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
             SurfaceRole::Panel => {
                 if panel.reserve_work_area {
-                    if !crate::platform::configure_panel_window(&window) {
+                    if !crate::platform::configure_panel_window(&window, self.options.panel_edge) {
                         tracing::warn!(?role, "failed to configure Windows reserved panel window");
                     }
                 } else if matches!(

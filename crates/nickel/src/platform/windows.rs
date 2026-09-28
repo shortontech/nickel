@@ -71,7 +71,7 @@ use windows::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture},
             Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
             Shell::{
-                ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
+                ABE_BOTTOM, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
                 CommandLineToArgvW, DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH,
                 DWPOS_TILE, DesktopWallpaper, IDesktopWallpaper, NIF_GUID, NIF_ICON, NIF_MESSAGE,
                 NIF_STATE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
@@ -1304,7 +1304,27 @@ static WINDOW_SWITCH_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
+#[derive(Clone, Copy)]
+struct FallbackPanel {
+    hwnd: isize,
+    height: i32,
+    edge: crate::winit_shell::PanelEdge,
+}
+
+struct FallbackMonitor {
+    bounds: RECT,
+    original_work_area: RECT,
+    base_work_area: RECT,
+    panels: Vec<FallbackPanel>,
+}
+
+struct FallbackPanelLayout {
+    work_area: RECT,
+    windows: Vec<(isize, RECT)>,
+}
+
+static FALLBACK_WORK_AREAS: LazyLock<Mutex<HashMap<isize, FallbackMonitor>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static TRAY_ITEMS: Mutex<Vec<NativeTrayIcon>> = Mutex::new(Vec::new());
 static PANEL_WINDOW_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static PANEL_WINDOW_HANDLE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -4088,7 +4108,10 @@ pub fn launcher_window_visible() -> bool {
     launcher != 0 && unsafe { IsWindowVisible(HWND(launcher as *mut c_void)).as_bool() }
 }
 
-pub fn configure_panel_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+pub fn configure_panel_window(
+    window: &impl raw_window_handle::HasWindowHandle,
+    edge: crate::winit_shell::PanelEdge,
+) -> bool {
     let Some(hwnd) = window_hwnd(window) else {
         return false;
     };
@@ -4125,7 +4148,11 @@ pub fn configure_panel_window(window: &impl raw_window_handle::HasWindowHandle) 
         cbSize: size_of::<APPBARDATA>() as u32,
         hWnd: hwnd,
         uCallbackMessage: PANEL_APPBAR_CALLBACK,
-        uEdge: ABE_BOTTOM,
+        uEdge: if edge == crate::winit_shell::PanelEdge::Top {
+            ABE_TOP
+        } else {
+            ABE_BOTTOM
+        },
         rc: rectangle,
         lParam: LPARAM(0),
     };
@@ -4133,12 +4160,33 @@ pub fn configure_panel_window(window: &impl raw_window_handle::HasWindowHandle) 
     // synchronous and Shell32 copies the structure before returning.
     let registered = unsafe { SHAppBarMessage(ABM_NEW, &mut appbar) } != 0;
     if !registered {
-        return reserve_work_area_without_explorer(rectangle) && topmost;
+        return reserve_work_area_without_explorer(hwnd, rectangle, edge) && topmost;
     }
+    position_registered_appbar(hwnd, rectangle, edge) && topmost
+}
+
+fn position_registered_appbar(
+    hwnd: HWND,
+    rectangle: RECT,
+    edge: crate::winit_shell::PanelEdge,
+) -> bool {
+    let height = rectangle.bottom - rectangle.top;
+    let mut appbar = APPBARDATA {
+        cbSize: size_of::<APPBARDATA>() as u32,
+        hWnd: hwnd,
+        uCallbackMessage: PANEL_APPBAR_CALLBACK,
+        uEdge: if edge == crate::winit_shell::PanelEdge::Top {
+            ABE_TOP
+        } else {
+            ABE_BOTTOM
+        },
+        rc: rectangle,
+        lParam: LPARAM(0),
+    };
     unsafe {
         SHAppBarMessage(ABM_QUERYPOS, &mut appbar);
     }
-    appbar.rc.top = appbar.rc.bottom - height;
+    appbar.rc = adjusted_appbar_rect(appbar.rc, height, edge);
     let positioned = unsafe { SHAppBarMessage(ABM_SETPOS, &mut appbar) } != 0;
     // SAFETY: This only applies Shell32's negotiated geometry and the persistent topmost band to
     // Nickel's live panel; it neither activates nor resizes any foreign window.
@@ -4155,6 +4203,37 @@ pub fn configure_panel_window(window: &impl raw_window_handle::HasWindowHandle) 
         .is_ok()
     };
     positioned && topmost
+}
+
+pub fn reposition_panel_window(
+    window: &impl raw_window_handle::HasWindowHandle,
+    edge: crate::winit_shell::PanelEdge,
+) -> bool {
+    let Some(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    let mut rectangle = RECT::default();
+    // SAFETY: rectangle is writable storage for this live panel HWND.
+    if unsafe { GetWindowRect(hwnd, &mut rectangle) }.is_err() {
+        return false;
+    }
+    if let Some(positioned) = reposition_fallback_panel(hwnd, rectangle, edge) {
+        return positioned;
+    }
+    position_registered_appbar(hwnd, rectangle, edge) || configure_panel_window(window, edge)
+}
+
+fn adjusted_appbar_rect(
+    mut rectangle: RECT,
+    height: i32,
+    edge: crate::winit_shell::PanelEdge,
+) -> RECT {
+    if edge == crate::winit_shell::PanelEdge::Top {
+        rectangle.bottom = rectangle.top + height;
+    } else {
+        rectangle.top = rectangle.bottom - height;
+    }
+    rectangle
 }
 
 pub fn update_panel_fullscreen_state() {
@@ -4286,6 +4365,12 @@ fn install_tray_host(hwnd: HWND) {
     unsafe {
         let message = RegisterWindowMessageW(w!("TaskbarCreated"));
         let _ = SendNotifyMessageW(HWND_BROADCAST, message, WPARAM(0), LPARAM(0));
+    }
+}
+
+pub fn ensure_panel_tray_host(window: &impl raw_window_handle::HasWindowHandle) {
+    if let Some(hwnd) = window_hwnd(window) {
+        install_tray_host(hwnd);
     }
 }
 
@@ -4653,39 +4738,183 @@ fn wide_text(buffer: &[u16]) -> String {
     String::from_utf16_lossy(&buffer[..length])
 }
 
-fn reserve_work_area_without_explorer(panel: RECT) -> bool {
-    let mut work_area = RECT::default();
-    // SAFETY: work_area is writable storage and the fallback is used only for the single-monitor
-    // Explorer-free session. SPIF_SENDCHANGE broadcasts the new work area without persisting it.
-    if unsafe {
-        SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some((&mut work_area as *mut RECT).cast()),
-            Default::default(),
-        )
+fn fallback_panel_layout(monitor: &FallbackMonitor) -> FallbackPanelLayout {
+    let mut top = monitor.bounds.top;
+    let mut bottom = monitor.bounds.bottom;
+    let mut windows = Vec::with_capacity(monitor.panels.len());
+    let maximum_height = (bottom - top).max(1);
+    for panel in &monitor.panels {
+        let height = panel.height.clamp(1, maximum_height);
+        let y = if panel.edge == crate::winit_shell::PanelEdge::Top {
+            let y = top.min(monitor.bounds.bottom - height);
+            top = top.saturating_add(height).min(monitor.bounds.bottom);
+            y
+        } else {
+            bottom = bottom.saturating_sub(height).max(monitor.bounds.top);
+            bottom
+        };
+        windows.push((
+            panel.hwnd,
+            RECT {
+                left: monitor.bounds.left,
+                top: y,
+                right: monitor.bounds.right,
+                bottom: y + height,
+            },
+        ));
     }
-    .is_err()
-    {
-        return false;
+    let mut work_area = monitor.base_work_area;
+    work_area.top = work_area.top.max(top).min(monitor.bounds.bottom - 1);
+    work_area.bottom = work_area.bottom.min(bottom).max(work_area.top + 1);
+    FallbackPanelLayout { work_area, windows }
+}
+
+fn apply_fallback_panel_layout(mut layout: FallbackPanelLayout) -> bool {
+    let mut positioned = true;
+    for (window, bounds) in layout.windows {
+        // SAFETY: Each HWND is a live Nickel panel retained by the caller. Repositioning it
+        // keeps the AppBar-free shell's panel stack aligned with the reserved work area.
+        positioned &= unsafe {
+            SetWindowPos(
+                HWND(window as *mut c_void),
+                Some(HWND_TOPMOST),
+                bounds.left,
+                bounds.top,
+                bounds.right - bounds.left,
+                bounds.bottom - bounds.top,
+                SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+            .is_ok()
+        };
     }
-    let mut original = work_area;
-    original.bottom = panel.bottom;
-    if let Ok(mut saved) = ORIGINAL_WORK_AREA.lock() {
-        *saved = Some(original);
-    }
-    work_area.left = panel.left;
-    work_area.right = panel.right;
-    work_area.bottom = panel.top;
-    unsafe {
+    // SAFETY: The rectangle is on the selected monitor; SPIF_SENDCHANGE broadcasts the
+    // work-area change without persisting it across sessions.
+    let reserved = unsafe {
         SystemParametersInfoW(
             SPI_SETWORKAREA,
             0,
-            Some((&mut work_area as *mut RECT).cast()),
+            Some((&mut layout.work_area as *mut RECT).cast()),
             SPIF_SENDCHANGE,
         )
         .is_ok()
+    };
+    positioned && reserved
+}
+
+fn reserve_work_area_without_explorer(
+    hwnd: HWND,
+    panel: RECT,
+    edge: crate::winit_shell::PanelEdge,
+) -> bool {
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return false;
     }
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: info is writable storage for the monitor containing the live panel HWND.
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return false;
+    }
+    let layout = {
+        let Ok(mut monitors) = FALLBACK_WORK_AREAS.lock() else {
+            return false;
+        };
+        let state = monitors.entry(monitor.0 as isize).or_insert_with(|| {
+            let mut base_work_area = info.rcWork;
+            base_work_area.top = info.rcMonitor.top;
+            base_work_area.bottom = info.rcMonitor.bottom;
+            FallbackMonitor {
+                bounds: info.rcMonitor,
+                original_work_area: info.rcWork,
+                base_work_area,
+                panels: Vec::new(),
+            }
+        });
+        let panel = FallbackPanel {
+            hwnd: hwnd.0 as isize,
+            height: panel.bottom - panel.top,
+            edge,
+        };
+        if let Some(existing) = state.panels.iter_mut().find(|item| item.hwnd == panel.hwnd) {
+            *existing = panel;
+        } else {
+            state.panels.push(panel);
+        }
+        fallback_panel_layout(state)
+    };
+    apply_fallback_panel_layout(layout)
+}
+
+fn reposition_fallback_panel(
+    hwnd: HWND,
+    rectangle: RECT,
+    edge: crate::winit_shell::PanelEdge,
+) -> Option<bool> {
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let layout = {
+        let Ok(mut monitors) = FALLBACK_WORK_AREAS.lock() else {
+            return Some(false);
+        };
+        let key = monitors.iter().find_map(|(key, state)| {
+            state
+                .panels
+                .iter()
+                .any(|panel| panel.hwnd == hwnd.0 as isize)
+                .then_some(*key)
+        })?;
+        if key != monitor.0 as isize {
+            drop(monitors);
+            release_fallback_panel(hwnd);
+            return Some(reserve_work_area_without_explorer(hwnd, rectangle, edge));
+        }
+        let state = monitors
+            .get_mut(&key)
+            .expect("matched monitor still exists");
+        let panel = state
+            .panels
+            .iter_mut()
+            .find(|panel| panel.hwnd == hwnd.0 as isize)
+            .expect("matched panel still exists");
+        panel.height = rectangle.bottom - rectangle.top;
+        panel.edge = edge;
+        fallback_panel_layout(state)
+    };
+    Some(apply_fallback_panel_layout(layout))
+}
+
+fn release_fallback_panel(hwnd: HWND) {
+    let layout = {
+        let Ok(mut monitors) = FALLBACK_WORK_AREAS.lock() else {
+            return;
+        };
+        let Some(key) = monitors.iter().find_map(|(key, state)| {
+            state
+                .panels
+                .iter()
+                .any(|panel| panel.hwnd == hwnd.0 as isize)
+                .then_some(*key)
+        }) else {
+            return;
+        };
+        let state = monitors
+            .get_mut(&key)
+            .expect("matched monitor still exists");
+        state.panels.retain(|panel| panel.hwnd != hwnd.0 as isize);
+        if state.panels.is_empty() {
+            let work_area = state.original_work_area;
+            monitors.remove(&key);
+            FallbackPanelLayout {
+                work_area,
+                windows: Vec::new(),
+            }
+        } else {
+            fallback_panel_layout(state)
+        }
+    };
+    let _ = apply_fallback_panel_layout(layout);
 }
 
 pub fn release_panel_window(window: &impl raw_window_handle::HasWindowHandle) {
@@ -4701,18 +4930,17 @@ pub fn release_panel_window(window: &impl raw_window_handle::HasWindowHandle) {
     unsafe {
         SHAppBarMessage(ABM_REMOVE, &mut appbar);
     }
-    if let Ok(mut saved) = ORIGINAL_WORK_AREA.lock()
-        && let Some(mut original) = saved.take()
-    {
-        // SAFETY: original is the work area captured before Nickel reserved the panel strip.
-        unsafe {
-            let _ = SystemParametersInfoW(
-                SPI_SETWORKAREA,
-                0,
-                Some((&mut original as *mut RECT).cast()),
-                SPIF_SENDCHANGE,
-            );
+    release_fallback_panel(hwnd);
+    if PANEL_WINDOW_HANDLE.load(Ordering::Relaxed) == hwnd.0 as isize {
+        let previous = PANEL_WINDOW_PROC.swap(0, Ordering::Relaxed);
+        if previous != 0 {
+            // SAFETY: The live panel still owns this HWND. Restore its original procedure
+            // before winit destroys the window and another panel becomes the tray host.
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+            }
         }
+        PANEL_WINDOW_HANDLE.store(0, Ordering::Relaxed);
     }
 }
 
@@ -6018,20 +6246,77 @@ mod tests {
     };
 
     use super::{
-        ActiveSettlementExit, DwmPreviewState, NativeApplyState, NativePreviewDiagnostics,
-        NativeWindowFingerprint, NativeWindowLifetime, RetainedNativeSettlement,
-        SettlementRetentionOutcome, TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag,
-        WindowDragAdmission, WindowDragCoordinator, application_icon,
-        apply_native_write_completion, apply_window_drag, clamp_preview_x,
-        classify_window_drag_observation, contain_rect, contested_authority,
+        ActiveSettlementExit, DwmPreviewState, FallbackMonitor, FallbackPanel, NativeApplyState,
+        NativePreviewDiagnostics, NativeWindowFingerprint, NativeWindowLifetime,
+        RetainedNativeSettlement, SettlementRetentionOutcome, TerminalSettlementOutcome,
+        TrayNotifyIconData, WindowDrag, WindowDragAdmission, WindowDragCoordinator,
+        adjusted_appbar_rect, application_icon, apply_native_write_completion, apply_window_drag,
+        clamp_preview_x, classify_window_drag_observation, contain_rect, contested_authority,
         contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
-        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
-        native_system_drag_hit, parse_windows_command, permits_contested_workflow,
-        pointer_drag_rectangle, project_native_preview_diagnostics, project_windows_shortcuts,
-        rectangle_covers, restore_legacy_icon_alpha, should_observe_tokenless_geometry,
-        should_restore_on_activation, unknown_suspension_within_bound, windows_pid_descends_from,
-        work_area_above_panel,
+        fallback_panel_layout, is_nickel_host_terminal, is_shell_infrastructure,
+        native_hotkey_requests, native_system_drag_hit, parse_windows_command,
+        permits_contested_workflow, pointer_drag_rectangle, project_native_preview_diagnostics,
+        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
+        should_observe_tokenless_geometry, should_restore_on_activation,
+        unknown_suspension_within_bound, windows_pid_descends_from, work_area_above_panel,
     };
+    use crate::winit_shell::PanelEdge;
+
+    #[test]
+    fn windows_appbar_rect_uses_its_declared_edge() {
+        let proposed = RECT {
+            left: 100,
+            top: 220,
+            right: 900,
+            bottom: 720,
+        };
+        let top = adjusted_appbar_rect(proposed, 56, PanelEdge::Top);
+        assert_eq!((top.top, top.bottom), (220, 276));
+        let bottom = adjusted_appbar_rect(proposed, 56, PanelEdge::Bottom);
+        assert_eq!((bottom.top, bottom.bottom), (664, 720));
+    }
+
+    #[test]
+    fn explorer_free_panels_stack_and_reflow_after_retirement() {
+        let bounds = RECT {
+            left: 100,
+            top: 200,
+            right: 900,
+            bottom: 800,
+        };
+        let mut monitor = FallbackMonitor {
+            bounds,
+            original_work_area: bounds,
+            base_work_area: bounds,
+            panels: vec![
+                FallbackPanel {
+                    hwnd: 1,
+                    height: 56,
+                    edge: PanelEdge::Bottom,
+                },
+                FallbackPanel {
+                    hwnd: 2,
+                    height: 36,
+                    edge: PanelEdge::Bottom,
+                },
+            ],
+        };
+        let bottom = fallback_panel_layout(&monitor);
+        assert_eq!(bottom.work_area.bottom, 708);
+        assert_eq!(
+            (bottom.windows[0].1.top, bottom.windows[1].1.top),
+            (744, 708)
+        );
+        monitor.panels.remove(0);
+        let remaining = fallback_panel_layout(&monitor);
+        assert_eq!(remaining.work_area.bottom, 764);
+        assert_eq!(remaining.windows[0].1.top, 764);
+
+        monitor.panels[0].edge = PanelEdge::Top;
+        let top = fallback_panel_layout(&monitor);
+        assert_eq!(top.work_area.top, 236);
+        assert_eq!(top.windows[0].1.top, 200);
+    }
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
         NativeWindowFingerprint {
