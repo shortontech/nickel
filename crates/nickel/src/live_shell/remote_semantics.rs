@@ -235,19 +235,7 @@ impl LiveShell {
                         |_, _| false,
                     )?))
                 } else {
-                    self.preview_frame
-                        .as_ref()
-                        .ok_or_else(|| "window preview is unavailable".to_owned())
-                        .and_then(|frame| {
-                            Ok(observe_only((
-                                frame.change_token().semantic_generation,
-                                frame
-                                    .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
-                                    .map_err(|_| {
-                                        "shell semantics are protected or exceed budget".to_owned()
-                                    })?,
-                            )))
-                        })
+                    Err("Window preview plugin is unavailable".into())
                 }
             }
             SurfaceRole::WindowContextMenu => {

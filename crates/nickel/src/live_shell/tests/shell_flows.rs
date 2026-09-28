@@ -108,14 +108,19 @@
 
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(!shell.preview_plugin_active());
+        assert!(shell.preview_group.is_none());
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
         );
-        assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
-        assert!(shell.preview_frame.is_some());
+        assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
+        assert!(shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
+        assert!(shell.preview_frame.is_none());
+        shell.open_window_preview(0);
+        assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
 
         assert!(shell.set_plugin_enabled(id, true).unwrap());
+        shell.open_window_preview(0);
         assert!(shell.preview_plugin_active());
         assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
         assert!(shell.preview_frame.is_none());
@@ -188,14 +193,17 @@
         shell
             .set_plugin_enabled(&crate::plugin_panel::window_preview_manifest().id, false)
             .unwrap();
+        assert!(shell.task_switcher.session().is_none());
+        assert!(shell.task_switcher_group.is_none());
         shell.task_switcher.apply(
             nickel_core::hotkeys::HotkeyAction::SwitchNext,
             &candidates,
         );
         shell.rebuild_task_switcher_preview();
-        assert!(!shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
+        assert!(shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
+        assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
         assert!(!shell.preview_plugin_active());
-        assert!(shell.preview_frame.is_some());
+        assert!(shell.preview_frame.is_none());
     }
 
     #[test]

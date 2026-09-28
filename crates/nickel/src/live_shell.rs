@@ -138,11 +138,10 @@ use crate::{
     window_preview::{
         ApplicationMenuAction, ApplicationMenuApp, ApplicationMenuTarget, MENU_WIDTH, MenuAction,
         PreviewAction, TaskbarPreviewAnchor, WindowMenuApp, WindowPreviewFrame,
-        application_menu_entries, build_preview_frame, display_menu_entries, menu_height,
-        menu_height_for_rows, preview_dimensions, semantic_theme_from_palette,
-        task_switcher_dimensions, validated_application_close_targets,
-        window_menu_action_is_current, window_menu_entries, window_menu_max_rows,
-        workspace_menu_entries,
+        application_menu_entries, display_menu_entries, menu_height, menu_height_for_rows,
+        preview_dimensions, semantic_theme_from_palette, task_switcher_dimensions,
+        validated_application_close_targets, window_menu_action_is_current, window_menu_entries,
+        window_menu_max_rows, workspace_menu_entries,
     },
     winit_shell::SurfaceRole,
 };
@@ -3385,7 +3384,8 @@ impl LiveShell {
                 self.volume_osd_until.is_some() && self.plugin_volume_osd_host.is_some()
             }
             SurfaceRole::WindowPreview => {
-                self.preview_group.is_some() || self.task_switcher_group.is_some()
+                self.plugin_preview_host.is_some()
+                    && (self.preview_group.is_some() || self.task_switcher_group.is_some())
             }
             SurfaceRole::WindowContextMenu => {
                 self.window_menu.is_some() || self.application_menu_target.is_some()
@@ -3480,9 +3480,15 @@ impl LiveShell {
             let (_, host) = self.plugin_panel_extra_hosts.get(key)?;
             host.inspect()
         };
+        // A settings edit replaces the host, whose generation restarts at zero.
+        // Include the activation revision so the presenter cannot reuse the old frame.
         Some(HostChangeToken {
-            frame_generation: inspection.frame_generation,
-            semantic_generation: inspection.semantic_generation,
+            frame_generation: inspection
+                .frame_generation
+                .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+            semantic_generation: inspection
+                .semantic_generation
+                .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
         })
     }
 
@@ -3647,6 +3653,7 @@ impl LiveShell {
                 ..Default::default()
             },
         );
+        self.maybe_publish_plugin_status();
     }
 
     pub(crate) fn close_plugin_window(
@@ -4088,9 +4095,10 @@ impl LiveShell {
         nickel_core::plugins::PluginPreferences::update_default(&manifest, key, value)
             .map_err(|error| format!("could not save plugin setting: {error}"))?;
         self.plugin_settings.insert(id.to_owned(), values);
+        let mut replaced_panels = false;
         if let Some(replacements) = replacement {
             let mut extension_bytes = None;
-            let replaced_panels = replacements
+            replaced_panels = replacements
                 .iter()
                 .any(|(surface_id, _)| surface_id.is_some());
             for (surface_id, application) in replacements {
@@ -4161,6 +4169,8 @@ impl LiveShell {
                 );
             }
         }
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
         if let Some((target, _, _, _, _)) = self.plugin_widget_slot_hosts.get(id) {
             let target = target.clone();
             self.refresh_plugin_slot_hosts(&target);
@@ -4169,8 +4179,15 @@ impl LiveShell {
             let target = target.clone();
             self.refresh_plugin_slot_hosts(&target);
         }
-        self.plugin_activation_generation =
-            self.plugin_activation_generation.wrapping_add(1).max(1);
+        if replaced_panels {
+            for (surface, placement) in self
+                .plugin_panels()
+                .into_iter()
+                .filter(|(surface, _)| surface.plugin_id == id)
+            {
+                let _ = self.plugin_panel_scene(&surface, placement.width, placement.height);
+            }
+        }
         self.maybe_publish_plugin_status();
         Ok(true)
     }
@@ -4350,6 +4367,17 @@ impl LiveShell {
                 }
             } else if id == crate::plugin_panel::window_preview_manifest().id {
                 self.plugin_preview_host = None;
+                let preview_was_open =
+                    self.preview_group.is_some() || self.task_switcher_group.is_some();
+                if self.task_switcher_group.is_some() {
+                    self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
+                }
+                if preview_was_open {
+                    self.close_window_preview();
+                } else {
+                    self.preview_pending = None;
+                    self.preview_frame = None;
+                }
             } else if id == crate::plugin_panel::desktop_manifest().id {
                 self.plugin_desktop_host = None;
                 self.desktop_application_dirty = true;
@@ -7964,6 +7992,9 @@ impl LiveShell {
     }
 
     fn open_window_preview(&mut self, index: usize) {
+        if self.plugin_preview_host.is_none() {
+            return;
+        }
         if self.preview_group == Some(index) {
             self.preview_pending = None;
             return;
@@ -10196,6 +10227,9 @@ impl LiveShell {
     }
 
     fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
+        if self.plugin_preview_host.is_none() {
+            return Vec::new();
+        }
         let group = self.task_switcher_group.clone().or_else(|| {
             self.preview_group.and_then(|index| {
                 self.panel_groups()
@@ -10241,21 +10275,7 @@ impl LiveShell {
             self.maybe_publish_plugin_status();
             return commands;
         }
-        let theme = self.semantic_theme();
-        if let Some(frame) = self.preview_frame.as_mut() {
-            frame.sync(&group, &self.preview_images, self.preview_hovered, theme);
-        } else {
-            self.preview_frame = Some(build_preview_frame(
-                &group,
-                &self.preview_images,
-                self.preview_hovered,
-                theme,
-            ));
-        }
-        self.preview_frame.as_ref().map_or_else(Vec::new, |frame| {
-            let _change_token = frame.change_token();
-            frame.commands().to_vec()
-        })
+        Vec::new()
     }
 
     fn preview_plugin_active(&self) -> bool {

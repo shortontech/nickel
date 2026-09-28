@@ -111,6 +111,9 @@ Disabling Volume OSD closes that overlay and clears its retained native UI;
 audio changes do not recreate a Rust fallback.
 Disabling Control Center closes ordinary Quick Settings. The trusted display
 projection chooser remains available for recovery.
+Disabling Window Preview closes its visible cards and task switcher view;
+hovering a taskbar group no longer creates a Rust preview. Re-enabling the
+plugin restores the JSX preview.
 Disabling Notifications closes ordinary popups and history, releases its UI
 memory, and leaves Super+N inactive until re-enabled. Pending remote access and
 Codex approval requests retain a trusted notification surface so users can

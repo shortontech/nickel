@@ -402,6 +402,13 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
         "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-label'] ? 'External panel' : 'Hidden')); }",
     )
     .unwrap();
+    #[cfg(target_os = "linux")]
+    let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+        crate::session_host::default_session_host(),
+    ));
+    #[cfg(target_os = "linux")]
+    let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+    #[cfg(not(target_os = "linux"))]
     let mut shell = LiveShell::new().unwrap();
     let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
     assert!(catalog.failures.is_empty());
@@ -430,8 +437,17 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
         .unwrap();
     assert!(panel.desired_enabled);
     assert!(panel.memory.native_ui_bytes.unwrap_or(0) > 0);
+    #[cfg(target_os = "linux")]
+    assert!(host.take_commands().iter().any(|command| matches!(
+        command,
+        crate::platform::ShellCommand::PublishPluginStatus { snapshot }
+            if snapshot.plugins.iter().any(|plugin|
+                plugin.id == "org.example.panel" && plugin.memory.native_ui_bytes.unwrap_or(0) > 0)
+    )));
     assert_eq!(panel.settings.len(), 1);
     assert_eq!(panel.settings[0].value, serde_json::json!(true));
+    let panel_key = shell.plugin_panels()[0].0.clone();
+    let token_before_setting = shell.plugin_panel_change_token(&panel_key).unwrap();
 
     let generation = status.activation_generation;
     assert!(shell.apply_plugin_effects(vec![
@@ -459,6 +475,11 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
         .find(|plugin| plugin.id == "org.example.panel")
         .unwrap();
     assert_eq!(panel.settings[0].value, serde_json::json!(false));
+    assert!(panel.memory.native_ui_bytes.unwrap_or(0) > 0);
+    assert_ne!(
+        shell.plugin_panel_change_token(&panel_key),
+        Some(token_before_setting)
+    );
     assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
     let commands = shell.scene(crate::winit_shell::SurfaceRole::Panel, 360, 96);
     assert!(commands.iter().any(|command| matches!(command,

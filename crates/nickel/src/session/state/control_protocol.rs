@@ -1336,12 +1336,16 @@ impl NickelSession {
                     );
                 }
                 if let Some(coordinator) = self.internal_shell.as_mut() {
-                    if let Err(reason) = coordinator.set_plugin_setting(&id, &key, value) {
-                        return protocol_error(ErrorCode::InvalidRequest, reason);
-                    }
+                    let changed = match coordinator.set_plugin_setting(&id, &key, value) {
+                        Ok(changed) => changed,
+                        Err(reason) => return protocol_error(ErrorCode::InvalidRequest, reason),
+                    };
                     let snapshot = coordinator.plugin_status_snapshot();
                     self.plugin_status = Some(snapshot.clone());
                     self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot.clone()));
+                    if changed {
+                        self.request_output_redraw();
+                    }
                     return ServerMessage::Plugins(snapshot);
                 }
                 let Some(setting) = self.plugin_status.as_ref().and_then(|status| {

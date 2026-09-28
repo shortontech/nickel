@@ -377,7 +377,6 @@ fn exercise(
     {
         return Err("installed panel did not start with its declared setting".into());
     }
-    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(5))?;
     wait_for_plugin_panel_on_output(
         test_input,
         &environment,
@@ -385,6 +384,7 @@ fn exercise(
         true,
         Duration::from_secs(5),
     )?;
+    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(5))?;
     checked(
         test_input,
         &environment,
@@ -1547,8 +1547,9 @@ fn wait_for_plugin_native_memory(
             }
         }
         if Instant::now() >= deadline {
+            let surfaces = checked(test_input, environment, &["surfaces"])?;
             return Err(format!(
-                "plugin {id} did not report rendered UI memory: health={:?}, native={:?}, peak={:?}",
+                "plugin {id} did not report rendered UI memory: health={:?}, native={:?}, peak={:?}; surfaces={surfaces}",
                 plugin.health, plugin.memory.native_ui_bytes, plugin.memory.tracked_peak_bytes,
             ));
         }
