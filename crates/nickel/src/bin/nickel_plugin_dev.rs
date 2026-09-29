@@ -678,7 +678,7 @@ mod platform {
         fn native_screenshot_is_not_a_developer_plugin() {
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/screenshot"
+                "/../../tests/fixtures/legacy-screenshot-plugin"
             ));
             assert!(
                 load_dev_package(root)
@@ -691,7 +691,7 @@ mod platform {
         fn native_desktop_is_not_a_developer_plugin() {
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/desktop"
+                "/../../tests/fixtures/legacy-desktop-plugin"
             ));
             assert!(
                 load_dev_package(root)

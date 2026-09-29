@@ -214,7 +214,7 @@ pub fn screenshot_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
         PluginManifest::from_json(include_str!(
-            "../../../assets/plugins/screenshot/plugin.json"
+            "../../../tests/fixtures/legacy-screenshot-plugin/plugin.json"
         ))
         .expect("bundled screenshot plugin manifest must be valid")
     })
@@ -254,8 +254,10 @@ pub fn window_preview_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
 pub fn desktop_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!("../../../assets/plugins/desktop/plugin.json"))
-            .expect("bundled desktop plugin manifest must be valid")
+        PluginManifest::from_json(include_str!(
+            "../../../tests/fixtures/legacy-desktop-plugin/plugin.json"
+        ))
+        .expect("bundled desktop plugin manifest must be valid")
     })
 }
 
@@ -1703,8 +1705,10 @@ impl PluginPanelApplication {
         Self::bundled_application(
             screenshot_manifest(),
             "main.js",
-            include_str!("../../../assets/plugins/screenshot/main.js"),
-            Some(include_str!("../../../assets/plugins/screenshot/ui.css")),
+            include_str!("../../../tests/fixtures/legacy-screenshot-plugin/main.js"),
+            Some(include_str!(
+                "../../../tests/fixtures/legacy-screenshot-plugin/ui.css"
+            )),
             data.to_string(),
         )
     }
@@ -1787,7 +1791,7 @@ impl PluginPanelApplication {
         Self::bundled_application(
             desktop_manifest(),
             "main.js",
-            include_str!("../../../assets/plugins/desktop/main.js"),
+            include_str!("../../../tests/fixtures/legacy-desktop-plugin/main.js"),
             None,
             data.to_string(),
         )
