@@ -9,13 +9,13 @@ use nickel_core::{
     wallpaper_settings::WallpaperPosition,
 };
 use nickel_plugin_presentation::{
-    components::{PanelNode, PluginImages},
+    components::PluginImages,
     css::StyleSheet,
     page::{JsxPage, STALE_DATA},
 };
 use nickel_ui::{
-    AnyView, Button, ButtonPresentation, Column, FrameOverlay, OverlayAnchor, OverlayStyle,
-    Popover, Row, SemanticTheme, SettingsCard, SettingsRow, Size, TextField, UiId,
+    AnyView, Button, ButtonPresentation, FrameOverlay, OverlayAnchor, OverlayStyle, Popover, Row,
+    SemanticTheme, SettingsCard, SettingsRow, Size, TextField, UiId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -70,11 +70,8 @@ impl AppearancePage {
                 .insert("wallpaper-preview".into(), (1, Arc::clone(preview)));
         }
         let node = self.page.node().ok_or("Appearance page is unavailable")?;
-        let PanelNode::Div { children, .. } = node else {
-            return Err("Appearance needs a shared div root".into());
-        };
-        if children.len() != 6 || !matches!(&children[2], PanelNode::Dialog { .. }) {
-            return Err("Appearance sections or dialog are invalid".into());
+        if node.dialog("appearance-custom-hue-dialog").is_none() {
+            return Err("Appearance custom hue dialog is unavailable".into());
         }
         Ok(node.view_as_scoped::<SettingsMessage>(
             &self.images,
@@ -84,23 +81,12 @@ impl AppearancePage {
     }
 
     pub(super) fn dialog_view(&self, _theme: SemanticTheme) -> Option<AnyView<SettingsMessage>> {
-        let PanelNode::Dialog {
-            open: true,
-            children,
-            ..
-        } = self.page.node()?.dialog("appearance-custom-hue-dialog")?
-        else {
-            return None;
-        };
-        Some(AnyView::new(Column::new().children(children.iter().map(
-            |child| {
-                child.view_as_scoped::<SettingsMessage>(
-                    &self.images,
-                    &self.stylesheet,
-                    Some(APPEARANCE_SCOPE),
-                )
-            },
-        ))))
+        self.page.node()?.dialog_content_view(
+            "appearance-custom-hue-dialog",
+            &self.images,
+            &self.stylesheet,
+            Some(APPEARANCE_SCOPE),
+        )
     }
 
     fn dispatch(

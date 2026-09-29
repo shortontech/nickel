@@ -2761,6 +2761,26 @@ impl PanelNode {
         }
     }
 
+    pub fn dialog_content_view<Message: PluginUiMessage>(
+        &self,
+        requested_id: &str,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+    ) -> Option<AnyView<Message>> {
+        let Self::Dialog {
+            open: true,
+            children,
+            ..
+        } = self.dialog(requested_id)?
+        else {
+            return None;
+        };
+        Some(AnyView::new(Column::new().children(children.iter().map(
+            |child| child.view_as_scoped(images, stylesheet, scope),
+        ))))
+    }
+
     pub fn menu(&self, requested_id: &str) -> Option<&Self> {
         match self {
             Self::Menu { id, .. } if id == requested_id => Some(self),
