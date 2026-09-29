@@ -1202,7 +1202,13 @@ fn verify_generic_widget_slot(
         "Widget Host Example",
         Duration::from_secs(5),
     )?;
-    click_at(test_input, environment, window.1 + 210, window.2 + 77)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.widget-host/main",
+        "slot-action-open-launcher",
+        (window.1, window.2),
+    )?;
     wait_for_launcher_visibility(test_input, environment, true, Duration::from_secs(5))?;
     checked(test_input, environment, &["key", "meta", "pressed"])?;
     checked(test_input, environment, &["key", "meta", "released"])?;
@@ -1238,9 +1244,21 @@ fn verify_component_window(
         ));
     }
     let first_window = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
-    click_at(test_input, environment, first_window.1 + 260, first_window.2 + 77)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.component-window/main",
+        "open-dialog",
+        (first_window.1, first_window.2),
+    )?;
     wait_for_component_dialog_memory(test_input, environment, initial_bytes)?;
-    click_at(test_input, environment, first_window.1 + 80, first_window.2 + 182)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.component-window/main",
+        "show-settings",
+        (first_window.1, first_window.2),
+    )?;
     wait_for_settings_memory(test_input, environment, true, Duration::from_secs(8))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     let settings_window = loop {
@@ -1349,6 +1367,52 @@ fn click_at(
     checked(test_input, environment, &["button", "left", "pressed"])?;
     checked(test_input, environment, &["button", "left", "released"])?;
     Ok(())
+}
+
+fn click_plugin_control(
+    test_input: &Path,
+    environment: &[(String, String)],
+    plugin_surface: &str,
+    control_id: &str,
+    window_origin: (i32, i32),
+) -> Result<(), String> {
+    let layouts = checked(test_input, environment, &["layouts"])?;
+    let surface = layouts
+        .lines()
+        .find(|line| line.ends_with(plugin_surface))
+        .and_then(|line| line.split('\t').next())
+        .ok_or_else(|| format!("{plugin_surface} is absent from layout inventory: {layouts}"))?;
+    let layout = checked(test_input, environment, &["layout", surface])?;
+    let node = layout
+        .lines()
+        .find(|line| {
+            line.split_whitespace().nth(1).is_some_and(|id| {
+                id == control_id || id.strip_suffix(control_id).is_some_and(|prefix| prefix.ends_with('/'))
+            })
+        })
+        .ok_or_else(|| format!("{control_id} is absent from {plugin_surface} layout: {layout}"))?;
+    let allocated = node
+        .split(" allocated=")
+        .nth(1)
+        .and_then(|fields| fields.split_whitespace().next())
+        .ok_or_else(|| format!("{control_id} has no allocated geometry: {node}"))?;
+    let geometry = allocated
+        .split(',')
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("{control_id} has invalid geometry: {error}"))?;
+    let [x, y, width, height] = geometry.as_slice() else {
+        return Err(format!("{control_id} has incomplete geometry: {node}"));
+    };
+    if *width <= 0.0 || *height <= 0.0 {
+        return Err(format!("{control_id} has no clickable area: {node}"));
+    }
+    click_at(
+        test_input,
+        environment,
+        window_origin.0 + (x + width / 2.0).round() as i32,
+        window_origin.1 + (y + height / 2.0).round() as i32,
+    )
 }
 
 fn wait_for_component_dialog_memory(
@@ -1591,7 +1655,13 @@ fn verify_separate_plugin_dialog(
     if dialog_surface_line(&surfaces).is_some() {
         return Err(format!("plugin dialog started open: {surfaces}"));
     }
-    click_at(test_input, environment, home_x + 210, home_y + 77)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.surface-dialog/home",
+        "open-dialog",
+        (home_x, home_y),
+    )?;
     let deadline = Instant::now() + Duration::from_secs(5);
     let (dialog_x, dialog_y) = loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
@@ -1626,7 +1696,13 @@ fn verify_separate_plugin_dialog(
     {
         return Err(format!("owned dialog allowed input to close its owner: {surfaces}"));
     }
-    click_at(test_input, environment, dialog_x + 180, dialog_y + 119)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.surface-dialog/confirm",
+        "dismiss-dialog",
+        (dialog_x, dialog_y),
+    )?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
@@ -1668,7 +1744,13 @@ fn verify_separate_plugin_dialog(
         }
         thread::sleep(POLL);
     }
-    click_at(test_input, environment, home_x + 210, home_y + 77)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.surface-dialog/home",
+        "open-dialog",
+        (home_x, home_y),
+    )?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
@@ -1749,7 +1831,13 @@ fn verify_separate_plugin_overlay(
     if overlay_surface_line(&surfaces).is_some() {
         return Err(format!("plugin overlay started open: {surfaces}"));
     }
-    click_at(test_input, environment, home_x + 210, home_y + 77)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.overlay/home",
+        "show-overlay",
+        (home_x, home_y),
+    )?;
     let deadline = Instant::now() + Duration::from_secs(5);
     let (overlay_x, overlay_y) = loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
@@ -1781,7 +1869,13 @@ fn verify_separate_plugin_overlay(
     if opened_bytes <= home_bytes {
         return Err("plugin overlay did not increase its retained UI memory".into());
     }
-    click_at(test_input, environment, overlay_x + 150, overlay_y + 77)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.overlay/notice",
+        "hide-overlay",
+        (overlay_x, overlay_y),
+    )?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;

@@ -47,6 +47,7 @@ interface NickelSurfaceProps extends NickelProps {
 }
 interface NickelWindowProps extends NickelProps {
     id?: string;
+    title?: string;
     width: number | "100%";
     height: number | "100%";
     placement?: "managed" | "fixed";

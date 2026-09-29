@@ -1193,14 +1193,22 @@ fn scene_for_native_surface(
     height: u32,
 ) -> Option<Vec<nickel_ui::backend::PaintCommand>> {
     let surface = shell.surface(id)?;
-    if let Some(key) = surface.plugin_key() {
+    let commands = if let Some(key) = surface.plugin_key() {
         state.plugin_surface_scene_for_output(key, Some(surface.output_name()), width, height)
     } else if surface.role() == SurfaceRole::Launcher {
         let key = state.active_launcher_surface_key()?;
         state.plugin_surface_scene_for_output(&key, None, width, height)
     } else {
         Some(state.scene(surface.role(), width, height))
+    };
+    if surface.role() == SurfaceRole::Panel
+        && let Some(title) = surface
+            .plugin_key()
+            .and_then(|key| state.plugin_panel_title(key))
+    {
+        shell.set_surface_title(id, title);
     }
+    commands
 }
 
 fn scene_change_token_for_native_surface(

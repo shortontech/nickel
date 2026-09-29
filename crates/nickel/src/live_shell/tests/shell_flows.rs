@@ -82,6 +82,43 @@
     }
 
     #[test]
+    fn ordinary_plugin_window_title_comes_from_its_jsx_root() {
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-surface-dialog"
+        );
+        let mut package = nickel_core::plugins::PluginPackage::load(directory).unwrap();
+        package.source = "function App() { const surface = nickel.data.surface; return h(Window, {width: surface.width, height: surface.height, title: surface.id === 'confirm' ? 'Confirm' : 'Home'}, h(Text, {}, 'Example')); }".into();
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "home")
+            .unwrap();
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: package.manifest.id.clone(),
+            surface_id: surface.id.clone(),
+        };
+        let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(
+            &package,
+            &Default::default(),
+            surface,
+        )
+        .unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell.plugin_panel_extra_hosts.insert(
+            key.clone(),
+            (
+                surface.clone(),
+                nickel_ui::UiHost::new(application, surface.width, surface.height),
+            ),
+        );
+        assert_eq!(shell.plugin_panel_title(&key), Some("Home"));
+        shell.plugin_panel_extra_hosts.remove(&key);
+        assert_eq!(shell.plugin_panel_title(&key), None);
+    }
+
+    #[test]
     fn desktop_projection_failure_retires_its_plugin_host() {
         let mut shell = LiveShell::new().unwrap();
         let application = crate::plugin_panel::PluginPanelApplication::desktop_with_test_source(

@@ -1757,6 +1757,17 @@ impl WinitShell {
         self.surfaces.get_mut(index)
     }
 
+    pub fn set_surface_title(&self, id: SurfaceId, title: &str) -> bool {
+        let Some(surface) = self.surface(id) else {
+            return false;
+        };
+        if surface.window.title() == title {
+            return false;
+        }
+        surface.window.set_title(title);
+        true
+    }
+
     pub fn mark_initial_exposed(&mut self, id: SurfaceId) -> bool {
         let Some(surface) = self.surface_mut(id) else {
             return false;

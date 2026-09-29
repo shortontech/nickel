@@ -3869,6 +3869,23 @@ impl LiveShell {
         })
     }
 
+    pub(crate) fn plugin_panel_title(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<&str> {
+        if self.plugin_panel_owner == key.plugin_id
+            && self.plugin_panel_surface.id == key.surface_id
+        {
+            return self
+                .plugin_panel_host
+                .as_ref()
+                .map(|host| host.application().title());
+        }
+        self.plugin_panel_extra_hosts
+            .get(key)
+            .map(|(_, host)| host.application().title())
+    }
+
     #[cfg(test)]
     pub(crate) fn plugin_surface_semantic_nodes(
         &self,
