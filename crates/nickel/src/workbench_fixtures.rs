@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
 use nickel_ui::{ActionKind, ControllerFamily, ReadingDirection, SemanticRole};
@@ -15,7 +15,6 @@ use crate::{
     launcher::{Launcher, LauncherInput},
     launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
     live_shell::{DesktopApplication, LockApplication},
-    model::{WindowGroup, WindowId},
     notification::{DesktopNotification, NotificationAction},
     notification_view::NotificationApp,
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
@@ -24,7 +23,6 @@ use crate::{
         TaskbarPluginTrayItem,
     },
     screenshot::ScreenshotApp,
-    window_preview::WindowPreviewApp,
 };
 
 pub struct ShellFixtureProvider;
@@ -582,7 +580,7 @@ impl Fixture for ScreenshotFixture {
 }
 
 impl Fixture for WindowPreviewFixture {
-    type App = WindowPreviewApp;
+    type App = PluginPanelApplication;
     fn metadata() -> &'static FixtureMetadata {
         &PREVIEW_METADATA
     }
@@ -596,38 +594,39 @@ impl Fixture for WindowPreviewFixture {
             _ => 1,
         };
         let windows = (0..count)
-            .map(|index| crate::model::OpenWindow {
-                id: WindowId(index + 1),
-                application_id: None,
-                active: index == 0,
-                title: format!("Workbench window {}", index + 1),
-                state: crate::model::WindowState::default(),
+            .map(|index| {
+                let title = format!("Workbench window {}", index + 1);
+                serde_json::json!({
+                    "id": (index + 1).to_string(),
+                    "title": title,
+                    "accessibleName": title,
+                    "closable": true,
+                    "index": index,
+                    "imageWidth": 244,
+                    "selected": index == 0,
+                })
             })
             .collect::<Vec<_>>();
-        let group = WindowGroup {
-            application_id: None,
-            application_name: "Workbench".into(),
-            windows,
-        };
-        let previews = if v.id == "missing-preview" {
-            HashMap::new()
-        } else {
-            group
-                .windows
-                .iter()
-                .map(|window| {
-                    (
-                        window.id,
-                        Arc::new(image::RgbaImage::from_pixel(
-                            260,
-                            116,
-                            image::Rgba([40, 54, 82, 255]),
-                        )),
-                    )
-                })
-                .collect()
-        };
-        WindowPreviewApp::fixture(group, previews, palette())
+        let mut application = PluginPanelApplication::window_preview_with_data(
+            &serde_json::json!({"windows": windows}),
+        )
+        .expect("bundled window preview fixture");
+        if v.id != "missing-preview" {
+            let thumbnail = Arc::new(image::RgbaImage::from_pixel(
+                260,
+                116,
+                image::Rgba([40, 54, 82, 255]),
+            ));
+            let mut images = PluginImages::new();
+            for index in 0..count {
+                images.insert(
+                    format!("window:{}", index + 1),
+                    ((index + 1) as u16, Arc::clone(&thumbnail)),
+                );
+            }
+            application.sync_images(images);
+        }
+        application
     }
     fn surface_size() -> (u32, u32) {
         (882, 214)
