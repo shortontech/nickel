@@ -123,7 +123,7 @@ use crate::{
     file_window_host::{FileWindowHost, default_file_window_host},
     launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherView},
     launcher_actions::{LauncherAction, LauncherShellEffect, reduce_launcher_action},
-    launcher_view::LauncherIconCache,
+    launcher_icon_cache::LauncherIconCache,
     model::{Application, OpenWindow, TrayItem, WindowGroup},
     notification::DesktopNotification,
     notification_view::{NotificationApp, NotificationEffect, NotificationHost},

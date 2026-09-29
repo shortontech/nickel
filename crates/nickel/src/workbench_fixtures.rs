@@ -13,7 +13,8 @@ use nickel_codex_ui::ChatApplication;
 use crate::{
     control_view::ControlCenterApp,
     launcher::{Launcher, LauncherInput},
-    launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
+    launcher_icon_cache::LauncherIconCache,
+    launcher_view::{LauncherApplication, LauncherViewState},
     live_shell::{DesktopApplication, LockApplication},
     notification::{DesktopNotification, NotificationAction},
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},

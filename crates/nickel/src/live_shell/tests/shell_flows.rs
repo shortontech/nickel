@@ -1716,7 +1716,7 @@
             LauncherApplication::new(
                 launcher.clone(),
                 crate::launcher_view::LauncherViewState::default(),
-                crate::launcher_view::LauncherIconCache::new(),
+                crate::launcher_icon_cache::LauncherIconCache::new(),
                 palette,
             ),
             920,
@@ -1815,7 +1815,7 @@
         let mut application = LauncherApplication::new(
             launcher.clone(),
             crate::launcher_view::LauncherViewState::default(),
-            crate::launcher_view::LauncherIconCache::new(),
+            crate::launcher_icon_cache::LauncherIconCache::new(),
             palette,
         );
         application.sync(launcher, palette, status);

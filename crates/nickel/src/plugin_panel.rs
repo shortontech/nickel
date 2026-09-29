@@ -3260,7 +3260,7 @@ mod tests {
             crate::launcher_view::LauncherApplication::new(
                 Launcher::default(),
                 crate::launcher_view::LauncherViewState::default(),
-                crate::launcher_view::LauncherIconCache::new(),
+                crate::launcher_icon_cache::LauncherIconCache::new(),
                 nickel_core::theme::ThemePalette::from_appearance(
                     nickel_core::theme::Appearance::default(),
                 ),

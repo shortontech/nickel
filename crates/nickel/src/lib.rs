@@ -119,6 +119,7 @@ mod internal_codex;
 #[allow(clippy::manual_is_multiple_of, dead_code)]
 mod launcher;
 mod launcher_actions;
+mod launcher_icon_cache;
 #[cfg(target_os = "linux")]
 mod lock_auth;
 use launcher::{DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects};
@@ -126,6 +127,7 @@ mod control_view;
 #[allow(dead_code)] // Wired into the Smithay runtime by the next integration slice.
 #[cfg(target_os = "linux")]
 mod internal_shell;
+#[cfg(any(test, feature = "workbench-fixtures"))]
 mod launcher_view;
 mod live_shell;
 mod local_cues;
