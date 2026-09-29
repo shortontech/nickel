@@ -438,11 +438,14 @@ impl SettingsApp {
             None
         };
         let jsx_active = curated.is_some();
-        let (curated, catalog_nodes) = curated.unwrap_or_else(|| {
-            (
-                AnyView::new(Column::new().gap(2.0).children(rows)),
-                std::collections::BTreeMap::new(),
-            )
+        let crate::default_apps_plugin::DefaultAppsRendered {
+            curated,
+            catalog_nodes,
+            stylesheet: catalog_stylesheet,
+        } = curated.unwrap_or_else(|| crate::default_apps_plugin::DefaultAppsRendered {
+            curated: AnyView::new(Column::new().gap(2.0).children(rows)),
+            catalog_nodes: std::collections::BTreeMap::new(),
+            stylesheet: nickel_plugin_presentation::css::StyleSheet::default(),
         });
         let target_results = if self.default_apps_loading && self.default_app_targets.is_empty() {
             AnyView::new(
@@ -468,7 +471,10 @@ impl SettingsApp {
                 move |target: nickel_platform::AssociationTarget| {
                     let key = target.platform_key();
                     if let Some(node) = catalog_nodes.get(&key) {
-                        return node.view(theme, "", SettingsMessage::DefaultAppsJsxAction);
+                        return node.view_as::<SettingsMessage>(
+                            &nickel_plugin_presentation::components::PluginImages::new(),
+                            &catalog_stylesheet,
+                        );
                     }
                     let kind = target.family().label();
                     AnyView::new(

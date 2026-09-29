@@ -1,34 +1,41 @@
 // @jsx h
-// Curated default application choices. Rust owns association discovery and
-// validates the target again when opening its native picker.
+// Rust owns association discovery and the virtual catalog geometry.
 function App() {
     const data = nickel.data;
-    return <settings-stack>
-        <settings-compact-list>
-            {data.rows.map(row => <settings-row key={row.target} label={row.label} value={row.status} compact={true}>
-                <settings-button id={`default-app-${row.index}`}
-                    label={row.current} value="quiet"
+    return <div className="default-app-page">
+        <div className="default-app-curated">
+            {data.rows.map(row => <div key={row.target} className="default-app-row">
+                <div className="default-app-label">
+                    <Text className="default-app-name">{row.label}</Text>
+                    {row.status ? <Text className="default-app-detail" wrap={true}>{row.status}</Text> : null}
+                </div>
+                <Button id={`default-app-${row.index}`} className="default-app-action"
                     accessibilityLabel={`${row.label}: ${row.current}`}
-                    onClick={() => nickel.request({type: 'choose-default', index: row.index, target: row.target})} />
-            </settings-row>)}
-        </settings-compact-list>
-        <settings-card label={data.advancedTitle} value={data.advancedStatus}>
-            <settings-input id="default-app-advanced-target" value={data.query}
+                    onClick={() => nickel.request({type: 'choose-default', index: row.index, target: row.target})}>{row.current}</Button>
+            </div>)}
+        </div>
+        <div className="default-app-advanced">
+            <Text className="default-app-heading">{data.advancedTitle}</Text>
+            {data.advancedStatus ? <Text className="default-app-detail" wrap={true}>{data.advancedStatus}</Text> : null}
+            <TextField id="default-app-advanced-target" className="default-app-search"
+                value={data.query} placeholder={data.searchPlaceholder}
                 onChange={value => nickel.request({type: 'search-targets', value})} />
-            <settings-grid>
-                {data.families.map(family => <settings-button key={family.index}
+            <div className="default-app-families">
+                {data.families.map(family => <Button key={family.index}
                     id={`default-app-family-${family.index}`}
-                    label={family.label} value={family.selected ? 'primary' : 'quiet'}
-                    onClick={() => nickel.request({type: 'set-family', index: family.index})} />)}
-            </settings-grid>
-        </settings-card>
-        <settings-compact-list>
-            {data.catalogRows.map(row => <settings-row key={row.key}
-                label={row.key} value={row.family}>
-                <settings-button id={`default-app-target-${row.index}`}
-                    label="Choose app" value="quiet"
-                    onClick={() => nickel.request({type: 'browse-target', index: row.index, key: row.key})} />
-            </settings-row>)}
-        </settings-compact-list>
-    </settings-stack>;
+                    className={family.selected ? 'default-app-family selected' : 'default-app-family'}
+                    onClick={() => nickel.request({type: 'set-family', index: family.index})}>{family.label}</Button>)}
+            </div>
+        </div>
+        <div className="default-app-catalog">
+            {data.catalogRows.map(row => <div key={row.key} className="default-app-row">
+                <div className="default-app-label">
+                    <Text className="default-app-name">{row.key}</Text>
+                    <Text className="default-app-detail">{row.family}</Text>
+                </div>
+                <Button id={`default-app-target-${row.index}`} className="default-app-action"
+                    onClick={() => nickel.request({type: 'browse-target', index: row.index, key: row.key})}>Choose app</Button>
+            </div>)}
+        </div>
+    </div>;
 }

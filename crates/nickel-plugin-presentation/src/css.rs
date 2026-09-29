@@ -266,6 +266,9 @@ fn track(source: &str) -> Result<Track, String> {
         if parts.len() != 2 {
             return Err("repeat() needs a count and one track".into());
         }
+        if parts[0] == "auto-fit" {
+            return Ok(Track::repeat_auto_fit(track(parts[1])?));
+        }
         let count: usize = parts[0].parse().map_err(|_| "invalid repeat() count")?;
         if !(1..=32).contains(&count) {
             return Err("repeat() count must be 1 to 32".into());
@@ -667,6 +670,17 @@ mod tests {
                 2,
                 Track::minmax(Track::Px(40.0), Track::Fraction(1.0))
             )])
+        );
+        let auto = StyleSheet::compile(
+            ".grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }",
+        )
+        .unwrap();
+        assert_eq!(
+            auto.resolve("div", None, Some("grid")).grid_columns,
+            Some(vec![Track::repeat_auto_fit(Track::minmax(
+                Track::Px(110.0),
+                Track::Fraction(1.0)
+            ))])
         );
     }
 

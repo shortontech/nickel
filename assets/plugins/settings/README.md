@@ -85,8 +85,9 @@ typed requests before opening the file picker or saving settings. Invalid hue
 input leaves the dialog open for correction. Native controls remain available
 if JSX fails. Build it with the same command and its source filename.
 
-`settings-default-apps.jsx` renders the curated association rows, catalog
-search, family filters, and visible catalog rows. Rust owns the virtual list's
+`settings-default-apps.jsx` and `settings-default-apps.css` render the curated
+association rows, catalog search, family filters, and visible catalog rows
+through shared controls. Rust owns the virtual list's
 scroll geometry and projects only its current bounded window into JavaScript.
 Typed chooser requests carry the projected target identity and are checked
 before Rust opens the host-owned handler picker. Build it with the same command

@@ -2107,7 +2107,11 @@ impl PanelNode {
                         move |value| Message::from_plugin(PluginMessage::Text(action, value))
                     })
                 };
-                let mut field = field.id(id.clone()).accessibility_label(placeholder);
+                let mut field = field
+                    .id(id.clone())
+                    .accessibility_label(placeholder)
+                    .grow(1.0)
+                    .wrap(false);
                 if let Some(size) = style.font_size {
                     field = field.font_size(size);
                 }
@@ -2284,6 +2288,23 @@ impl PanelNode {
             | Self::ScrollView { children, .. } => children
                 .iter()
                 .find_map(|child| child.button_action(requested_id)),
+            _ => None,
+        }
+    }
+
+    pub fn text_field_action(&self, requested_id: &str) -> Option<usize> {
+        match self {
+            Self::TextField { id, action, .. } if id == requested_id => Some(*action),
+            Self::Box { children, .. }
+            | Self::Div { children, .. }
+            | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
+            | Self::Panel { children, .. }
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
+            | Self::ScrollView { children, .. } => children
+                .iter()
+                .find_map(|child| child.text_field_action(requested_id)),
             _ => None,
         }
     }

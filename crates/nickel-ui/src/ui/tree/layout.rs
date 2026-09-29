@@ -845,6 +845,7 @@ pub(super) fn apply_transient_state<Message>(
                 selection_x,
                 caret_position,
                 input_value,
+                input_placeholder,
                 input_mask,
                 line_height,
                 ..
@@ -897,7 +898,9 @@ pub(super) fn apply_transient_state<Message>(
                     y: line_index as f32 * height,
                 }
             });
-            *value = if let Some(mask) = input_mask {
+            *value = if editor.text().is_empty() && editor.preedit().is_empty() {
+                input_placeholder.clone().unwrap_or_default()
+            } else if let Some(mask) = input_mask {
                 mask_text(&editor.display_text_with_caret(""), *mask)
             } else {
                 editor.display_text_with_caret("")

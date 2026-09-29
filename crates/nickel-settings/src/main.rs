@@ -519,8 +519,6 @@ enum SettingsMessage {
     DefaultAppsScroll(u32),
     DefaultAppTargetChanged(String),
     DefaultAppTargetFamily(Option<nickel_platform::AssociationFamily>),
-    DefaultAppsJsxAction(usize),
-    DefaultAppsJsxInput(usize, String),
     DefaultAppPickerJsxAction(usize),
     DefaultAppPickerJsxInput(usize, String),
     DefaultAppPickerDismissed,
@@ -1919,6 +1917,9 @@ impl SettingsApp {
                             self.handle_bluetooth_jsx_action(index);
                         }
                         SettingsPage::Plugins => self.handle_plugin_jsx_action(index, value),
+                        SettingsPage::DefaultApps => {
+                            self.handle_default_apps_jsx_action(index, value);
+                        }
                         _ => {}
                     }
                 }
@@ -2081,12 +2082,6 @@ impl SettingsApp {
             SettingsMessage::DefaultAppTargetFamily(family) => {
                 self.default_app_target_family = family;
                 self.default_app_catalog_scroll_offset = 0.0;
-            }
-            SettingsMessage::DefaultAppsJsxAction(index) => {
-                self.handle_default_apps_jsx_action(index, serde_json::Value::Null);
-            }
-            SettingsMessage::DefaultAppsJsxInput(index, value) => {
-                self.handle_default_apps_jsx_action(index, serde_json::Value::String(value));
             }
             SettingsMessage::DefaultAppPickerJsxAction(index) => {
                 self.handle_default_app_picker_jsx_action(index, serde_json::Value::Null);
@@ -4607,15 +4602,17 @@ mod tests {
         });
         let tree = app.build_ui(850.0, 900.0);
         let anchor = tree
-            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(
+            .semantic_targets_for_message(&SettingsMessage::JsxAction(
                 default_app_action(&app, 0),
+                "null".into(),
             ))
             .into_iter()
             .next()
             .expect("default association row has one chooser");
         let next = tree
-            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(
+            .semantic_targets_for_message(&SettingsMessage::JsxAction(
                 default_app_action(&app, 1),
+                "null".into(),
             ))
             .into_iter()
             .next()
@@ -4737,7 +4734,7 @@ mod tests {
             .expect("the searched uncommon association has a JSX action");
         assert!(
             !associations
-                .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(action))
+                .semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
                 .is_empty(),
             "platform-reported uncommon associations must be searchable"
         );
@@ -4754,8 +4751,9 @@ mod tests {
         let consent = app.build_ui(850.0, 900.0);
         assert!(
             !consent
-                .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(
+                .semantic_targets_for_message(&SettingsMessage::JsxAction(
                     default_app_action(app, 0),
+                    "null".into(),
                 ))
                 .is_empty(),
             "consent-only platforms must expose the same candidate chooser"
@@ -4781,7 +4779,10 @@ mod tests {
         let mut host = UiHost::new(app, 850, 900);
         let chooser_action = default_app_action(host.application_mut(), 0);
         let anchor = host
-            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(chooser_action))
+            .semantic_targets_for_message(&SettingsMessage::JsxAction(
+                chooser_action,
+                "null".into(),
+            ))
             .into_iter()
             .next()
             .expect("unsupported rows remain inspectable");
@@ -4905,7 +4906,7 @@ mod tests {
         let mut host = UiHost::new(app, 850, 900);
         let action = default_app_action(host.application_mut(), 0);
         let chooser = host
-            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(action))
+            .semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
             .into_iter()
             .next()
             .unwrap();
@@ -4949,7 +4950,7 @@ mod tests {
         let action = default_app_target_action(host.application_mut(), 0)
             .expect("visible catalog row has a JSX action");
         let target_id = host
-            .semantic_targets_for_message(&SettingsMessage::DefaultAppsJsxAction(action))
+            .semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
             .into_iter()
             .next()
             .expect("catalog row is reachable")

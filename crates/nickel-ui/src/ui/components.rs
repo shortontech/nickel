@@ -1481,8 +1481,9 @@ impl<Message> TextField<Message> {
         value: &str,
         placeholder: impl Into<String>,
     ) -> Self {
+        let placeholder = placeholder.into();
         let displayed = if value.is_empty() {
-            placeholder.into()
+            placeholder.clone()
         } else {
             value.to_owned()
         };
@@ -1491,8 +1492,14 @@ impl<Message> TextField<Message> {
             displayed,
             single_line_height: None,
         };
-        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+        if let Kind::Text {
+            input_value,
+            input_placeholder,
+            ..
+        } = &mut field.text.0.kind
+        {
             *input_value = Some(value.to_owned());
+            *input_placeholder = Some(placeholder);
         }
         field
     }
@@ -1535,8 +1542,9 @@ impl<Message> TextField<Message> {
         placeholder: impl Into<String>,
         mask: char,
     ) -> Self {
+        let placeholder = placeholder.into();
         let displayed = if value.is_empty() {
-            placeholder.into()
+            placeholder.clone()
         } else {
             std::iter::repeat_n(mask, value.chars().count()).collect()
         };
@@ -1547,11 +1555,13 @@ impl<Message> TextField<Message> {
         };
         if let Kind::Text {
             input_value,
+            input_placeholder,
             input_mask,
             ..
         } = &mut field.text.0.kind
         {
             *input_value = Some(value.to_owned());
+            *input_placeholder = Some(placeholder);
             *input_mask = Some(mask);
         }
         field

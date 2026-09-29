@@ -505,6 +505,17 @@ fn single_line_text_field_centers_placeholder_and_masked_text() {
 }
 
 #[test]
+fn empty_editable_field_paints_its_placeholder() {
+    let frame = UiFrame::layout(
+        TextField::on_change_with_placeholder("", "Search associations", map_query),
+        Rect::new(0.0, 0.0, 260.0, 44.0),
+    );
+    assert!(frame.commands().iter().any(|command| {
+        matches!(command, PaintCommand::Text { text, .. } if text == "Search associations")
+    }));
+}
+
+#[test]
 fn masked_field_geometry_uses_concealed_glyphs_for_caret_selection_and_ime() {
     fn geometry(
         value: &str,

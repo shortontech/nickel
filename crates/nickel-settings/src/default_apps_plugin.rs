@@ -3,56 +3,77 @@
 
 use std::collections::BTreeMap;
 
+use nickel_plugin_presentation::{
+    components::{PanelNode, PluginImages},
+    css::StyleSheet,
+    page::{JsxPage, STALE_DATA},
+};
 use nickel_ui::{AnyView, Column, SemanticTheme, VirtualWindow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    SettingsApp, SettingsMessage, SettingsPage,
-    settings_components::{Node, SettingsJsxContext},
-};
+use crate::{SettingsApp, SettingsMessage, SettingsPage};
 
-const STALE_STATUS: &str = "Default applications changed; refresh the page";
+const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct DefaultAppsPage {
-    context: SettingsJsxContext,
+    page: JsxPage,
+    stylesheet: StyleSheet,
+    last_theme: Option<SemanticTheme>,
+}
+
+pub(super) struct DefaultAppsRendered {
+    pub curated: AnyView<SettingsMessage>,
+    pub catalog_nodes: BTreeMap<String, PanelNode>,
+    pub stylesheet: StyleSheet,
 }
 
 impl DefaultAppsPage {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            context: SettingsJsxContext::new(
+            page: JsxPage::new(
                 crate::settings_package::source(crate::settings_package::Script::DefaultApps)?,
-                parse_tree,
-                STALE_STATUS,
-                "Default application action must request one operation",
+                crate::settings_package::manifest()?.clone(),
+                None,
             )?,
+            stylesheet: StyleSheet::default(),
+            last_theme: None,
         })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.context.retained_bytes()
+        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
     }
 
     pub(super) fn render(
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<(AnyView<SettingsMessage>, BTreeMap<String, Node>), String> {
-        let node = self.context.render(data)?;
-        let Node::Stack(children) = node else {
+    ) -> Result<DefaultAppsRendered, String> {
+        self.page.render(data)?;
+        if self.last_theme != Some(theme) {
+            self.stylesheet = crate::settings_plugin::stylesheet_template(
+                include_str!("../../../assets/plugins/settings/settings-default-apps.css"),
+                theme,
+            )?;
+            self.last_theme = Some(theme);
+        }
+        let Some(PanelNode::Div { children, .. }) = self.page.node() else {
             return Err("Default Apps page structure is invalid".into());
         };
-        let Node::CompactList(catalog) = &children[2] else {
+        if children.len() != 3 {
+            return Err("Default Apps page needs curated, advanced, and catalog sections".into());
+        }
+        let PanelNode::Div {
+            children: catalog, ..
+        } = &children[2]
+        else {
             return Err("Default Apps catalog structure is invalid".into());
         };
         let projected = data["catalogRows"]
             .as_array()
             .ok_or("Default Apps catalog projection is invalid")?;
-        let search_placeholder = data["searchPlaceholder"]
-            .as_str()
-            .ok_or("Default Apps search placeholder is invalid")?;
-        if catalog.len() != projected.len() {
+        if catalog.len() != projected.len() || catalog.len() > 32 {
             return Err("Default Apps catalog row count changed".into());
         }
         let catalog_nodes = projected
@@ -71,17 +92,19 @@ impl DefaultAppsPage {
         if catalog_nodes.len() != catalog.len() {
             return Err("Default Apps catalog has duplicate targets".into());
         }
-        let view = AnyView::new(Column::new().fill_width().gap(16.0).children(
-            children[..2].iter().map(|child| {
-                child.view_with_input(
-                    theme,
-                    search_placeholder,
-                    SettingsMessage::DefaultAppsJsxAction,
-                    SettingsMessage::DefaultAppsJsxInput,
-                )
-            }),
-        ));
-        Ok((view, catalog_nodes))
+        let images = PluginImages::new();
+        let view = AnyView::new(
+            Column::new().fill_width().gap(16.0).children(
+                children[..2]
+                    .iter()
+                    .map(|child| child.view_as::<SettingsMessage>(&images, &self.stylesheet)),
+            ),
+        );
+        Ok(DefaultAppsRendered {
+            curated: view,
+            catalog_nodes,
+            stylesheet: self.stylesheet.clone(),
+        })
     }
 
     fn dispatch(
@@ -90,60 +113,20 @@ impl DefaultAppsPage {
         value: Value,
         data: &Value,
     ) -> Result<SettingsMessage, String> {
-        self.context.dispatch(index, &value, data, |effect| {
+        self.page.dispatch(index, &value, data, |effect| {
             let request: DefaultAppsRequest =
-                serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
+                serde_json::from_value(effect).map_err(|error| error.to_string())?;
             validate_request(request, data)
         })
     }
 
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.context.action_for_id(id)
+        self.page.node().and_then(|node| {
+            node.button_action(id)
+                .or_else(|| node.text_field_action(id))
+        })
     }
-}
-
-fn parse_tree(value: &Value) -> Result<Node, String> {
-    let children = value
-        .get("children")
-        .and_then(Value::as_array)
-        .ok_or("Default Apps page has no children")?;
-    if value.get("kind").and_then(Value::as_str) != Some("settings-stack")
-        || children.len() != 3
-        || children[0].get("kind").and_then(Value::as_str) != Some("settings-compact-list")
-        || children[1].get("kind").and_then(Value::as_str) != Some("settings-card")
-        || children[2].get("kind").and_then(Value::as_str) != Some("settings-compact-list")
-    {
-        return Err("Default Apps page structure is invalid".into());
-    }
-    let rows = children[0]
-        .get("children")
-        .and_then(Value::as_array)
-        .ok_or("Default Apps rows are missing")?;
-    let advanced = children[1]
-        .get("children")
-        .and_then(Value::as_array)
-        .ok_or("Default Apps filters are missing")?;
-    let catalog = children[2]
-        .get("children")
-        .and_then(Value::as_array)
-        .ok_or("Default Apps catalog rows are missing")?;
-    if rows.is_empty()
-        || rows.len() > 64
-        || rows
-            .iter()
-            .any(|child| child.get("kind").and_then(Value::as_str) != Some("settings-row"))
-        || advanced.len() != 2
-        || advanced[0].get("kind").and_then(Value::as_str) != Some("settings-input")
-        || advanced[1].get("kind").and_then(Value::as_str) != Some("settings-grid")
-        || catalog.len() > 32
-        || catalog
-            .iter()
-            .any(|child| child.get("kind").and_then(Value::as_str) != Some("settings-row"))
-    {
-        return Err("Default Apps controls are invalid".into());
-    }
-    Node::parse(value)
 }
 
 #[derive(Deserialize)]
@@ -454,8 +437,12 @@ mod tests {
         app.default_app_target_query = "x-nickel-fixture-249".into();
         let data = projection(&app);
         let mut page = DefaultAppsPage::new().unwrap();
-        let (_, catalog) = page.render(&data, app.ui_theme()).unwrap();
-        assert!(catalog.contains_key("application/x-nickel-fixture-249"));
+        let rendered = page.render(&data, app.ui_theme()).unwrap();
+        assert!(
+            rendered
+                .catalog_nodes
+                .contains_key("application/x-nickel-fixture-249")
+        );
         let action = page.action_for_id("default-app-target-0").unwrap();
         assert_eq!(
             page.dispatch(action, Value::Null, &data).unwrap(),
