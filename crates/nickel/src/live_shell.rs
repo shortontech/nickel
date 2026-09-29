@@ -4105,13 +4105,11 @@ impl LiveShell {
             let projected = (|| -> Result<bool, String> {
                 let keyboard_changed = keyboard_data
                     .as_ref()
-                    .map(|data| host.application_mut().sync_on_screen_keyboard_data(data))
+                    .map(|data| host.application_mut().sync_data(data))
                     .transpose()?
                     .unwrap_or(false);
                 let screenshot_changed = if let Some(presentation) = screenshot {
-                    let data_changed = host
-                        .application_mut()
-                        .sync_screenshot_data(&presentation.data)?;
+                    let data_changed = host.application_mut().sync_data(&presentation.data)?;
                     let mut images = crate::plugin_panel::PluginImages::new();
                     if let Some(image) = presentation.image {
                         images.insert("capture".into(), (65_000, image));
@@ -8688,7 +8686,7 @@ impl LiveShell {
         if let Some(host) = self.plugin_preview_host.as_mut() {
             let data_changed = match host
                 .application_mut()
-                .sync_window_preview_data(&serde_json::json!({"windows": []}))
+                .sync_data(&serde_json::json!({"windows": []}))
             {
                 Ok(changed) => changed,
                 Err(error) => {
@@ -10046,7 +10044,7 @@ impl LiveShell {
                     "color": widget.color,
                 })).collect::<Vec<_>>(),
             });
-            match host.application_mut().sync_desktop_data(&data) {
+            match host.application_mut().sync_data(&data) {
                 Ok(data_changed) => 'render: {
                     let mut images = crate::plugin_panel::PluginImages::new();
                     if let Some(wallpaper) = &self.wallpaper {
@@ -10912,7 +10910,7 @@ impl LiveShell {
         if self.preview_plugin_active() {
             let (data, images) = self.preview_plugin_projection(&group);
             let host = self.plugin_preview_host.as_mut().unwrap();
-            let data_changed = match host.application_mut().sync_window_preview_data(&data) {
+            let data_changed = match host.application_mut().sync_data(&data) {
                 Ok(changed) => changed,
                 Err(error) => {
                     self.fail_preview_plugin_runtime(error);
@@ -11141,7 +11139,7 @@ impl LiveShell {
         let Some(host) = self.plugin_preview_host.as_mut() else {
             return Default::default();
         };
-        let data_changed = match host.application_mut().sync_window_preview_data(&data) {
+        let data_changed = match host.application_mut().sync_data(&data) {
             Ok(changed) => changed,
             Err(error) => {
                 self.fail_preview_plugin_runtime(error);
@@ -11896,7 +11894,7 @@ impl LiveShell {
         let Some(host) = self.plugin_control_host.as_mut() else {
             return Vec::new();
         };
-        let changed = match host.application_mut().sync_control_center_data(&data) {
+        let changed = match host.application_mut().sync_data(&data) {
             Ok(changed) => changed,
             Err(error) => {
                 self.fail_control_plugin_runtime(error);
@@ -11935,7 +11933,7 @@ impl LiveShell {
         let Some(host) = self.plugin_control_host.as_mut() else {
             return nickel_ui::HostEventOutcome::default();
         };
-        let changed = match host.application_mut().sync_control_center_data(&data) {
+        let changed = match host.application_mut().sync_data(&data) {
             Ok(changed) => changed,
             Err(error) => {
                 self.fail_control_plugin_runtime(error);

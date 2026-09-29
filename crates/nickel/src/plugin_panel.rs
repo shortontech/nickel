@@ -1798,30 +1798,14 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, codex_projects_manifest(), Some(data))
     }
 
-    pub fn sync_screenshot_data(&mut self, data: &Value) -> Result<bool, String> {
-        if self.manifest.id != screenshot_manifest().id {
-            return Err("this plugin is not the screenshot tool".into());
-        }
+    /// Refresh the plugin's host-owned data using the same render transaction
+    /// regardless of which surface or first-party plugin consumes it.
+    pub fn sync_data(&mut self, data: &Value) -> Result<bool, String> {
         let serialized = data.to_string();
-        if self.projection_data.as_deref() == Some(serialized.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&serialized)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(serialized);
-        Ok(true)
+        self.sync_serialized_data(serialized)
     }
 
-    pub fn sync_on_screen_keyboard_data(&mut self, data: &Value) -> Result<bool, String> {
-        if self.manifest.id != on_screen_keyboard_manifest().id {
-            return Err("this plugin is not the on-screen keyboard".into());
-        }
-        let serialized = data.to_string();
+    fn sync_serialized_data(&mut self, serialized: String) -> Result<bool, String> {
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
@@ -1844,18 +1828,7 @@ impl PluginPanelApplication {
             return Err("this plugin is not Codex projects".into());
         }
         let data = serde_json::to_string(projection).map_err(|error| error.to_string())?;
-        if self.projection_data.as_deref() == Some(data.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&data)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(data);
-        Ok(true)
+        self.sync_serialized_data(data)
     }
 
     pub fn window_preview_with_data(data: &Value) -> Result<Self, String> {
@@ -1927,18 +1900,7 @@ impl PluginPanelApplication {
             return Err("this plugin is not the Run dialog".into());
         }
         let data = serde_json::json!({ "status": status }).to_string();
-        if self.projection_data.as_deref() == Some(data.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&data)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(data);
-        Ok(true)
+        self.sync_serialized_data(data)
     }
 
     fn new_with_manifest(
@@ -2016,19 +1978,7 @@ impl PluginPanelApplication {
         data.as_object_mut()
             .ok_or("external plugin projection must be an object")?
             .insert("slots".into(), slots.clone());
-        let data = data.to_string();
-        if self.projection_data.as_deref() == Some(data.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&data)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(data);
-        Ok(true)
+        self.sync_data(&data)
     }
 
     pub fn sync_launcher(&mut self, launcher: &Launcher) -> Result<bool, String> {
@@ -2047,20 +1997,9 @@ impl PluginPanelApplication {
             return Err("this plugin is not the launcher".into());
         }
         let data = projection.to_json();
-        if self.projection_data.as_deref() == Some(data.as_str()) {
-            self.launcher_shortcuts = Some(projection.into());
-            return Ok(false);
-        }
-        self.runtime.set_data(&data)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(data);
+        let changed = self.sync_serialized_data(data)?;
         self.launcher_shortcuts = Some(projection.into());
-        Ok(true)
+        Ok(changed)
     }
 
     pub fn sync_taskbar_projection(
@@ -2071,18 +2010,7 @@ impl PluginPanelApplication {
             return Err("this plugin is not the taskbar".into());
         }
         let data = projection.to_json();
-        if self.projection_data.as_deref() == Some(data.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&data)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(data);
-        Ok(true)
+        self.sync_serialized_data(data)
     }
 
     pub fn rendered_taskbar_item_matches(&self, index: usize, id: &str) -> bool {
@@ -2113,18 +2041,7 @@ impl PluginPanelApplication {
             return Err("this plugin is not the taskbar".into());
         }
         let data = projection.to_json();
-        if self.projection_data.as_deref() == Some(data.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&data)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(data);
-        Ok(true)
+        self.sync_serialized_data(data)
     }
 
     pub fn sync_notification_projection(
@@ -2135,26 +2052,12 @@ impl PluginPanelApplication {
             return Err("this plugin is not notifications".into());
         }
         let data = projection.to_json();
-        if self.projection_data.as_deref() == Some(data.as_str()) {
-            self.notification_shortcuts = Some((
-                projection.notification.as_ref().map(|item| item.id),
-                projection.history_visible,
-            ));
-            return Ok(false);
-        }
-        self.runtime.set_data(&data)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(data);
+        let changed = self.sync_serialized_data(data)?;
         self.notification_shortcuts = Some((
             projection.notification.as_ref().map(|item| item.id),
             projection.history_visible,
         ));
-        Ok(true)
+        Ok(changed)
     }
 
     pub fn sync_volume_osd_projection(
@@ -2165,75 +2068,7 @@ impl PluginPanelApplication {
             return Err("this plugin is not the volume overlay".into());
         }
         let data = projection.to_json();
-        if self.projection_data.as_deref() == Some(data.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&data)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(data);
-        Ok(true)
-    }
-
-    pub fn sync_control_center_data(&mut self, data: &Value) -> Result<bool, String> {
-        if self.manifest.id != control_center_manifest().id {
-            return Err("this plugin is not the control center".into());
-        }
-        let serialized = data.to_string();
-        if self.projection_data.as_deref() == Some(serialized.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&serialized)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(serialized);
-        Ok(true)
-    }
-
-    pub fn sync_window_preview_data(&mut self, data: &Value) -> Result<bool, String> {
-        if self.manifest.id != window_preview_manifest().id {
-            return Err("this plugin is not the window preview".into());
-        }
-        let serialized = data.to_string();
-        if self.projection_data.as_deref() == Some(serialized.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&serialized)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(serialized);
-        Ok(true)
-    }
-
-    pub fn sync_desktop_data(&mut self, data: &Value) -> Result<bool, String> {
-        if self.manifest.id != desktop_manifest().id {
-            return Err("this plugin is not the desktop".into());
-        }
-        let serialized = data.to_string();
-        if self.projection_data.as_deref() == Some(serialized.as_str()) {
-            return Ok(false);
-        }
-        self.runtime.set_data(&serialized)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
-        self.projection_data = Some(serialized);
-        Ok(true)
+        self.sync_serialized_data(data)
     }
 
     pub fn activate_desktop_tile(&mut self, id: &str) -> bool {
@@ -5765,7 +5600,7 @@ mod tests {
                 false,
             ),
         });
-        assert!(plugin.sync_on_screen_keyboard_data(&disabled).unwrap());
+        assert!(plugin.sync_data(&disabled).unwrap());
         let message = plugin.button_message("osk-char-113").unwrap();
         plugin.update(message);
         assert!(plugin.take_effects().is_empty());
