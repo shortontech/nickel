@@ -1969,7 +1969,21 @@
             .expect("live panel group resolves");
         assert_eq!(panel.role, ShellRole::Panel);
         assert_eq!(panel.output, None);
-        assert!(shell.panel_pointer_moved(panel.x as f32, 1280));
+        let key = shell.taskbar_surface_key().expect("active taskbar surface");
+        assert!(shell.plugin_panel_host_input_for(
+            &key,
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(1),
+                position: nickel_input::Point {
+                    x: f64::from(panel.x),
+                    y: 28.0,
+                },
+                delta: None,
+            }),
+            1280,
+            56,
+        ));
         assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Task(0)));
         assert!(shell.preview_group.is_none());
         assert_eq!(shell.preview_pending.map(|(index, _)| index), Some(0));

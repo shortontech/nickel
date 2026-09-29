@@ -7257,7 +7257,11 @@ impl LiveShell {
         self.step_taskbar_plugin(
             vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
             width,
-        );
+        )
+        .is_some_and(|outcome| outcome.changed)
+    }
+
+    fn sync_panel_hover_from_host(&mut self) -> bool {
         let hovered = self
             .plugin_taskbar_host
             .as_ref()
@@ -10842,6 +10846,18 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> Option<nickel_ui::HostEventOutcome> {
+        let pointer_moved = batch.events.iter().any(|event| match event {
+            HostEvent::Ui(UiEvent::PointerMoved(_)) => true,
+            HostEvent::Normalized { input, .. } => matches!(
+                input,
+                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion { .. })
+            ),
+            HostEvent::NormalizedIngress(envelope) => matches!(
+                &envelope.input,
+                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion { .. })
+            ),
+            _ => false,
+        });
         let (clock, _) = panel_clock_text();
         let (mut projection, images) = self.taskbar_plugin_projection(&clock);
         compose_taskbar_badges(&mut projection, &self.plugin_taskbar_badge_hosts);
@@ -10897,6 +10913,9 @@ impl LiveShell {
                 .get_or_insert_with(|| Instant::now() + Duration::from_millis(360));
         } else {
             self.panel_pet_deadline = None;
+        }
+        if pointer_moved {
+            outcome.changed |= self.sync_panel_hover_from_host();
         }
         outcome.changed |= self.apply_plugin_effects(effects);
         Some(outcome)
