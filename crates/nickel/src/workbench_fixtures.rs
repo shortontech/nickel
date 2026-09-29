@@ -268,9 +268,9 @@ metadata!(
     DESKTOP_METADATA,
     "shell.desktop",
     "Desktop",
-    "Production desktop application",
+    "Bundled JSX desktop presentation",
     DESKTOP_VARIANTS,
-    &["shell", "desktop", "context-interactive"]
+    &["shell", "desktop", "jsx"]
 );
 metadata!(
     PANEL_METADATA,
@@ -397,7 +397,7 @@ impl Fixture for RuntimeFixture {
 }
 
 impl Fixture for DesktopFixture {
-    type App = DesktopApplication;
+    type App = PluginPanelApplication;
     fn metadata() -> &'static FixtureMetadata {
         &DESKTOP_METADATA
     }
@@ -405,25 +405,32 @@ impl Fixture for DesktopFixture {
         Self::create_variant(&DESKTOP_VARIANTS[0])
     }
     fn create_variant(v: &FixtureVariant) -> Self::App {
-        let wallpaper = (v.id == "wallpaper").then(|| {
-            Arc::new(image::RgbaImage::from_fn(64, 64, |x, y| {
+        let mut app = PluginPanelApplication::desktop_with_data(&serde_json::json!({
+            "width": 960,
+            "height": 540,
+            "background": 0xff202124_u32,
+            "wallpaper": v.id == "wallpaper",
+            "surfaceColor": 0xff30343a_u32,
+            "text": 0xffffffff_u32,
+            "error": null,
+            "tiles": [],
+            "widgets": [],
+            "context": null,
+        }))
+        .expect("bundled desktop fixture must compile");
+        if v.id == "wallpaper" {
+            let wallpaper = Arc::new(image::RgbaImage::from_fn(64, 64, |x, y| {
                 let value = ((x / 8 + y / 8) % 2) as u8;
                 image::Rgba([28 + value * 18, 34 + value * 12, 58 + value * 28, 255])
-            }))
-        });
-        DesktopApplication::fixture(wallpaper, palette())
+            }));
+            let mut images = PluginImages::new();
+            images.insert("wallpaper".into(), (1, wallpaper));
+            app.sync_images(images);
+        }
+        app
     }
     fn surface_size() -> (u32, u32) {
         (960, 540)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(
-            SemanticRole::ApplicationPresentation,
-            "Desktop",
-        ))
-    }
-    fn default_action() -> ActionKind {
-        ActionKind::ContextMenu
     }
 }
 

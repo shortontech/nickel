@@ -17,7 +17,7 @@ function App() {
     const backgroundAction = (action) => nickel.request({ type: "desktop-background-action", action });
     /** @param {boolean} selected @param {string} label */
     const checked = (selected, label) => selected ? `✓ ${label}` : label;
-    return h(FixedWindow, { id: "main", width: "100%", height: "100%", background: data.background },
+    return h(FixedWindow, { id: "main", width: "100%", height: "100%", background: data.background, 'aria-label': "Desktop" },
         data.wallpaper ? h(Image, { asset: "wallpaper", width: data.width, height: data.height, fit: "stretch" }) : null,
         (data.tiles || []).map(tile => h(FileTile, { key: tile.id, ...tile, onSelect: () => nickel.request({ type: "desktop-select", id: tile.id }), onMove: ({ dx, dy }) => nickel.request({ type: "desktop-move", id: tile.id, dx, dy }), onFileAction: ({ action }) => nickel.request({ type: "desktop-file-action", id: tile.id, action }), onClick: () => nickel.request({ type: "desktop-open", id: tile.id }) })),
         fileContext ? h(Menu, { id: "desktop-file-actions", anchor: fileContext.id, open: true },

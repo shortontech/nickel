@@ -17,7 +17,8 @@ function App() {
     const backgroundAction = (action) => nickel.request({type: "desktop-background-action", action});
     /** @param {boolean} selected @param {string} label */
     const checked = (selected, label) => selected ? `✓ ${label}` : label;
-    return <FixedWindow id="main" width="100%" height="100%" background={data.background}>
+    return <FixedWindow id="main" width="100%" height="100%" background={data.background}
+        aria-label="Desktop">
         {data.wallpaper ? <Image asset="wallpaper" width={data.width} height={data.height} fit="stretch" /> : null}
         {(data.tiles || []).map(tile => <FileTile key={tile.id} {...tile}
             onSelect={() => nickel.request({type: "desktop-select", id: tile.id})}

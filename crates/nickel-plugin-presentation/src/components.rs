@@ -279,6 +279,7 @@ pub enum PanelNode {
         children: Vec<Self>,
         id: Option<String>,
         window_request: Option<WindowRequest>,
+        accessibility_label: Option<String>,
         escape_action: Option<usize>,
         submit_action: Option<usize>,
         class_name: Option<String>,
@@ -1174,6 +1175,18 @@ impl PanelNode {
                 Ok(Self::Surface {
                     class_name,
                     window_request,
+                    accessibility_label: match value
+                        .get("aria-label")
+                        .or_else(|| value.get("accessibilityLabel"))
+                    {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(label)) if !label.is_empty() && label.len() <= 256 => {
+                            Some(label.clone())
+                        }
+                        _ => {
+                            return Err("window accessible label must contain 1 to 256 bytes".into());
+                        }
+                    },
                     escape_action: value
                         .get("escapeAction")
                         .and_then(Value::as_u64)
@@ -2095,6 +2108,7 @@ impl PanelNode {
             Self::Surface {
                 children,
                 id,
+                accessibility_label,
                 class_name,
                 background,
                 width,
@@ -2117,6 +2131,11 @@ impl PanelNode {
                     .child(layer);
                 if let Some(id) = id {
                     container = container.id(id.clone());
+                }
+                if let Some(label) = accessibility_label {
+                    container = container
+                        .semantic_role(SemanticRole::ApplicationPresentation)
+                        .accessibility_label(label.clone());
                 }
                 with_margin(
                     AnyView::new(apply_container_style(container, &style)),
