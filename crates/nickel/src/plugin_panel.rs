@@ -2098,23 +2098,6 @@ impl nickel_ui::Application for PluginPanelApplication {
     type Message = PluginMessage;
 
     fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
-        if self.manifest.id == run_manifest().id {
-            return match shortcut {
-                Shortcut::Escape => {
-                    self.effects.push(PluginEffect::RunDismiss);
-                    nickel_ui::ShortcutOutcome::handled(true)
-                }
-                Shortcut::Submit => {
-                    if let Some(action) = self.node.button_action("run-submit") {
-                        self.update(PluginMessage::Click(action));
-                        nickel_ui::ShortcutOutcome::handled(true)
-                    } else {
-                        nickel_ui::ShortcutOutcome::from_changed(false)
-                    }
-                }
-                _ => nickel_ui::ShortcutOutcome::from_changed(false),
-            };
-        }
         if shortcut == Shortcut::Escape
             && let Some((id, history_visible)) = self.notification_shortcuts
         {
@@ -2133,12 +2116,12 @@ impl nickel_ui::Application for PluginPanelApplication {
         if self.overlay_open && shortcut == Shortcut::Submit {
             return nickel_ui::ShortcutOutcome::from_changed(false);
         }
-        if self.manifest.id == control_center_manifest().id && shortcut == Shortcut::Escape {
-            self.effects.push(PluginEffect::ToggleControlCenter);
+        if let Some(action) = self.node.window_shortcut_action(shortcut) {
+            self.update(PluginMessage::Click(action));
             return nickel_ui::ShortcutOutcome::handled(true);
         }
-        if self.manifest.id == codex_projects_manifest().id && shortcut == Shortcut::Escape {
-            self.effects.push(PluginEffect::CodexProjectClose);
+        if self.manifest.id == control_center_manifest().id && shortcut == Shortcut::Escape {
+            self.effects.push(PluginEffect::ToggleControlCenter);
             return nickel_ui::ShortcutOutcome::handled(true);
         }
         if self.manifest.id == on_screen_keyboard_manifest().id && shortcut == Shortcut::Escape {
@@ -5421,6 +5404,26 @@ mod tests {
             nickel_ui::EventDisposition::Handled
         );
         assert_eq!(panel.take_effects(), vec![PluginEffect::RunDismiss]);
+    }
+
+    #[test]
+    fn external_window_shortcuts_dispatch_jsx_handlers() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.window-shortcuts".into();
+        let package = PluginPackage {
+            manifest: external_manifest,
+            images: Default::default(),
+            stylesheet: String::new(),
+            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%', onEscape: () => nickel.request('show-launcher'), onSubmit: () => nickel.request('show-launcher')}, h(Text, {}, 'Ready')); }".into(),
+        };
+        let mut panel = PluginPanelApplication::from_package(&package).unwrap();
+        for shortcut in [Shortcut::Escape, Shortcut::Submit] {
+            assert_eq!(
+                panel.shortcut_outcome(shortcut).disposition,
+                nickel_ui::EventDisposition::Handled
+            );
+            assert_eq!(panel.take_effects(), vec![PluginEffect::ShowLauncher]);
+        }
     }
 
     #[test]

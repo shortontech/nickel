@@ -235,6 +235,10 @@ sharing one runtime across sibling windows is a later host change.
 Controls do not need explicit IDs for ordinary rendering or event handling.
 Nickel derives stable control IDs from the tree path; list items rendered from
 arrays inside a `Window` must use unique `key` values, such as `key={item.id}`.
+The root `Window` or `FixedWindow` can handle Enter and Escape through
+`onSubmit` and `onEscape` JavaScript callbacks. Their requested desktop actions
+receive the same capability checks as button callbacks.
+
 `<Slot id="content" />` marks a place where a host can insert its own component
 tree into the JSX layout. The ID names the insertion point; a slot with no
 host-provided content is empty. CSS can style the slot box with `slot#content`

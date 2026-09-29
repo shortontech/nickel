@@ -140,6 +140,10 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onFileAction) - 1 : null;
     const closeAction = typeof props?.onClose === 'function'
         ? __handlers.push(props.onClose) - 1 : null;
+    const escapeAction = typeof props?.onEscape === 'function'
+        ? __handlers.push(props.onEscape) - 1 : null;
+    const submitAction = typeof props?.onSubmit === 'function'
+        ? __handlers.push(props.onSubmit) - 1 : null;
     return {kind, key: props?.key, action, id: props?.id, title: props?.title, className: props?.className, open: props?.open, anchor: props?.anchor,
         placement: props?.placement, output: props?.output, edge: props?.edge,
         reserveWorkArea: props?.reserveWorkArea, bottomOffset: props?.bottomOffset,
@@ -159,6 +163,7 @@ function h(kind, props, ...children) {
         'aria-selected': props?.['aria-selected'],
         state: props?.state, disabled: props?.disabled, icon: props?.icon,
         showLabel: props?.showLabel, contextAction, dragAction, selectAction, moveAction, fileAction, closeAction,
+        escapeAction, submitAction,
         value: props?.value, placeholder: props?.placeholder, secure: props?.secure,
         wrap: props?.wrap,
         maxLines: props?.maxLines,

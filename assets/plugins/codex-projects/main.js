@@ -13,7 +13,7 @@ function App() {
                     : data.status === "incompatible" ? "Codex is incompatible"
                         : availableProjects.length === 0 ? "No projects available"
                             : projects.length === 0 ? "No matching projects" : "Choose a project";
-    return h(FixedWindow, { width: 520, height: 680, className: "codex-projects" },
+    return h(FixedWindow, { width: 520, height: 680, className: "codex-projects", onEscape: () => nickel.request({ type: "codex-project-close" }) },
         h(Column, null,
             h(Row, null,
                 h(Text, null, "Codex projects"),

@@ -9,8 +9,8 @@ use nickel_core::plugins::{PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, Dropdown, FilePlaneItem, Grid,
-    Image, ImageFit, Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Slider,
-    Spacer, Text, TextField as UiTextField, VerticalScroll,
+    Image, ImageFit, Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Shortcut,
+    Slider, Spacer, Text, TextField as UiTextField, VerticalScroll,
 };
 use serde_json::Value;
 
@@ -279,6 +279,8 @@ pub enum PanelNode {
         children: Vec<Self>,
         id: Option<String>,
         window_request: Option<WindowRequest>,
+        escape_action: Option<usize>,
+        submit_action: Option<usize>,
         class_name: Option<String>,
         background: u32,
         width: Length,
@@ -1177,6 +1179,14 @@ impl PanelNode {
                 Ok(Self::Surface {
                     class_name,
                     window_request,
+                    escape_action: value
+                        .get("escapeAction")
+                        .and_then(Value::as_u64)
+                        .map(|action| action as usize),
+                    submit_action: value
+                        .get("submitAction")
+                        .and_then(Value::as_u64)
+                        .map(|action| action as usize),
                     children: children
                         .iter()
                         .filter(|value| !value.is_null())
@@ -2097,6 +2107,7 @@ impl PanelNode {
                 background,
                 width,
                 height,
+                ..
             } => {
                 let style = stylesheet.resolve(
                     if window_request.is_some() {
@@ -2722,6 +2733,23 @@ impl PanelNode {
                 window_request: Some(request),
                 ..
             } => request.title.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn window_shortcut_action(&self, shortcut: Shortcut) -> Option<usize> {
+        let Self::Surface {
+            window_request: Some(_),
+            escape_action,
+            submit_action,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        match shortcut {
+            Shortcut::Escape => *escape_action,
+            Shortcut::Submit => *submit_action,
             _ => None,
         }
     }

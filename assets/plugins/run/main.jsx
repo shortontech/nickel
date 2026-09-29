@@ -6,7 +6,8 @@ function App() {
         const trimmed = command.trim();
         if (trimmed) nickel.request({ type: "run-submit", command: trimmed });
     };
-    return <Window id="main" width={620} height={180} className="run-window">
+    return <Window id="main" width={620} height={180} className="run-window"
+        onSubmit={submit} onEscape={() => nickel.request({ type: "run-dismiss" })}>
         <div className="run-content">
             <Text className="run-title">{nickel.data.status || "Run command"}</Text>
             <TextField id="run-command" value={command} placeholder="Enter a command"

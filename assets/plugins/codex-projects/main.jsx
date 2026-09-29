@@ -14,7 +14,8 @@ function App() {
         : data.status === "incompatible" ? "Codex is incompatible"
         : availableProjects.length === 0 ? "No projects available"
         : projects.length === 0 ? "No matching projects" : "Choose a project";
-    return <FixedWindow width={520} height={680} className="codex-projects">
+    return <FixedWindow width={520} height={680} className="codex-projects"
+        onEscape={() => nickel.request({type: "codex-project-close"})}>
         <Column>
             <Row>
                 <Text>Codex projects</Text>

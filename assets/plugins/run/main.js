@@ -7,7 +7,7 @@ function App() {
         if (trimmed)
             nickel.request({ type: "run-submit", command: trimmed });
     };
-    return h(Window, { id: "main", width: 620, height: 180, className: "run-window" },
+    return h(Window, { id: "main", width: 620, height: 180, className: "run-window", onSubmit: submit, onEscape: () => nickel.request({ type: "run-dismiss" }) },
         h("div", { className: "run-content" },
             h(Text, { className: "run-title" }, nickel.data.status || "Run command"),
             h(TextField, { id: "run-command", value: command, placeholder: "Enter a command", onChange: value => setCommand(value.slice(0, 4096)) }),
