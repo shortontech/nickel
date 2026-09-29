@@ -446,6 +446,7 @@ pub enum PluginEffect {
     ToggleLauncherPin {
         id: String,
     },
+    RetryApplicationPinSave,
     DismissLauncher,
     LauncherOpenProject {
         id: String,
@@ -689,6 +690,7 @@ pub struct LauncherPluginProject {
 pub struct LauncherPluginProjection {
     pub query: String,
     pub status: Option<String>,
+    pub pin_save_failed: bool,
     pub dashboard_visible: bool,
     pub view: LauncherView,
     pub result_page: usize,
@@ -981,6 +983,7 @@ impl LauncherPluginProjection {
         Self {
             query: launcher.query().to_owned(),
             status: None,
+            pin_save_failed: false,
             dashboard_visible: launcher.mode() == LauncherMode::Dashboard,
             view: launcher.view(),
             result_page,
@@ -1037,6 +1040,9 @@ impl LauncherPluginProjection {
     }
 
     pub(crate) fn with_status(mut self, status: Option<String>) -> Self {
+        self.pin_save_failed = status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Launcher preferences could not be saved:"));
         self.status = status.map(|status| status.chars().take(160).collect());
         self
     }
@@ -1055,7 +1061,7 @@ impl LauncherPluginProjection {
             LauncherView::Applications => "applications",
             LauncherView::Places => "places",
         };
-        serde_json::json!({"query": self.query, "status": self.status, "dashboardVisible": self.dashboard_visible, "view": view,
+        serde_json::json!({"query": self.query, "status": self.status, "pinSaveFailed": self.pin_save_failed, "dashboardVisible": self.dashboard_visible, "view": view,
             "resultPage": self.result_page, "resultPageCount": self.result_page_count,
             "dashboardPage": self.dashboard_page, "dashboardPageCount": self.dashboard_page_count,
             "results": results,
@@ -2599,6 +2605,15 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::ToggleLauncherPin { id: id.to_owned() });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("applications-retry-pin-save")
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsPin) =>
+                        {
+                            approved.push(PluginEffect::RetryApplicationPinSave);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-open-project")
@@ -4912,6 +4927,75 @@ mod tests {
                 .unwrap()
         );
         assert!(!format!("{:?}", panel.node).contains("Could not launch Demo"));
+    }
+
+    #[test]
+    fn application_pin_save_retry_requires_pin_capability() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.pin-retry".into();
+        external_manifest.capabilities.clear();
+        let mut package = PluginPackage {
+            manifest: external_manifest,
+            images: Default::default(),
+            stylesheet: String::new(),
+            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%', onEscape: () => nickel.request({type: 'applications-retry-pin-save'})}); }".into(),
+        };
+        let mut denied = PluginPanelApplication::from_package(&package).unwrap();
+        denied.shortcut_outcome(Shortcut::Escape);
+        assert!(denied.take_effects().is_empty());
+        package
+            .manifest
+            .capabilities
+            .push(PluginCapability::ApplicationsPin);
+        let mut granted = PluginPanelApplication::from_package(&package).unwrap();
+        granted.shortcut_outcome(Shortcut::Escape);
+        assert_eq!(
+            granted.take_effects(),
+            vec![PluginEffect::RetryApplicationPinSave]
+        );
+    }
+
+    #[test]
+    fn failed_launcher_save_exposes_retry_in_jsx_menu() {
+        let launcher = Launcher::default();
+        let projection = LauncherPluginProjection::from_launcher(&launcher).with_status(Some(
+            "Launcher preferences could not be saved: storage unavailable".into(),
+        ));
+        let mut host = nickel_ui::UiHost::new(
+            PluginPanelApplication::bundled_with_data(
+                launcher_manifest(),
+                "main.js",
+                projection.to_json(),
+            )
+            .unwrap(),
+            920,
+            680,
+        );
+        let app = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Firefox".into(),
+            })
+            .unwrap();
+        let outcome = host.perform_accessibility_action(
+            app.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::ContextMenu),
+        );
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
+        let retry = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::MenuItem,
+                name: "Retry saving favorites".into(),
+            })
+            .unwrap();
+        host.perform_accessibility_action(
+            retry.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::RetryApplicationPinSave]
+        );
     }
 
     #[test]

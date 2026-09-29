@@ -11,7 +11,7 @@
   ],
   "validation_data": {
     "main": {
-      "query": "", "status": null, "dashboardVisible": false,
+      "query": "", "status": null, "pinSaveFailed": false, "dashboardVisible": false,
       "view": "favorites", "resultPage": 0, "resultPageCount": 1,
       "dashboardPage": 0, "dashboardPageCount": 1,
       "results": [], "dashboard": [], "places": [], "projects": [],

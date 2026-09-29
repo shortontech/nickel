@@ -6466,6 +6466,14 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::RetryApplicationPinSave => {
+                    if self.launcher_status.as_deref().is_some_and(|status| {
+                        status.starts_with("Launcher preferences could not be saved:")
+                    }) {
+                        self.apply_launcher_action(LauncherAction::RetryPreferencePersistence);
+                        changed = true;
+                    }
+                }
                 crate::plugin_panel::PluginEffect::LauncherOpenProject { id } => {
                     let projection = self.current_plugin_launcher_projection();
                     if projection.dashboard_visible

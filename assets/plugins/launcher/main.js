@@ -77,5 +77,6 @@ function App() {
                             nickel.request({ type: "launcher-launch-dashboard", id: menuTarget.id });
                         }
                     } }, "Launch"),
-                h(MenuItem, { id: "toggle-pin", onClick: () => nickel.request({ type: "launcher-toggle-pin", id: menuTarget.id }) }, menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar")) : null));
+                h(MenuItem, { id: "toggle-pin", onClick: () => nickel.request({ type: "launcher-toggle-pin", id: menuTarget.id }) }, menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"),
+                data.pinSaveFailed ? h(MenuItem, { id: "retry-pin-save", onClick: () => nickel.request({ type: "applications-retry-pin-save" }) }, "Retry saving favorites") : null) : null));
 }

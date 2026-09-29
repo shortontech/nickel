@@ -1807,6 +1807,42 @@
         );
     }
 
+    #[test]
+    fn plugin_retry_saves_failed_launcher_preferences_once() {
+        let directory = tempfile::tempdir().expect("temporary preferences directory");
+        let preferences_path = directory.path().join("launcher-preferences");
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::default();
+        preferences_fixture(&mut shell, directory.path().to_path_buf());
+        shell.apply_launcher_action(LauncherAction::TogglePin("firefox".into()));
+        finish_preference_write(&mut shell);
+        assert!(shell.launcher_status.as_deref().is_some_and(|status| {
+            status.starts_with("Launcher preferences could not be saved:")
+        }));
+        let projection = shell.current_plugin_launcher_projection();
+        assert!(projection.pin_save_failed);
+        assert!(projection.to_json().contains("\"pinSaveFailed\":true"));
+
+        preferences_fixture(&mut shell, preferences_path.clone());
+        assert!(shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::RetryApplicationPinSave
+        ]));
+        finish_preference_write(&mut shell);
+        assert_eq!(shell.launcher_persistence_attempts, 2);
+        assert!(shell.launcher_status.is_none());
+        assert!(!shell.current_plugin_launcher_projection().pin_save_failed);
+        assert_eq!(
+            LauncherPreferences::load(preferences_path)
+                .expect("retried preferences")
+                .favorites(),
+            ["firefox"]
+        );
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::RetryApplicationPinSave
+        ]));
+        assert_eq!(shell.launcher_persistence_attempts, 2);
+    }
+
     fn launcher_scenario(
         launcher: &crate::launcher::Launcher,
         palette: nickel_core::theme::ThemePalette,
