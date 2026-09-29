@@ -793,6 +793,46 @@
     }
 
     #[test]
+    fn run_callback_failure_retires_only_run_and_restores_launcher() {
+        let mut shell = LiveShell::new().unwrap();
+        let application = crate::plugin_panel::PluginPanelApplication::run_with_test_source(
+            "function App() { return h(Panel, {}, h(Button, {id: 'run-fail', onClick: () => { throw Error('Run callback exploded'); }}, 'Break Run')); }",
+        )
+        .unwrap();
+        shell.plugin_run_host = Some(nickel_ui::UiHost::new(application, 620, 180));
+        shell.apply_session_launcher_visibility(true);
+        assert!(shell.set_run_visible(true));
+        let target = shell
+            .plugin_run_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Break Run".into(),
+            })
+            .unwrap();
+        assert!(!shell.launcher_host_ui(
+            UiEvent::AccessibilityActivate(target.id),
+            620,
+            180,
+        ));
+        let id = &crate::plugin_panel::run_manifest().id;
+        let entry = shell.plugin_registry().get(id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("Run callback exploded")));
+        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+        assert!(!shell.run_visible);
+        assert!(!shell.launcher_visible);
+        assert_eq!(
+            shell.active_launcher_surface_key(),
+            Some(crate::plugin_panel::launcher_surface_key())
+        );
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.set_run_visible(true));
+    }
+
+    #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
         use nickel_input::global::{ShortcutCapability, UnavailableReason};
 

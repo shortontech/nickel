@@ -401,11 +401,16 @@ impl LiveShell {
                     .plugin_run_host
                     .as_mut()
                     .ok_or("Run plugin is unavailable")?;
-                let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
-                if !plugin.application_mut().take_effects().is_empty() {
+                let outcome = mutate(plugin, generation, node, action, clipboard_limit);
+                let requested = plugin.application_mut().take_effects();
+                if let Some(error) = plugin.application_mut().take_runtime_failure() {
+                    self.fail_run_plugin_runtime(error);
+                    return Err("Run plugin failed".into());
+                }
+                if !requested.is_empty() {
                     return Err("run plugin requested an unguarded effect".into());
                 }
-                outcome
+                outcome?
             }
             SurfaceRole::Launcher if self.plugin_launcher_host.is_some() => {
                 let plugin = self

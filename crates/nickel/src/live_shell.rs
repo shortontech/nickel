@@ -4760,6 +4760,24 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
+    fn retire_run_plugin_state(&mut self) {
+        self.plugin_run_host = None;
+        if self.run_visible {
+            self.run_visible = false;
+            self.set_launcher_visible(false);
+        }
+    }
+
+    fn fail_run_plugin_runtime(&mut self, error: String) {
+        let id = &crate::plugin_panel::run_manifest().id;
+        tracing::warn!(plugin = id, %error, "bundled Run plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.retire_run_plugin_state();
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -4901,11 +4919,7 @@ impl LiveShell {
             } else if id == crate::plugin_panel::launcher_manifest().id {
                 self.retire_launcher_plugin_state();
             } else if id == crate::plugin_panel::run_manifest().id {
-                self.plugin_run_host = None;
-                if self.run_visible {
-                    self.run_visible = false;
-                    self.set_launcher_visible(false);
-                }
+                self.retire_run_plugin_state();
             } else if id == crate::plugin_panel::taskbar_manifest().id {
                 self.retire_taskbar_plugin_state();
             } else if id == crate::plugin_panel::notification_manifest().id {
@@ -5397,6 +5411,10 @@ impl LiveShell {
                     ..HostBatch::default()
                 });
                 let effects = host.application_mut().take_effects();
+                if let Some(error) = host.application_mut().take_runtime_failure() {
+                    self.fail_run_plugin_runtime(error);
+                    return nickel_ui::HostEventOutcome::default();
+                }
                 self.apply_plugin_effects(effects);
                 self.host_runtime_samples.record(outcome.telemetry);
                 return outcome;
@@ -5477,6 +5495,10 @@ impl LiveShell {
                     && outcome.text_input_active
                     && host.controller_targets_text_input();
                 let effects = host.application_mut().take_effects();
+                if let Some(error) = host.application_mut().take_runtime_failure() {
+                    self.fail_run_plugin_runtime(error);
+                    return false;
+                }
                 if show_keyboard {
                     self.set_keyboard_visible(true);
                 }
@@ -6315,10 +6337,10 @@ impl LiveShell {
                             let status =
                                 format!("Could not run command: {}", launch_error_summary(&error));
                             if let Some(host) = self.plugin_run_host.as_mut() {
-                                changed |= host
-                                    .application_mut()
-                                    .sync_run_status(Some(&status))
-                                    .unwrap_or(false);
+                                match host.application_mut().sync_run_status(Some(&status)) {
+                                    Ok(projected) => changed |= projected,
+                                    Err(error) => self.fail_run_plugin_runtime(error),
+                                }
                             }
                         }
                     }
@@ -9087,11 +9109,18 @@ impl LiveShell {
         self.run_visible = visible;
         if visible {
             if let Some(host) = self.plugin_run_host.as_mut() {
-                let _ = host.application_mut().sync_run_status(None);
+                if let Err(error) = host.application_mut().sync_run_status(None) {
+                    self.fail_run_plugin_runtime(error);
+                    return false;
+                }
                 host.step(HostBatch {
                     application_changed: true,
                     ..HostBatch::default()
                 });
+                if let Some(error) = host.application_mut().take_runtime_failure() {
+                    self.fail_run_plugin_runtime(error);
+                    return false;
+                }
                 if let Ok(field) =
                     host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
                 {
@@ -9169,12 +9198,15 @@ impl LiveShell {
         }
         if self.run_visible {
             if let Some(host) = self.plugin_run_host.as_mut() {
-                return host
-                    .step(HostBatch {
-                        window_focused: Some(true),
-                        ..HostBatch::default()
-                    })
-                    .changed;
+                let outcome = host.step(HostBatch {
+                    window_focused: Some(true),
+                    ..HostBatch::default()
+                });
+                if let Some(error) = host.application_mut().take_runtime_failure() {
+                    self.fail_run_plugin_runtime(error);
+                    return false;
+                }
+                return outcome.changed;
             }
             return false;
         }
@@ -11091,6 +11123,10 @@ impl LiveShell {
                 events: vec![HostEvent::Poll],
                 ..HostBatch::default()
             });
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_run_plugin_runtime(error);
+                return Vec::new();
+            }
             let commands = host.commands().to_vec();
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::run_manifest().id,

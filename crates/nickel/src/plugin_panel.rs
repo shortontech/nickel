@@ -3351,6 +3351,15 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source.as_ref(), run_manifest(), Some(data))
     }
 
+    #[cfg(test)]
+    pub(crate) fn run_with_test_source(source: &str) -> Result<Self, String> {
+        Self::new_with_manifest(
+            source,
+            run_manifest(),
+            Some(serde_json::json!({ "status": null }).to_string()),
+        )
+    }
+
     pub fn sync_run_status(&mut self, status: Option<&str>) -> Result<bool, String> {
         if self.manifest.id != run_manifest().id {
             return Err("this plugin is not the Run dialog".into());
