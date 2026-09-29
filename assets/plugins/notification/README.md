@@ -1,9 +1,11 @@
 # Notification plugin comparison path
 
-`main.jsx` is Nickel's bundled notification view. Generate `main.js` with:
+`main.jsx` is Nickel's bundled notification view. Its fixed `<Window>` root
+matches the manifest's overlay surface; `ui.css` styles the native controls.
+Generate `main.js` with:
 
 ```sh
-tsc --allowJs --checkJs false --jsx react --jsxFactory h --target ES2020 \
+tsc --allowJs --checkJs false --noCheck --jsx react --jsxFactory h --target ES2020 \
   --outDir assets/plugins/notification assets/plugins/notification/main.jsx
 ```
 

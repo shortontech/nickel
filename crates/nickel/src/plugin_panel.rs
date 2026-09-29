@@ -3907,6 +3907,10 @@ impl PluginPanelApplication {
             notification_manifest(),
             Some(projection.to_json()),
         )?;
+        application.stylesheet = bundled_stylesheet(
+            notification_manifest(),
+            include_str!("../../../assets/plugins/notification/ui.css"),
+        )?;
         application.notification_shortcuts = Some((
             projection.notification.as_ref().map(|item| item.id),
             projection.history_visible,
@@ -5871,7 +5875,6 @@ impl nickel_ui::Application for PluginPanelApplication {
             &self.node,
             PanelNode::Viewport { .. } | PanelNode::Surface { .. }
         ) || self.manifest.id == taskbar_manifest().id
-            || self.manifest.id == notification_manifest().id
             || self.manifest.id == run_manifest().id
             || self.manifest.id == window_preview_manifest().id
             || self.manifest.id == desktop_manifest().id
@@ -7597,6 +7600,53 @@ mod tests {
             })
             .unwrap();
         assert!(title.bounds.size.height >= 20.0, "{title:?}");
+    }
+
+    #[test]
+    fn notification_plugin_uses_styled_window_root() {
+        let item = NotificationPluginItem {
+            id: 7,
+            app_name: "Mail".into(),
+            summary: "New message".into(),
+            body: "The body".into(),
+            actions: vec![NotificationPluginAction {
+                key: "open".into(),
+                label: "Open".into(),
+            }],
+        };
+        for projection in [
+            NotificationPluginProjection {
+                notification: None,
+                history: Vec::new(),
+                history_visible: false,
+            },
+            NotificationPluginProjection {
+                notification: Some(item.clone()),
+                history: Vec::new(),
+                history_visible: false,
+            },
+            NotificationPluginProjection {
+                notification: Some(item.clone()),
+                history: vec![item.clone()],
+                history_visible: true,
+            },
+        ] {
+            let panel = PluginPanelApplication::notification_with_projection(&projection).unwrap();
+            assert!(matches!(
+                &panel.node,
+                PanelNode::Surface {
+                    window_request: Some(_),
+                    ..
+                }
+            ));
+            assert_eq!(
+                panel
+                    .stylesheet
+                    .resolve("window", Some("main"), Some("notification-window"))
+                    .background,
+                Some(0xf22b303c)
+            );
+        }
     }
 
     #[test]
