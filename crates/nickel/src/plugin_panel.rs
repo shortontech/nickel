@@ -3379,6 +3379,11 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source.as_ref(), desktop_manifest(), Some(data.to_string()))
     }
 
+    #[cfg(test)]
+    pub(crate) fn desktop_with_test_source(source: &str, data: &Value) -> Result<Self, String> {
+        Self::new_with_manifest(source, desktop_manifest(), Some(data.to_string()))
+    }
+
     pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
         let source = bundled_source(
             run_manifest(),

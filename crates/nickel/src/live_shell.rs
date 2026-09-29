@@ -2980,6 +2980,10 @@ impl LiveShell {
                         events: vec![HostEvent::Ui(UiEvent::Dismiss)],
                         ..HostBatch::default()
                     });
+                    if let Some(error) = host.application_mut().take_runtime_failure() {
+                        self.fail_desktop_plugin_runtime(error);
+                        return false;
+                    }
                 }
             }
         }
@@ -2999,7 +3003,7 @@ impl LiveShell {
                     ..
                 }) if self.desktop_overlay_pointer_capture.as_ref() == Some(button)
             );
-            let (outcome, effects, menu_still_open) = {
+            let (outcome, effects, menu_still_open, failure) = {
                 let host = self.plugin_desktop_host.as_mut().expect("menu host exists");
                 let outcome = host.step(HostBatch {
                     events: vec![ingress],
@@ -3008,8 +3012,13 @@ impl LiveShell {
                 });
                 let effects = host.application_mut().take_effects();
                 let menu_still_open = host.inspect().open_overlay.is_some();
-                (outcome, effects, menu_still_open)
+                let failure = host.application_mut().take_runtime_failure();
+                (outcome, effects, menu_still_open, failure)
             };
+            if let Some(error) = failure {
+                self.fail_desktop_plugin_runtime(error);
+                return false;
+            }
             if captured_release {
                 self.desktop_overlay_pointer_capture = None;
             }
@@ -3195,6 +3204,28 @@ impl LiveShell {
         changed
     }
 
+    fn perform_desktop_plugin_action(
+        &mut self,
+        action: impl FnOnce(&mut crate::plugin_panel::PluginPanelApplication) -> bool,
+    ) -> Result<(bool, Vec<crate::plugin_panel::PluginEffect>), ()> {
+        let Some(host) = self.plugin_desktop_host.as_mut() else {
+            return Ok((false, Vec::new()));
+        };
+        let handled = action(host.application_mut());
+        let effects = host.application_mut().take_effects();
+        if handled {
+            host.step(HostBatch {
+                application_changed: true,
+                ..HostBatch::default()
+            });
+        }
+        if let Some(error) = host.application_mut().take_runtime_failure() {
+            self.fail_desktop_plugin_runtime(error);
+            return Err(());
+        }
+        Ok((handled, effects))
+    }
+
     fn dispatch_desktop_plugin_open(&mut self) -> bool {
         let Some(entry) = self
             .desktop_host
@@ -3205,20 +3236,11 @@ impl LiveShell {
             return false;
         };
         let id = format!("{}:{}", entry.0.0, entry.0.1);
-        let (handled, effects) =
-            self.plugin_desktop_host
-                .as_mut()
-                .map_or((false, Vec::new()), |host| {
-                    let handled = host.application_mut().activate_desktop_tile(&id);
-                    let effects = host.application_mut().take_effects();
-                    if handled {
-                        host.step(HostBatch {
-                            application_changed: true,
-                            ..HostBatch::default()
-                        });
-                    }
-                    (handled, effects)
-                });
+        let Ok((handled, effects)) = self
+            .perform_desktop_plugin_action(|application| application.activate_desktop_tile(&id))
+        else {
+            return false;
+        };
         if handled {
             self.apply_plugin_effects(effects)
         } else {
@@ -3246,20 +3268,11 @@ impl LiveShell {
             return false;
         }
         let id = format!("{}:{}", entry.0.0, entry.0.1);
-        let (handled, effects) =
-            self.plugin_desktop_host
-                .as_mut()
-                .map_or((false, Vec::new()), |host| {
-                    let handled = host.application_mut().file_action_desktop_tile(&id, action);
-                    let effects = host.application_mut().take_effects();
-                    if handled {
-                        host.step(HostBatch {
-                            application_changed: true,
-                            ..HostBatch::default()
-                        });
-                    }
-                    (handled, effects)
-                });
+        let Ok((handled, effects)) = self.perform_desktop_plugin_action(|application| {
+            application.file_action_desktop_tile(&id, action)
+        }) else {
+            return false;
+        };
         if handled {
             self.apply_plugin_effects(effects)
         } else {
@@ -3280,20 +3293,11 @@ impl LiveShell {
             return false;
         };
         let id = format!("{}:{}", entry.0.0, entry.0.1);
-        let (handled, effects) =
-            self.plugin_desktop_host
-                .as_mut()
-                .map_or((false, Vec::new()), |host| {
-                    let handled = host.application_mut().select_desktop_tile(&id);
-                    let effects = host.application_mut().take_effects();
-                    if handled {
-                        host.step(HostBatch {
-                            application_changed: true,
-                            ..HostBatch::default()
-                        });
-                    }
-                    (handled, effects)
-                });
+        let Ok((handled, effects)) =
+            self.perform_desktop_plugin_action(|application| application.select_desktop_tile(&id))
+        else {
+            return false;
+        };
         if handled {
             self.apply_plugin_effects(effects)
         } else {
@@ -3315,22 +3319,11 @@ impl LiveShell {
             return false;
         };
         let id = format!("{}:{}", entry.0.0, entry.0.1);
-        let (handled, effects) =
-            self.plugin_desktop_host
-                .as_mut()
-                .map_or((false, Vec::new()), |host| {
-                    let handled = host
-                        .application_mut()
-                        .move_desktop_tile(&id, delta.x, delta.y);
-                    let effects = host.application_mut().take_effects();
-                    if handled {
-                        host.step(HostBatch {
-                            application_changed: true,
-                            ..HostBatch::default()
-                        });
-                    }
-                    (handled, effects)
-                });
+        let Ok((handled, effects)) = self.perform_desktop_plugin_action(|application| {
+            application.move_desktop_tile(&id, delta.x, delta.y)
+        }) else {
+            return false;
+        };
         if handled {
             self.apply_plugin_effects(effects)
         } else {
@@ -9766,6 +9759,16 @@ impl LiveShell {
         self.desktop_application_dirty = true;
     }
 
+    fn fail_desktop_plugin_runtime(&mut self, error: String) {
+        let id = &crate::plugin_panel::desktop_manifest().id;
+        tracing::warn!(plugin = id, %error, "bundled Desktop plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.retire_desktop_plugin_state();
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         if self.plugin_desktop_host.is_some() {
             self.load_wallpaper_for(width, height);
@@ -9869,7 +9872,7 @@ impl LiveShell {
                 })).collect::<Vec<_>>(),
             });
             match host.application_mut().sync_desktop_data(&data) {
-                Ok(data_changed) => {
+                Ok(data_changed) => 'render: {
                     let mut images = crate::plugin_panel::PluginImages::new();
                     if let Some(wallpaper) = &self.wallpaper {
                         images.insert("wallpaper".into(), (0x6000, Arc::clone(wallpaper)));
@@ -9882,6 +9885,10 @@ impl LiveShell {
                         events: vec![HostEvent::Poll],
                         ..HostBatch::default()
                     });
+                    if let Some(error) = host.application_mut().take_runtime_failure() {
+                        self.fail_desktop_plugin_runtime(error);
+                        break 'render None;
+                    }
                     let retained_frame_bytes = if let Some((menu_id, anchor)) = menu_anchor.as_ref()
                         && host.inspect().open_overlay.is_none()
                     {
@@ -9894,6 +9901,10 @@ impl LiveShell {
                     } else {
                         outcome.telemetry.retained_frame_bytes
                     };
+                    if let Some(error) = host.application_mut().take_runtime_failure() {
+                        self.fail_desktop_plugin_runtime(error);
+                        break 'render None;
+                    }
                     let commands = host.commands().to_vec();
                     let image_bytes = host.application().retained_image_bytes();
                     let _ = self.plugin_registry.record_memory(
@@ -9908,11 +9919,7 @@ impl LiveShell {
                     Some(commands)
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "desktop plugin projection failed");
-                    let _ = self
-                        .plugin_registry
-                        .mark_failed(&crate::plugin_panel::desktop_manifest().id, error);
-                    self.retire_desktop_plugin_state();
+                    self.fail_desktop_plugin_runtime(error);
                     None
                 }
             }
