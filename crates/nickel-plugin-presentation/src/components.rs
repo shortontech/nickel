@@ -345,6 +345,7 @@ pub enum PanelNode {
         class_name: Option<String>,
         label: String,
         accessibility_label: String,
+        accessibility_state: Option<String>,
         width: Option<u32>,
         height: Option<u32>,
         icon: Option<String>,
@@ -1267,6 +1268,11 @@ impl PanelNode {
                         .and_then(Value::as_str)
                         .unwrap_or(&label)
                         .to_owned(),
+                    accessibility_state: value
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .filter(|state| state.len() <= 128)
+                        .map(str::to_owned),
                     width: dimension("width")?,
                     height: dimension("height")?,
                     icon: value
@@ -2055,7 +2061,12 @@ impl PanelNode {
                     .height(44.0)
                     .semantic_role(SemanticRole::Switch)
                     .accessibility_label(label.clone())
-                    .accessibility_state(state.replace('-', " "))
+                    .accessibility_state(match state.as_str() {
+                        "disabled-off" => "off disabled",
+                        "disabled-on" => "on disabled",
+                        "mixed-unavailable" => "mixed unavailable",
+                        other => other,
+                    })
                     .align_items(nickel_ui::Align::Center)
                     .justify_content(nickel_ui::Justify::Center)
                     .child(track);
@@ -2113,6 +2124,7 @@ impl PanelNode {
                 class_name,
                 label,
                 accessibility_label,
+                accessibility_state,
                 width,
                 height,
                 icon,
@@ -2147,6 +2159,9 @@ impl PanelNode {
                     .semantic_role(SemanticRole::Button)
                     .message(Message::from_plugin(PluginMessage::Click(*action)))
                     .height(height.unwrap_or(42) as f32);
+                if let Some(state) = accessibility_state {
+                    container = container.accessibility_state(state);
+                }
                 if let Some(width) = width {
                     container = container.width(*width as f32);
                 }

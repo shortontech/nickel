@@ -1,22 +1,35 @@
 // @jsx h
-// Network presentation. The Settings host verifies live adapter and network
-// identity before it acts on these requests.
+// The host verifies current adapter and network identity before applying requests.
 function request(type, fields = {}) {
     nickel.request({ type, ...fields });
 }
 function App() {
     const data = nickel.data;
-    return h("settings-stack", null,
-        h("settings-row", { label: data.wifiLabel, value: data.wifiStatus },
-            h("settings-switch", { id: "network-wifi-power", label: data.wifiLabel, value: data.switchState, onClick: data.powerEditable
-                    ? () => request('wifi-power', { enabled: !data.wifiEnabled })
-                    : undefined })),
-        h("settings-card", { label: data.visibleWifi, value: "" }, data.networks.length
-            ? data.networks.map(network => h("settings-row", { key: network.profile, label: network.profile, value: network.detail },
-                h("settings-button", { id: `wifi-network-${network.index}`, label: network.actionLabel, value: "quiet", accessibilityLabel: `${network.profile}, ${network.detail}`, state: network.connected ? 'connected' : 'not connected', onClick: data.networkPending ? undefined
-                        : () => request('wifi-network', { index: network.index, profile: network.profile }) })))
-            : h("settings-row", { label: data.wifiStatus, value: "" })),
-        h("settings-card", { label: data.adaptersLabel, value: "" }, data.adapters.length
-            ? data.adapters.map(adapter => h("settings-row", { key: adapter.name, label: adapter.name, value: adapter.status }))
-            : h("settings-row", { label: data.noAdapters, value: "" })));
+    return h("div", { className: "network-page" },
+        h("div", { className: "network-card" },
+            h("div", { className: "network-power-row" },
+                h("div", { className: "network-power-label" },
+                    h(Text, { className: "network-title" }, data.wifiLabel),
+                    h(Text, { className: "network-detail", wrap: true }, data.wifiStatus)),
+                h(Switch, { id: "network-wifi-power", className: `network-switch ${data.switchState}`, accessibilityLabel: data.wifiLabel, state: data.switchState, onClick: data.powerEditable
+                        ? () => request('wifi-power', { enabled: !data.wifiEnabled })
+                        : undefined }))),
+        h("div", { className: "network-card" },
+            h(Text, { className: "network-title" }, data.visibleWifi),
+            data.networks.length
+                ? data.networks.map(network => h("div", { key: network.profile, className: "network-row" },
+                    h("div", { className: "network-label" },
+                        h(Text, { className: "network-name" }, network.profile),
+                        h(Text, { className: "network-detail", wrap: true }, network.detail)),
+                    data.networkPending
+                        ? h(Text, { className: "network-detail" }, network.actionLabel)
+                        : h(Button, { id: `wifi-network-${network.index}`, className: "network-action", accessibilityLabel: `${network.profile}, ${network.detail}`, state: network.connected ? 'connected' : 'not connected', onClick: () => request('wifi-network', { index: network.index, profile: network.profile }) }, network.actionLabel)))
+                : h(Text, { className: "network-detail", wrap: true }, data.wifiStatus)),
+        h("div", { className: "network-card" },
+            h(Text, { className: "network-title" }, data.adaptersLabel),
+            data.adapters.length
+                ? data.adapters.map(adapter => h("div", { key: adapter.name, className: "network-label" },
+                    h(Text, { className: "network-name" }, adapter.name),
+                    h(Text, { className: "network-detail", wrap: true }, adapter.status)))
+                : h(Text, { className: "network-detail" }, data.noAdapters)));
 }

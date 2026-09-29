@@ -62,8 +62,9 @@ environment overrides before applying them. Its Boa context starts only while
 this page is open, and the native view remains available if JSX fails. Build
 its shipped JS with the same command and its source filename.
 
-`settings-network.jsx` owns the Network page's Wi-Fi switch, discovered network
-list, and adapter summary. Requests carry the observed network index and
+`settings-network.jsx` uses shared components and `settings-network.css` for
+the Network page's Wi-Fi switch, discovered network list, and adapter summary.
+Requests carry the observed network index and
 profile; the host checks the current projection before invoking the existing
 platform path. The native Network view remains available if JSX fails. Build
 it with the same command and its source filename.

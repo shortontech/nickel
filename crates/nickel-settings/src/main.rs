@@ -512,7 +512,6 @@ enum SettingsMessage {
     BluetoothScroll,
     SetWifiPower(bool),
     WifiNetwork(usize),
-    NetworkJsxAction(usize),
     NetworkScroll,
     OptionalFeaturesScroll,
     PluginsScroll,
@@ -1921,6 +1920,9 @@ impl SettingsApp {
                         SettingsPage::OptionalFeatures if value.is_null() => {
                             self.handle_optional_features_jsx_action(index);
                         }
+                        SettingsPage::Network if value.is_null() => {
+                            self.handle_network_jsx_action(index);
+                        }
                         _ => {}
                     }
                 }
@@ -2066,7 +2068,6 @@ impl SettingsApp {
             }
             SettingsMessage::DisplayRevert => self.revert_display_layout(),
             SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
-            SettingsMessage::NetworkJsxAction(index) => self.handle_network_jsx_action(index),
             SettingsMessage::DisplayScroll
             | SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
@@ -5071,7 +5072,7 @@ mod tests {
         let action = network_action(&app, "network-wifi-power").expect("Wi-Fi JSX action");
 
         assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::NetworkJsxAction(action))
+            tree.semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
                 .len(),
             1,
             "one activation must issue exactly one typed power request"
@@ -5177,7 +5178,7 @@ mod tests {
         let tree = app.build_ui(850.0, 900.0);
         let action = network_action(&app, "network-wifi-power").expect("rollback JSX action");
         assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::NetworkJsxAction(action))
+            tree.semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
                 .len(),
             1,
             "rollback leaves the confirmed opposite request available"

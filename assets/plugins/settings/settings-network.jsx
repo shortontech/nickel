@@ -1,38 +1,50 @@
 // @jsx h
-// Network presentation. The Settings host verifies live adapter and network
-// identity before it acts on these requests.
+// The host verifies current adapter and network identity before applying requests.
 function request(type, fields = {}) {
     nickel.request({type, ...fields});
 }
 
 function App() {
     const data = nickel.data;
-    return <settings-stack>
-        <settings-row label={data.wifiLabel} value={data.wifiStatus}>
-            <settings-switch id="network-wifi-power" label={data.wifiLabel}
-                value={data.switchState}
+    return <div className="network-page">
+        <div className="network-card">
+            <div className="network-power-row">
+                <div className="network-power-label">
+                    <Text className="network-title">{data.wifiLabel}</Text>
+                    <Text className="network-detail" wrap={true}>{data.wifiStatus}</Text>
+                </div>
+                <Switch id="network-wifi-power" className={`network-switch ${data.switchState}`}
+                    accessibilityLabel={data.wifiLabel} state={data.switchState}
                 onClick={data.powerEditable
                     ? () => request('wifi-power', {enabled: !data.wifiEnabled})
                     : undefined} />
-        </settings-row>
-        <settings-card label={data.visibleWifi} value="">
+            </div>
+        </div>
+        <div className="network-card">
+            <Text className="network-title">{data.visibleWifi}</Text>
             {data.networks.length
-                ? data.networks.map(network =>
-                    <settings-row key={network.profile} label={network.profile} value={network.detail}>
-                        <settings-button id={`wifi-network-${network.index}`}
-                            label={network.actionLabel} value="quiet"
+                ? data.networks.map(network => <div key={network.profile} className="network-row">
+                    <div className="network-label">
+                        <Text className="network-name">{network.profile}</Text>
+                        <Text className="network-detail" wrap={true}>{network.detail}</Text>
+                    </div>
+                    {data.networkPending
+                        ? <Text className="network-detail">{network.actionLabel}</Text>
+                        : <Button id={`wifi-network-${network.index}`} className="network-action"
                             accessibilityLabel={`${network.profile}, ${network.detail}`}
                             state={network.connected ? 'connected' : 'not connected'}
-                            onClick={data.networkPending ? undefined
-                                : () => request('wifi-network', {index: network.index, profile: network.profile})} />
-                    </settings-row>)
-                : <settings-row label={data.wifiStatus} value="" />}
-        </settings-card>
-        <settings-card label={data.adaptersLabel} value="">
+                            onClick={() => request('wifi-network', {index: network.index, profile: network.profile})}>{network.actionLabel}</Button>}
+                </div>)
+                : <Text className="network-detail" wrap={true}>{data.wifiStatus}</Text>}
+        </div>
+        <div className="network-card">
+            <Text className="network-title">{data.adaptersLabel}</Text>
             {data.adapters.length
-                ? data.adapters.map(adapter => <settings-row key={adapter.name}
-                    label={adapter.name} value={adapter.status} />)
-                : <settings-row label={data.noAdapters} value="" />}
-        </settings-card>
-    </settings-stack>;
+                ? data.adapters.map(adapter => <div key={adapter.name} className="network-label">
+                    <Text className="network-name">{adapter.name}</Text>
+                    <Text className="network-detail" wrap={true}>{adapter.status}</Text>
+                </div>)
+                : <Text className="network-detail">{data.noAdapters}</Text>}
+        </div>
+    </div>;
 }

@@ -1,33 +1,38 @@
-//! Network page JSX adapter. The platform operations remain in Settings.
+//! Network page JSX through the shared native component renderer.
 
-use nickel_ui::{AnyView, Column, Insets, SemanticTheme, VerticalScroll};
+use nickel_plugin_presentation::{
+    components::PluginImages,
+    css::StyleSheet,
+    page::{JsxPage, STALE_DATA},
+};
+use nickel_ui::{AnyView, Column, SemanticTheme, VerticalScroll};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    SettingsApp, SettingsMessage, SettingsPage,
-    settings_components::{Node, SettingsJsxContext},
-};
+use crate::{SettingsApp, SettingsMessage, SettingsPage};
 
-const STALE_STATUS: &str = "Network status changed; refresh the page";
+const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct NetworkPage {
-    context: SettingsJsxContext,
+    page: JsxPage,
+    stylesheet: StyleSheet,
+    last_theme: Option<SemanticTheme>,
 }
 
 impl NetworkPage {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.context.retained_bytes()
+        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
     }
 
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            context: SettingsJsxContext::new(
+            page: JsxPage::new(
                 crate::settings_package::source(crate::settings_package::Script::Network)?,
-                parse_tree,
-                STALE_STATUS,
-                "Network action must request one operation",
+                crate::settings_package::manifest()?.clone(),
+                None,
             )?,
+            stylesheet: StyleSheet::default(),
+            last_theme: None,
         })
     }
 
@@ -36,57 +41,37 @@ impl NetworkPage {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        let node = self.context.render(data)?;
+        self.page.render(data)?;
+        if self.last_theme != Some(theme) {
+            self.stylesheet = crate::settings_plugin::stylesheet_template(
+                include_str!("../../../assets/plugins/settings/settings-network.css"),
+                theme,
+            )?;
+            self.last_theme = Some(theme);
+        }
+        let node = self.page.node().ok_or("Network page is unavailable")?;
         Ok(AnyView::new(
-            Column::new()
-                .grow(1.0)
-                .padding(Insets {
-                    top: 20.0,
-                    right: 40.0,
-                    bottom: 20.0,
-                    left: 20.0,
-                })
-                .child(
-                    VerticalScroll::new(SettingsMessage::NetworkScroll, 0.0)
-                        .grow(1.0)
-                        .theme(theme)
-                        .child(node.view(theme, "", SettingsMessage::NetworkJsxAction)),
-                ),
+            Column::new().grow(1.0).child(
+                VerticalScroll::new(SettingsMessage::NetworkScroll, 0.0)
+                    .grow(1.0)
+                    .theme(theme)
+                    .child(node.view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet)),
+            ),
         ))
     }
 
     fn dispatch(&mut self, index: usize, data: &Value) -> Result<SettingsMessage, String> {
-        self.context.dispatch(index, &Value::Null, data, |effect| {
+        self.page.dispatch(index, &Value::Null, data, |effect| {
             let request: NetworkRequest =
-                serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
+                serde_json::from_value(effect).map_err(|error| error.to_string())?;
             validate_request(request, data)
         })
     }
 
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.context.action_for_id(id)
+        self.page.node()?.button_action(id)
     }
-}
-
-fn parse_tree(value: &Value) -> Result<Node, String> {
-    let Some(children) = value.get("children").and_then(Value::as_array) else {
-        return Err("Network page has no components".into());
-    };
-    if value.get("kind").and_then(Value::as_str) != Some("settings-stack")
-        || children.len() != 3
-        || children[0].get("kind").and_then(Value::as_str) != Some("settings-row")
-        || children[1..]
-            .iter()
-            .any(|child| child.get("kind").and_then(Value::as_str) != Some("settings-card"))
-    {
-        return Err("Network page structure is invalid".into());
-    }
-    let node = Node::parse(value)?;
-    if node.contains_input() {
-        return Err("Network page cannot request text input".into());
-    }
-    Ok(node)
 }
 
 #[derive(Debug, Deserialize)]
