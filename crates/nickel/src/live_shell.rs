@@ -4672,7 +4672,9 @@ impl LiveShell {
         tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
         self.plugin_taskbar_badge_hosts.remove(id);
-        self.plugin_taskbar_action_hosts.remove(id);
+        if self.plugin_taskbar_action_hosts.remove(id).is_some() {
+            self.application_menu_plugin_host = None;
+        }
         self.plugin_desktop_widget_hosts.remove(id);
         self.plugin_widget_slot_hosts.remove(id);
         self.plugin_action_slot_hosts.remove(id);
