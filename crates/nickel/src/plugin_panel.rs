@@ -1296,6 +1296,21 @@ fn validation_surface_projection(
 }
 
 impl PluginPanelApplication {
+    fn bundled_application(
+        manifest: &PluginManifest,
+        entry: &str,
+        source: &'static str,
+        stylesheet: Option<&'static str>,
+        data: String,
+    ) -> Result<Self, String> {
+        let source = bundled_source(manifest, entry, source)?;
+        let mut application = Self::new_with_manifest(source.as_ref(), manifest, Some(data))?;
+        if let Some(stylesheet) = stylesheet {
+            application.stylesheet = bundled_stylesheet(manifest, stylesheet)?;
+        }
+        Ok(application)
+    }
+
     pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
         self.node.button_action(id).map(PluginMessage::Click)
     }
@@ -1546,17 +1561,12 @@ impl PluginPanelApplication {
     }
 
     pub fn launcher_with_projection(projection: &LauncherPluginProjection) -> Result<Self, String> {
-        let source = bundled_source(
+        let mut application = Self::bundled_application(
             launcher_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/launcher/main.js"),
-        )?;
-        let data = projection.to_json();
-        let mut application =
-            Self::new_with_manifest(source.as_ref(), launcher_manifest(), Some(data))?;
-        application.stylesheet = bundled_stylesheet(
-            launcher_manifest(),
-            include_str!("../../../assets/plugins/launcher/ui.css"),
+            Some(include_str!("../../../assets/plugins/launcher/ui.css")),
+            projection.to_json(),
         )?;
         application.launcher_shortcuts = Some(projection.into());
         Ok(application)
@@ -1574,21 +1584,13 @@ impl PluginPanelApplication {
     }
 
     pub fn taskbar_with_projection(projection: &TaskbarPluginProjection) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             taskbar_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/taskbar/main.js"),
-        )?;
-        let mut application = Self::new_with_manifest(
-            source.as_ref(),
-            taskbar_manifest(),
-            Some(projection.to_json()),
-        )?;
-        application.stylesheet = bundled_stylesheet(
-            taskbar_manifest(),
-            include_str!("../../../assets/plugins/taskbar/ui.css"),
-        )?;
-        Ok(application)
+            Some(include_str!("../../../assets/plugins/taskbar/ui.css")),
+            projection.to_json(),
+        )
     }
 
     #[cfg(test)]
@@ -1602,49 +1604,36 @@ impl PluginPanelApplication {
     pub fn taskbar_menu_with_projection(
         projection: &TaskbarMenuPluginProjection,
     ) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             taskbar_manifest(),
             "menu.js",
             include_str!("../../../assets/plugins/taskbar/menu.js"),
-        )?;
-        Self::new_with_manifest(
-            source.as_ref(),
-            taskbar_manifest(),
-            Some(projection.to_json()),
+            None,
+            projection.to_json(),
         )
     }
 
     pub fn taskbar_window_menu_with_projection(
         projection: &TaskbarWindowMenuPluginProjection,
     ) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             taskbar_manifest(),
             "window-menu.js",
             include_str!("../../../assets/plugins/taskbar/window-menu.js"),
-        )?;
-        Self::new_with_manifest(
-            source.as_ref(),
-            taskbar_manifest(),
-            Some(projection.to_json()),
+            None,
+            projection.to_json(),
         )
     }
 
     pub fn notification_with_projection(
         projection: &NotificationPluginProjection,
     ) -> Result<Self, String> {
-        let source = bundled_source(
+        let mut application = Self::bundled_application(
             notification_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/notification/main.js"),
-        )?;
-        let mut application = Self::new_with_manifest(
-            source.as_ref(),
-            notification_manifest(),
-            Some(projection.to_json()),
-        )?;
-        application.stylesheet = bundled_stylesheet(
-            notification_manifest(),
-            include_str!("../../../assets/plugins/notification/ui.css"),
+            Some(include_str!("../../../assets/plugins/notification/ui.css")),
+            projection.to_json(),
         )?;
         application.notification_shortcuts = Some((
             projection.notification.as_ref().map(|item| item.id),
@@ -1670,21 +1659,13 @@ impl PluginPanelApplication {
     pub fn volume_osd_with_projection(
         projection: &VolumeOsdPluginProjection,
     ) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             volume_osd_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/volume-osd/main.js"),
-        )?;
-        let mut application = Self::new_with_manifest(
-            source.as_ref(),
-            volume_osd_manifest(),
-            Some(projection.to_json()),
-        )?;
-        application.stylesheet = bundled_stylesheet(
-            volume_osd_manifest(),
-            include_str!("../../../assets/plugins/volume-osd/ui.css"),
-        )?;
-        Ok(application)
+            Some(include_str!("../../../assets/plugins/volume-osd/ui.css")),
+            projection.to_json(),
+        )
     }
 
     #[cfg(test)]
@@ -1696,21 +1677,15 @@ impl PluginPanelApplication {
     }
 
     pub fn control_center_with_data(data: &Value) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             control_center_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/control-center/main.js"),
-        )?;
-        let mut application = Self::new_with_manifest(
-            source.as_ref(),
-            control_center_manifest(),
-            Some(data.to_string()),
-        )?;
-        application.stylesheet = bundled_stylesheet(
-            control_center_manifest(),
-            include_str!("../../../assets/plugins/control-center/ui.css"),
-        )?;
-        Ok(application)
+            Some(include_str!(
+                "../../../assets/plugins/control-center/ui.css"
+            )),
+            data.to_string(),
+        )
     }
 
     #[cfg(test)]
@@ -1724,57 +1699,37 @@ impl PluginPanelApplication {
     pub fn codex_projects_with_projection(
         projection: &ProjectMenuProjection,
     ) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             codex_projects_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/codex-projects/main.js"),
-        )?;
-        let mut application = Self::new_with_manifest(
-            source.as_ref(),
-            codex_projects_manifest(),
-            Some(serde_json::to_string(projection).map_err(|error| error.to_string())?),
-        )?;
-        application.stylesheet = bundled_stylesheet(
-            codex_projects_manifest(),
-            include_str!("../../../assets/plugins/codex-projects/ui.css"),
-        )?;
-        Ok(application)
+            Some(include_str!(
+                "../../../assets/plugins/codex-projects/ui.css"
+            )),
+            serde_json::to_string(projection).map_err(|error| error.to_string())?,
+        )
     }
 
     pub fn on_screen_keyboard_with_data(data: &Value) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             on_screen_keyboard_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/on-screen-keyboard/main.js"),
-        )?;
-        let mut application = Self::new_with_manifest(
-            source.as_ref(),
-            on_screen_keyboard_manifest(),
-            Some(data.to_string()),
-        )?;
-        application.stylesheet = bundled_stylesheet(
-            on_screen_keyboard_manifest(),
-            include_str!("../../../assets/plugins/on-screen-keyboard/ui.css"),
-        )?;
-        Ok(application)
+            Some(include_str!(
+                "../../../assets/plugins/on-screen-keyboard/ui.css"
+            )),
+            data.to_string(),
+        )
     }
 
     pub fn screenshot_with_data(data: &Value) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             screenshot_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/screenshot/main.js"),
-        )?;
-        let mut application = Self::new_with_manifest(
-            source.as_ref(),
-            screenshot_manifest(),
-            Some(data.to_string()),
-        )?;
-        application.stylesheet = bundled_stylesheet(
-            screenshot_manifest(),
-            include_str!("../../../assets/plugins/screenshot/ui.css"),
-        )?;
-        Ok(application)
+            Some(include_str!("../../../assets/plugins/screenshot/ui.css")),
+            data.to_string(),
+        )
     }
 
     #[cfg(test)]
@@ -1832,21 +1787,15 @@ impl PluginPanelApplication {
     }
 
     pub fn window_preview_with_data(data: &Value) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             window_preview_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/window-preview/main.js"),
-        )?;
-        let mut application = Self::new_with_manifest(
-            source.as_ref(),
-            window_preview_manifest(),
-            Some(data.to_string()),
-        )?;
-        application.stylesheet = bundled_stylesheet(
-            window_preview_manifest(),
-            include_str!("../../../assets/plugins/window-preview/ui.css"),
-        )?;
-        Ok(application)
+            Some(include_str!(
+                "../../../assets/plugins/window-preview/ui.css"
+            )),
+            data.to_string(),
+        )
     }
 
     #[cfg(test)]
@@ -1858,12 +1807,13 @@ impl PluginPanelApplication {
     }
 
     pub fn desktop_with_data(data: &Value) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             desktop_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/desktop/main.js"),
-        )?;
-        Self::new_with_manifest(source.as_ref(), desktop_manifest(), Some(data.to_string()))
+            None,
+            data.to_string(),
+        )
     }
 
     #[cfg(test)]
@@ -1872,18 +1822,13 @@ impl PluginPanelApplication {
     }
 
     pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
-        let source = bundled_source(
+        Self::bundled_application(
             run_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/run/main.js"),
-        )?;
-        let data = serde_json::json!({ "status": status }).to_string();
-        let mut application = Self::new_with_manifest(source.as_ref(), run_manifest(), Some(data))?;
-        application.stylesheet = bundled_stylesheet(
-            run_manifest(),
-            include_str!("../../../assets/plugins/run/ui.css"),
-        )?;
-        Ok(application)
+            Some(include_str!("../../../assets/plugins/run/ui.css")),
+            serde_json::json!({ "status": status }).to_string(),
+        )
     }
 
     #[cfg(test)]
