@@ -1317,10 +1317,10 @@ impl PluginPanelApplication {
                     action,
                     ..
                 } if section_id == id => Some(*action),
-                PanelNode::Row { children, .. } | PanelNode::Column { children, .. } => {
-                    children.iter().find_map(|child| find(child, id))
-                }
-                _ => None,
+                _ => node
+                    .container_children()?
+                    .iter()
+                    .find_map(|child| find(child, id)),
             }
         }
         let Some(action) = find(&self.node, id) else {
@@ -1354,10 +1354,10 @@ impl PluginPanelApplication {
                 {
                     Some(*action)
                 }
-                PanelNode::Row { children, .. } | PanelNode::Column { children, .. } => children
+                _ => node
+                    .container_children()?
                     .iter()
                     .find_map(|child| find(child, id, application_id)),
-                _ => None,
             }
         }
         find(&self.node, id, application_id)
@@ -3361,6 +3361,68 @@ mod tests {
         assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
         assert!(!application.activate_control_section("missing"));
         assert!(application.take_effects().is_empty());
+    }
+
+    #[test]
+    fn contribution_callbacks_work_inside_generic_component_containers() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins");
+        let mut action = PluginPackage::load(format!("{root}/example-task-action")).unwrap();
+        let plain_bytes = PluginPanelApplication::from_package(&action)
+            .unwrap()
+            .retained_contribution_bytes();
+        action.source = r#"
+            function App() {
+                return h(Div, {className: 'contribution'},
+                    h(Box, {x: 0, y: 0, width: 80, height: 32},
+                        h(Action, {id: 'find-apps', label: 'Find apps',
+                            onClick: () => nickel.request('show-launcher')})));
+            }
+        "#
+        .into();
+        let mut application = PluginPanelApplication::from_package(&action).unwrap();
+        assert!(application.retained_contribution_bytes() > plain_bytes);
+        assert_eq!(application.taskbar_actions().unwrap()[0].id, "find-apps");
+        assert!(application.activate_taskbar_action("find-apps", "org.nickel.mail"));
+        assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
+
+        let mut section = PluginPackage::load(format!("{root}/example-control-section")).unwrap();
+        section.source = r#"
+            function App() {
+                return h(Div, {}, h(Column, {},
+                    h(Section, {id: 'find-apps', label: 'Applications', value: 'Search',
+                        onClick: () => nickel.request('show-launcher')})));
+            }
+        "#
+        .into();
+        let mut application = PluginPanelApplication::from_package(&section).unwrap();
+        assert_eq!(application.control_sections().unwrap()[0].id, "find-apps");
+        assert!(application.activate_control_section("find-apps"));
+        assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
+
+        let mut badge = PluginPackage::load(format!("{root}/example-task-badge")).unwrap();
+        badge.source = r#"
+            function App() {
+                return h(Div, {}, h(Badge,
+                    {item: 'org.example.mail', label: 'Unread mail', count: 3}));
+            }
+        "#
+        .into();
+        let application = PluginPanelApplication::from_package(&badge).unwrap();
+        assert_eq!(application.taskbar_badges().unwrap()[0].2, 3);
+
+        let mut widget = PluginPackage::load(format!("{root}/example-widget-contributor")).unwrap();
+        widget.source = r#"
+            function App() {
+                return h(Div, {}, h(Widget,
+                    {label: 'Unread mail', value: '3', percent: 50}));
+            }
+        "#
+        .into();
+        let application = PluginPanelApplication::from_package(&widget).unwrap();
+        assert_eq!(
+            application.desktop_widgets().unwrap()[0].label,
+            "Unread mail"
+        );
     }
 
     #[test]

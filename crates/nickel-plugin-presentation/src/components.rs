@@ -476,16 +476,20 @@ fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<M
 }
 
 impl PanelNode {
-    pub fn direct_child_with_class(&self, class: &str) -> Option<&Self> {
-        let children = match self {
+    pub fn container_children(&self) -> Option<&Vec<Self>> {
+        match self {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
-            | Self::ScrollView { children, .. } => children,
-            _ => return None,
-        };
+            | Self::ScrollView { children, .. } => Some(children),
+            _ => None,
+        }
+    }
+
+    pub fn direct_child_with_class(&self, class: &str) -> Option<&Self> {
+        let children = self.container_children()?;
         let mut matches = children.iter().filter(|child| {
             let class_name = match child {
                 Self::Box { class_name, .. }
@@ -539,62 +543,89 @@ impl PanelNode {
     pub fn contribution_bytes(&self) -> u64 {
         let own = std::mem::size_of::<Self>() as u64;
         let capacity = |value: &String| value.capacity() as u64;
-        own + match self {
-            Self::Badge { item, label, .. } => item.as_ref().map_or(0, capacity) + capacity(label),
-            Self::Widget { label, value, .. } => capacity(label) + capacity(value),
-            Self::Action {
-                id, item, label, ..
-            } => capacity(id) + item.as_ref().map_or(0, capacity) + capacity(label),
-            Self::Section {
-                id, label, value, ..
-            } => capacity(id) + capacity(label) + capacity(value),
-            Self::Slot { id, class_name } => capacity(id) + class_name.as_ref().map_or(0, capacity),
-            Self::ColorSwatch {
-                id,
-                class_name,
-                label,
-                ..
-            } => capacity(id) + class_name.as_ref().map_or(0, capacity) + capacity(label),
-            Self::Select {
-                id,
-                class_name,
-                label,
-                value,
-                options,
-                ..
-            } => {
-                capacity(id)
-                    + class_name.as_ref().map_or(0, capacity)
-                    + capacity(label)
-                    + capacity(value)
-                    + (options.capacity() * std::mem::size_of::<(String, String, usize)>()) as u64
-                    + options
-                        .iter()
-                        .map(|(id, label, _)| capacity(id) + capacity(label))
-                        .sum::<u64>()
+        let descendants = self.container_children().map_or(0, |children| {
+            ((children.capacity() - children.len()) * std::mem::size_of::<Self>()) as u64
+                + children.iter().map(Self::contribution_bytes).sum::<u64>()
+        });
+        own + descendants
+            + match self {
+                Self::Badge { item, label, .. } => {
+                    item.as_ref().map_or(0, capacity) + capacity(label)
+                }
+                Self::Widget { label, value, .. } => capacity(label) + capacity(value),
+                Self::Action {
+                    id, item, label, ..
+                } => capacity(id) + item.as_ref().map_or(0, capacity) + capacity(label),
+                Self::Section {
+                    id, label, value, ..
+                } => capacity(id) + capacity(label) + capacity(value),
+                Self::Slot { id, class_name } => {
+                    capacity(id) + class_name.as_ref().map_or(0, capacity)
+                }
+                Self::ColorSwatch {
+                    id,
+                    class_name,
+                    label,
+                    ..
+                } => capacity(id) + class_name.as_ref().map_or(0, capacity) + capacity(label),
+                Self::Select {
+                    id,
+                    class_name,
+                    label,
+                    value,
+                    options,
+                    ..
+                } => {
+                    capacity(id)
+                        + class_name.as_ref().map_or(0, capacity)
+                        + capacity(label)
+                        + capacity(value)
+                        + (options.capacity() * std::mem::size_of::<(String, String, usize)>())
+                            as u64
+                        + options
+                            .iter()
+                            .map(|(id, label, _)| capacity(id) + capacity(label))
+                            .sum::<u64>()
+                }
+                Self::Div {
+                    id,
+                    class_name,
+                    accessibility_label,
+                    accessibility_state,
+                    ..
+                } => {
+                    id.as_ref().map_or(0, capacity)
+                        + class_name.as_ref().map_or(0, capacity)
+                        + accessibility_label.as_ref().map_or(0, capacity)
+                        + accessibility_state.as_ref().map_or(0, capacity)
+                }
+                Self::Box { class_name, .. }
+                | Self::Row { class_name, .. }
+                | Self::Column { class_name, .. } => class_name.as_ref().map_or(0, capacity),
+                Self::ScrollView { id, class_name, .. } => {
+                    capacity(id) + class_name.as_ref().map_or(0, capacity)
+                }
+                Self::Surface {
+                    id,
+                    window_request,
+                    accessibility_label,
+                    class_name,
+                    ..
+                } => {
+                    id.as_ref().map_or(0, capacity)
+                        + accessibility_label.as_ref().map_or(0, capacity)
+                        + class_name.as_ref().map_or(0, capacity)
+                        + window_request.as_ref().map_or(0, |request| {
+                            capacity(&request.id)
+                                + capacity(&request.placement)
+                                + request.title.as_ref().map_or(0, capacity)
+                                + request.output.as_ref().map_or(0, capacity)
+                                + request.edge.as_ref().map_or(0, capacity)
+                                + request.anchor.as_ref().map_or(0, capacity)
+                        })
+                }
+                _ => 0,
             }
-            Self::Div {
-                id,
-                class_name,
-                children,
-                accessibility_label,
-                accessibility_state,
-                ..
-            } => {
-                let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
-                spare as u64
-                    + id.as_ref().map_or(0, capacity)
-                    + class_name.as_ref().map_or(0, capacity)
-                    + accessibility_label.as_ref().map_or(0, capacity)
-                    + accessibility_state.as_ref().map_or(0, capacity)
-                    + children.iter().map(Self::contribution_bytes).sum::<u64>()
-            }
-            Self::Row { children, .. } | Self::Column { children, .. } => {
-                let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
-                spare as u64 + children.iter().map(Self::contribution_bytes).sum::<u64>()
-            }
-            _ => 0,
-        }
     }
 
     fn parse(value: &Value) -> Result<Self, String> {
@@ -632,7 +663,6 @@ impl PanelNode {
                 "box"
                     | "div"
                     | "window"
-                    | "panel"
                     | "row"
                     | "column"
                     | "scroll-view"
@@ -2634,13 +2664,18 @@ impl PanelNode {
                 badges.push((item.clone(), label.clone(), *count, *color));
                 Ok(())
             }
-            Self::Row { children, .. } | Self::Column { children, .. } => {
+            _ => {
+                let Some(children) = self.container_children() else {
+                    return Err(
+                        "taskbar badge extension must return badges in a supported container"
+                            .into(),
+                    );
+                };
                 for child in children {
                     child.collect_taskbar_badges(badges)?;
                 }
                 Ok(())
             }
-            _ => Err("taskbar badge extension must return badges or a row/column of badges".into()),
         }
     }
 
@@ -2666,15 +2701,18 @@ impl PanelNode {
                 });
                 Ok(())
             }
-            Self::Row { children, .. } | Self::Column { children, .. } => {
+            _ => {
+                let Some(children) = self.container_children() else {
+                    return Err(
+                        "desktop widget extension must return widgets in a supported container"
+                            .into(),
+                    );
+                };
                 for child in children {
                     child.collect_desktop_widgets(widgets)?;
                 }
                 Ok(())
             }
-            _ => Err(
-                "desktop widget extension must return widgets or a row/column of widgets".into(),
-            ),
         }
     }
 
@@ -2699,15 +2737,18 @@ impl PanelNode {
                 });
                 Ok(())
             }
-            Self::Row { children, .. } | Self::Column { children, .. } => {
+            _ => {
+                let Some(children) = self.container_children() else {
+                    return Err(
+                        "taskbar action extension must return actions in a supported container"
+                            .into(),
+                    );
+                };
                 for child in children {
                     child.collect_taskbar_actions(actions)?;
                 }
                 Ok(())
             }
-            _ => Err(
-                "taskbar action extension must return actions or a row/column of actions".into(),
-            ),
         }
     }
 
@@ -2732,15 +2773,18 @@ impl PanelNode {
                 });
                 Ok(())
             }
-            Self::Row { children, .. } | Self::Column { children, .. } => {
+            _ => {
+                let Some(children) = self.container_children() else {
+                    return Err(
+                        "control section extension must return sections in a supported container"
+                            .into(),
+                    );
+                };
                 for child in children {
                     child.collect_control_sections(sections)?;
                 }
                 Ok(())
             }
-            _ => Err(
-                "control section extension must return sections or a row/column of sections".into(),
-            ),
         }
     }
 }

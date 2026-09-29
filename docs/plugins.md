@@ -347,8 +347,11 @@ them in Settings' enable review. The first executable slot is the taskbar's
 `task-badge` slot: a package with no surface can declare one `badge`
 contribution targeting `org.nickel.taskbar/task-badge`. Its `App` returns
 `h(Badge, { item: "application-id", label: "Unread mail", count: 3 })`; Nickel
-places the badge beside the matching task. Additive badge plugins compose in
-priority and plugin ID order, with a limit of three visible badges per task.
+places the badge beside the matching task. Contribution nodes may also sit
+inside `Div`, `Box`, `Row`, `Column`, and other generic component containers.
+Their callbacks keep the contributor's own capability checks. Additive badge
+plugins compose in priority and plugin ID order, with a limit of three visible
+badges per task.
 A `replace` contribution replaces the slot's base badges; if several are
 enabled, the highest priority wins, with plugin ID breaking ties. Additive
 contributions then follow the winner.
