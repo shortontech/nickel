@@ -1675,11 +1675,16 @@ impl PluginPanelApplication {
             "main.js",
             include_str!("../../../assets/plugins/volume-osd/main.js"),
         )?;
-        Self::new_with_manifest(
+        let mut application = Self::new_with_manifest(
             source.as_ref(),
             volume_osd_manifest(),
             Some(projection.to_json()),
-        )
+        )?;
+        application.stylesheet = bundled_stylesheet(
+            volume_osd_manifest(),
+            include_str!("../../../assets/plugins/volume-osd/ui.css"),
+        )?;
+        Ok(application)
     }
 
     #[cfg(test)]
@@ -3925,6 +3930,36 @@ mod tests {
         });
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/nickel-ui-snapshots/taskbar-shared.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
+    }
+
+    #[test]
+    fn bundled_volume_osd_visual_snapshot() {
+        let projection = VolumeOsdPluginProjection {
+            label: "Speakers · 65%".into(),
+            percent: 65,
+        };
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::volume_osd_with_projection(&projection).unwrap(),
+            420,
+            96,
+        );
+        assert!(matches!(
+            host.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(420, 96, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(420, 96, |x, y| {
+            let pixel = renderer.pixels()[(y * 420 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/volume-osd-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         image.save(output).unwrap();
     }
