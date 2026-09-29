@@ -479,6 +479,121 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
 }
 
 #[test]
+fn installed_panel_with_windows_read_tracks_the_live_window_list() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "org.example.window-list";
+    let directory = root.path().join(id);
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.window-list","name":"Window List","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96}],"capabilities":["windows-read","windows-focus"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(Panel, {}, h(Column, {}, (nickel.data.windows || []).map(window => h(Button, {key: window.id, id: 'window-' + window.id, onClick: () => nickel.request({type: 'window-action', action: 'activate', window: window.id})}, window.title)))); }",
+    )
+    .unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    assert!(catalog.failures.is_empty());
+    let descriptor = catalog.packages.remove(id).unwrap();
+    let session = Arc::new(crate::session_host::StagedSessionHost::new(
+        crate::session_host::default_session_host(),
+    ));
+    let mut shell = LiveShell::new_with_session_host(session.clone()).unwrap();
+    shell
+        .plugin_registry
+        .register(descriptor.manifest.clone())
+        .unwrap();
+    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell.set_plugin_enabled(id, true).unwrap();
+    shell.windows = vec![crate::model::OpenWindow {
+        id: crate::model::WindowId(71),
+        application_id: Some(crate::model::ApplicationId::new("org.example.editor")),
+        active: true,
+        title: "Editor".into(),
+        state: crate::model::WindowState::default(),
+    }];
+    let projected = shell.external_plugin_windows(id).unwrap();
+    assert_eq!(projected[0]["id"], "71");
+    assert_eq!(projected[0]["applicationId"], "org.example.editor");
+    let (key, surface) = shell
+        .plugin_panels()
+        .into_iter()
+        .find(|(key, _)| key.plugin_id == id)
+        .unwrap();
+    shell
+        .plugin_panel_scene(&key, surface.width, surface.height)
+        .unwrap();
+    let button = shell
+        .plugin_panel_host_for(&key)
+        .unwrap()
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Editor".into(),
+        })
+        .unwrap();
+    assert!(button.bounds.size.width > 0.0);
+    session.take_commands();
+    assert!(shell.plugin_panel_host_ui_for(
+        &key,
+        nickel_ui::UiEvent::AccessibilityActivate(button.id),
+        surface.width,
+        surface.height,
+    ));
+    assert!(session.take_commands().iter().any(|command| matches!(
+        command,
+        crate::platform::ShellCommand::WindowAction {
+            window: crate::model::WindowId(71),
+            action: crate::platform::WindowAction::Activate,
+        }
+    )));
+    shell.windows[0].state.capabilities.activate = false;
+    assert!(
+        !shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::ActivateWindow(
+            crate::model::WindowId(71)
+        ),])
+    );
+    assert!(session.take_commands().is_empty());
+
+    shell.windows[0].state.capabilities.close = false;
+    assert!(
+        !shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::CloseWindow(
+            crate::model::WindowId(71)
+        ),])
+    );
+    assert!(session.take_commands().is_empty());
+    shell.windows[0].state.capabilities.close = true;
+    assert!(
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::CloseWindow(
+            crate::model::WindowId(71)
+        ),])
+    );
+    assert!(session.take_commands().iter().any(|command| matches!(
+        command,
+        crate::platform::ShellCommand::WindowAction {
+            window: crate::model::WindowId(71),
+            action: crate::platform::WindowAction::Close,
+        }
+    )));
+
+    shell.windows.clear();
+    shell
+        .plugin_panel_scene(&key, surface.width, surface.height)
+        .unwrap();
+    assert!(
+        shell
+            .plugin_panel_host_for(&key)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Editor".into(),
+            })
+            .is_err()
+    );
+}
+
+#[test]
 fn keyed_panel_controller_opens_a_component_dialog() {
     let mut shell = LiveShell::new().unwrap();
     let source = include_str!("../../../../assets/plugins/hello-panel/main.js");

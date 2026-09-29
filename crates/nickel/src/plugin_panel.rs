@@ -403,6 +403,8 @@ pub enum PluginEffect {
     RunDismiss,
     ToggleLauncher,
     ShowControlCenter,
+    ActivateWindow(crate::model::WindowId),
+    CloseWindow(crate::model::WindowId),
     ToggleOnScreenKeyboard,
     KeyboardKey {
         id: String,
@@ -1166,7 +1168,8 @@ impl PluginPanelApplication {
         package: &PluginPackage,
         settings: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> Result<Self, String> {
-        let data = serde_json::json!({ "settings": settings, "slots": {} }).to_string();
+        let data =
+            serde_json::json!({ "settings": settings, "slots": {}, "windows": [] }).to_string();
         let mut application =
             Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
         application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
@@ -1191,6 +1194,7 @@ impl PluginPanelApplication {
         let data = serde_json::json!({
             "settings": settings,
             "slots": {},
+            "windows": [],
             "surface": {
                 "id": surface.id,
                 "kind": surface.kind.as_str(),
@@ -1229,6 +1233,7 @@ impl PluginPanelApplication {
                 let mut data = serde_json::json!({
                     "settings": settings,
                     "slots": {},
+                    "windows": [],
                     "surface": {
                         "id": surface.id,
                         "kind": surface.kind.as_str(),
@@ -1538,6 +1543,17 @@ impl PluginPanelApplication {
     }
 
     pub(crate) fn sync_external_slots(&mut self, slots: &Value) -> Result<bool, String> {
+        self.sync_host_data_field("slots", slots)
+    }
+
+    pub(crate) fn sync_host_data_field(
+        &mut self,
+        field: &str,
+        value: &Value,
+    ) -> Result<bool, String> {
+        if !matches!(field, "slots" | "windows") {
+            return Err("unknown host data field".into());
+        }
         let Some(data) = self.projection_data.as_deref() else {
             return Err("plugin has no external projection".into());
         };
@@ -1545,7 +1561,7 @@ impl PluginPanelApplication {
             .map_err(|error| format!("invalid external plugin projection: {error}"))?;
         data.as_object_mut()
             .ok_or("external plugin projection must be an object")?
-            .insert("slots".into(), slots.clone());
+            .insert(field.into(), value.clone());
         self.sync_data(&data)
     }
 
@@ -1837,6 +1853,41 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::ControlCenterShow) =>
                         {
                             approved.push(PluginEffect::ShowControlCenter);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("window-action") =>
+                        {
+                            let action = effect.get("action").and_then(Value::as_str);
+                            let window = effect
+                                .get("window")
+                                .and_then(Value::as_str)
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .filter(|id| *id != 0)
+                                .map(crate::model::WindowId);
+                            let requested = match (action, window) {
+                                (Some("activate"), Some(window))
+                                    if self
+                                        .manifest
+                                        .capabilities
+                                        .contains(&PluginCapability::WindowsFocus) =>
+                                {
+                                    Some(PluginEffect::ActivateWindow(window))
+                                }
+                                (Some("close"), Some(window))
+                                    if self
+                                        .manifest
+                                        .capabilities
+                                        .contains(&PluginCapability::WindowsContext) =>
+                                {
+                                    Some(PluginEffect::CloseWindow(window))
+                                }
+                                _ => None,
+                            };
+                            let Some(requested) = requested else {
+                                self.last_error = Some("window action is invalid or denied".into());
+                                return;
+                            };
+                            approved.push(requested);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("toggle-on-screen-keyboard")
@@ -4021,6 +4072,44 @@ mod tests {
                 assert!(app.take_effects().is_empty());
                 assert!(app.last_error().is_some());
             }
+        }
+    }
+
+    #[test]
+    fn external_window_actions_require_the_matching_capability() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        for (action, capability, expected) in [
+            (
+                "activate",
+                PluginCapability::WindowsFocus,
+                PluginEffect::ActivateWindow(crate::model::WindowId(71)),
+            ),
+            (
+                "close",
+                PluginCapability::WindowsContext,
+                PluginEffect::CloseWindow(crate::model::WindowId(71)),
+            ),
+        ] {
+            let source = format!(
+                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'action',onClick:()=>nickel.request({{type:'window-action',action:'{action}',window:'71'}})}}, 'Act')); }}"
+            );
+            manifest.capabilities.clear();
+            let mut denied =
+                PluginPanelApplication::new_with_manifest(&source, &manifest, None).unwrap();
+            denied.update(denied.button_message("action").unwrap());
+            assert!(denied.take_effects().is_empty());
+            assert!(denied.last_error().is_some());
+
+            manifest.capabilities.push(capability);
+            let mut granted =
+                PluginPanelApplication::new_with_manifest(&source, &manifest, None).unwrap();
+            granted.update(granted.button_message("action").unwrap());
+            assert_eq!(granted.take_effects(), vec![expected]);
         }
     }
 

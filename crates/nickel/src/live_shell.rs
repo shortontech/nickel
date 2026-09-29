@@ -2162,6 +2162,7 @@ impl LiveShell {
         if changed {
             redraw.extend([
                 SurfaceRole::Taskbar,
+                SurfaceRole::Panel,
                 SurfaceRole::Launcher,
                 SurfaceRole::WindowPreview,
                 SurfaceRole::WindowContextMenu,
@@ -2713,6 +2714,7 @@ impl LiveShell {
             SurfaceRole::Taskbar => self.panel_scene(width, height),
             SurfaceRole::Panel => {
                 let slots = self.plugin_slot_projection(&self.plugin_panel_owner);
+                let windows = self.external_plugin_windows(&self.plugin_panel_owner);
                 let owner = self.plugin_panel_owner.clone();
                 let Some(host) = self.plugin_panel_host.as_mut() else {
                     return Vec::new();
@@ -2721,7 +2723,16 @@ impl LiveShell {
                     .as_ref()
                     .map(|slots| host.application_mut().sync_external_slots(slots))
                     .unwrap_or(Ok(false));
-                let slots_changed = match slots_changed {
+                let windows_changed = windows
+                    .as_ref()
+                    .map(|windows| {
+                        host.application_mut()
+                            .sync_host_data_field("windows", windows)
+                    })
+                    .unwrap_or(Ok(false));
+                let data_changed = match slots_changed
+                    .and_then(|slots| windows_changed.map(|windows| slots || windows))
+                {
                     Ok(changed) => changed,
                     Err(error) => {
                         self.fail_plugin_panel_runtime(&owner, error);
@@ -2733,7 +2744,7 @@ impl LiveShell {
                     .as_mut()
                     .expect("panel host remains active");
                 let outcome = host.step(HostBatch {
-                    application_changed: slots_changed,
+                    application_changed: data_changed,
                     surface_size: Some((width, height)),
                     ..HostBatch::default()
                 });
@@ -3666,6 +3677,36 @@ impl LiveShell {
         })
     }
 
+    fn external_plugin_windows(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        if !package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::WindowsRead)
+        {
+            return None;
+        }
+        Some(serde_json::Value::Array(
+            self.windows
+                .iter()
+                .take(128)
+                .map(|window| {
+                    serde_json::json!({
+                        "id": window.id.0.to_string(),
+                        "applicationId": window.application_id.as_ref().map(|id| id.as_str()),
+                        "title": window.title.chars().take(120).collect::<String>(),
+                        "active": window.active,
+                        "minimized": window.state.minimized,
+                        "workspace": window.state.workspace,
+                        "output": window.state.output,
+                        "canActivate": window.state.capabilities.activate,
+                        "canClose": window.state.capabilities.close,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
     fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
         use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
 
@@ -3791,6 +3832,7 @@ impl LiveShell {
             return Some(self.scene(SurfaceRole::Panel, width, height));
         }
         let slots = self.plugin_slot_projection(&key.plugin_id);
+        let windows = self.external_plugin_windows(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
         let result = (|| {
@@ -3806,7 +3848,15 @@ impl LiveShell {
                     .map(|slots| host.application_mut().sync_external_slots(slots))
                     .transpose()?
                     .unwrap_or(false);
-                Ok(keyboard_changed || slots_changed)
+                let windows_changed = windows
+                    .as_ref()
+                    .map(|windows| {
+                        host.application_mut()
+                            .sync_host_data_field("windows", windows)
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                Ok(keyboard_changed || slots_changed || windows_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
@@ -6075,6 +6125,24 @@ impl LiveShell {
                         self.set_launcher_visible(false);
                     }
                     changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ActivateWindow(window) => {
+                    if self
+                        .windows
+                        .iter()
+                        .any(|current| current.id == window && current.state.capabilities.activate)
+                    {
+                        changed |= self.try_send_window_action(window, WindowAction::Activate);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::CloseWindow(window) => {
+                    if self
+                        .windows
+                        .iter()
+                        .any(|current| current.id == window && current.state.capabilities.close)
+                    {
+                        changed |= self.try_send_window_action(window, WindowAction::Close);
+                    }
                 }
                 crate::plugin_panel::PluginEffect::ToggleOnScreenKeyboard => {
                     if self.keyboard_enabled {

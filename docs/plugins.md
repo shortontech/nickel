@@ -274,6 +274,12 @@ host asset renders a placeholder without giving the plugin filesystem access.
 `Button` may also handle `onDrag({ phase, x, y, bounds })`; Nickel captures the
 pointer through start, move, end, and cancel events. The callback can request a
 typed effect, as the bundled taskbar does when moving a pinned app.
+Plugins granted `windows-read` receive a bounded `nickel.data.windows` array.
+Each window has a string `id`, title, application ID, active state, and
+`canActivate`/`canClose` flags. A plugin with `windows-focus` may request
+`{ type: "window-action", action: "activate", window: id }`; `windows-context`
+permits `action: "close"`. Nickel checks the current window and its capability
+again when handling the request.
 `Dialog` accepts `onClose`, called when the host dismisses an open dialog by
 Escape, outside input, or focus loss. The handler should clear the state that
 controls `open`; dialog buttons may still update state and request typed effects.
