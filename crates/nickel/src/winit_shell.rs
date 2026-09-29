@@ -939,8 +939,6 @@ impl WinitShell {
         }
         let keyboard_plugin_active =
             active_panels.contains_key(&crate::plugin_panel::on_screen_keyboard_surface_key());
-        let screenshot_plugin_active =
-            active_panels.contains_key(&crate::plugin_panel::screenshot_surface_key());
         let mut desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
         let taskbar_key = crate::plugin_panel::taskbar_surface_key();
         let outputs = panel_outputs(
@@ -965,7 +963,7 @@ impl WinitShell {
         self.surfaces.retain(|surface| match surface.role {
             SurfaceRole::Launcher => launcher_available,
             SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
-            SurfaceRole::Screenshot => !screenshot_plugin_active,
+            SurfaceRole::Screenshot => true,
             SurfaceRole::WindowContextMenu => self.taskbar_panel_enabled,
             SurfaceRole::Desktop | SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
                 fixed_plugin_surface_key(surface.role)
@@ -1128,7 +1126,7 @@ impl WinitShell {
             if (role == SurfaceRole::Launcher && launcher_available
                 || role == SurfaceRole::WindowContextMenu && self.taskbar_panel_enabled
                 || role == SurfaceRole::OnScreenKeyboard && !keyboard_plugin_active
-                || role == SurfaceRole::Screenshot && !screenshot_plugin_active
+                || role == SurfaceRole::Screenshot
                 || fixed_plugin_surface_key(role)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
                 && !self.surfaces.iter().any(|surface| surface.role == role)
@@ -1578,10 +1576,11 @@ impl WinitShell {
         let Some((geometry, _)) = self.displays.get(index) else {
             return;
         };
-        let Some(surface) = self.surfaces.iter_mut().find(|surface| {
-            surface.role == SurfaceRole::Screenshot
-                || surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
-        }) else {
+        let Some(surface) = self
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.role == SurfaceRole::Screenshot)
+        else {
             return;
         };
         surface.display_index = index;
