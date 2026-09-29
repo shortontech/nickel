@@ -742,7 +742,6 @@ impl PanelNode {
                 kind,
                 "box"
                     | "div"
-                    | "surface"
                     | "window"
                     | "panel"
                     | "row"
@@ -1094,16 +1093,14 @@ impl PanelNode {
                         .unwrap_or(0) as u32,
                 })
             }
-            "surface" | "window" => {
+            "window" => {
                 let dimension = |name| match value.get(name) {
                     Some(Value::Number(size)) => size
                         .as_u64()
                         .filter(|size| (1..=8192).contains(size))
                         .map(|size| Length::Px(size as f32))
                         .ok_or_else(|| format!("{kind} {name} must be 1 to 8192")),
-                    Some(Value::String(percent)) if kind == "window" && percent == "100%" => {
-                        Ok(Length::Percent(1.0))
-                    }
+                    Some(Value::String(percent)) if percent == "100%" => Ok(Length::Percent(1.0)),
                     _ => Err(format!("{kind} {name} must be 1 to 8192 or 100%")),
                 };
                 let id = value
@@ -1111,7 +1108,7 @@ impl PanelNode {
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty() && id.len() <= 128)
                     .map(str::to_owned);
-                let window_request = if kind == "window" {
+                let window_request = {
                     let id = id.as_ref().ok_or("window needs a bounded id")?.clone();
                     let optional_token =
                         |name, allowed: &[&str]| -> Result<Option<String>, String> {
@@ -1173,8 +1170,6 @@ impl PanelNode {
                         reserve_work_area,
                         bottom_offset,
                     })
-                } else {
-                    None
                 };
                 Ok(Self::Surface {
                     class_name,
@@ -1196,9 +1191,7 @@ impl PanelNode {
                     background: value
                         .get("background")
                         .and_then(Value::as_u64)
-                        .map_or(if kind == "window" { 0 } else { 0xff202124 }, |color| {
-                            color as u32
-                        }),
+                        .map_or(0, |color| color as u32),
                     width: dimension("width")?,
                     height: dimension("height")?,
                 })
@@ -2102,22 +2095,13 @@ impl PanelNode {
             Self::Surface {
                 children,
                 id,
-                window_request,
                 class_name,
                 background,
                 width,
                 height,
                 ..
             } => {
-                let style = stylesheet.resolve(
-                    if window_request.is_some() {
-                        "window"
-                    } else {
-                        "surface"
-                    },
-                    id.as_deref(),
-                    class_name.as_deref(),
-                );
+                let style = stylesheet.resolve("window", id.as_deref(), class_name.as_deref());
                 let mut layer = Layer::new().width_length(*width).height_length(*height);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {

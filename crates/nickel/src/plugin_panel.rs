@@ -4187,6 +4187,40 @@ mod tests {
     }
 
     #[test]
+    fn bundled_desktop_window_fills_large_output_and_anchors_background_menu() {
+        let data = serde_json::json!({
+            "width": 2560, "height": 1440, "background": 0xff101820_u32,
+            "wallpaper": false, "surfaceColor": 0xff202830_u32,
+            "text": 0xfff0f0f0_u32, "error": null, "widgets": [], "tiles": [],
+            "context": {
+                "kind": "background", "x": 80, "y": 90,
+                "iconsVisible": true, "iconWidth": 96, "arrangement": "manual",
+                "foldersFirst": false, "pasteAvailable": false, "desktopWritable": false
+            },
+        });
+        let application = PluginPanelApplication::desktop_with_data(&data).unwrap();
+        assert!(matches!(
+            application.node,
+            PanelNode::Surface {
+                id: Some(ref id),
+                window_request: Some(_),
+                ..
+            } if id == "main"
+        ));
+        assert!(matches!(
+            application.node.menu("desktop-background-actions"),
+            Some(PanelNode::Menu { anchor, .. }) if anchor == "main"
+        ));
+        let host = nickel_ui::UiHost::new(application, 2560, 1440);
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Fill { rect, color }
+                if *color == 0xff101820 && rect.origin.x == 0.0 && rect.origin.y == 0.0
+                    && rect.size.width == 2560.0 && rect.size.height == 1440.0
+        )));
+    }
+
+    #[test]
     fn image_button_renders_host_image_and_dispatches_its_handler() {
         let source = "function App() { return h(Panel, {height: 180}, h(ImageButton, {id: 'preview', asset: 'window:1', width: 180, height: 110, accessibilityLabel: 'Open window', onClick: () => nickel.request('show-launcher')})); }";
         let mut app = PluginPanelApplication::new(source).unwrap();

@@ -17,7 +17,7 @@ function App() {
     const backgroundAction = (action) => nickel.request({type: "desktop-background-action", action});
     /** @param {boolean} selected @param {string} label */
     const checked = (selected, label) => selected ? `✓ ${label}` : label;
-    return <Surface id="desktop-background" width={data.width} height={data.height} background={data.background}>
+    return <FixedWindow id="main" width="100%" height="100%" background={data.background}>
         {data.wallpaper ? <Image asset="wallpaper" width={data.width} height={data.height} fit="stretch" /> : null}
         {(data.tiles || []).map(tile => <FileTile key={tile.id} {...tile}
             onSelect={() => nickel.request({type: "desktop-select", id: tile.id})}
@@ -32,7 +32,7 @@ function App() {
             <MenuItem id="properties" onClick={() => nickel.request({type: "desktop-file-action", id: fileContext.id, action: "properties"})}>Properties</MenuItem>
             <MenuItem id="open-terminal" onClick={() => nickel.request({type: "desktop-file-action", id: fileContext.id, action: "open-terminal"})}>Open in Terminal</MenuItem>
         </Menu> : null}
-        {background ? <Menu id="desktop-background-actions" anchor="desktop-background" x={background.x} y={background.y} open={true}>
+        {background ? <Menu id="desktop-background-actions" anchor="main" x={background.x} y={background.y} open={true}>
             <MenuItem id="view" label="View">
                 <MenuItem id="toggle-icons" shortcut="Ctrl+Shift+D" onClick={() => backgroundAction("toggle-icons")}>{background.iconsVisible ? "Hide desktop icons" : "Show desktop icons"}</MenuItem>
                 <MenuItem id="small-icons" onClick={() => backgroundAction("small-icons")}>{checked(background.iconWidth <= 72, "Small icons")}</MenuItem>
@@ -74,5 +74,5 @@ function App() {
             height={52} background={data.surfaceColor} radius={8}>
             <Text color={data.text}>{data.error}</Text>
         </Box> : null}
-    </Surface>;
+    </FixedWindow>;
 }

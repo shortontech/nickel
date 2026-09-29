@@ -17,7 +17,7 @@ function App() {
     const backgroundAction = (action) => nickel.request({ type: "desktop-background-action", action });
     /** @param {boolean} selected @param {string} label */
     const checked = (selected, label) => selected ? `✓ ${label}` : label;
-    return h(Surface, { id: "desktop-background", width: data.width, height: data.height, background: data.background },
+    return h(FixedWindow, { id: "main", width: "100%", height: "100%", background: data.background },
         data.wallpaper ? h(Image, { asset: "wallpaper", width: data.width, height: data.height, fit: "stretch" }) : null,
         (data.tiles || []).map(tile => h(FileTile, { key: tile.id, ...tile, onSelect: () => nickel.request({ type: "desktop-select", id: tile.id }), onMove: ({ dx, dy }) => nickel.request({ type: "desktop-move", id: tile.id, dx, dy }), onFileAction: ({ action }) => nickel.request({ type: "desktop-file-action", id: tile.id, action }), onClick: () => nickel.request({ type: "desktop-open", id: tile.id }) })),
         fileContext ? h(Menu, { id: "desktop-file-actions", anchor: fileContext.id, open: true },
@@ -27,7 +27,7 @@ function App() {
             h(MenuItem, { id: "rename", onClick: () => nickel.request({ type: "desktop-file-action", id: fileContext.id, action: "rename" }) }, "Rename"),
             h(MenuItem, { id: "properties", onClick: () => nickel.request({ type: "desktop-file-action", id: fileContext.id, action: "properties" }) }, "Properties"),
             h(MenuItem, { id: "open-terminal", onClick: () => nickel.request({ type: "desktop-file-action", id: fileContext.id, action: "open-terminal" }) }, "Open in Terminal")) : null,
-        background ? h(Menu, { id: "desktop-background-actions", anchor: "desktop-background", x: background.x, y: background.y, open: true },
+        background ? h(Menu, { id: "desktop-background-actions", anchor: "main", x: background.x, y: background.y, open: true },
             h(MenuItem, { id: "view", label: "View" },
                 h(MenuItem, { id: "toggle-icons", shortcut: "Ctrl+Shift+D", onClick: () => backgroundAction("toggle-icons") }, background.iconsVisible ? "Hide desktop icons" : "Show desktop icons"),
                 h(MenuItem, { id: "small-icons", onClick: () => backgroundAction("small-icons") }, checked(background.iconWidth <= 72, "Small icons")),

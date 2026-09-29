@@ -1,6 +1,5 @@
 
 const Panel = 'panel';
-const Surface = 'surface';
 const Window = 'window';
 function FixedWindow(props) {
     const {children, ...windowProps} = props;

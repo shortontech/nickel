@@ -10030,10 +10030,7 @@ impl LiveShell {
             });
         let menu_anchor = context.as_ref().and_then(|context| {
             if context.get("kind").and_then(serde_json::Value::as_str) == Some("background") {
-                Some((
-                    "plugin-menu-desktop-background-actions",
-                    "desktop-background".to_owned(),
-                ))
+                Some(("plugin-menu-desktop-background-actions", "main".to_owned()))
             } else {
                 context
                     .get("id")

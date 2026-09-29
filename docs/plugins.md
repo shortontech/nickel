@@ -189,7 +189,7 @@ The runtime provides `h`, `Panel`, `Div`, `Row`, `Column`, `Text`, `Button`,
 `Window`, `FixedWindow`, `Slot`, `Dialog`, `Image`, `ImageButton`, `Slider`, `useState`, `useRef`, and other small native
 components.
 An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
-256 KiB. `className` accepts space-separated class names on `Surface`, `Window`, `Panel`,
+256 KiB. `className` accepts space-separated class names on `Window`, `Panel`,
 `Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Slot`, `Text`, `Button`,
 `TextField`, and `Slider`. For example, `<Button className="primary" onClick={save}>Save</Button>`
 matches `button.primary { padding: 8px; background: #345678; }`. The supported
