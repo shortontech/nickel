@@ -1,9 +1,12 @@
 //! Bounded CSS subset for plugin presentation. Rules are compiled once at activation.
 
+use std::borrow::Cow;
+
 use cssparser::{
     AtRuleParser, CowRcStr, DeclarationParser, ParseError, Parser, ParserState,
     QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser,
 };
+use nickel_core::theme::{Appearance, ThemePalette};
 use nickel_ui::{Align, Insets, Justify, Length, Track};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -585,17 +588,49 @@ impl<'i> RuleBodyItemParser<'i, Declaration, String> for CssDeclarationParser {
     }
 }
 
+fn expand_palette_colors(source: &str, palette: ThemePalette) -> String {
+    let mut expanded = source.to_owned();
+    for (name, color) in [
+        ("background", palette.background),
+        ("panel", palette.panel),
+        ("surface", palette.surface),
+        ("surface-hover", palette.surface_hover),
+        ("text", palette.text),
+        ("muted", palette.muted),
+        ("accent", palette.accent),
+        ("accent-soft", palette.accent_soft),
+        ("complement", palette.complement),
+    ] {
+        expanded = expanded.replace(
+            &format!("var(--nickel-{name})"),
+            &format!("#{:06x}", color & 0x00ff_ffff),
+        );
+    }
+    expanded
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct StyleSheet {
     rules: Vec<Rule>,
+    source_with_palette_tokens: Option<String>,
+    palette: Option<ThemePalette>,
 }
 
 impl StyleSheet {
     pub fn compile(source: &str) -> Result<Self, String> {
+        Self::compile_with_palette(source, ThemePalette::from_appearance(Appearance::default()))
+    }
+
+    pub fn compile_with_palette(source: &str, palette: ThemePalette) -> Result<Self, String> {
         if source.len() > nickel_core::plugins::MAX_PLUGIN_CSS_BYTES {
             return Err("plugin stylesheet exceeds 256 KiB".into());
         }
-        let mut parser = Parser::new(source);
+        let expanded = if source.contains("var(--nickel-") {
+            Cow::Owned(expand_palette_colors(source, palette))
+        } else {
+            Cow::Borrowed(source)
+        };
+        let mut parser = Parser::new(&expanded);
         let mut rule_parser = CssRuleParser;
         let mut rules = Vec::new();
         for result in StyleSheetParser::new(&mut parser, &mut rule_parser) {
@@ -610,7 +645,23 @@ impl StyleSheet {
                 return Err("plugin stylesheet has more than 256 rules".into());
             }
         }
-        Ok(Self { rules })
+        Ok(Self {
+            rules,
+            source_with_palette_tokens: source.contains("var(--nickel-").then(|| source.to_owned()),
+            palette: Some(palette),
+        })
+    }
+
+    pub fn set_palette(&mut self, palette: ThemePalette) -> Result<bool, String> {
+        if self.palette == Some(palette) {
+            return Ok(false);
+        }
+        let Some(source) = &self.source_with_palette_tokens else {
+            self.palette = Some(palette);
+            return Ok(false);
+        };
+        *self = Self::compile_with_palette(source, palette)?;
+        Ok(true)
     }
 
     pub fn resolve(&self, kind: &str, id: Option<&str>, class_name: Option<&str>) -> ControlStyle {
@@ -654,7 +705,11 @@ impl StyleSheet {
     }
 
     pub fn estimated_retained_bytes(&self) -> u64 {
-        let mut bytes = self.rules.capacity() * std::mem::size_of::<Rule>();
+        let mut bytes = self.rules.capacity() * std::mem::size_of::<Rule>()
+            + self
+                .source_with_palette_tokens
+                .as_ref()
+                .map_or(0, String::capacity);
         for rule in &self.rules {
             bytes += rule.selectors.capacity() * std::mem::size_of::<Selector>();
             bytes += rule.declarations.capacity() * std::mem::size_of::<Declaration>();
@@ -672,6 +727,39 @@ impl StyleSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_color_tokens_recompile_for_theme_changes() {
+        let dark = ThemePalette::from_appearance(Appearance::default());
+        let light = ThemePalette::from_appearance(Appearance {
+            mode: nickel_core::theme::ThemeMode::Light,
+            ..Appearance::default()
+        });
+        let mut sheet = StyleSheet::compile_with_palette(
+            "window { background: var(--nickel-panel); border: 1px solid var(--nickel-muted); } text { color: var(--nickel-text); }",
+            dark,
+        )
+        .unwrap();
+        assert_eq!(
+            sheet.resolve("window", None, None).background,
+            Some(0xff00_0000 | dark.panel)
+        );
+        assert_eq!(
+            sheet.resolve("text", None, None).color,
+            Some(0xff00_0000 | dark.text)
+        );
+        assert!(sheet.set_palette(light).unwrap());
+        assert_eq!(
+            sheet.resolve("window", None, None).background,
+            Some(0xff00_0000 | light.panel)
+        );
+        assert_eq!(
+            sheet.resolve("text", None, None).color,
+            Some(0xff00_0000 | light.text)
+        );
+        assert!(!sheet.set_palette(light).unwrap());
+        assert!(StyleSheet::compile("text { color: var(--unknown); }").is_err());
+    }
 
     #[test]
     fn classes_and_type_selectors_apply_in_order() {

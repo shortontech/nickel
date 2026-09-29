@@ -6556,6 +6556,13 @@ impl LiveShell {
             .plugin_launcher_host
             .as_mut()
             .expect("launcher plugin host exists");
+        let palette_changed = match host.application_mut().sync_theme_palette(self.palette) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.fail_launcher_plugin_runtime(error);
+                return None;
+            }
+        };
         let image_changed = host.application_mut().sync_images(images);
         let projection_changed = match host
             .application_mut()
@@ -6567,7 +6574,7 @@ impl LiveShell {
                 return None;
             }
         };
-        Some(image_changed || projection_changed)
+        Some(palette_changed || image_changed || projection_changed)
     }
 
     fn current_plugin_launcher_projection(&self) -> crate::plugin_panel::LauncherPluginProjection {

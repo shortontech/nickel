@@ -214,6 +214,15 @@ their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
 props remain available. Row, Column, and specialized widgets still have some
 legacy sizing behavior while the generic layout path expands.
 
+Color declarations may use Nickel palette tokens such as
+`var(--nickel-panel)`, `var(--nickel-surface)`, `var(--nickel-text)`,
+`var(--nickel-muted)`, and `var(--nickel-accent)`. The complete token set is
+`background`, `panel`, `surface`, `surface-hover`, `text`, `muted`, `accent`,
+`accent-soft`, and `complement`, each prefixed with `--nickel-`. Nickel resolves
+these when compiling the stylesheet. A host can refresh the resolved colors
+when its appearance changes; the bundled launcher is wired to do so. Other
+CSS custom properties are not supported yet.
+
 `<Slider value={hue / 359} accessibilityLabel="Hue" onChange={fraction =>
 nickel.request({type: "appearance-hue", fraction})} />` is a native slider with a
 value from 0 to 1. It receives a stable automatic control ID unless `id` is

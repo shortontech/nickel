@@ -1521,6 +1521,13 @@ impl PluginPanelApplication {
         })
     }
 
+    pub fn sync_theme_palette(
+        &mut self,
+        palette: nickel_core::theme::ThemePalette,
+    ) -> Result<bool, String> {
+        self.stylesheet.set_palette(palette)
+    }
+
     pub fn sync_images(&mut self, images: PluginImages) -> bool {
         let changed = self.images.len() != images.len()
             || self.images.iter().any(|(key, (id, image))| {
@@ -4946,6 +4953,35 @@ mod tests {
             granted.take_effects(),
             vec![PluginEffect::RetryApplicationPinSave]
         );
+    }
+
+    #[test]
+    fn plugin_stylesheet_tracks_host_palette_without_restarting_js() {
+        let package = PluginPackage {
+            manifest: manifest().clone(),
+            images: Default::default(),
+            stylesheet: "window { background: var(--nickel-panel); } text { color: var(--nickel-text); }".into(),
+            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h(Text, {}, 'Ready')); }".into(),
+        };
+        let mut app = PluginPanelApplication::from_package(&package).unwrap();
+        let dark = nickel_core::theme::ThemePalette::from_appearance(
+            nickel_core::theme::Appearance::default(),
+        );
+        let light =
+            nickel_core::theme::ThemePalette::from_appearance(nickel_core::theme::Appearance {
+                mode: nickel_core::theme::ThemeMode::Light,
+                ..nickel_core::theme::Appearance::default()
+            });
+        assert_eq!(
+            app.stylesheet.resolve("window", None, None).background,
+            Some(0xff00_0000 | dark.panel)
+        );
+        assert!(app.sync_theme_palette(light).unwrap());
+        assert_eq!(
+            app.stylesheet.resolve("window", None, None).background,
+            Some(0xff00_0000 | light.panel)
+        );
+        assert!(!app.sync_theme_palette(light).unwrap());
     }
 
     #[test]
