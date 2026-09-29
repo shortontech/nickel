@@ -308,6 +308,10 @@ action list. `notifications-act` permits
 `{ type: "notification-close-history" }`. Nickel checks the live notification
 again before acting. Trusted approval notifications stay in native UI and are
 excluded from plugin data and actions.
+Plugins granted `run-command` may request
+`{ type: "run-submit", command: "..." }`. Nickel trims the command and rejects
+empty commands or those over 4096 characters before calling the platform's
+Run command handler.
 Any plugin granted `windows-focus` or `windows-context` can request
 `{ type: "preview-action", action: "activate" | "close" | "menu", window: id }`
 for a window in the currently open preview. `activate` requires `windows-focus`;

@@ -1862,7 +1862,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str) == Some("run-submit")
-                            && self.manifest.id == run_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -4348,6 +4347,37 @@ mod tests {
             granted.update(granted.button_message("action").unwrap());
             assert_eq!(granted.take_effects(), vec![expected]);
         }
+    }
+
+    #[test]
+    fn external_run_command_uses_capability_instead_of_plugin_identity() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities.clear();
+        let source = r#"
+            function App() {
+                return h(Window, {width: 320, height: 180},
+                    h(Button, {id: 'run', onClick: () => nickel.request({type: 'run-submit', command: 'nickel-test'})}, 'Run'));
+            }
+        "#;
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        denied.update(denied.button_message("run").unwrap());
+        assert!(denied.take_effects().is_empty());
+        assert!(denied.last_error().is_some());
+
+        manifest.capabilities.push(PluginCapability::RunCommand);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        granted.update(granted.button_message("run").unwrap());
+        assert_eq!(
+            granted.take_effects(),
+            vec![PluginEffect::RunSubmit("nickel-test".into())]
+        );
     }
 
     #[test]
