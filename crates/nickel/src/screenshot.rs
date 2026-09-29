@@ -481,6 +481,7 @@ impl ScreenshotTool {
 
     pub fn hide(&mut self) {
         self.capture_generation = self.capture_generation.wrapping_add(1);
+        self.capture_deadline = None;
         self.pending_pointer = None;
         self.pointer_deadline = None;
         let app = self.host.application_mut();

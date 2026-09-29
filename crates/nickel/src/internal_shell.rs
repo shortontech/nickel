@@ -3789,6 +3789,32 @@ mod tests {
     }
 
     #[test]
+    fn disabling_screenshot_plugin_cancels_pending_capture() {
+        let mut coordinator = coordinator();
+        let output = InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        };
+        let key = crate::plugin_panel::screenshot_surface_key();
+        coordinator.set_outputs(&[output.clone()]);
+        assert!(
+            coordinator
+                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+        );
+        coordinator
+            .set_plugin_enabled(&key.plugin_id, false)
+            .unwrap();
+        coordinator.set_outputs(&[output]);
+        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+        assert!(coordinator.plugin_surface(&key, "nested").is_none());
+        assert!(!coordinator.shell.surface_visible(SurfaceRole::Screenshot));
+    }
+
+    #[test]
     fn production_print_screen_reducer_requests_internal_capture_surface() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
