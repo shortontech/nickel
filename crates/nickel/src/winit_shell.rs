@@ -878,6 +878,7 @@ impl WinitShell {
             self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
         }
         self.create_surface(SurfaceRole::Screenshot, 0, primary, primary_name)?;
+        #[cfg(target_os = "windows")]
         self.create_surface(SurfaceRole::OnScreenKeyboard, 0, primary, primary_name)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
@@ -937,6 +938,8 @@ impl WinitShell {
                 self.plugin_panel_surface.clone(),
             );
         }
+        let keyboard_plugin_active = cfg!(target_os = "linux")
+            && active_panels.contains_key(&crate::plugin_panel::on_screen_keyboard_surface_key());
         let mut desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
         let taskbar_key = crate::plugin_panel::taskbar_surface_key();
         let outputs = panel_outputs(
@@ -960,6 +963,7 @@ impl WinitShell {
         let launcher_available = launcher_plugin_surface_available(&self.active_fixed_plugins);
         self.surfaces.retain(|surface| match surface.role {
             SurfaceRole::Launcher => launcher_available,
+            SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
             SurfaceRole::WindowContextMenu => self.taskbar_panel_enabled,
             SurfaceRole::Desktop | SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
                 fixed_plugin_surface_key(surface.role)
@@ -1116,9 +1120,11 @@ impl WinitShell {
             SurfaceRole::VolumeOsd,
             SurfaceRole::WindowPreview,
             SurfaceRole::WindowContextMenu,
+            SurfaceRole::OnScreenKeyboard,
         ] {
             if (role == SurfaceRole::Launcher && launcher_available
                 || role == SurfaceRole::WindowContextMenu && self.taskbar_panel_enabled
+                || role == SurfaceRole::OnScreenKeyboard && !keyboard_plugin_active
                 || fixed_plugin_surface_key(role)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
                 && !self.surfaces.iter().any(|surface| surface.role == role)

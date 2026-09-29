@@ -363,6 +363,14 @@ impl InternalShellCoordinator {
                 {
                     continue;
                 }
+                if role == SurfaceRole::OnScreenKeyboard
+                    && cfg!(target_os = "linux")
+                    && self.shell.plugin_surface_matches(
+                        &crate::plugin_panel::on_screen_keyboard_surface_key(),
+                    )
+                {
+                    continue;
+                }
                 let plugin = match role {
                     SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
                     SurfaceRole::WindowPreview => {
@@ -1901,6 +1909,7 @@ mod tests {
 
     struct StorageHost(Arc<AtomicU8>);
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn native_keyboard_normalized_gesture_uses_press_epoch_and_blur_cancels_release() {
         use nickel_input::{
@@ -1947,6 +1956,13 @@ mod tests {
         let host = Arc::new(KeyboardHost(std::sync::Mutex::new(Vec::new())));
         let mut coordinator =
             InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+        coordinator
+            .shell
+            .set_plugin_enabled(
+                &crate::plugin_panel::on_screen_keyboard_manifest().id,
+                false,
+            )
+            .unwrap();
         coordinator.set_outputs(&[InternalOutput {
             name: "test".into(),
             x: 0,
@@ -2058,6 +2074,7 @@ mod tests {
         assert_eq!(host.0.lock().unwrap().len(), 2);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn jsx_keyboard_click_delivers_to_the_press_time_recipient() {
         use nickel_input::{
@@ -2118,6 +2135,11 @@ mod tests {
         }]);
         coordinator.poll(Instant::now());
         let key = crate::plugin_panel::on_screen_keyboard_surface_key();
+        assert!(
+            coordinator
+                .surface(SurfaceRole::OnScreenKeyboard, None)
+                .is_none()
+        );
         let id = coordinator.plugin_surface(&key, "test").unwrap().id;
         assert!(coordinator.visible(id));
         coordinator.scene(id);
@@ -2157,6 +2179,40 @@ mod tests {
         coordinator.poll(Instant::now());
         coordinator.step_slot_changes(id, event(KeyEdge::Released));
         assert_eq!(host.inputs.lock().unwrap().len(), 1);
+
+        coordinator
+            .shell
+            .set_plugin_enabled(
+                &crate::plugin_panel::on_screen_keyboard_manifest().id,
+                false,
+            )
+            .unwrap();
+        let output = InternalOutput {
+            name: "test".into(),
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+        };
+        coordinator.set_outputs(&[output.clone()]);
+        assert!(coordinator.plugin_surface(&key, "test").is_none());
+        assert!(
+            coordinator
+                .surface(SurfaceRole::OnScreenKeyboard, None)
+                .is_some()
+        );
+        coordinator
+            .shell
+            .set_plugin_enabled(&crate::plugin_panel::on_screen_keyboard_manifest().id, true)
+            .unwrap();
+        coordinator.set_outputs(&[output]);
+        assert!(coordinator.plugin_surface(&key, "test").is_some());
+        assert!(
+            coordinator
+                .surface(SurfaceRole::OnScreenKeyboard, None)
+                .is_none()
+        );
     }
 
     #[test]
