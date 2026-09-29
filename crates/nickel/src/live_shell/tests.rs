@@ -233,7 +233,12 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
         [2, 7]
     );
     let host = UiHost::new(
-        crate::plugin_panel::PluginPanelApplication::taskbar_with_projection(&projection).unwrap(),
+        crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::taskbar_manifest(),
+            "main.js",
+            projection.to_json(),
+        )
+        .unwrap(),
         800,
         56,
     );

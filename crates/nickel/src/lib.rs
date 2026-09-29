@@ -109,6 +109,7 @@ mod desktop {
         pub position: WallpaperPosition,
     }
 }
+mod bundled_plugin_assets;
 #[cfg(target_os = "linux")]
 mod executable_index;
 mod file_window_host;

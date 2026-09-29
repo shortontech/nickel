@@ -799,7 +799,7 @@ impl TaskbarWindowMenuPluginProjection {
 }
 
 impl TaskbarMenuPluginProjection {
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         serde_json::json!({
             "applicationId": self.application_id,
             "pinned": self.pinned,
@@ -1113,6 +1113,17 @@ impl PluginPanelApplication {
         Ok(application)
     }
 
+    /// Bundled source selection is packaging; rendering and data refresh use
+    /// the same path as an installed plugin after the asset has been selected.
+    pub(crate) fn bundled_with_data(
+        manifest: &PluginManifest,
+        entry: &str,
+        data: String,
+    ) -> Result<Self, String> {
+        let (source, stylesheet) = crate::bundled_plugin_assets::resolve(&manifest.id, entry)?;
+        Self::bundled_application(manifest, entry, source, Some(stylesheet), data)
+    }
+
     pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
         self.node.button_action(id).map(PluginMessage::Click)
     }
@@ -1363,36 +1374,12 @@ impl PluginPanelApplication {
         }
     }
 
-    pub fn launcher(launcher: &Launcher) -> Result<Self, String> {
-        Self::launcher_with_projection(&LauncherPluginProjection::from_launcher(launcher))
-    }
-
-    pub fn launcher_with_projection(projection: &LauncherPluginProjection) -> Result<Self, String> {
-        Self::bundled_application(
-            launcher_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/launcher/main.js"),
-            Some(include_str!("../../../assets/plugins/launcher/ui.css")),
-            projection.to_json(),
-        )
-    }
-
     #[cfg(test)]
     pub(crate) fn launcher_with_test_source(
         source: &str,
         projection: &LauncherPluginProjection,
     ) -> Result<Self, String> {
         Self::new_with_manifest(source, launcher_manifest(), Some(projection.to_json()))
-    }
-
-    pub fn taskbar_with_projection(projection: &TaskbarPluginProjection) -> Result<Self, String> {
-        Self::bundled_application(
-            taskbar_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/taskbar/main.js"),
-            Some(include_str!("../../../assets/plugins/taskbar/ui.css")),
-            projection.to_json(),
-        )
     }
 
     #[cfg(test)]
@@ -1403,60 +1390,12 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
     }
 
-    pub fn taskbar_menu_with_projection(
-        projection: &TaskbarMenuPluginProjection,
-    ) -> Result<Self, String> {
-        Self::bundled_application(
-            taskbar_manifest(),
-            "menu.js",
-            include_str!("../../../assets/plugins/taskbar/menu.js"),
-            Some(include_str!("../../../assets/plugins/taskbar/ui.css")),
-            projection.to_json(),
-        )
-    }
-
-    pub fn taskbar_window_menu_with_projection(
-        projection: &TaskbarWindowMenuPluginProjection,
-    ) -> Result<Self, String> {
-        Self::bundled_application(
-            taskbar_manifest(),
-            "window-menu.js",
-            include_str!("../../../assets/plugins/taskbar/window-menu.js"),
-            Some(include_str!("../../../assets/plugins/taskbar/ui.css")),
-            projection.to_json(),
-        )
-    }
-
-    pub fn notification_with_projection(
-        projection: &NotificationPluginProjection,
-    ) -> Result<Self, String> {
-        Self::bundled_application(
-            notification_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/notification/main.js"),
-            Some(include_str!("../../../assets/plugins/notification/ui.css")),
-            projection.to_json(),
-        )
-    }
-
     #[cfg(test)]
     pub(crate) fn notification_with_test_source(
         source: &str,
         projection: &NotificationPluginProjection,
     ) -> Result<Self, String> {
         Self::new_with_manifest(source, notification_manifest(), Some(projection.to_json()))
-    }
-
-    pub fn volume_osd_with_projection(
-        projection: &VolumeOsdPluginProjection,
-    ) -> Result<Self, String> {
-        Self::bundled_application(
-            volume_osd_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/volume-osd/main.js"),
-            Some(include_str!("../../../assets/plugins/volume-osd/ui.css")),
-            projection.to_json(),
-        )
     }
 
     #[cfg(test)]
@@ -1467,50 +1406,12 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, volume_osd_manifest(), Some(projection.to_json()))
     }
 
-    pub fn control_center_with_data(data: &Value) -> Result<Self, String> {
-        Self::bundled_application(
-            control_center_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/control-center/main.js"),
-            Some(include_str!(
-                "../../../assets/plugins/control-center/ui.css"
-            )),
-            data.to_string(),
-        )
-    }
-
     #[cfg(test)]
     pub(crate) fn control_center_with_test_source(
         source: &str,
         data: &Value,
     ) -> Result<Self, String> {
         Self::new_with_manifest(source, control_center_manifest(), Some(data.to_string()))
-    }
-
-    pub fn codex_projects_with_projection(
-        projection: &ProjectMenuProjection,
-    ) -> Result<Self, String> {
-        Self::bundled_application(
-            codex_projects_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/codex-projects/main.js"),
-            Some(include_str!(
-                "../../../assets/plugins/codex-projects/ui.css"
-            )),
-            serde_json::to_string(projection).map_err(|error| error.to_string())?,
-        )
-    }
-
-    pub fn on_screen_keyboard_with_data(data: &Value) -> Result<Self, String> {
-        Self::bundled_application(
-            on_screen_keyboard_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/on-screen-keyboard/main.js"),
-            Some(include_str!(
-                "../../../assets/plugins/on-screen-keyboard/ui.css"
-            )),
-            data.to_string(),
-        )
     }
 
     #[cfg(test)]
@@ -1556,34 +1457,12 @@ impl PluginPanelApplication {
         Ok(true)
     }
 
-    pub fn window_preview_with_data(data: &Value) -> Result<Self, String> {
-        Self::bundled_application(
-            window_preview_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/window-preview/main.js"),
-            Some(include_str!(
-                "../../../assets/plugins/window-preview/ui.css"
-            )),
-            data.to_string(),
-        )
-    }
-
     #[cfg(test)]
     pub(crate) fn window_preview_with_test_source(
         source: &str,
         data: &Value,
     ) -> Result<Self, String> {
         Self::new_with_manifest(source, window_preview_manifest(), Some(data.to_string()))
-    }
-
-    pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
-        Self::bundled_application(
-            run_manifest(),
-            "main.js",
-            include_str!("../../../assets/plugins/run/main.js"),
-            Some(include_str!("../../../assets/plugins/run/ui.css")),
-            serde_json::json!({ "status": status }).to_string(),
-        )
     }
 
     #[cfg(test)]
@@ -2995,7 +2874,12 @@ mod tests {
             keyboard_enabled: false,
             codex_available: false,
         };
-        let app = PluginPanelApplication::taskbar_with_projection(&projection).unwrap();
+        let app = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::taskbar_manifest(),
+            "main.js",
+            projection.to_json(),
+        )
+        .unwrap();
         assert!(matches!(
             &app.node,
             PanelNode::Surface {
@@ -3071,7 +2955,12 @@ mod tests {
             codex_available: true,
         };
         let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::taskbar_with_projection(&projection).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                crate::plugin_panel::taskbar_manifest(),
+                "main.js",
+                projection.to_json(),
+            )
+            .unwrap(),
             960,
             56,
         );
@@ -3109,7 +2998,12 @@ mod tests {
             percent: 65,
         };
         let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::volume_osd_with_projection(&projection).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                crate::plugin_panel::volume_osd_manifest(),
+                "main.js",
+                projection.to_json(),
+            )
+            .unwrap(),
             420,
             96,
         );
@@ -3141,7 +3035,12 @@ mod tests {
         .unwrap();
         let data = validation_surface_projection(&package, control_center_surface()).unwrap();
         let mut host = nickel_ui::UiHost::new(
-            PluginPanelApplication::control_center_with_data(&data).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                crate::plugin_panel::control_center_manifest(),
+                "main.js",
+                data.to_string(),
+            )
+            .unwrap(),
             420,
             600,
         );
@@ -3190,7 +3089,12 @@ mod tests {
         .unwrap();
         let data = validation_surface_projection(&package, &package.manifest.surfaces[0]).unwrap();
         let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::on_screen_keyboard_with_data(&data).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                crate::plugin_panel::on_screen_keyboard_manifest(),
+                "main.js",
+                data.to_string(),
+            )
+            .unwrap(),
             1056,
             368,
         );
@@ -3226,7 +3130,12 @@ mod tests {
     fn bundled_launcher_visual_snapshot() {
         let launcher = Launcher::default();
         let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::launcher(&launcher).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                launcher_manifest(),
+                "main.js",
+                LauncherPluginProjection::from_launcher(&launcher).to_json(),
+            )
+            .unwrap(),
             920,
             680,
         );
@@ -3282,7 +3191,12 @@ mod tests {
     #[test]
     fn bundled_launcher_grid_reflows_with_a_narrow_host() {
         let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::launcher(&Launcher::default()).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                launcher_manifest(),
+                "main.js",
+                LauncherPluginProjection::from_launcher(&Launcher::default()).to_json(),
+            )
+            .unwrap(),
             600,
             600,
         );
@@ -3463,7 +3377,12 @@ mod tests {
             "id": "71", "title": "Document", "accessibleName": "Document",
             "closable": true, "index": 0, "imageWidth": 244, "selected": false
         }]});
-        let app = PluginPanelApplication::window_preview_with_data(&data).unwrap();
+        let app = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::window_preview_manifest(),
+            "main.js",
+            data.to_string(),
+        )
+        .unwrap();
         assert!(matches!(
             &app.node,
             PanelNode::Surface {
@@ -3498,7 +3417,12 @@ mod tests {
             {"id":"72","title":"Mail","accessibleName":"Mail","closable":true,"imageWidth":244,"selected":false}
         ]});
         let wide = nickel_ui::UiHost::new(
-            PluginPanelApplication::window_preview_with_data(&two_windows).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                crate::plugin_panel::window_preview_manifest(),
+                "main.js",
+                two_windows.to_string(),
+            )
+            .unwrap(),
             600,
             214,
         );
@@ -4593,7 +4517,12 @@ mod tests {
 
     #[test]
     fn run_plugin_submits_bounded_command_and_shows_host_error() {
-        let mut panel = PluginPanelApplication::run_with_status(None).unwrap();
+        let mut panel = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::run_manifest(),
+            "main.js",
+            serde_json::json!({ "status": null }).to_string(),
+        )
+        .unwrap();
         assert!(matches!(
             &panel.node,
             PanelNode::Surface {
@@ -4627,7 +4556,12 @@ mod tests {
 
     #[test]
     fn run_plugin_escape_requests_dismissal() {
-        let mut panel = PluginPanelApplication::run_with_status(None).unwrap();
+        let mut panel = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::run_manifest(),
+            "main.js",
+            serde_json::json!({ "status": null }).to_string(),
+        )
+        .unwrap();
         assert_eq!(
             panel.shortcut_outcome(Shortcut::Escape).disposition,
             nickel_ui::EventDisposition::Handled
@@ -4747,7 +4681,12 @@ mod tests {
     #[test]
     fn run_plugin_host_accepts_text_and_submit_from_focused_field() {
         let mut host = nickel_ui::UiHost::new(
-            PluginPanelApplication::run_with_status(None).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                crate::plugin_panel::run_manifest(),
+                "main.js",
+                serde_json::json!({ "status": null }).to_string(),
+            )
+            .unwrap(),
             620,
             180,
         );
@@ -4805,7 +4744,12 @@ mod tests {
             None,
         )]);
         launcher.set_query("demo");
-        let mut panel = PluginPanelApplication::launcher(&launcher).unwrap();
+        let mut panel = PluginPanelApplication::bundled_with_data(
+            launcher_manifest(),
+            "main.js",
+            LauncherPluginProjection::from_launcher(&launcher).to_json(),
+        )
+        .unwrap();
         panel.set_overlay_open(true);
         assert_eq!(
             panel.shortcut_outcome(Shortcut::Submit).disposition,
@@ -4820,7 +4764,12 @@ mod tests {
         let projection = LauncherPluginProjection::from_launcher(&launcher)
             .with_status(Some("Could not launch Demo".repeat(30)));
         assert_eq!(projection.status.as_ref().unwrap().chars().count(), 160);
-        let mut panel = PluginPanelApplication::launcher_with_projection(&projection).unwrap();
+        let mut panel = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::launcher_manifest(),
+            "main.js",
+            projection.to_json(),
+        )
+        .unwrap();
         assert!(format!("{:?}", panel.node).contains("Could not launch Demo"));
         assert!(
             panel
@@ -4849,8 +4798,12 @@ mod tests {
                 name: "Example project".into(),
             }],
         };
-        let mut panel =
-            PluginPanelApplication::codex_projects_with_projection(&projection).unwrap();
+        let mut panel = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::codex_projects_manifest(),
+            "main.js",
+            serde_json::to_string(&projection).unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
             panel.node,
             PanelNode::Surface {
@@ -4877,7 +4830,12 @@ mod tests {
         assert!(!format!("{:?}", panel.node).contains("Example project"));
 
         let mut host = nickel_ui::UiHost::new(
-            PluginPanelApplication::codex_projects_with_projection(&projection).unwrap(),
+            PluginPanelApplication::bundled_with_data(
+                crate::plugin_panel::codex_projects_manifest(),
+                "main.js",
+                serde_json::to_string(&projection).unwrap(),
+            )
+            .unwrap(),
             520,
             680,
         );
@@ -4938,7 +4896,12 @@ mod tests {
             "recipientAvailable": true,
             "rows": rows,
         });
-        let mut plugin = PluginPanelApplication::on_screen_keyboard_with_data(&data).unwrap();
+        let mut plugin = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::on_screen_keyboard_manifest(),
+            "main.js",
+            data.to_string(),
+        )
+        .unwrap();
         let message = plugin.button_message("osk-char-113").unwrap();
         plugin.update(message);
         assert_eq!(
@@ -4983,7 +4946,12 @@ mod tests {
     #[test]
     fn launcher_plugin_uses_window_root_and_keeps_nested_controls_reachable() {
         let launcher = Launcher::new(Vec::new());
-        let mut panel = PluginPanelApplication::launcher(&launcher).unwrap();
+        let mut panel = PluginPanelApplication::bundled_with_data(
+            launcher_manifest(),
+            "main.js",
+            LauncherPluginProjection::from_launcher(&launcher).to_json(),
+        )
+        .unwrap();
         assert!(!panel.shortcut_outcome(Shortcut::Submit).changed);
         assert!(panel.take_effects().is_empty());
         assert!(matches!(
@@ -5034,7 +5002,12 @@ mod tests {
                 history_visible: true,
             },
         ] {
-            let panel = PluginPanelApplication::notification_with_projection(&projection).unwrap();
+            let panel = PluginPanelApplication::bundled_with_data(
+                crate::plugin_panel::notification_manifest(),
+                "main.js",
+                projection.to_json(),
+            )
+            .unwrap();
             assert!(matches!(
                 &panel.node,
                 PanelNode::Surface {
@@ -5055,7 +5028,12 @@ mod tests {
     #[test]
     fn launcher_scroll_area_shrinks_with_the_popup() {
         let launcher = Launcher::new(Vec::new());
-        let app = PluginPanelApplication::launcher(&launcher).unwrap();
+        let app = PluginPanelApplication::bundled_with_data(
+            launcher_manifest(),
+            "main.js",
+            LauncherPluginProjection::from_launcher(&launcher).to_json(),
+        )
+        .unwrap();
         let mut host = nickel_ui::UiHost::new(app, 920, 680);
         let large = host.scroll_extent(&PluginMessage::Scroll).unwrap();
         host.step(nickel_ui::HostBatch {

@@ -481,8 +481,12 @@ impl Fixture for PanelFixture {
             keyboard_enabled: populated,
             codex_available: populated,
         };
-        let mut app = PluginPanelApplication::taskbar_with_projection(&projection)
-            .expect("bundled taskbar fixture must compile");
+        let mut app = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::taskbar_manifest(),
+            "main.js",
+            projection.to_json(),
+        )
+        .expect("bundled taskbar fixture must compile");
         let mut images = PluginImages::new();
         for (key, id, color) in [
             ("logo", 2, [120, 90, 220, 255]),
@@ -538,8 +542,12 @@ impl Fixture for NotificationFixture {
         let notification =
             DesktopNotification::fixture(1, "Nickel", "Workbench notification", body, actions);
         let projection = NotificationPluginProjection::from_feed(Some(&notification), &[], false);
-        PluginPanelApplication::notification_with_projection(&projection)
-            .expect("bundled notification fixture must compile")
+        PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::notification_manifest(),
+            "main.js",
+            projection.to_json(),
+        )
+        .expect("bundled notification fixture must compile")
     }
     fn surface_size() -> (u32, u32) {
         (420, 180)
@@ -613,8 +621,10 @@ impl Fixture for WindowPreviewFixture {
                 })
             })
             .collect::<Vec<_>>();
-        let mut application = PluginPanelApplication::window_preview_with_data(
-            &serde_json::json!({"windows": windows}),
+        let mut application = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::window_preview_manifest(),
+            "main.js",
+            serde_json::json!({"windows": windows}).to_string(),
         )
         .expect("bundled window preview fixture");
         if v.id != "missing-preview" {
