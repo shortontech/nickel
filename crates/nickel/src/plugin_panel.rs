@@ -2489,8 +2489,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::RunDismiss);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-toggle-launcher")
-                            && self.manifest.id == taskbar_manifest().id
+                            == Some("toggle-launcher")
                             && self
                                 .manifest
                                 .capabilities
@@ -2508,8 +2507,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::ToggleControlCenter);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-toggle-keyboard")
-                            && self.manifest.id == taskbar_manifest().id
+                            == Some("toggle-on-screen-keyboard")
                             && self
                                 .manifest
                                 .capabilities
@@ -2518,8 +2516,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::ToggleOnScreenKeyboard);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-toggle-codex")
-                            && self.manifest.id == taskbar_manifest().id
+                            == Some("toggle-projects-menu")
                             && self
                                 .manifest
                                 .capabilities
@@ -5487,6 +5484,46 @@ mod tests {
             granted.take_effects(),
             vec![PluginEffect::ToggleControlCenter]
         );
+    }
+
+    #[test]
+    fn external_shell_toggles_use_capabilities_instead_of_taskbar_identity() {
+        for (action, capability, expected) in [
+            (
+                "toggle-launcher",
+                PluginCapability::LauncherShow,
+                PluginEffect::ToggleLauncher,
+            ),
+            (
+                "toggle-on-screen-keyboard",
+                PluginCapability::OnScreenKeyboardShow,
+                PluginEffect::ToggleOnScreenKeyboard,
+            ),
+            (
+                "toggle-projects-menu",
+                PluginCapability::ProjectsMenuShow,
+                PluginEffect::ToggleCodexProjects,
+            ),
+        ] {
+            let mut external_manifest = manifest().clone();
+            external_manifest.id = format!("org.example.{action}");
+            external_manifest.capabilities.clear();
+            let mut package = PluginPackage {
+                manifest: external_manifest,
+                images: Default::default(),
+                stylesheet: String::new(),
+                source: format!(
+                    "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%', onEscape: () => nickel.request({{type: '{action}'}})}}); }}"
+                ),
+            };
+            let mut denied = PluginPanelApplication::from_package(&package).unwrap();
+            denied.shortcut_outcome(Shortcut::Escape);
+            assert!(denied.take_effects().is_empty(), "{action}");
+            package.manifest.capabilities.push(capability);
+            let mut granted = PluginPanelApplication::from_package(&package).unwrap();
+            granted.shortcut_outcome(Shortcut::Escape);
+            assert_eq!(granted.take_effects(), vec![expected], "{action}");
+        }
     }
 
     #[test]

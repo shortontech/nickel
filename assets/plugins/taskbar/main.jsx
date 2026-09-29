@@ -62,7 +62,7 @@ function App() {
         reserveWorkArea={true} className="taskbar">
         <div className="taskbar-content">
             <Button id="taskbar-launcher" className="launcher-button" icon="logo" accessibilityLabel="Open Nickel Start"
-                onClick={() => nickel.request({type: "taskbar-toggle-launcher"})}>Nickel</Button>
+                onClick={() => nickel.request({type: "toggle-launcher"})}>Nickel</Button>
             {items.flatMap(item => [
                 <Task key={item.id} item={item} />,
                 ...(item.badges || []).map((badge, index) =>
@@ -71,9 +71,9 @@ function App() {
             ])}
             <Spacer className="taskbar-spacer" />
             {data.keyboardEnabled ? <Button id="taskbar-keyboard" className="utility-button" accessibilityLabel="On-screen keyboard"
-                onClick={() => nickel.request({type: "taskbar-toggle-keyboard"})}>⌨</Button> : null}
+                onClick={() => nickel.request({type: "toggle-on-screen-keyboard"})}>⌨</Button> : null}
             {data.codexAvailable ? <Button id="taskbar-codex" className="utility-button" icon="codex" accessibilityLabel="Codex projects"
-                onClick={() => nickel.request({type: "taskbar-toggle-codex"})}>Codex</Button> : null}
+                onClick={() => nickel.request({type: "toggle-projects-menu"})}>Codex</Button> : null}
             {tray.map(item => <TrayItem key={item.id} item={item} />)}
             <Button id="taskbar-control" className="clock-button"
                 onClick={() => nickel.request({type: "toggle-control-center"})}>{data.clock || ""}</Button>

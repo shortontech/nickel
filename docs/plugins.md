@@ -241,6 +241,9 @@ receive the same capability checks as button callbacks.
 For example, a plugin granted `control-center-show` can call
 `nickel.request({type: "toggle-control-center"})` from a button or a root
 shortcut handler.
+The same pattern supports `toggle-launcher` with `launcher-show`,
+`toggle-on-screen-keyboard` with `on-screen-keyboard-show`, and
+`toggle-projects-menu` with `projects-menu-show`.
 
 `<Slot id="content" />` marks a place where a host can insert its own component
 tree into the JSX layout. The ID names the insertion point; a slot with no
