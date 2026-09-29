@@ -4654,6 +4654,48 @@ impl LiveShell {
         Ok(true)
     }
 
+    /// Retire a failed installed runtime while preserving its desired activation.
+    fn fail_installed_plugin_runtime(&mut self, id: &str, error: String) -> bool {
+        if !self.external_plugin_packages.contains_key(id)
+            || !self
+                .plugin_registry
+                .get(id)
+                .is_some_and(|entry| entry.health == nickel_core::plugins::PluginHealth::Running)
+        {
+            return false;
+        }
+        let extension_target = self
+            .plugin_registry
+            .get(id)
+            .and_then(|entry| entry.manifest.contributes.first())
+            .map(|contribution| contribution.target_plugin.clone());
+        tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.plugin_taskbar_badge_hosts.remove(id);
+        self.plugin_taskbar_action_hosts.remove(id);
+        self.plugin_desktop_widget_hosts.remove(id);
+        self.plugin_widget_slot_hosts.remove(id);
+        self.plugin_action_slot_hosts.remove(id);
+        self.plugin_control_section_hosts.remove(id);
+        self.plugin_panel_extra_hosts
+            .retain(|key, _| key.plugin_id != id);
+        self.plugin_panel_memory
+            .retain(|key, _| key.plugin_id != id);
+        if self.plugin_panel_owner == id {
+            self.plugin_panel_host = None;
+            self.plugin_panel_owner = crate::plugin_panel::manifest().id.clone();
+            self.plugin_panel_surface = crate::plugin_panel::surface().clone();
+        }
+        if let Some(target) = extension_target {
+            self.refresh_plugin_slot_hosts(&target);
+        }
+        self.refresh_plugin_slot_hosts(id);
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+        true
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -5853,7 +5895,7 @@ impl LiveShell {
                 )
                 .is_some_and(|outcome| outcome.changed);
         }
-        let (changed, effects) = {
+        let (changed, effects, failure) = {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
@@ -5867,8 +5909,18 @@ impl LiveShell {
                     ..HostBatch::default()
                 })
                 .changed;
-            (changed, host.application_mut().take_effects())
+            let application = host.application_mut();
+            (
+                changed,
+                application.take_effects(),
+                application.take_runtime_failure(),
+            )
         };
+        if let Some(error) = failure
+            && self.fail_installed_plugin_runtime(&key.plugin_id, error)
+        {
+            return true;
+        }
         screenshot_changed
             | changed
             | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
@@ -5922,7 +5974,7 @@ impl LiveShell {
                 )
                 .is_some_and(|outcome| outcome.changed);
         }
-        let (changed, effects) = {
+        let (changed, effects, failure) = {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
@@ -5933,8 +5985,18 @@ impl LiveShell {
                     ..HostBatch::default()
                 })
                 .changed;
-            (changed, host.application_mut().take_effects())
+            let application = host.application_mut();
+            (
+                changed,
+                application.take_effects(),
+                application.take_runtime_failure(),
+            )
         };
+        if let Some(error) = failure
+            && self.fail_installed_plugin_runtime(&key.plugin_id, error)
+        {
+            return true;
+        }
         changed | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
     }
 
@@ -5974,7 +6036,7 @@ impl LiveShell {
                 )
                 .is_some_and(|outcome| outcome.changed);
         }
-        let (changed, effects) = {
+        let (changed, effects, failure) = {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
@@ -5985,8 +6047,18 @@ impl LiveShell {
                     ..HostBatch::default()
                 })
                 .changed;
-            (changed, host.application_mut().take_effects())
+            let application = host.application_mut();
+            (
+                changed,
+                application.take_effects(),
+                application.take_runtime_failure(),
+            )
         };
+        if let Some(error) = failure
+            && self.fail_installed_plugin_runtime(&key.plugin_id, error)
+        {
+            return true;
+        }
         changed | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
     }
 

@@ -1365,6 +1365,71 @@ fn installed_panel_start_failure_is_visible_until_disabled() {
             .unwrap()
     );
 }
+
+#[test]
+fn installed_plugin_callback_failure_retires_all_surfaces_without_changing_desired_state() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "org.example.callback-failure";
+    let directory = root.path().join(id);
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.callback-failure","name":"Callback Failure","entry":"main.js","surfaces":[{"id":"left","kind":"panel","width":360,"height":96},{"id":"right","kind":"dock","width":360,"height":96}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(Panel, {}, h(Button, {id: 'crash', onClick: () => { throw Error('callback exploded'); }}, 'Crash plugin')); }",
+    )
+    .unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    let descriptor = catalog.packages.remove(id).unwrap();
+    let mut shell = LiveShell::new().unwrap();
+    shell
+        .plugin_registry
+        .register(descriptor.manifest.clone())
+        .unwrap();
+    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell.set_plugin_enabled(id, true).unwrap();
+    let panels = shell.plugin_panels();
+    assert_eq!(panels.len(), 2);
+    for (key, surface) in &panels {
+        shell
+            .plugin_panel_scene(key, surface.width, surface.height)
+            .unwrap();
+    }
+    let (key, surface) = &panels[0];
+    let crash = shell
+        .plugin_panel_host_for(key)
+        .unwrap()
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Crash plugin".into(),
+        })
+        .unwrap();
+    assert!(shell.plugin_panel_host_ui_for(
+        key,
+        nickel_ui::UiEvent::AccessibilityActivate(crash.id),
+        surface.width,
+        surface.height,
+    ));
+    assert!(
+        shell
+            .plugin_panels()
+            .iter()
+            .all(|(key, _)| key.plugin_id != id)
+    );
+    let entry = shell.plugin_registry.get(id).unwrap();
+    assert!(entry.desired_enabled);
+    assert!(
+        matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("callback exploded"))
+    );
+    assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+    assert!(shell.taskbar_surface_key().is_some());
+    assert!(shell.set_plugin_enabled(id, false).unwrap());
+    assert!(shell.set_plugin_enabled(id, true).unwrap());
+    assert_eq!(shell.plugin_panels().len(), 2);
+}
 include!("tests/panel_and_cache.rs");
 include!("tests/desktop_interactions.rs");
 

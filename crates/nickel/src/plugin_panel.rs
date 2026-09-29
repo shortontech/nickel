@@ -1920,6 +1920,7 @@ pub struct PluginPanelApplication {
     effects: Vec<PluginEffect>,
     pending_transient: Option<(OverlayId, UiId)>,
     last_error: Option<String>,
+    runtime_failure: Option<String>,
     manifest: PluginManifest,
     projection_data: Option<String>,
     launcher_shortcuts: Option<LauncherShortcutState>,
@@ -3358,6 +3359,7 @@ impl PluginPanelApplication {
             effects: Vec::new(),
             pending_transient: None,
             last_error: None,
+            runtime_failure: None,
             manifest: manifest.clone(),
             projection_data: data,
             launcher_shortcuts: None,
@@ -3635,6 +3637,10 @@ impl PluginPanelApplication {
 
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    pub fn take_runtime_failure(&mut self) -> Option<String> {
+        self.runtime_failure.take()
     }
 }
 
@@ -4962,9 +4968,13 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.node = node;
                 self.last_error = None;
             }
-            (Err(error), _) | (_, Err(error)) => self.last_error = Some(error),
+            (Err(error), _) | (_, Err(error)) => {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+            }
         })();
         if let Err(error) = self.runtime.finish_event(self.last_error.is_none()) {
+            self.runtime_failure = Some(error.clone());
             self.last_error = Some(error);
         }
     }
@@ -5566,6 +5576,12 @@ mod tests {
         let invalid = panel.button_message("invalid").unwrap();
         panel.update(invalid);
         assert!(panel.last_error().is_some());
+        assert!(
+            panel
+                .take_runtime_failure()
+                .unwrap()
+                .contains("handler failed")
+        );
         assert!(panel.take_effects().is_empty());
         assert!(format!("{:?}", panel.node).contains("Count: 0"));
 
@@ -5593,6 +5609,7 @@ mod tests {
         let denied = panel.button_message("denied").unwrap();
         panel.update(denied);
         assert!(panel.last_error().unwrap().contains("not granted"));
+        assert!(panel.take_runtime_failure().is_none());
         assert!(panel.take_effects().is_empty());
         assert!(format!("{:?}", panel.node).contains("Count: 0"));
 
