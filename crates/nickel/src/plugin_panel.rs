@@ -442,6 +442,9 @@ pub enum PluginEffect {
     LaunchDashboardApplication {
         id: String,
     },
+    LaunchApplication {
+        id: String,
+    },
     SetLauncherView(LauncherView),
     ToggleLauncherPin {
         id: String,
@@ -1216,6 +1219,7 @@ impl PluginPanelApplication {
             "settings": settings,
             "slots": {},
             "windows": [],
+            "applications": [],
             "notifications": initial_notifications_data(&package.manifest),
             "surface": {
                 "id": surface.id,
@@ -1256,6 +1260,7 @@ impl PluginPanelApplication {
                     "settings": settings,
                     "slots": {},
                     "windows": [],
+                    "applications": [],
                     "notifications": initial_notifications_data(&package.manifest),
                     "surface": {
                         "id": surface.id,
@@ -1595,10 +1600,12 @@ impl PluginPanelApplication {
         if fields.is_empty() {
             return Ok(false);
         }
-        if fields
-            .iter()
-            .any(|(field, _)| !matches!(*field, "slots" | "windows" | "notifications"))
-        {
+        if fields.iter().any(|(field, _)| {
+            !matches!(
+                *field,
+                "slots" | "windows" | "applications" | "notifications"
+            )
+        }) {
             return Err("unknown host data field".into());
         }
         if fields.iter().any(|(field, _)| *field == "notifications")
@@ -1608,6 +1615,14 @@ impl PluginPanelApplication {
                 .contains(&PluginCapability::NotificationsRead)
         {
             return Err("notification data requires notifications.read".into());
+        }
+        if fields.iter().any(|(field, _)| *field == "applications")
+            && !self
+                .manifest
+                .capabilities
+                .contains(&PluginCapability::ApplicationsRead)
+        {
+            return Err("application data requires applications-read".into());
         }
         let Some(data) = self.projection_data.as_deref() else {
             return Err("plugin has no external projection".into());
@@ -2594,6 +2609,23 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 index,
                                 id: id.to_owned(),
                             });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("applications.launch")
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsLaunch) =>
+                        {
+                            let Some(id) = effect
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.is_empty() && id.len() <= 256)
+                            else {
+                                self.last_error = Some("application ID is invalid".into());
+                                return;
+                            };
+                            approved.push(PluginEffect::LaunchApplication { id: id.to_owned() });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-launch-dashboard")
@@ -4377,6 +4409,70 @@ mod tests {
         assert_eq!(
             granted.take_effects(),
             vec![PluginEffect::RunSubmit("nickel-test".into())]
+        );
+    }
+
+    #[test]
+    fn external_application_catalog_and_launch_action_follow_capabilities() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities.clear();
+        let source = r#"
+            function App() {
+                return h(Window, {width: 320, height: 180},
+                    h(Text, {}, nickel.data.applications?.[0]?.name || 'None'),
+                    h(Button, {id: 'launch', onClick: () => nickel.request({type: 'applications.launch', id: 'org.example.Editor'})}, 'Launch'));
+            }
+        "#;
+        let applications =
+            serde_json::json!([{"id":"org.example.Editor","name":"Editor","pinned":false}]);
+        let mut denied = PluginPanelApplication::new_with_manifest(
+            source,
+            &manifest,
+            Some(r#"{"applications":[]}"#.into()),
+        )
+        .unwrap();
+        assert!(
+            denied
+                .sync_host_data_field("applications", &applications)
+                .is_err()
+        );
+        denied.update(denied.button_message("launch").unwrap());
+        assert!(denied.take_effects().is_empty());
+
+        manifest
+            .capabilities
+            .push(PluginCapability::ApplicationsRead);
+        let mut read_only = PluginPanelApplication::new_with_manifest(
+            source,
+            &manifest,
+            Some(r#"{"applications":[]}"#.into()),
+        )
+        .unwrap();
+        assert!(
+            read_only
+                .sync_host_data_field("applications", &applications)
+                .unwrap()
+        );
+        assert!(format!("{:?}", read_only.node).contains("Editor"));
+        read_only.update(read_only.button_message("launch").unwrap());
+        assert!(read_only.take_effects().is_empty());
+
+        manifest
+            .capabilities
+            .push(PluginCapability::ApplicationsLaunch);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        granted.update(granted.button_message("launch").unwrap());
+        assert_eq!(
+            granted.take_effects(),
+            vec![PluginEffect::LaunchApplication {
+                id: "org.example.Editor".into()
+            }]
         );
     }
 

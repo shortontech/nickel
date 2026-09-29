@@ -299,6 +299,11 @@ Each window has a string `id`, title, application ID, active state, and
 `{ type: "window-action", action: "activate", window: id }`; `windows-context`
 permits `action: "close"`. Nickel checks the current window and its capability
 again when handling the request.
+Plugins granted `applications-read` receive up to 256 entries in
+`nickel.data.applications`, each with a stable ID, display name, and pinned
+state. `applications-launch` permits
+`nickel.request({ type: "applications.launch", id })`; Nickel resolves the ID
+against the current application catalog before launching it.
 Plugins granted `notifications-read` receive `nickel.data.notifications` with
 the current ordinary notification, up to 12 history entries, and
 `historyVisible`. Items include an ID, app name, summary, body, and bounded

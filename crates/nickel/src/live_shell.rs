@@ -2715,6 +2715,7 @@ impl LiveShell {
             SurfaceRole::Panel => {
                 let slots = self.plugin_slot_projection(&self.plugin_panel_owner);
                 let windows = self.external_plugin_windows(&self.plugin_panel_owner);
+                let applications = self.external_plugin_applications(&self.plugin_panel_owner);
                 let notifications = self.external_plugin_notifications(&self.plugin_panel_owner);
                 let owner = self.plugin_panel_owner.clone();
                 let Some(host) = self.plugin_panel_host.as_mut() else {
@@ -2723,6 +2724,7 @@ impl LiveShell {
                 let fields = [
                     ("slots", slots.as_ref()),
                     ("windows", windows.as_ref()),
+                    ("applications", applications.as_ref()),
                     ("notifications", notifications.as_ref()),
                 ]
                 .into_iter()
@@ -3729,6 +3731,31 @@ impl LiveShell {
         serde_json::from_str(&projection.to_json()).ok()
     }
 
+    fn external_plugin_applications(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        if !package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::ApplicationsRead)
+        {
+            return None;
+        }
+        Some(serde_json::Value::Array(
+            self.launcher
+                .applications()
+                .take(256)
+                .filter(|application| !application.id().is_empty() && application.id().len() <= 256)
+                .map(|application| {
+                    serde_json::json!({
+                        "id": application.id(),
+                        "name": application.name().chars().take(120).collect::<String>(),
+                        "pinned": self.launcher.is_pinned(application.id()),
+                    })
+                })
+                .collect(),
+        ))
+    }
+
     fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
         use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
 
@@ -3855,6 +3882,7 @@ impl LiveShell {
         }
         let slots = self.plugin_slot_projection(&key.plugin_id);
         let windows = self.external_plugin_windows(&key.plugin_id);
+        let applications = self.external_plugin_applications(&key.plugin_id);
         let notifications = self.external_plugin_notifications(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
@@ -3869,6 +3897,7 @@ impl LiveShell {
                 let fields = [
                     ("slots", slots.as_ref()),
                     ("windows", windows.as_ref()),
+                    ("applications", applications.as_ref()),
                     ("notifications", notifications.as_ref()),
                 ]
                 .into_iter()
@@ -6460,6 +6489,16 @@ impl LiveShell {
                             .any(|item| item.id == id)
                     {
                         self.apply_launcher_action(LauncherAction::LaunchApplication(id));
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::LaunchApplication { id } => {
+                    if self
+                        .launcher
+                        .applications()
+                        .any(|application| application.id() == id)
+                    {
+                        self.launch_application_by_id(&id);
                         changed = true;
                     }
                 }

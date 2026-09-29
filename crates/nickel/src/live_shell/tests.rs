@@ -790,6 +790,45 @@ fn external_notification_projection_requires_read_capability() {
 }
 
 #[test]
+fn external_application_catalog_requires_read_capability() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/plugins/example-window");
+    let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let id = descriptor.manifest.id.clone();
+    let mut shell = LiveShell::new().unwrap();
+    shell
+        .launcher
+        .replace_discovered_applications(vec![crate::model::Application::new(
+            "org.example.Editor".into(),
+            "Editor".into(),
+            None,
+            None,
+            None,
+        )]);
+    shell
+        .external_plugin_packages
+        .insert(id.clone(), descriptor);
+    assert!(shell.external_plugin_applications(&id).is_none());
+
+    shell
+        .external_plugin_packages
+        .get_mut(&id)
+        .unwrap()
+        .manifest
+        .capabilities
+        .push(nickel_core::plugins::PluginCapability::ApplicationsRead);
+    let data = shell.external_plugin_applications(&id).unwrap();
+    assert!(data.as_array().unwrap().iter().any(|application| {
+        application["id"] == "org.example.Editor" && application["name"] == "Editor"
+    }));
+}
+
+#[test]
 fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.bounded-windows");
