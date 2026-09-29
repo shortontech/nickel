@@ -4725,10 +4725,26 @@ impl LiveShell {
     }
 
     fn fail_taskbar_plugin_runtime(&mut self, error: String) {
-        let id = &crate::plugin_panel::taskbar_manifest().id;
-        tracing::warn!(plugin = id, %error, "bundled taskbar plugin runtime failed");
+        self.fail_bundled_plugin_runtime(
+            &crate::plugin_panel::taskbar_manifest().id,
+            error,
+            Self::retire_taskbar_plugin_state,
+        );
+    }
+
+    /// Fail one first-party runtime, retire its owned state, then publish one
+    /// activation change. Desired enablement stays intact for Settings retry.
+    fn fail_bundled_plugin_runtime(&mut self, id: &str, error: String, retire: fn(&mut Self)) {
+        if !self
+            .plugin_registry
+            .get(id)
+            .is_some_and(|entry| entry.health == nickel_core::plugins::PluginHealth::Running)
+        {
+            return;
+        }
+        tracing::warn!(plugin = id, %error, "bundled plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
-        self.retire_taskbar_plugin_state();
+        retire(self);
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
         self.maybe_publish_plugin_status();
@@ -4744,13 +4760,11 @@ impl LiveShell {
     }
 
     fn fail_launcher_plugin_runtime(&mut self, error: String) {
-        let id = &crate::plugin_panel::launcher_manifest().id;
-        tracing::warn!(plugin = id, %error, "bundled launcher plugin runtime failed");
-        let _ = self.plugin_registry.mark_failed(id, error);
-        self.retire_launcher_plugin_state();
-        self.plugin_activation_generation =
-            self.plugin_activation_generation.wrapping_add(1).max(1);
-        self.maybe_publish_plugin_status();
+        self.fail_bundled_plugin_runtime(
+            &crate::plugin_panel::launcher_manifest().id,
+            error,
+            Self::retire_launcher_plugin_state,
+        );
     }
 
     fn retire_run_plugin_state(&mut self) {
@@ -4762,13 +4776,11 @@ impl LiveShell {
     }
 
     fn fail_run_plugin_runtime(&mut self, error: String) {
-        let id = &crate::plugin_panel::run_manifest().id;
-        tracing::warn!(plugin = id, %error, "bundled Run plugin runtime failed");
-        let _ = self.plugin_registry.mark_failed(id, error);
-        self.retire_run_plugin_state();
-        self.plugin_activation_generation =
-            self.plugin_activation_generation.wrapping_add(1).max(1);
-        self.maybe_publish_plugin_status();
+        self.fail_bundled_plugin_runtime(
+            &crate::plugin_panel::run_manifest().id,
+            error,
+            Self::retire_run_plugin_state,
+        );
     }
 
     fn retire_control_plugin_state(&mut self) {
@@ -4779,13 +4791,11 @@ impl LiveShell {
     }
 
     fn fail_control_plugin_runtime(&mut self, error: String) {
-        let id = &crate::plugin_panel::control_center_manifest().id;
-        tracing::warn!(plugin = id, %error, "bundled Quick Settings plugin runtime failed");
-        let _ = self.plugin_registry.mark_failed(id, error);
-        self.retire_control_plugin_state();
-        self.plugin_activation_generation =
-            self.plugin_activation_generation.wrapping_add(1).max(1);
-        self.maybe_publish_plugin_status();
+        self.fail_bundled_plugin_runtime(
+            &crate::plugin_panel::control_center_manifest().id,
+            error,
+            Self::retire_control_plugin_state,
+        );
     }
 
     fn retire_notification_plugin_state(&mut self) {
@@ -4797,13 +4807,11 @@ impl LiveShell {
     }
 
     fn fail_notification_plugin_runtime(&mut self, error: String) {
-        let id = &crate::plugin_panel::notification_manifest().id;
-        tracing::warn!(plugin = id, %error, "bundled Notifications plugin runtime failed");
-        let _ = self.plugin_registry.mark_failed(id, error);
-        self.retire_notification_plugin_state();
-        self.plugin_activation_generation =
-            self.plugin_activation_generation.wrapping_add(1).max(1);
-        self.maybe_publish_plugin_status();
+        self.fail_bundled_plugin_runtime(
+            &crate::plugin_panel::notification_manifest().id,
+            error,
+            Self::retire_notification_plugin_state,
+        );
     }
 
     fn retire_volume_osd_plugin_state(&mut self) {
@@ -4812,13 +4820,11 @@ impl LiveShell {
     }
 
     fn fail_volume_osd_plugin_runtime(&mut self, error: String) {
-        let id = &crate::plugin_panel::volume_osd_manifest().id;
-        tracing::warn!(plugin = id, %error, "bundled Volume OSD plugin runtime failed");
-        let _ = self.plugin_registry.mark_failed(id, error);
-        self.retire_volume_osd_plugin_state();
-        self.plugin_activation_generation =
-            self.plugin_activation_generation.wrapping_add(1).max(1);
-        self.maybe_publish_plugin_status();
+        self.fail_bundled_plugin_runtime(
+            &crate::plugin_panel::volume_osd_manifest().id,
+            error,
+            Self::retire_volume_osd_plugin_state,
+        );
     }
 
     fn retire_preview_plugin_state(&mut self) {
@@ -4835,13 +4841,11 @@ impl LiveShell {
     }
 
     fn fail_preview_plugin_runtime(&mut self, error: String) {
-        let id = &crate::plugin_panel::window_preview_manifest().id;
-        tracing::warn!(plugin = id, %error, "bundled Window Preview plugin runtime failed");
-        let _ = self.plugin_registry.mark_failed(id, error);
-        self.retire_preview_plugin_state();
-        self.plugin_activation_generation =
-            self.plugin_activation_generation.wrapping_add(1).max(1);
-        self.maybe_publish_plugin_status();
+        self.fail_bundled_plugin_runtime(
+            &crate::plugin_panel::window_preview_manifest().id,
+            error,
+            Self::retire_preview_plugin_state,
+        );
     }
 
     /// Starts or retires a plugin instance after Settings has shown its grants.
@@ -9760,13 +9764,11 @@ impl LiveShell {
     }
 
     fn fail_desktop_plugin_runtime(&mut self, error: String) {
-        let id = &crate::plugin_panel::desktop_manifest().id;
-        tracing::warn!(plugin = id, %error, "bundled Desktop plugin runtime failed");
-        let _ = self.plugin_registry.mark_failed(id, error);
-        self.retire_desktop_plugin_state();
-        self.plugin_activation_generation =
-            self.plugin_activation_generation.wrapping_add(1).max(1);
-        self.maybe_publish_plugin_status();
+        self.fail_bundled_plugin_runtime(
+            &crate::plugin_panel::desktop_manifest().id,
+            error,
+            Self::retire_desktop_plugin_state,
+        );
     }
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
