@@ -195,7 +195,7 @@ jobs:
       - name: Validate shipped extension examples
         shell: pwsh
         run: |
-          foreach ($package in @("hello-panel", "taskbar", "launcher", "desktop", "notification", "run", "control-center", "codex-projects", "on-screen-keyboard", "window-preview", "volume-osd")) {
+          foreach ($package in @("hello-panel", "taskbar", "launcher", "desktop", "notification", "run", "control-center", "codex-projects", "on-screen-keyboard", "window-preview", "volume-osd", "screenshot")) {
             cargo run --locked -p nickel --bin nickel-plugin -- validate "assets/plugins/$package"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -253,7 +253,7 @@ jobs:
                 try { $snapshot = $json | ConvertFrom-Json } catch { $snapshot = $null }
                 if ($snapshot -and $snapshot.plugins) {
                   $ready = $true
-                foreach ($id in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects", "org.nickel.on-screen-keyboard")) {
+                foreach ($id in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects", "org.nickel.on-screen-keyboard", "org.nickel.screenshot")) {
                     $plugin = $snapshot.plugins | Where-Object { $_.id -eq $id } | Select-Object -First 1
                     if (-not $plugin -or $plugin.health.state -ne "running") { $ready = $false }
                   }
@@ -263,7 +263,7 @@ jobs:
             }
             if (-not $snapshot) { throw "Nickel Settings could not query the live shell plugin status (last exit $lastExit)" }
             if (-not $ready) {
-              $states = $snapshot.plugins | Where-Object { $_.id -in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects", "org.nickel.on-screen-keyboard") } | ForEach-Object { "$($_.id)=$($_.health.state)" }
+              $states = $snapshot.plugins | Where-Object { $_.id -in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects", "org.nickel.on-screen-keyboard", "org.nickel.screenshot") } | ForEach-Object { "$($_.id)=$($_.health.state)" }
               throw "Windows shell plugins did not reach running: $($states -join ', ')"
             }
             $taskbar = $snapshot.plugins | Where-Object { $_.id -eq "org.nickel.taskbar" } | Select-Object -First 1
@@ -302,7 +302,10 @@ jobs:
             if ([NickelCodexMenuWindowProbe]::HasWindowTitle([uint32]$shell.Id, "On-screen keyboard — Nickel")) {
               throw "The retired fixed keyboard window is still present"
             }
-            Write-Host "Live Windows launcher, taskbar, desktop, Codex project, and keyboard plugins are running."
+            if ([NickelCodexMenuWindowProbe]::HasWindowTitle([uint32]$shell.Id, "Nickel Screenshot")) {
+              throw "The retired fixed screenshot window is still present"
+            }
+            Write-Host "Live Windows launcher, taskbar, desktop, Codex project, keyboard, and screenshot plugins are running."
             Write-Host "Taskbar retained UI: $taskbarBytes bytes; peak: $taskbarPeak bytes."
           } finally {
             $shell.Refresh()

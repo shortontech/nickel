@@ -7917,9 +7917,8 @@ fn task_switcher_opens_on_the_pointer_output() {
 }
 
 #[test]
-fn native_screenshot_captures_and_opens_on_the_invoking_pointer_output() {
+fn screenshot_plugin_captures_and_opens_on_the_invoking_pointer_output() {
     use crate::session_host::DesktopCapturePoll;
-    use crate::winit_shell::SurfaceRole;
     use nickel_session_protocol::{InputState, TestInput, TestKey, TestPointerButton};
     #[derive(Default)]
     struct CaptureHost(std::sync::Mutex<Vec<Option<String>>>);
@@ -7979,9 +7978,17 @@ fn native_screenshot_captures_and_opens_on_the_invoking_pointer_output() {
         .unwrap();
     let shell = session.internal_shell.as_mut().unwrap();
     shell.poll(Instant::now() + Duration::from_millis(100));
-    let screenshot = shell.surface(SurfaceRole::Screenshot, None).unwrap().id;
+    let screenshot = shell
+        .surfaces()
+        .iter()
+        .find(|surface| {
+            surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
+        })
+        .unwrap()
+        .id;
     assert!(shell.visible(screenshot));
     assert_eq!(*host.0.lock().unwrap(), vec![Some("secondary".into())]);
+    assert_eq!(shell.screenshot_output(), Some("secondary"));
     session.sync_internal_shell();
     let runtime = session.internal_shell_surfaces[&screenshot];
     let placement = session.internal_ui.placement(runtime).unwrap();
@@ -8114,19 +8121,34 @@ fn native_screenshot_clipboard_retains_each_payload_for_repeated_paste() {
 }
 
 #[test]
-fn native_screenshot_claims_keyboard_on_show_and_escape_hides_without_clicking() {
-    use crate::winit_shell::SurfaceRole;
+fn screenshot_plugin_claims_keyboard_on_show_and_escape_hides_without_clicking() {
     use nickel_session_protocol::{InputState, ShortcutAction, TestInput, TestKey};
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
     let shell = session.internal_shell.as_mut().unwrap();
     shell.global_shortcut(ShortcutAction::ShowScreenshotTool);
     shell.poll(Instant::now() + Duration::from_millis(100));
-    let screenshot = shell.surface(SurfaceRole::Screenshot, None).unwrap().id;
+    let screenshot = shell
+        .surfaces()
+        .iter()
+        .find(|surface| {
+            surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
+        })
+        .unwrap()
+        .id;
     assert!(shell.visible(screenshot));
     session.sync_internal_shell();
     let runtime = session.internal_shell_surfaces[&screenshot];
     assert_eq!(session.internal_ui.focused(), Some(runtime));
+    assert!(
+        !session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .remote_access_protected(screenshot)
+    );
+    assert!(session.internal_ui.is_visible(runtime));
+    assert!(!session.internal_ui.remote_access_protected(runtime));
     assert!(session.remote_desktop_events.snapshot().events.iter().any(
             |event| matches!(
                 event.event,

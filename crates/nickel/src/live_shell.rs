@@ -1468,6 +1468,7 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::control_center_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::codex_projects_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::on_screen_keyboard_manifest().clone())?;
+        plugin_registry.register(crate::plugin_panel::screenshot_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::window_preview_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::desktop_manifest().clone())?;
         plugin_registry.register(crate::settings_plugin_report::manifest().clone())?;
@@ -1938,6 +1939,28 @@ impl LiveShell {
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "keyboard plugin failed to start");
+                    shell.plugin_registry.mark_failed(id, error)?;
+                }
+            }
+        }
+        if plugin_activation.desired_enabled(&crate::plugin_panel::screenshot_manifest().id, true) {
+            let id = &crate::plugin_panel::screenshot_manifest().id;
+            shell.plugin_registry.set_enabled(id, true)?;
+            let data = shell.screenshot.plugin_presentation(1, 1).data;
+            match crate::plugin_panel::PluginPanelApplication::screenshot_with_data(&data) {
+                Ok(application) => {
+                    let surface = crate::plugin_panel::screenshot_manifest().surfaces[0].clone();
+                    shell.plugin_panel_extra_hosts.insert(
+                        crate::plugin_panel::screenshot_surface_key(),
+                        (
+                            surface.clone(),
+                            nickel_ui::UiHost::new(application, surface.width, surface.height),
+                        ),
+                    );
+                    shell.plugin_registry.mark_running(id)?;
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "screenshot plugin failed to start");
                     shell.plugin_registry.mark_failed(id, error)?;
                 }
             }
@@ -2647,7 +2670,13 @@ impl LiveShell {
                     true
                 }
             }
-            SurfaceRole::Screenshot => self.screenshot.remote_access_protected(),
+            SurfaceRole::Screenshot => self
+                .plugin_panel_extra_hosts
+                .get(&crate::plugin_panel::screenshot_surface_key())
+                .map_or_else(
+                    || self.screenshot.remote_access_protected(),
+                    |(_, host)| host.remote_access_protected(),
+                ),
             SurfaceRole::OnScreenKeyboard => self.keyboard_host.remote_access_protected(),
             _ => true,
         }
@@ -3434,7 +3463,10 @@ impl LiveShell {
             }
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::Lock => self.locked,
-            SurfaceRole::Screenshot => self.screenshot.visible(),
+            SurfaceRole::Screenshot => {
+                self.screenshot.visible()
+                    && !self.plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key())
+            }
             SurfaceRole::OnScreenKeyboard => {
                 self.keyboard_visible
                     && !self.plugin_surface_matches(
@@ -3462,6 +3494,11 @@ impl LiveShell {
                 && self.keyboard_visible
                 && self.keyboard_enabled
                 && self.plugin_surface_matches(&crate::plugin_panel::on_screen_keyboard_surface_key());
+        }
+        if key == Some(&crate::plugin_panel::screenshot_surface_key()) {
+            return role == SurfaceRole::Panel
+                && self.screenshot.visible()
+                && self.plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key());
         }
         if role == SurfaceRole::CodexProjectMenu {
             return false;
@@ -3943,6 +3980,8 @@ impl LiveShell {
         let slots = self.plugin_slot_projection(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
+        let screenshot = (*key == crate::plugin_panel::screenshot_surface_key())
+            .then(|| self.screenshot.plugin_presentation(width, height));
         let (_, host) = self.plugin_panel_extra_hosts.get_mut(key)?;
         let keyboard_changed = keyboard_data.is_some_and(|data| {
             host.application_mut()
@@ -3951,6 +3990,20 @@ impl LiveShell {
                     tracing::warn!(%error, "keyboard plugin projection failed");
                     false
                 })
+        });
+        let screenshot_changed = screenshot.is_some_and(|presentation| {
+            let data_changed = host
+                .application_mut()
+                .sync_screenshot_data(&presentation.data)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "screenshot plugin projection failed");
+                    false
+                });
+            let mut images = crate::plugin_panel::PluginImages::new();
+            if let Some(image) = presentation.image {
+                images.insert("capture".into(), (65_000, image));
+            }
+            data_changed | host.application_mut().sync_images(images)
         });
         let slots_changed = slots.is_some_and(|slots| {
             match host.application_mut().sync_external_slots(&slots) {
@@ -3962,7 +4015,7 @@ impl LiveShell {
             }
         });
         let outcome = host.step(HostBatch {
-            application_changed: slots_changed || keyboard_changed,
+            application_changed: slots_changed || keyboard_changed || screenshot_changed,
             surface_size: Some((width, height)),
             ..HostBatch::default()
         });
@@ -4782,6 +4835,9 @@ impl LiveShell {
                 self.codex_menu_requests.clear();
             } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
                 self.keyboard_gesture_leases.clear();
+            } else if id == crate::plugin_panel::screenshot_manifest().id {
+                self.screenshot.hide();
+                self.set_screenshot_focus(false);
             } else if id == crate::plugin_panel::window_preview_manifest().id {
                 self.plugin_preview_host = None;
                 let preview_was_open =
@@ -4964,6 +5020,20 @@ impl LiveShell {
                         crate::plugin_panel::on_screen_keyboard_manifest().surfaces[0].clone();
                     self.plugin_panel_extra_hosts.insert(
                         crate::plugin_panel::on_screen_keyboard_surface_key(),
+                        (
+                            surface.clone(),
+                            nickel_ui::UiHost::new(application, surface.width, surface.height),
+                        ),
+                    );
+                },
+            )
+        } else if id == crate::plugin_panel::screenshot_manifest().id {
+            let data = self.screenshot.plugin_presentation(1, 1).data;
+            crate::plugin_panel::PluginPanelApplication::screenshot_with_data(&data).map(
+                |application| {
+                    let surface = crate::plugin_panel::screenshot_manifest().surfaces[0].clone();
+                    self.plugin_panel_extra_hosts.insert(
+                        crate::plugin_panel::screenshot_surface_key(),
                         (
                             surface.clone(),
                             nickel_ui::UiHost::new(application, surface.width, surface.height),
@@ -5679,6 +5749,63 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if *key == crate::plugin_panel::screenshot_surface_key() {
+            if !self.native_surface_visible(SurfaceRole::Panel, Some(key)) {
+                return false;
+            }
+            if matches!(&input, nickel_input::InputEvent::Key(key)
+                if key.edge == nickel_input::KeyEdge::Pressed
+                    && key.logical == nickel_input::LogicalKey::Named(nickel_input::NamedKey::Escape))
+            {
+                let changed = self.screenshot.escape();
+                if changed {
+                    self.set_screenshot_focus(false);
+                }
+                return changed;
+            }
+        }
+        let screenshot_changed = if *key == crate::plugin_panel::screenshot_surface_key() {
+            use nickel_input::{InputEvent, KeyEdge, PointerButton, PointerEvent};
+            match &input {
+                InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
+                    self.screenshot.queue_pointer_moved(
+                        position.x as f32,
+                        position.y as f32,
+                        width,
+                        height,
+                    );
+                    false
+                }
+                InputEvent::Pointer(PointerEvent::Button {
+                    button: PointerButton::Primary,
+                    edge: KeyEdge::Pressed,
+                    position: Some(position),
+                    ..
+                }) => self.screenshot.pointer_pressed(
+                    position.x as f32,
+                    position.y as f32,
+                    width,
+                    height,
+                ),
+                InputEvent::Pointer(PointerEvent::Button {
+                    button: PointerButton::Primary,
+                    edge: KeyEdge::Released,
+                    position: Some(position),
+                    ..
+                }) => {
+                    self.screenshot.queue_pointer_moved(
+                        position.x as f32,
+                        position.y as f32,
+                        width,
+                        height,
+                    );
+                    self.screenshot.pointer_released()
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
         if *key == crate::plugin_panel::on_screen_keyboard_surface_key()
             && !self.native_surface_visible(SurfaceRole::Panel, Some(key))
         {
@@ -5736,7 +5863,9 @@ impl LiveShell {
                 .changed;
             (changed, host.application_mut().take_effects())
         };
-        changed | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+        screenshot_changed
+            | changed
+            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
     }
 
     pub(crate) fn plugin_panel_host_controller_for(
@@ -5750,6 +5879,15 @@ impl LiveShell {
             && action == ControllerAction::Cancel
         {
             return self.set_keyboard_visible(false);
+        }
+        if *key == crate::plugin_panel::screenshot_surface_key()
+            && action == ControllerAction::Cancel
+        {
+            let changed = self.screenshot_controller(action);
+            if changed && !self.screenshot.visible() {
+                self.set_screenshot_focus(false);
+            }
+            return changed;
         }
         let keyboard_epoch = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| {
@@ -5864,6 +6002,19 @@ impl LiveShell {
                 | crate::plugin_panel::PluginEffect::KeyboardHold { .. }
                 | crate::plugin_panel::PluginEffect::KeyboardResize { .. }) => {
                     changed |= self.apply_keyboard_plugin_effect(effect, keyboard_epoch);
+                }
+                crate::plugin_panel::PluginEffect::ScreenshotAction { action, generation } => {
+                    if generation == self.screenshot.capture_generation()
+                        && self.screenshot.visible()
+                        && self
+                            .plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key())
+                    {
+                        let was_visible = self.screenshot.visible();
+                        changed |= self.screenshot.perform_plugin_toolbar_action(action);
+                        if was_visible && !self.screenshot.visible() {
+                            self.set_screenshot_focus(false);
+                        }
+                    }
                 }
                 crate::plugin_panel::PluginEffect::ShowLauncher => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
@@ -8701,7 +8852,6 @@ impl LiveShell {
         }
     }
 
-    #[cfg(any(test, target_os = "linux"))]
     pub fn screenshot_controller(&mut self, action: ControllerAction) -> bool {
         if !self.screenshot.visible() {
             return false;
@@ -8718,7 +8868,13 @@ impl LiveShell {
         let _ = self.send_session_command(
             "screenshot-focus",
             if visible {
-                ShellCommand::FocusScreenshot
+                if self.plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key()) {
+                    ShellCommand::FocusPluginSurface {
+                        key: crate::plugin_panel::screenshot_surface_key(),
+                    }
+                } else {
+                    ShellCommand::FocusScreenshot
+                }
             } else {
                 ShellCommand::RestoreApplicationFocus
             },

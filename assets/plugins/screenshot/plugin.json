@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.screenshot",
+  "name": "Nickel Screenshot",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "surfaces": [{"id":"main","kind":"overlay","width":8192,"height":8192,"anchor":"top-left"}],
+  "capabilities": ["screenshot-control"]
+}

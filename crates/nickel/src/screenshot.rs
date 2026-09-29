@@ -346,9 +346,15 @@ impl Application for ScreenshotApp {
 pub struct ScreenshotTool {
     session_host: std::sync::Arc<dyn crate::session_host::SessionHost>,
     host: UiHost<ScreenshotApp>,
+    capture_generation: u64,
     capture_deadline: Option<Instant>,
     pending_pointer: Option<(f32, f32, u32, u32)>,
     pointer_deadline: Option<Instant>,
+}
+
+pub(crate) struct ScreenshotPluginPresentation {
+    pub data: serde_json::Value,
+    pub image: Option<Arc<RgbaImage>>,
 }
 
 impl ScreenshotTool {
@@ -374,6 +380,7 @@ impl Default for ScreenshotTool {
         Self {
             session_host: crate::session_host::default_session_host(),
             host: UiHost::new(ScreenshotApp::new(1, 1), 1, 1),
+            capture_generation: 0,
             capture_deadline: None,
             pending_pointer: None,
             pointer_deadline: None,
@@ -395,6 +402,22 @@ impl ScreenshotTool {
             frame_generation: inspection.frame_generation,
             semantic_generation: inspection.semantic_generation,
         }
+    }
+
+    pub(crate) fn capture_generation(&self) -> u64 {
+        self.capture_generation
+    }
+
+    pub(crate) fn perform_plugin_toolbar_action(&mut self, action: ToolbarAction) -> bool {
+        if !self.visible()
+            || (action != ToolbarAction::Cancel && !self.host.application().confirmed)
+        {
+            return false;
+        }
+        self.host
+            .application_mut()
+            .update(ScreenshotMessage::Toolbar(action));
+        self.apply_effects()
     }
 
     pub fn request_capture(&mut self) {
@@ -429,6 +452,7 @@ impl ScreenshotTool {
     }
 
     pub fn show(&mut self, image: RgbaImage) {
+        self.capture_generation = self.capture_generation.wrapping_add(1);
         let app = self.host.application_mut();
         app.image = Some(Arc::new(image));
         app.status = instructions();
@@ -456,6 +480,7 @@ impl ScreenshotTool {
     }
 
     pub fn hide(&mut self) {
+        self.capture_generation = self.capture_generation.wrapping_add(1);
         self.pending_pointer = None;
         self.pointer_deadline = None;
         let app = self.host.application_mut();
@@ -468,6 +493,37 @@ impl ScreenshotTool {
         app.save_after_confirmation = false;
         app.dirty = true;
         self.host.poll();
+    }
+
+    pub(crate) fn plugin_presentation(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> ScreenshotPluginPresentation {
+        let app = self.host.application();
+        let preview = image_rect(app.image.as_deref(), width, height);
+        let rect = |rect: Rect| {
+            serde_json::json!({
+                "x": rect.origin.x.round() as i32,
+                "y": rect.origin.y.round() as i32,
+                "width": (rect.size.width.round() as u32).clamp(1, 8192),
+                "height": (rect.size.height.round() as u32).clamp(1, 8192),
+            })
+        };
+        ScreenshotPluginPresentation {
+            data: serde_json::json!({
+                "generation": self.capture_generation,
+                "width": width.clamp(1, 8192),
+                "height": height.clamp(1, 8192),
+                "status": app.status.chars().take(256).collect::<String>(),
+                "imageAvailable": app.image.is_some(),
+                "imageRect": rect(preview),
+                "selection": app.selection.map(rect),
+                "confirmed": app.confirmed,
+                "errorVisible": app.error_visible,
+            }),
+            image: app.image.clone(),
+        }
     }
 
     /// Native hosts use normalized input; region selection shares the existing
@@ -623,7 +679,6 @@ impl ScreenshotTool {
         outcome.changed | self.apply_effects()
     }
 
-    #[cfg(any(test, target_os = "linux"))]
     pub fn controller_action(&mut self, action: nickel_ui::ControllerAction) -> bool {
         if action == nickel_ui::ControllerAction::Cancel {
             return self.escape();
@@ -982,6 +1037,8 @@ fn clamp_to_rect(point: (f32, f32), rect: Rect) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use image::{Rgba, RgbaImage};
 
     use super::{ScreenshotApp, ScreenshotMessage, ScreenshotTool, ToolbarAction, normalized};
@@ -1114,6 +1171,25 @@ mod tests {
         assert_eq!(crop.dimensions(), (2, 2));
         assert_eq!(crop.get_pixel(0, 0).0, [1, 0, 0, 255]);
         assert_eq!(crop.get_pixel(1, 1).0, [2, 1, 0, 255]);
+    }
+
+    #[test]
+    fn plugin_projection_reuses_host_pixels_and_revokes_old_capture() {
+        let mut tool = ScreenshotTool::default();
+        tool.show(RgbaImage::new(800, 450));
+        let preview = tool.plugin_presentation(1200, 760);
+        assert_eq!(preview.data["imageAvailable"], true);
+        assert_eq!(preview.data["imageRect"]["width"], 1156);
+        assert!(Arc::ptr_eq(
+            preview.image.as_ref().unwrap(),
+            tool.host.application().image.as_ref().unwrap(),
+        ));
+        let generation = preview.data["generation"].as_u64().unwrap();
+        tool.hide();
+        let hidden = tool.plugin_presentation(1200, 760);
+        assert_eq!(hidden.data["imageAvailable"], false);
+        assert!(hidden.image.is_none());
+        assert_ne!(hidden.data["generation"].as_u64().unwrap(), generation);
     }
 
     #[test]

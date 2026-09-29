@@ -332,6 +332,7 @@ fn exercise(
         "org.nickel.on-screen-keyboard",
         "org.nickel.window-preview",
         "org.nickel.desktop",
+        "org.nickel.screenshot",
     ] {
         let plugin = plugins
             .plugins

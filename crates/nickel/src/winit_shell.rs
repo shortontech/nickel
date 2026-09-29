@@ -877,7 +877,6 @@ impl WinitShell {
         if self.taskbar_panel_enabled {
             self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
         }
-        self.create_surface(SurfaceRole::Screenshot, 0, primary, primary_name)?;
         #[cfg(target_os = "windows")]
         self.create_surface(SurfaceRole::OnScreenKeyboard, 0, primary, primary_name)?;
         tracing::info!(
@@ -940,6 +939,8 @@ impl WinitShell {
         }
         let keyboard_plugin_active =
             active_panels.contains_key(&crate::plugin_panel::on_screen_keyboard_surface_key());
+        let screenshot_plugin_active =
+            active_panels.contains_key(&crate::plugin_panel::screenshot_surface_key());
         let mut desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
         let taskbar_key = crate::plugin_panel::taskbar_surface_key();
         let outputs = panel_outputs(
@@ -964,6 +965,7 @@ impl WinitShell {
         self.surfaces.retain(|surface| match surface.role {
             SurfaceRole::Launcher => launcher_available,
             SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
+            SurfaceRole::Screenshot => !screenshot_plugin_active,
             SurfaceRole::WindowContextMenu => self.taskbar_panel_enabled,
             SurfaceRole::Desktop | SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
                 fixed_plugin_surface_key(surface.role)
@@ -1121,10 +1123,12 @@ impl WinitShell {
             SurfaceRole::WindowPreview,
             SurfaceRole::WindowContextMenu,
             SurfaceRole::OnScreenKeyboard,
+            SurfaceRole::Screenshot,
         ] {
             if (role == SurfaceRole::Launcher && launcher_available
                 || role == SurfaceRole::WindowContextMenu && self.taskbar_panel_enabled
                 || role == SurfaceRole::OnScreenKeyboard && !keyboard_plugin_active
+                || role == SurfaceRole::Screenshot && !screenshot_plugin_active
                 || fixed_plugin_surface_key(role)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
                 && !self.surfaces.iter().any(|surface| surface.role == role)
@@ -1520,6 +1524,30 @@ impl WinitShell {
             self.active_output_name.as_deref(),
             self.primary_output_name.as_deref(),
         )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn position_screenshot_plugin_on_active_output(&mut self) {
+        let Some(index) = self.active_output_index() else {
+            return;
+        };
+        let Some((geometry, _)) = self.displays.get(index) else {
+            return;
+        };
+        let Some(surface) = self.surfaces.iter().find(|surface| {
+            surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
+        }) else {
+            return;
+        };
+        surface
+            .window
+            .set_outer_position(LogicalPosition::new(geometry.x, geometry.y));
+        let size = (geometry.width, geometry.height);
+        if surface.window.size() != size {
+            let _ = surface
+                .window
+                .request_inner_size(LogicalSize::new(size.0, size.1));
+        }
     }
 
     fn relocate_to_active_output(&mut self, index: usize) {

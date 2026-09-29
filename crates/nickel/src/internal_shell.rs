@@ -371,6 +371,13 @@ impl InternalShellCoordinator {
                 {
                     continue;
                 }
+                if role == SurfaceRole::Screenshot
+                    && self
+                        .shell
+                        .plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key())
+                {
+                    continue;
+                }
                 let plugin = match role {
                     SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
                     SurfaceRole::WindowPreview => {
@@ -492,12 +499,19 @@ impl InternalShellCoordinator {
             .is_none_or(|entry| {
                 let role = if self.is_taskbar_surface(entry) {
                     SurfaceRole::Taskbar
+                } else if self.is_screenshot_surface_id(id) {
+                    SurfaceRole::Screenshot
                 } else {
                     entry.role
                 };
+                let visible_role = if self.is_screenshot_surface_id(id) {
+                    entry.role
+                } else {
+                    role
+                };
                 !self
                     .shell
-                    .native_surface_visible(role, entry.plugin.as_ref())
+                    .native_surface_visible(visible_role, entry.plugin.as_ref())
                     || self.shell.surface_remote_access_protected(role)
             })
     }
@@ -516,6 +530,9 @@ impl InternalShellCoordinator {
             .native_surface_visible(entry.role, entry.plugin.as_ref())
         {
             return Err("shell surface is hidden or retired".into());
+        }
+        if self.is_screenshot_surface_id(id) {
+            return self.shell.bounded_plugin_screenshot_semantics();
         }
         let semantics_role = if self.is_taskbar_surface(entry) {
             SurfaceRole::Taskbar
@@ -647,6 +664,8 @@ impl InternalShellCoordinator {
             || (roles.contains(&SurfaceRole::OnScreenKeyboard)
                 && surface.plugin.as_ref()
                     == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()))
+            || (roles.contains(&SurfaceRole::Screenshot)
+                && surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key()))
     }
 
     pub fn visible(&self, id: InternalSurfaceId) -> bool {
@@ -1488,6 +1507,15 @@ impl InternalShellCoordinator {
             .iter()
             .find(|surface| surface.id == id)
             .is_some_and(|surface| self.is_taskbar_surface(surface))
+    }
+
+    pub(crate) fn is_screenshot_surface_id(&self, id: InternalSurfaceId) -> bool {
+        self.entries
+            .iter()
+            .find(|surface| surface.id == id)
+            .is_some_and(|surface| {
+                surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
+            })
     }
 
     pub(crate) fn is_reserved_panel_surface_id(&self, id: InternalSurfaceId) -> bool {
@@ -3483,6 +3511,10 @@ mod tests {
 
     fn opened_screenshot() -> (InternalShellCoordinator, InternalSurfaceId) {
         let mut coordinator = coordinator();
+        coordinator
+            .shell
+            .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
+            .unwrap();
         coordinator.set_outputs(&[InternalOutput {
             x: 0,
             y: 0,
@@ -3634,6 +3666,82 @@ mod tests {
     }
 
     #[test]
+    fn jsx_screenshot_selects_and_cancels_through_normalized_pointer_input() {
+        use nickel_input::{
+            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
+        };
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        assert!(coordinator.surface(SurfaceRole::Screenshot, None).is_none());
+        coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool);
+        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+        let id = coordinator
+            .plugin_surface(&crate::plugin_panel::screenshot_surface_key(), "nested")
+            .unwrap()
+            .id;
+        let scene = coordinator.scene(id).unwrap();
+        let image = scene
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Image { bounds, .. } => Some(*bounds),
+                _ => None,
+            })
+            .expect("host capture is rendered by JSX");
+        let point = |fraction: f32| nickel_input::Point {
+            x: f64::from(image.origin.x + image.size.width * fraction),
+            y: f64::from(image.origin.y + image.size.height * fraction),
+        };
+        let send = |coordinator: &mut InternalShellCoordinator, position, edge, order| {
+            coordinator.step_slot_changes(
+                id,
+                HostBatch {
+                    events: vec![nickel_ui::HostEvent::Normalized {
+                        input: InputEvent::Pointer(PointerEvent::Button {
+                            device: DeviceId(1),
+                            order: EventOrder(order),
+                            position: Some(position),
+                            button: PointerButton::Primary,
+                            edge,
+                        }),
+                        clipboard_text: None,
+                    }],
+                    ..Default::default()
+                },
+            );
+        };
+        send(&mut coordinator, point(0.25), KeyEdge::Pressed, 1);
+        send(&mut coordinator, point(0.75), KeyEdge::Released, 2);
+        for order in [3, 5] {
+            send(&mut coordinator, point(0.5), KeyEdge::Pressed, order);
+            send(&mut coordinator, point(0.5), KeyEdge::Released, order + 1);
+        }
+        let scene = coordinator.scene(id).unwrap();
+        assert!(scene.iter().any(|command| matches!(command,
+            PaintCommand::Text { text, .. } if text == "SELECTION CONFIRMED")));
+        let cancel = scene
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { text, bounds, .. } if text == "Cancel" => Some(*bounds),
+                _ => None,
+            })
+            .expect("JSX toolbar exposes Cancel");
+        let cancel = nickel_input::Point {
+            x: f64::from(cancel.origin.x + cancel.size.width / 2.0),
+            y: f64::from(cancel.origin.y + cancel.size.height / 2.0),
+        };
+        send(&mut coordinator, cancel, KeyEdge::Pressed, 7);
+        send(&mut coordinator, cancel, KeyEdge::Released, 8);
+        assert!(!coordinator.visible(id));
+    }
+
+    #[test]
     fn production_print_screen_reducer_requests_internal_capture_surface() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
@@ -3644,8 +3752,9 @@ mod tests {
             height: 600,
             scale: 1.0,
         }]);
+        assert!(coordinator.surface(SurfaceRole::Screenshot, None).is_none());
         let screenshot = coordinator
-            .surface(SurfaceRole::Screenshot, None)
+            .plugin_surface(&crate::plugin_panel::screenshot_surface_key(), "nested")
             .unwrap()
             .id;
         let mut hotkeys = CompositorShortcutAdapter::default();

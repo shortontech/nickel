@@ -1283,6 +1283,8 @@ fn render_role(
                     && surface.plugin_key() == Some(&plugin_panel::notification_surface_key()))
                 || (wanted == SurfaceRole::ControlCenter
                     && surface.plugin_key() == Some(&plugin_panel::control_center_surface_key()))
+                || (wanted == SurfaceRole::Screenshot
+                    && surface.plugin_key() == Some(&plugin_panel::screenshot_surface_key()))
         })
         .map(|surface| {
             let (logical_width, logical_height) = surface.window().size();
@@ -1651,6 +1653,12 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
         Some(&plugin_panel::codex_projects_surface_key()),
     ) {
         shell.raise_plugin_surface(&plugin_panel::codex_projects_surface_key());
+    }
+    if state.native_surface_visible(
+        SurfaceRole::Panel,
+        Some(&plugin_panel::screenshot_surface_key()),
+    ) {
+        shell.raise_plugin_surface(&plugin_panel::screenshot_surface_key());
     }
 }
 
@@ -2834,6 +2842,7 @@ pub fn run() -> Result<(), String> {
                     shortcut,
                     platform::GlobalShortcut::ToggleLauncher
                         | platform::GlobalShortcut::ShowLauncher
+                        | platform::GlobalShortcut::Screenshot(_)
                 ) && let Some(point) = platform::active_display_point()
                 {
                     shell.set_active_output_at(point);
@@ -3150,6 +3159,8 @@ pub fn run() -> Result<(), String> {
                 "screenshot capture deadline handled"
             );
             if captured {
+                #[cfg(target_os = "windows")]
+                shell.position_screenshot_plugin_on_active_output();
                 sync_visibility(&mut shell, &state);
                 focus_visible_overlay(&mut shell, &state);
                 render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;

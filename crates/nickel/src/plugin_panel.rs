@@ -205,6 +205,23 @@ pub fn on_screen_keyboard_surface_key() -> nickel_core::plugins::PluginSurfaceKe
     }
 }
 
+pub fn screenshot_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/screenshot/plugin.json"
+        ))
+        .expect("bundled screenshot plugin manifest must be valid")
+    })
+}
+
+pub fn screenshot_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: screenshot_manifest().id.clone(),
+        surface_id: screenshot_manifest().surfaces[0].id.clone(),
+    }
+}
+
 pub fn window_preview_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -2094,6 +2111,10 @@ pub enum PluginEffect {
         delta: i32,
         generation: u64,
     },
+    ScreenshotAction {
+        action: crate::screenshot::ToolbarAction,
+        generation: u64,
+    },
     ToggleCodexProjects,
     CodexProjectRefresh,
     CodexProjectClose,
@@ -3218,6 +3239,33 @@ impl PluginPanelApplication {
             on_screen_keyboard_manifest(),
             Some(data.to_string()),
         )
+    }
+
+    pub fn screenshot_with_data(data: &Value) -> Result<Self, String> {
+        let source = bundled_source(
+            screenshot_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/screenshot/main.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            screenshot_manifest(),
+            Some(data.to_string()),
+        )
+    }
+
+    pub fn sync_screenshot_data(&mut self, data: &Value) -> Result<bool, String> {
+        if self.manifest.id != screenshot_manifest().id {
+            return Err("this plugin is not the screenshot tool".into());
+        }
+        let serialized = data.to_string();
+        if self.projection_data.as_deref() == Some(serialized.as_str()) {
+            return Ok(false);
+        }
+        self.runtime.set_data(&serialized)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.projection_data = Some(serialized);
+        Ok(true)
     }
 
     pub fn sync_on_screen_keyboard_data(&mut self, data: &Value) -> Result<bool, String> {
@@ -4556,6 +4604,61 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 }
                                 _ => unreachable!(),
                             }
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("screenshot-action")
+                            && self.manifest.id == screenshot_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ScreenshotControl) =>
+                        {
+                            let projected = self
+                                .projection_data
+                                .as_deref()
+                                .and_then(|data| serde_json::from_str::<Value>(data).ok());
+                            let generation = effect.get("generation").and_then(Value::as_u64);
+                            let visible = projected.as_ref().is_some_and(|data| {
+                                data.get("imageAvailable").and_then(Value::as_bool) == Some(true)
+                                    || data.get("errorVisible").and_then(Value::as_bool)
+                                        == Some(true)
+                            });
+                            if !visible
+                                || generation.is_none()
+                                || generation
+                                    != projected.as_ref().and_then(|data| {
+                                        data.get("generation").and_then(Value::as_u64)
+                                    })
+                            {
+                                self.last_error = Some("screenshot request is stale".into());
+                                return;
+                            }
+                            let action = match effect.get("action").and_then(Value::as_str) {
+                                Some("copy") => crate::screenshot::ToolbarAction::Copy,
+                                Some("save") => crate::screenshot::ToolbarAction::Save,
+                                Some("temporary-path") => {
+                                    crate::screenshot::ToolbarAction::TemporaryPath
+                                }
+                                Some("cancel") => crate::screenshot::ToolbarAction::Cancel,
+                                _ => {
+                                    self.last_error = Some("unknown screenshot action".into());
+                                    return;
+                                }
+                            };
+                            if action != crate::screenshot::ToolbarAction::Cancel
+                                && projected
+                                    .as_ref()
+                                    .and_then(|data| data.get("confirmed").and_then(Value::as_bool))
+                                    != Some(true)
+                            {
+                                self.last_error =
+                                    Some("screenshot selection is not confirmed".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ScreenshotAction {
+                                action,
+                                generation: generation.unwrap(),
+                            });
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
