@@ -44,12 +44,13 @@ function App() {
     const data = nickel.data;
     const items = data.items || [];
     const tray = data.tray || [];
+    const badges = (data.slots && data.slots["task-badge"]) || [];
     return h(FixedWindow, { width: "100%", height: 56, output: "all", edge: "bottom", reserveWorkArea: true, className: "taskbar" },
         h("div", { className: "taskbar-content" },
             h(Button, { id: "taskbar-launcher", className: "launcher-button", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.request({ type: "toggle-launcher" }) }, "Nickel"),
             items.flatMap(item => [
                 h(Task, { key: item.id, item: item }),
-                ...(item.badges || []).map((badge, index) => h(Badge, { key: item.id + ":badge:" + index, label: badge.label, count: badge.count, color: badge.color }))
+                ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) => h(Badge, { key: badge.pluginId + ":" + item.id + ":" + index, label: badge.label, count: badge.count, color: badge.color }))
             ]),
             h(Spacer, { className: "taskbar-spacer" }),
             data.keyboardEnabled ? h(Button, { id: "taskbar-keyboard", className: "utility-button", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.request({ type: "toggle-on-screen-keyboard" }) }, "\u2328") : null,

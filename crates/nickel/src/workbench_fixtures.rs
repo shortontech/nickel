@@ -451,7 +451,6 @@ impl Fixture for PanelFixture {
                         active: true,
                         pinned: true,
                         icon: true,
-                        badges: Vec::new(),
                     },
                     TaskbarPluginItem {
                         index: 1,
@@ -460,7 +459,6 @@ impl Fixture for PanelFixture {
                         active: false,
                         pinned: false,
                         icon: true,
-                        badges: Vec::new(),
                     },
                 ]
             } else {

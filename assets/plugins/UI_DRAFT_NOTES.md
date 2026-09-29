@@ -33,11 +33,10 @@ every `nickel.request` against the owning plugin's capabilities.
 
 ## Missing generic UI contracts
 
-- `<Slot name="task-badge" for={item.id}>` needs a stable scope/key and a
-  fallback policy. Today's bundled taskbar receives projected `item.badges`;
-  the draft shows where those badges belong in the tree. The taskbar's
-  `task-action` slot remains in its separate context menu script, which should
-  eventually use the same generic slot contract.
+- The shipped taskbar receives badge contributions through
+  `nickel.data.slots["task-badge"]` and maps them into JSX beside each task.
+  The `task-action` slot remains in its separate context menu script and should
+  eventually use the same data-driven composition path.
 - `<Dialog>` and `<Menu>` should own child surfaces through the same generic
   surface lifecycle, with anchor IDs resolved from their parent tree. The
   launcher keeps its existing logout and app menu behavior in the draft.

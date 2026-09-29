@@ -2,6 +2,7 @@
 // The host supplies grouped tasks and performs all window and launch actions.
 function Task(props) {
     const item = props.item;
+    const badges = props.badges || [];
     const label = (item.active ? "●" : "") + (item.name.charAt(0).toUpperCase() || "?");
     const pendingDrag = useRef(0);
     const suppressClick = useRef(false);
@@ -43,11 +44,9 @@ function Task(props) {
         {label}
     </Button>
         <Row className="task-badges">
-            <Slot name="task-badge" for={item.id}>
-                {(item.badges || []).map((badge, index) =>
-                    <Badge key={item.id + ":badge:" + index} className="task-badge"
-                        label={badge.label} count={badge.count} color={badge.color} />)}
-            </Slot>
+            {badges.map((badge, index) =>
+                <Badge key={badge.pluginId + ":" + item.id + ":" + index} className="task-badge"
+                    label={badge.label} count={badge.count} color={badge.color} />)}
         </Row>
     </Column>;
 }
@@ -66,13 +65,15 @@ function App() {
     const data = nickel.data;
     const items = data.items || [];
     const tray = data.tray || [];
+    const badges = (data.slots && data.slots["task-badge"]) || [];
     return <FixedWindow className="taskbar" output="all"
         edge="bottom" width="100%" height={56} reserveWorkArea={true}>
         <Row className="taskbar-content">
             <Button id="taskbar-launcher" className="launcher-button" icon="logo" accessibilityLabel="Open Nickel Start"
                 onClick={() => nickel.request({type: "toggle-launcher"})}>Nickel</Button>
             <Row className="task-list">
-                {items.map(item => <Task key={item.id} item={item} />)}
+                {items.map(item => <Task key={item.id} item={item}
+                    badges={badges.filter(badge => badge.item === item.id).slice(0, 3)} />)}
             </Row>
             <Spacer className="taskbar-spacer" grow={1} />
             {data.keyboardEnabled ? <Button id="taskbar-keyboard" className="utility-button" accessibilityLabel="On-screen keyboard"

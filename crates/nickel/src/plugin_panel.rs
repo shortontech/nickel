@@ -712,7 +712,6 @@ pub struct TaskbarPluginItem {
     pub active: bool,
     pub pinned: bool,
     pub icon: bool,
-    pub badges: Vec<TaskbarPluginBadge>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -720,13 +719,6 @@ pub struct TaskbarPluginTrayItem {
     pub id: String,
     pub title: String,
     pub icon: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskbarPluginBadge {
-    pub label: String,
-    pub count: u16,
-    pub color: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -906,7 +898,6 @@ impl TaskbarPluginProjection {
                         active: group.active(),
                         pinned: group.pinned,
                         icon: false,
-                        badges: Vec::new(),
                     })
                 })
                 .collect(),
@@ -921,9 +912,6 @@ impl TaskbarPluginProjection {
         serde_json::json!({"items": self.items.iter().map(|item| serde_json::json!({
             "index": item.index, "id": item.id, "name": item.name,
             "active": item.active, "pinned": item.pinned, "icon": item.icon,
-            "badges": item.badges.iter().map(|badge| serde_json::json!({
-                "label": badge.label, "count": badge.count, "color": badge.color,
-            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "tray": self.tray.iter().map(|item| serde_json::json!({
             "id": item.id, "title": item.title, "icon": item.icon,
@@ -2981,7 +2969,6 @@ mod tests {
                     active: false,
                     pinned: true,
                     icon: false,
-                    badges: Vec::new(),
                 })
                 .collect(),
             tray: Vec::new(),
@@ -3057,7 +3044,6 @@ mod tests {
                     active: index == 1,
                     pinned: true,
                     icon: false,
-                    badges: Vec::new(),
                 })
                 .collect(),
             tray: vec![TaskbarPluginTrayItem {

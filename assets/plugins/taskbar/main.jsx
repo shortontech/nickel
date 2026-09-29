@@ -58,6 +58,7 @@ function App() {
     const data = nickel.data;
     const items = data.items || [];
     const tray = data.tray || [];
+    const badges = (data.slots && data.slots["task-badge"]) || [];
     return <FixedWindow width="100%" height={56} output="all" edge="bottom"
         reserveWorkArea={true} className="taskbar">
         <div className="taskbar-content">
@@ -65,8 +66,8 @@ function App() {
                 onClick={() => nickel.request({type: "toggle-launcher"})}>Nickel</Button>
             {items.flatMap(item => [
                 <Task key={item.id} item={item} />,
-                ...(item.badges || []).map((badge, index) =>
-                    <Badge key={item.id + ":badge:" + index}
+                ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) =>
+                    <Badge key={badge.pluginId + ":" + item.id + ":" + index}
                         label={badge.label} count={badge.count} color={badge.color} />)
             ])}
             <Spacer className="taskbar-spacer" />

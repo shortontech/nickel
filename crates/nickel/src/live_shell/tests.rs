@@ -211,6 +211,21 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
     );
     assert_eq!(shell.plugin_taskbar_badge_hosts.len(), 2);
 
+    shell.windows = vec![crate::model::OpenWindow {
+        id: crate::model::WindowId(71),
+        application_id: Some(crate::model::ApplicationId::new("org.example.mail")),
+        active: true,
+        title: "Mail".into(),
+        state: crate::model::WindowState::default(),
+    }];
+    let (live_data, _) = shell.taskbar_plugin_render_data("12:00");
+    let live_data: serde_json::Value = serde_json::from_str(&live_data).unwrap();
+    assert_eq!(
+        live_data["slots"]["task-badge"][0]["item"],
+        "org.example.mail"
+    );
+    assert_eq!(live_data["slots"]["task-badge"][0]["count"], 2);
+
     let mut projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(&[], "12:00");
     projection
         .items
@@ -221,22 +236,22 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             active: false,
             pinned: true,
             icon: false,
-            badges: Vec::new(),
         });
-    super::compose_taskbar_badges(&mut projection, &shell.plugin_taskbar_badge_hosts);
+    let badges = super::compose_badge_slot(&projection.items, &shell.plugin_taskbar_badge_hosts);
     assert_eq!(
-        projection.items[0]
-            .badges
+        badges
             .iter()
-            .map(|badge| badge.count)
+            .map(|badge| badge["count"].as_u64().unwrap())
             .collect::<Vec<_>>(),
         [2, 7]
     );
+    let mut taskbar_data: serde_json::Value = serde_json::from_str(&projection.to_json()).unwrap();
+    taskbar_data["slots"] = serde_json::json!({"task-badge": badges});
     let host = UiHost::new(
         crate::plugin_panel::PluginPanelApplication::bundled_with_data(
             crate::plugin_panel::taskbar_manifest(),
             "main.js",
-            projection.to_json(),
+            taskbar_data.to_string(),
         )
         .unwrap(),
         800,
@@ -281,39 +296,35 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .composition[0]
             .contains("superseded")
     );
-    let mut replaced = projection.clone();
-    super::compose_taskbar_badges(&mut replaced, &shell.plugin_taskbar_badge_hosts);
+    let replaced = super::compose_badge_slot(&projection.items, &shell.plugin_taskbar_badge_hosts);
     assert_eq!(
-        replaced.items[0]
-            .badges
+        replaced
             .iter()
-            .map(|badge| badge.count)
+            .map(|badge| badge["count"].as_u64().unwrap())
             .collect::<Vec<_>>(),
         [23, 2, 7]
     );
     shell
         .set_plugin_enabled("org.example.replace-tie", false)
         .unwrap();
-    let mut high_priority = projection.clone();
-    super::compose_taskbar_badges(&mut high_priority, &shell.plugin_taskbar_badge_hosts);
+    let high_priority =
+        super::compose_badge_slot(&projection.items, &shell.plugin_taskbar_badge_hosts);
     assert_eq!(
-        high_priority.items[0]
-            .badges
+        high_priority
             .iter()
-            .map(|badge| badge.count)
+            .map(|badge| badge["count"].as_u64().unwrap())
             .collect::<Vec<_>>(),
         [19, 2, 7]
     );
     shell
         .set_plugin_enabled("org.example.replace-high", false)
         .unwrap();
-    let mut lower_priority = projection.clone();
-    super::compose_taskbar_badges(&mut lower_priority, &shell.plugin_taskbar_badge_hosts);
+    let lower_priority =
+        super::compose_badge_slot(&projection.items, &shell.plugin_taskbar_badge_hosts);
     assert_eq!(
-        lower_priority.items[0]
-            .badges
+        lower_priority
             .iter()
-            .map(|badge| badge.count)
+            .map(|badge| badge["count"].as_u64().unwrap())
             .collect::<Vec<_>>(),
         [11, 2, 7]
     );

@@ -20,6 +20,9 @@ groups and the visible tray before acting. The JSX task buttons use Nickel's
 captured pointer drag events to request a one-step pin move. Rust checks the
 current pinned item ID and position before persisting it. Full visual parity
 remains in the migration queue.
+
+`task-badge` contributions arrive in `nickel.data.slots["task-badge"]`; the JSX
+view chooses which task receives each badge and limits visible badges to three.
 Right-clicking a task now requests its host-owned application menu through a
 separate `windows-context` capability. The host checks the current group ID
 and index before showing the menu.

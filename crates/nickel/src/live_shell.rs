@@ -901,8 +901,8 @@ fn external_plugin_settings(
     Ok(stored.effective(manifest))
 }
 
-fn compose_taskbar_badges(
-    projection: &mut crate::plugin_panel::TaskbarPluginProjection,
+fn compose_badge_slot(
+    items: &[crate::plugin_panel::TaskbarPluginItem],
     extensions: &std::collections::BTreeMap<
         String,
         (
@@ -911,7 +911,7 @@ fn compose_taskbar_badges(
             crate::plugin_panel::PluginPanelApplication,
         ),
     >,
-) {
+) -> Vec<serde_json::Value> {
     use nickel_core::plugins::PluginContributionMode;
     let mut ordered = extensions.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
@@ -919,36 +919,38 @@ fn compose_taskbar_badges(
         .iter()
         .rev()
         .find(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace);
-    if let Some((_, (_, _, application))) = replacement {
-        for item in &mut projection.items {
-            item.badges.clear();
-        }
-        append_taskbar_badges(projection, application);
+    let mut badges = Vec::new();
+    if let Some((id, (_, _, application))) = replacement {
+        append_badge_slot(&mut badges, items, id, application);
     }
-    for (_, (_, mode, application)) in ordered {
+    for (id, (_, mode, application)) in ordered {
         if *mode == PluginContributionMode::Add {
-            append_taskbar_badges(projection, application);
+            append_badge_slot(&mut badges, items, id, application);
         }
     }
+    badges
 }
 
-fn append_taskbar_badges(
-    projection: &mut crate::plugin_panel::TaskbarPluginProjection,
+fn append_badge_slot(
+    badges: &mut Vec<serde_json::Value>,
+    items: &[crate::plugin_panel::TaskbarPluginItem],
+    plugin_id: &str,
     application: &crate::plugin_panel::PluginPanelApplication,
 ) {
-    if let Ok(badges) = application.taskbar_badges() {
-        for (item_id, label, count, color) in badges {
-            if count == 0 {
-                continue;
-            }
-            if let Some(item) = projection.items.iter_mut().find(|item| item.id == item_id)
-                && item.badges.len() < 3
+    if let Ok(contributions) = application.taskbar_badges() {
+        for (item, label, count, color) in contributions {
+            if count > 0
+                && items.iter().any(|candidate| candidate.id == item)
+                && badges
+                    .iter()
+                    .filter(|badge| badge["item"].as_str() == Some(item.as_str()))
+                    .count()
+                    < 3
             {
-                item.badges.push(crate::plugin_panel::TaskbarPluginBadge {
-                    label,
-                    count,
-                    color,
-                });
+                badges.push(serde_json::json!({
+                    "pluginId": plugin_id, "item": item, "label": label,
+                    "count": count, "color": color,
+                }));
             }
         }
     }
@@ -5061,11 +5063,11 @@ impl LiveShell {
             self.panel_pet_frame = 0;
             self.panel_pet_deadline = None;
             let (clock, _) = panel_clock_text();
-            let (projection, images) = self.taskbar_plugin_projection(&clock);
+            let (data, images) = self.taskbar_plugin_render_data(&clock);
             crate::plugin_panel::PluginPanelApplication::bundled_with_data(
                 crate::plugin_panel::taskbar_manifest(),
                 "main.js",
-                projection.to_json(),
+                data,
             )
             .map(|mut application| {
                 application.sync_images(images);
@@ -7386,11 +7388,11 @@ impl LiveShell {
                 .remove(&self.panel_output)
                 .or_else(|| {
                     let (clock, _) = panel_clock_text();
-                    let (projection, images) = self.taskbar_plugin_projection(&clock);
+                    let (data, images) = self.taskbar_plugin_render_data(&clock);
                     match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
                         crate::plugin_panel::taskbar_manifest(),
                         "main.js",
-                        projection.to_json(),
+                        data,
                     ) {
                         Ok(mut application) => {
                             application.sync_images(images);
@@ -10961,14 +10963,10 @@ impl LiveShell {
             _ => false,
         });
         let (clock, _) = panel_clock_text();
-        let (mut projection, images) = self.taskbar_plugin_projection(&clock);
-        compose_taskbar_badges(&mut projection, &self.plugin_taskbar_badge_hosts);
+        let (data, images) = self.taskbar_plugin_render_data(&clock);
         let host = self.plugin_taskbar_host.as_mut()?;
         let image_changed = host.application_mut().sync_images(images);
-        let projection_changed = match host
-            .application_mut()
-            .sync_serialized_data(projection.to_json())
-        {
+        let projection_changed = match host.application_mut().sync_serialized_data(data) {
             Ok(changed) => changed,
             Err(error) => {
                 self.fail_taskbar_plugin_runtime(error);
@@ -11164,6 +11162,19 @@ impl LiveShell {
             },
             clock,
         )
+    }
+
+    fn taskbar_plugin_render_data(
+        &mut self,
+        clock: &str,
+    ) -> (String, crate::plugin_panel::PluginImages) {
+        let (projection, images) = self.taskbar_plugin_projection(clock);
+        let mut data: serde_json::Value =
+            serde_json::from_str(&projection.to_json()).expect("taskbar projection produces JSON");
+        data["slots"] = serde_json::json!({
+            "task-badge": compose_badge_slot(&projection.items, &self.plugin_taskbar_badge_hosts),
+        });
+        (data.to_string(), images)
     }
 }
 
