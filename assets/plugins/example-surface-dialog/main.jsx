@@ -1,7 +1,8 @@
 // @jsx h
 function App() {
     const dialog = nickel.data.surface.id === "confirm";
-    return <Panel height={dialog ? 180 : 280} background={0xff202830}>
+    return <Window width={dialog ? 360 : 420} height={dialog ? 180 : 280}
+        className="example-dialog-window" background={0xff202830}>
         {dialog
             ? <Column>
                 <Text>This is a separate plugin dialog.</Text>
@@ -22,5 +23,5 @@ function App() {
                     surfaceId: "home",
                 })}>Close home</Button>
             </Column>}
-    </Panel>;
+    </Window>;
 }

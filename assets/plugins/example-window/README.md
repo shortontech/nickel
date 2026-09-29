@@ -1,7 +1,8 @@
 # Component window example
 
 This installed plugin declares a centered native `window` surface and renders
-its content with JSX. Its button opens a component dialog, whose action asks
+its content from a JSX `<Window>` root styled by `ui.css`. Its button opens a
+component dialog, whose action asks
 the host to open Nickel Settings under the `settings-show` grant.
 The manifest also declares `icon.png` as `nickel-icon`; JSX displays it with
 `<Image asset="nickel-icon" />`. Nickel decodes and renders the file in the

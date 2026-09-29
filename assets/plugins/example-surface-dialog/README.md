@@ -1,7 +1,8 @@
 # Separate dialog surface
 
 This package declares an ordinary window and a dialog. Enabling it creates the
-window only. Its button requests `show-plugin-surface` for the declared dialog;
+window only. Both surfaces render through the same JSX `<Window>` component and
+`ui.css`. Its button requests `show-plugin-surface` for the declared dialog;
 the dialog's own button requests `hide-plugin-surface` to retire it. The other
 button requests `show-settings` under the declared grant.
 The dialog declares `home` as its owner. Closing that window retires the dialog;

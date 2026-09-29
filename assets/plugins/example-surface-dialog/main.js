@@ -1,7 +1,7 @@
 // @jsx h
 function App() {
     const dialog = nickel.data.surface.id === "confirm";
-    return h(Panel, { height: dialog ? 180 : 280, background: 0xff202830 }, dialog
+    return h(Window, { width: dialog ? 360 : 420, height: dialog ? 180 : 280, className: "example-dialog-window", background: 0xff202830 }, dialog
         ? h(Column, null,
             h(Text, null, "This is a separate plugin dialog."),
             h(Button, { id: "open-settings", onClick: () => nickel.request({ type: "show-settings" }) }, "Open Settings"),

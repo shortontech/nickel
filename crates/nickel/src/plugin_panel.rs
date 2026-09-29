@@ -4848,6 +4848,13 @@ mod tests {
             520,
             340,
         );
+        assert!(matches!(
+            host.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
         let open = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -4996,6 +5003,13 @@ mod tests {
             home.width,
             home.height,
         );
+        assert!(matches!(
+            home.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
         let open = home
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -5022,6 +5036,13 @@ mod tests {
             dialog.width,
             dialog.height,
         );
+        assert!(matches!(
+            dialog.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
         let dismiss = dialog
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -5070,6 +5091,13 @@ mod tests {
             home.width,
             home.height,
         );
+        assert!(matches!(
+            home.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
         let show = home
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -5096,6 +5124,20 @@ mod tests {
             overlay.width,
             overlay.height,
         );
+        assert!(matches!(
+            overlay.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
+        assert!(overlay.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill {
+                color: 0xb0202830,
+                ..
+            }
+        )));
         let hide = overlay
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,

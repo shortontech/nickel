@@ -1,7 +1,7 @@
 // @jsx h
 function App() {
     const [open, setOpen] = useState(false);
-    return h(Panel, { height: 340, background: 0xff202830 },
+    return h(Window, { title: "Window plugin", width: 520, height: 340, className: "example-window", background: 0xff202830 },
         h(Box, { x: 0, y: 0, width: 504, height: 324, background: 0xff202830 },
             h(Column, null,
                 h(Text, null, "Window plugin"),

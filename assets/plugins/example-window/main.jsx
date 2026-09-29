@@ -1,7 +1,8 @@
 // @jsx h
 function App() {
     const [open, setOpen] = useState(false);
-    return <Panel height={340} background={0xff202830}>
+    return <Window title="Window plugin" width={520} height={340}
+        className="example-window" background={0xff202830}>
         <Box x={0} y={0} width={504} height={324} background={0xff202830}>
             <Column>
                 <Text>Window plugin</Text>
@@ -25,5 +26,5 @@ function App() {
                 </Row>
             </Column>
         </Dialog>
-    </Panel>;
+    </Window>;
 }
