@@ -304,6 +304,9 @@ Plugins granted `applications-read` receive up to 256 entries in
 state. `applications-launch` permits
 `nickel.request({ type: "applications.launch", id })`; Nickel resolves the ID
 against the current application catalog before launching it.
+`applications-pin` permits
+`nickel.request({ type: "applications.togglePin", id })` for a current
+catalog entry, a running application, or an already pinned application.
 Plugins granted `notifications-read` receive `nickel.data.notifications` with
 the current ordinary notification, up to 12 history entries, and
 `historyVisible`. Items include an ID, app name, summary, body, and bounded

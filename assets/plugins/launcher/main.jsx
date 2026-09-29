@@ -33,7 +33,7 @@ function App() {
                     {place.name}
                 </Button>
                 <Button id={"launcher-pin-place-" + place.index} className="launcher-pin-button"
-                    onClick={() => nickel.request({type: "launcher-toggle-pin", id: place.id})}>
+                    onClick={() => nickel.request({type: "applications.togglePin", id: place.id})}>
                     {place.pinned ? "Unpin" : "Pin"}
                 </Button>
             </Row>)}
@@ -74,7 +74,7 @@ function App() {
                 <Text className="launcher-app-name" wrap={true}>{app.name}</Text>
                 <Button id={"launcher-pin-dashboard-" + app.index} className="launcher-card-pin"
                     accessibilityLabel={(app.pinned ? "Unpin " : "Pin ") + app.name}
-                    onClick={() => nickel.request({type: "launcher-toggle-pin", id: app.id})}>
+                    onClick={() => nickel.request({type: "applications.togglePin", id: app.id})}>
                     {app.pinned ? "Unpin" : "Pin"}
                 </Button>
             </div>)}
@@ -112,7 +112,7 @@ function App() {
                 </Button>
                 <Button id={"launcher-pin-result-" + result.index} className="launcher-pin-button"
                     accessibilityLabel={(result.pinned ? "Unpin " : "Pin ") + result.name}
-                    onClick={() => nickel.request({type: "launcher-toggle-pin", id: result.id})}>
+                    onClick={() => nickel.request({type: "applications.togglePin", id: result.id})}>
                     {result.pinned ? "Unpin" : "Pin"}
                 </Button>
             </Row>)}
@@ -144,7 +144,7 @@ function App() {
                     nickel.request({type: "applications.launch", id: menuTarget.id});
                 }
             }}>Launch</MenuItem>
-            <MenuItem id="toggle-pin" onClick={() => nickel.request({type: "launcher-toggle-pin", id: menuTarget.id})}>
+            <MenuItem id="toggle-pin" onClick={() => nickel.request({type: "applications.togglePin", id: menuTarget.id})}>
                 {menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"}
             </MenuItem>
             {data.pinSaveFailed ? <MenuItem id="retry-pin-save" onClick={() => nickel.request({type: "applications-retry-pin-save"})}>

@@ -951,7 +951,7 @@ mod tests {
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
         assert_eq!(
             host.application_mut().take_effects(),
-            vec![crate::plugin_panel::PluginEffect::ToggleLauncherPin {
+            vec![crate::plugin_panel::PluginEffect::ToggleApplicationPin {
                 id: "firefox".into(),
             }]
         );

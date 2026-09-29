@@ -6259,12 +6259,6 @@ impl LiveShell {
                         changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::ToggleTaskbarMenuPin { id } => {
-                    self.apply_application_menu_action(ApplicationMenuAction::TogglePin(
-                        crate::model::ApplicationId::new(id),
-                    ));
-                    changed = true;
-                }
                 crate::plugin_panel::PluginEffect::CloseTaskbarMenuWindows => {
                     self.apply_application_menu_action(ApplicationMenuAction::CloseAll);
                     changed = true;
@@ -6495,13 +6489,30 @@ impl LiveShell {
                         changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::ToggleLauncherPin { id } => {
-                    if self
-                        .launcher
-                        .applications()
-                        .any(|application| application.id() == id)
+                crate::plugin_panel::PluginEffect::ToggleApplicationPin { id } => {
+                    if self.launcher.is_pinned(&id)
+                        || self
+                            .launcher
+                            .applications()
+                            .any(|application| application.id() == id)
+                        || self.windows.iter().any(|window| {
+                            window
+                                .application_id
+                                .as_ref()
+                                .is_some_and(|application| application.as_str() == id)
+                        })
                     {
+                        let dismiss_menu =
+                            self.application_menu_target.as_ref().is_some_and(|target| {
+                                target
+                                    .application_id
+                                    .as_ref()
+                                    .is_some_and(|application| application.as_str() == id)
+                            });
                         self.apply_launcher_action(LauncherAction::TogglePin(id));
+                        if dismiss_menu {
+                            self.dismiss_window_menu();
+                        }
                         changed = true;
                     }
                 }

@@ -25,7 +25,7 @@ function App() {
                 h(Text, { className: "launcher-section" }, "Places"),
                 data.places.map(place => h(Row, { key: place.id, className: "launcher-app-row" },
                     h(Button, { id: "launcher-place-" + place.index, className: "launcher-app-button", icon: "place:" + place.index, showLabel: true, onContextMenu: () => openAppMenu(place, "dashboard", "launcher-place-" + place.index), onClick: () => nickel.request({ type: "applications.launch", id: place.id }) }, place.name),
-                    h(Button, { id: "launcher-pin-place-" + place.index, className: "launcher-pin-button", onClick: () => nickel.request({ type: "launcher-toggle-pin", id: place.id }) }, place.pinned ? "Unpin" : "Pin"))),
+                    h(Button, { id: "launcher-pin-place-" + place.index, className: "launcher-pin-button", onClick: () => nickel.request({ type: "applications.togglePin", id: place.id }) }, place.pinned ? "Unpin" : "Pin"))),
                 data.codexAvailable ? h(Column, { className: "launcher-projects" },
                     h(Text, { className: "launcher-section" }, "Recent projects"),
                     data.projects.map(project => h(Button, { key: project.id, id: "launcher-project-" + project.id, className: "launcher-app-button", onClick: () => nickel.request({ type: "launcher-open-project", id: project.id }) }, project.name)),
@@ -39,7 +39,7 @@ function App() {
                 h("div", { className: "launcher-app-grid" }, data.dashboard.map(app => h("div", { key: app.id, className: "launcher-app-card" },
                     h(Button, { id: "launcher-dashboard-" + app.index, className: "launcher-icon-button", icon: "dashboard:" + app.index, accessibilityLabel: app.name, onContextMenu: () => openAppMenu(app, "dashboard", "launcher-dashboard-" + app.index), onClick: () => nickel.request({ type: "applications.launch", id: app.id }) }, app.name.charAt(0).toUpperCase()),
                     h(Text, { className: "launcher-app-name", wrap: true }, app.name),
-                    h(Button, { id: "launcher-pin-dashboard-" + app.index, className: "launcher-card-pin", accessibilityLabel: (app.pinned ? "Unpin " : "Pin ") + app.name, onClick: () => nickel.request({ type: "launcher-toggle-pin", id: app.id }) }, app.pinned ? "Unpin" : "Pin")))),
+                    h(Button, { id: "launcher-pin-dashboard-" + app.index, className: "launcher-card-pin", accessibilityLabel: (app.pinned ? "Unpin " : "Pin ") + app.name, onClick: () => nickel.request({ type: "applications.togglePin", id: app.id }) }, app.pinned ? "Unpin" : "Pin")))),
                 data.dashboardPageCount > 1 ? h(Row, null,
                     data.dashboardPage > 0 ? h(Button, { id: "launcher-dashboard-previous", onClick: () => nickel.request({ type: "launcher-set-page", view: "dashboard", page: data.dashboardPage - 1 }) }, "Previous") : null,
                     h(Text, null, "Page " + (data.dashboardPage + 1) + " of " + data.dashboardPageCount),
@@ -55,7 +55,7 @@ function App() {
                     data.results.length === 0 ? h(Text, null, "No applications found") : null,
                     data.results.map(result => h(Row, { key: result.id, className: "launcher-app-row" },
                         h(Button, { id: "launcher-result-" + result.index, className: "launcher-app-button", icon: "search:" + result.index, showLabel: true, onContextMenu: () => openAppMenu(result, "search", "launcher-result-" + result.index), onClick: () => nickel.request({ type: "launcher-activate-result", index: result.index, id: result.id }) }, result.name),
-                        h(Button, { id: "launcher-pin-result-" + result.index, className: "launcher-pin-button", accessibilityLabel: (result.pinned ? "Unpin " : "Pin ") + result.name, onClick: () => nickel.request({ type: "launcher-toggle-pin", id: result.id }) }, result.pinned ? "Unpin" : "Pin"))),
+                        h(Button, { id: "launcher-pin-result-" + result.index, className: "launcher-pin-button", accessibilityLabel: (result.pinned ? "Unpin " : "Pin ") + result.name, onClick: () => nickel.request({ type: "applications.togglePin", id: result.id }) }, result.pinned ? "Unpin" : "Pin"))),
                     data.resultPageCount > 1 ? h(Row, null,
                         data.resultPage > 0 ? h(Button, { id: "launcher-search-previous", onClick: () => nickel.request({ type: "launcher-set-page", view: "search", page: data.resultPage - 1 }) }, "Previous") : null,
                         h(Text, null, "Page " + (data.resultPage + 1) + " of " + data.resultPageCount),
@@ -77,6 +77,6 @@ function App() {
                             nickel.request({ type: "applications.launch", id: menuTarget.id });
                         }
                     } }, "Launch"),
-                h(MenuItem, { id: "toggle-pin", onClick: () => nickel.request({ type: "launcher-toggle-pin", id: menuTarget.id }) }, menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"),
+                h(MenuItem, { id: "toggle-pin", onClick: () => nickel.request({ type: "applications.togglePin", id: menuTarget.id }) }, menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"),
                 data.pinSaveFailed ? h(MenuItem, { id: "retry-pin-save", onClick: () => nickel.request({ type: "applications-retry-pin-save" }) }, "Retry saving favorites") : null) : null));
 }

@@ -443,7 +443,7 @@ pub enum PluginEffect {
         id: String,
     },
     SetLauncherView(LauncherView),
-    ToggleLauncherPin {
+    ToggleApplicationPin {
         id: String,
     },
     RetryApplicationPinSave,
@@ -465,9 +465,6 @@ pub enum PluginEffect {
         index: usize,
         id: String,
         direction: i8,
-    },
-    ToggleTaskbarMenuPin {
-        id: String,
     },
     CloseTaskbarMenuWindows,
     InvokeTaskbarExtensionAction {
@@ -2117,26 +2114,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::ContextTrayItem { id: id.to_owned() });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-menu-toggle-pin")
-                            && self.manifest.id == taskbar_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::ApplicationsPin) =>
-                        {
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error =
-                                    Some("taskbar menu application ID is missing".into());
-                                return;
-                            };
-                            if id.is_empty() || id.len() > 256 {
-                                self.last_error =
-                                    Some("taskbar menu application ID is invalid".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::ToggleTaskbarMenuPin { id: id.to_owned() });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-menu-close-all")
                             && self.manifest.id == taskbar_manifest().id
                             && self
@@ -2643,7 +2620,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::SetLauncherView(view));
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-toggle-pin")
+                            == Some("applications.togglePin")
                             && self
                                 .manifest
                                 .capabilities
@@ -2657,7 +2634,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 self.last_error = Some("pinned application ID is invalid".into());
                                 return;
                             }
-                            approved.push(PluginEffect::ToggleLauncherPin { id: id.to_owned() });
+                            approved.push(PluginEffect::ToggleApplicationPin { id: id.to_owned() });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("applications-retry-pin-save")
@@ -5471,9 +5448,9 @@ mod tests {
             ),
             (
                 "pin",
-                "{type: 'launcher-toggle-pin', id: 'org.example.app'}",
+                "{type: 'applications.togglePin', id: 'org.example.app'}",
                 PluginCapability::ApplicationsPin,
-                PluginEffect::ToggleLauncherPin {
+                PluginEffect::ToggleApplicationPin {
                     id: "org.example.app".into(),
                 },
             ),

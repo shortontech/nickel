@@ -1861,7 +1861,7 @@
     }
 
     #[test]
-    fn granted_plugin_can_pin_catalog_app_outside_launcher_page() {
+    fn granted_plugin_can_pin_catalog_app_and_unpin_unavailable_app() {
         let directory = tempfile::tempdir().expect("temporary preferences directory");
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::default();
@@ -1870,18 +1870,27 @@
         assert!(shell.current_plugin_launcher_projection().results.is_empty());
 
         assert!(shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::ToggleLauncherPin {
+            crate::plugin_panel::PluginEffect::ToggleApplicationPin {
                 id: "firefox".into(),
             }
         ]));
         assert!(shell.launcher.is_pinned("firefox"));
         assert_eq!(shell.launcher_persistence_attempts, 1);
         assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::ToggleLauncherPin {
+            crate::plugin_panel::PluginEffect::ToggleApplicationPin {
                 id: "org.example.missing".into(),
             }
         ]));
         assert_eq!(shell.launcher_persistence_attempts, 1);
+
+        shell.launcher.toggle_pin("org.example.unavailable");
+        assert!(shell.launcher.is_pinned("org.example.unavailable"));
+        assert!(shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::ToggleApplicationPin {
+                id: "org.example.unavailable".into(),
+            }
+        ]));
+        assert!(!shell.launcher.is_pinned("org.example.unavailable"));
     }
 
     #[test]
