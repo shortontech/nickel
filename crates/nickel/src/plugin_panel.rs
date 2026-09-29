@@ -2216,8 +2216,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("preview-action")
-                            && self.manifest.id == window_preview_manifest().id =>
+                            == Some("preview-action") =>
                         {
                             match preview_request(&effect) {
                                 Ok((action, capability))
@@ -2272,8 +2271,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("control-action")
-                            && self.manifest.id == control_center_manifest().id =>
+                            == Some("control-action") =>
                         {
                             match control_request(&effect) {
                                 Ok((action, capability))
@@ -4854,6 +4852,41 @@ mod tests {
             let mut granted = PluginPanelApplication::from_package(&package).unwrap();
             granted.shortcut_outcome(Shortcut::Escape);
             assert_eq!(granted.take_effects(), vec![expected], "{action}");
+        }
+    }
+
+    #[test]
+    fn external_preview_and_control_actions_use_grants_instead_of_plugin_identity() {
+        for (request, capability, expected) in [
+            (
+                "{type: 'preview-action', action: 'activate', window: '71'}",
+                PluginCapability::WindowsFocus,
+                PluginEffect::Preview(PreviewAction::Activate(crate::model::WindowId(71))),
+            ),
+            (
+                "{type: 'control-action', action: 'audio-volume', value: 25}",
+                PluginCapability::AudioControl,
+                PluginEffect::Control(ControlAction::SetAudioVolume(25)),
+            ),
+        ] {
+            let mut external_manifest = manifest().clone();
+            external_manifest.id = "org.example.desktop-controls".into();
+            external_manifest.capabilities.clear();
+            let mut package = PluginPackage {
+                manifest: external_manifest,
+                images: Default::default(),
+                stylesheet: String::new(),
+                source: format!(
+                    "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%', onEscape: () => nickel.request({request})}}); }}"
+                ),
+            };
+            let mut denied = PluginPanelApplication::from_package(&package).unwrap();
+            denied.shortcut_outcome(Shortcut::Escape);
+            assert!(denied.take_effects().is_empty());
+            package.manifest.capabilities.push(capability);
+            let mut granted = PluginPanelApplication::from_package(&package).unwrap();
+            granted.shortcut_outcome(Shortcut::Escape);
+            assert_eq!(granted.take_effects(), vec![expected]);
         }
     }
 

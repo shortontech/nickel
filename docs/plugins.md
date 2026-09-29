@@ -294,6 +294,15 @@ Each window has a string `id`, title, application ID, active state, and
 `{ type: "window-action", action: "activate", window: id }`; `windows-context`
 permits `action: "close"`. Nickel checks the current window and its capability
 again when handling the request.
+Any plugin granted `windows-focus` or `windows-context` can request
+`{ type: "preview-action", action: "activate" | "close" | "menu", window: id }`
+for a window in the currently open preview. `activate` requires `windows-focus`;
+the other actions require `windows-context`. Nickel checks the live preview
+and window before applying it. Similarly, `control-action` requests use the
+capability for the selected service, such as `audio-control` for
+`{ type: "control-action", action: "audio-volume", value: 25 }`. These actions
+currently require the bundled Control Center to be open and remain subject to
+its live service checks. Neither request depends on the caller's plugin ID.
 `Dialog` accepts `onClose`, called when the host dismisses an open dialog by
 Escape, outside input, or focus loss. The handler should clear the state that
 controls `open`; dialog buttons may still update state and request typed effects.
