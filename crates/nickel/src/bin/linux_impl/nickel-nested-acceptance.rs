@@ -797,6 +797,11 @@ fn verify_codex_project_plugin_retires(
         })
     };
     let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if surfaces.lines().any(|line| {
+        line.starts_with("CodexProjectMenu\t") || line.starts_with("ProjectMenu\t")
+    }) {
+        return Err(format!("retired Codex menu surface is still present: {surfaces}"));
+    }
     if !surface_present(&surfaces) {
         return Err(format!("Codex project plugin surface is missing: {surfaces}"));
     }

@@ -1,14 +1,12 @@
 use super::{
     apply_internal_plugin_surface_placement, avoid_trusted_control_collision,
-    internal_codex_chat_placement, internal_codex_project_menu_placement,
-    internal_shell_surface_placement, place_reserved_plugin_panel,
+    internal_codex_chat_placement, internal_shell_surface_placement, place_reserved_plugin_panel,
 };
 use crate::{
     internal_shell::InternalOutput,
     winit_shell::{PanelEdge, SurfaceRole},
 };
 use nickel_core::plugins::{PluginSurfaceAnchor, PluginSurfaceKind};
-use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 
 fn outputs() -> Vec<(InternalOutput, i32, i32)> {
     vec![
@@ -1468,58 +1466,6 @@ fn switching_active_output_relocates_one_launcher_to_negative_origin() {
     assert_eq!(left.output.as_deref(), Some("left"));
     assert_eq!(left.geometry, (-1902, 176, 960, 720));
     assert_ne!(right.geometry, left.geometry);
-}
-
-#[test]
-fn codex_menu_uses_clicked_panel_output_global_coordinates() {
-    let anchor = ShellPopoverAnchor {
-        control: "panel-codex".into(),
-        output: "right".into(),
-        bounds: Geometry {
-            x: 2200,
-            y: 1392,
-            width: 48,
-            height: 48,
-        },
-        preferred: AnchorSide::Above,
-    };
-
-    let placement = internal_codex_project_menu_placement(Some(&anchor), &outputs(), Some("left"));
-
-    assert_eq!(placement.output.as_deref(), Some("right"));
-    assert_eq!(placement.origin, (1964, 936));
-    assert_eq!(placement.scale, 1.0);
-}
-
-#[test]
-fn codex_menu_fallback_includes_negative_output_origin() {
-    let placement = internal_codex_project_menu_placement(None, &outputs(), Some("left"));
-
-    assert_eq!(placement.output.as_deref(), Some("left"));
-    assert_eq!(placement.origin, (-1920, 216));
-}
-
-#[test]
-fn codex_menu_fits_a_nested_960_by_600_output_above_the_panel() {
-    let outputs = vec![(
-        crate::internal_shell::InternalOutput {
-            name: "nested".into(),
-            width: 960,
-            height: 600,
-            scale: 1.0,
-            x: 0,
-            y: 0,
-        },
-        0,
-        0,
-    )];
-    let placement = internal_codex_project_menu_placement(None, &outputs, None);
-    let (width, height) = placement.menu_size.expect("sized menu");
-    assert_eq!((width, height), (520, 528));
-    assert!(placement.origin.0 >= 0);
-    assert!(placement.origin.0 + width as i32 <= 960);
-    assert!(placement.origin.1 >= 0);
-    assert!(placement.origin.1 + height as i32 <= 544);
 }
 
 #[test]

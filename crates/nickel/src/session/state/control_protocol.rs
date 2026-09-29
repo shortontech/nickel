@@ -2533,45 +2533,25 @@ impl NickelSession {
                         }
                         crate::winit_shell::SurfaceRole::CodexChat => return None,
                     };
-                    // The Codex menu is hosted by InternalUiRuntime. The shell
-                    // coordinator's role slot is only a visibility placeholder.
-                    let geometry = if surface.role
-                        == crate::winit_shell::SurfaceRole::CodexProjectMenu
-                    {
-                        self.internal_codex
-                            .as_ref()
-                            .and_then(crate::internal_codex::InternalCodexHost::project_menu)
-                            .filter(|id| self.internal_ui.is_visible(*id))
-                            .and_then(|id| self.internal_ui.placement(id))
-                            .map(|placement| ProtocolGeometry {
-                                x: placement.geometry.0,
-                                y: placement.geometry.1,
-                                width: i32::try_from(placement.geometry.2).unwrap_or(i32::MAX),
-                                height: i32::try_from(placement.geometry.3).unwrap_or(i32::MAX),
-                            })
-                    } else {
-                        shell.visible(surface.id).then(|| {
-                            self.internal_shell_surfaces
-                                .get(&surface.id)
-                                .and_then(|runtime| self.internal_ui.placement(*runtime))
-                                .map_or(
-                                    ProtocolGeometry {
-                                        x: 0,
-                                        y: 0,
-                                        width: i32::try_from(surface.size.0).unwrap_or(i32::MAX),
-                                        height: i32::try_from(surface.size.1).unwrap_or(i32::MAX),
-                                    },
-                                    |placement| ProtocolGeometry {
-                                        x: placement.geometry.0,
-                                        y: placement.geometry.1,
-                                        width: i32::try_from(placement.geometry.2)
-                                            .unwrap_or(i32::MAX),
-                                        height: i32::try_from(placement.geometry.3)
-                                            .unwrap_or(i32::MAX),
-                                    },
-                                )
-                        })
-                    };
+                    let geometry = shell.visible(surface.id).then(|| {
+                        self.internal_shell_surfaces
+                            .get(&surface.id)
+                            .and_then(|runtime| self.internal_ui.placement(*runtime))
+                            .map_or(
+                                ProtocolGeometry {
+                                    x: 0,
+                                    y: 0,
+                                    width: i32::try_from(surface.size.0).unwrap_or(i32::MAX),
+                                    height: i32::try_from(surface.size.1).unwrap_or(i32::MAX),
+                                },
+                                |placement| ProtocolGeometry {
+                                    x: placement.geometry.0,
+                                    y: placement.geometry.1,
+                                    width: i32::try_from(placement.geometry.2).unwrap_or(i32::MAX),
+                                    height: i32::try_from(placement.geometry.3).unwrap_or(i32::MAX),
+                                },
+                            )
+                    });
                     Some(ShellSurfaceSnapshot {
                         role,
                         geometry,

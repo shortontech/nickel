@@ -345,7 +345,6 @@ impl InternalShellCoordinator {
                 SurfaceRole::VolumeOsd,
                 SurfaceRole::WindowPreview,
                 SurfaceRole::WindowContextMenu,
-                SurfaceRole::CodexProjectMenu,
                 SurfaceRole::Screenshot,
                 SurfaceRole::OnScreenKeyboard,
             ] {
@@ -2989,6 +2988,10 @@ mod tests {
             .surface(SurfaceRole::ControlCenter, None)
             .unwrap()
             .id;
+        let plugin_control = coordinator
+            .plugin_surface(&crate::plugin_panel::control_center_surface_key(), "nested")
+            .unwrap()
+            .id;
         let osd = coordinator
             .surface(SurfaceRole::VolumeOsd, None)
             .unwrap()
@@ -3010,7 +3013,7 @@ mod tests {
             muted: true,
         });
         let changes = coordinator.apply_system_status_update(audio.clone());
-        assert_eq!(changes, vec![control, osd]);
+        assert_eq!(changes, vec![plugin_control, control, osd]);
         for id in changes {
             coordinator.scene(id);
         }
@@ -3026,7 +3029,7 @@ mod tests {
             });
         assert_eq!(
             coordinator.apply_system_status_update(network.clone()),
-            vec![control]
+            vec![plugin_control, control]
         );
         assert!(coordinator.apply_system_status_update(network).is_empty());
         assert_eq!(

@@ -5236,16 +5236,11 @@ impl NickelSession {
         self.internal_shell = Some(shell);
         self.reconcile_internal_shell_outputs();
         if codex_enabled {
-            let outputs = self.internal_outputs();
-            let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
-            let placement =
-                internal_codex_project_menu_placement(None, &outputs, fallback.as_deref());
             if let Some(mut host) = self.internal_codex.take() {
-                match host.ensure_project_menu(&mut self.internal_ui, placement) {
+                match host.ensure_project_menu() {
                     Ok(_) => {
-                        host.set_project_menu_visible(&mut self.internal_ui, false);
                         if let Some(shell) = self.internal_shell.as_mut() {
-                            host.sync_shell_projection(&self.internal_ui, shell);
+                            host.sync_shell_projection(shell);
                         }
                     }
                     Err(error) => tracing::warn!(%error, "could not start Codex project discovery"),
@@ -5538,13 +5533,6 @@ impl NickelSession {
             let menu_output = codex_menu_anchor
                 .as_ref()
                 .map(|anchor| anchor.output.as_str())
-                .or_else(|| {
-                    self.internal_codex
-                        .as_ref()
-                        .and_then(crate::internal_codex::InternalCodexHost::project_menu)
-                        .and_then(|id| self.internal_ui.placement(id))
-                        .and_then(|placement| placement.output.as_deref())
-                })
                 .map(str::to_owned);
             let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
             if shell_changed {
@@ -5554,19 +5542,9 @@ impl NickelSession {
                 self.apply_internal_file_action(action);
             }
             if codex_menu_visible && !codex_menu_plugin_active {
-                let placement = internal_codex_project_menu_placement(
-                    codex_menu_anchor.as_ref(),
-                    &outputs,
-                    fallback.as_deref(),
-                );
-                if let Err(error) = self.show_internal_codex_project_menu(placement) {
-                    tracing::warn!(%error, "could not host Codex project menu internally");
+                if let Some(shell) = self.internal_shell.as_mut() {
+                    shell.close_codex_project_menu();
                 }
-            } else if let Some(host) = self.internal_codex.take() {
-                if let Some(menu) = host.project_menu() {
-                    self.internal_ui.set_visible(menu, false);
-                }
-                self.internal_codex = Some(host);
             }
             if let Some(project_id) = requested_codex_project
                 && let Some(mut host) = self.internal_codex.take()
@@ -5589,8 +5567,8 @@ impl NickelSession {
             for request in codex_menu_requests {
                 match request {
                     crate::live_shell::CodexMenuRequest::Refresh => {
-                        if let Some(host) = self.internal_codex.as_ref() {
-                            host.refresh_project_menu(&mut self.internal_ui);
+                        if let Some(host) = self.internal_codex.as_mut() {
+                            host.refresh_project_menu();
                         }
                     }
                     crate::live_shell::CodexMenuRequest::Open { token, revision } => {
@@ -5624,16 +5602,6 @@ impl NickelSession {
                 }
             }
         }
-        let chat_output = self
-            .internal_codex
-            .as_ref()
-            .and_then(crate::internal_codex::InternalCodexHost::project_menu)
-            .and_then(|id| self.internal_ui.placement(id))
-            .and_then(|placement| placement.output.as_deref())
-            .map(str::to_owned)
-            .or_else(|| self.resolve_interaction_output(InvocationSource::RecentInteraction));
-        let chat_placement =
-            internal_codex_chat_placement(&self.internal_outputs(), chat_output.as_deref());
         if let Some(mut codex) = self.internal_codex.take() {
             let approval_decisions = self
                 .internal_shell
@@ -5696,35 +5664,22 @@ impl NickelSession {
                 }
             }
             let changed = codex.poll_due(&mut self.internal_ui, now);
-            let opened = codex
-                .service_requests(&mut self.internal_ui, chat_placement)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "could not service internal Codex request");
-                    Vec::new()
-                });
             let chat_requests_changed = codex.service_chat_requests(&mut self.internal_ui);
             let projection_changed = self
                 .internal_shell
                 .as_mut()
-                .is_some_and(|shell| codex.sync_shell_projection(&self.internal_ui, shell));
+                .is_some_and(|shell| codex.sync_shell_projection(shell));
             if let Some(shell) = self.internal_shell.as_mut() {
                 shell.sync_codex_approval_notifications(
                     codex.approval_notifications(&self.internal_ui),
                 );
             }
             self.internal_codex = Some(codex);
-            for surface in &opened {
-                self.register_internal_application(*surface);
-            }
             self.refresh_internal_application_metadata();
             if projection_changed {
                 self.sync_internal_shell();
             }
-            if !changed.is_empty()
-                || !opened.is_empty()
-                || chat_requests_changed
-                || projection_changed
-            {
+            if !changed.is_empty() || chat_requests_changed || projection_changed {
                 self.schedule_internal_ui_frame();
             }
         }
@@ -5776,28 +5731,6 @@ impl NickelSession {
             self.sync_internal_shell_changes(Some(&changed));
         }
         self.schedule_internal_shell_deadline();
-    }
-
-    pub(crate) fn show_internal_codex_project_menu(
-        &mut self,
-        placement: crate::internal_codex::CodexSurfacePlacement,
-    ) -> Result<nickel_ui::InternalSurfaceId, String> {
-        let mut host = self
-            .internal_codex
-            .take()
-            .ok_or_else(|| "Codex integration is disabled".to_owned())?;
-        let was_visible = host
-            .project_menu()
-            .is_some_and(|id| self.internal_ui.is_visible(id));
-        let result = host.ensure_project_menu(&mut self.internal_ui, placement);
-        self.internal_codex = Some(host);
-        if let Ok(id) = result {
-            self.internal_ui.set_visible(id, true);
-            if !was_visible {
-                self.focus_internal_surface(id);
-            }
-        }
-        result
     }
 
     /// Admit a compositor-hosted application into the same canonical window
@@ -7009,11 +6942,6 @@ impl NickelSession {
     fn dismiss_unfocused_internal_popovers(&mut self) {
         use crate::winit_shell::SurfaceRole;
         let focused = self.internal_ui.focused();
-        let menu = self
-            .internal_codex
-            .as_ref()
-            .and_then(|host| host.project_menu())
-            .filter(|id| self.internal_ui.is_visible(*id) && focused != Some(*id));
         let control_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
             shell.surfaces().iter().any(|surface| {
                 surface.role == SurfaceRole::ControlCenter
@@ -7044,16 +6972,10 @@ impl NickelSession {
                         .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
             })
         });
-        if menu.is_none() && !launcher_blurred && !control_blurred && !window_menu_blurred {
+        if !launcher_blurred && !control_blurred && !window_menu_blurred {
             return;
         }
-        if let Some(menu) = menu {
-            self.internal_ui.set_visible(menu, false);
-        }
         if let Some(shell) = self.internal_shell.as_mut() {
-            if menu.is_some() {
-                shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::CodexProjectMenu);
-            }
             if launcher_blurred {
                 shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher);
             }
@@ -16114,46 +16036,6 @@ fn avoid_trusted_control_collision(
     menu
 }
 
-fn internal_codex_project_menu_placement(
-    anchor: Option<&nickel_session_protocol::ShellPopoverAnchor>,
-    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
-    fallback_output: Option<&str>,
-) -> crate::internal_codex::CodexSurfacePlacement {
-    let requested = anchor
-        .map(|anchor| anchor.output.as_str())
-        .or(fallback_output);
-    let selected = requested
-        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
-        .or_else(|| outputs.first());
-    let Some((output, origin_x, origin_y)) = selected else {
-        return crate::internal_codex::CodexSurfacePlacement::default();
-    };
-    let work_height = output
-        .height
-        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
-    // Menus are compositor-owned overlays, so their client size must fit the
-    // usable logical output before anchor placement is clamped.
-    let menu_width = crate::internal_codex::MENU_SIZE
-        .0
-        .min(output.width.saturating_sub(16).max(1));
-    let menu_height = crate::internal_codex::MENU_SIZE
-        .1
-        .min(work_height.saturating_sub(16).max(1));
-    let max_x = output.width.saturating_sub(menu_width) as i32;
-    let anchor_center = anchor
-        .filter(|anchor| anchor.output == output.name)
-        .map_or(24, |anchor| anchor.bounds.x + anchor.bounds.width / 2);
-    let x = (anchor_center - menu_width as i32 / 2).clamp(0, max_x);
-    let y = work_height.saturating_sub(menu_height).saturating_sub(8) as i32;
-    crate::internal_codex::CodexSurfacePlacement {
-        output: Some(output.name.clone()),
-        origin: (origin_x + x, origin_y + y),
-        scale: output.scale,
-        menu_size: Some((menu_width, menu_height)),
-        chat_size: None,
-    }
-}
-
 fn internal_codex_chat_placement(
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
     requested_output: Option<&str>,
@@ -16193,7 +16075,6 @@ fn internal_codex_chat_placement(
             origin_y + outer_y as i32 + titlebar as i32 + border as i32,
         ),
         scale: output.scale,
-        menu_size: None,
         chat_size: Some((content_width, content_height)),
     }
 }
