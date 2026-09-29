@@ -44,8 +44,8 @@ function App() {
                     data.dashboardPage > 0 ? h(Button, { id: "launcher-dashboard-previous", onClick: () => nickel.request({ type: "launcher-set-page", view: "dashboard", page: data.dashboardPage - 1 }) }, "Previous") : null,
                     h(Text, null, "Page " + (data.dashboardPage + 1) + " of " + data.dashboardPageCount),
                     data.dashboardPage + 1 < data.dashboardPageCount ? h(Button, { id: "launcher-dashboard-next", onClick: () => nickel.request({ type: "launcher-set-page", view: "dashboard", page: data.dashboardPage + 1 }) }, "Next") : null) : null,
-                h(Button, { id: "launcher-account", className: "launcher-footer-button", onClick: () => nickel.request({ type: "launcher-open-account" }) }, data.accountName),
-                h(Button, { id: "launcher-settings", className: "launcher-footer-button", onClick: () => nickel.request({ type: "launcher-open-settings" }) }, "Settings"),
+                h(Button, { id: "launcher-account", className: "launcher-footer-button", onClick: () => nickel.request({ type: "show-control-center" }) }, data.accountName),
+                h(Button, { id: "launcher-settings", className: "launcher-footer-button", onClick: () => nickel.request({ type: "show-settings", screen: "appearance" }) }, "Settings"),
                 data.logoutAvailable ? h(Button, { id: "launcher-logout", className: "launcher-footer-button", onClick: () => {
                         setLogoutOpen(true);
                         nickel.openDialog("launcher-logout-dialog");

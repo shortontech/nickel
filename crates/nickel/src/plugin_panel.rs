@@ -385,7 +385,7 @@ pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, St
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
-    ShowSettings,
+    ShowSettings(Option<String>),
     ShowPluginSurface {
         plugin_id: String,
         surface_id: String,
@@ -402,6 +402,7 @@ pub enum PluginEffect {
     RunSubmit(String),
     RunDismiss,
     ToggleLauncher,
+    ShowControlCenter,
     ToggleOnScreenKeyboard,
     KeyboardKey {
         id: String,
@@ -444,8 +445,6 @@ pub enum PluginEffect {
         id: String,
     },
     DismissLauncher,
-    LauncherOpenSettings,
-    LauncherOpenAccount,
     LauncherOpenProject {
         id: String,
     },
@@ -1680,7 +1679,29 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .capabilities
                                 .contains(&PluginCapability::SettingsShow) =>
                         {
-                            approved.push(PluginEffect::ShowSettings);
+                            let screen = effect.get("screen").and_then(Value::as_str);
+                            if effect.get("screen").is_some() && screen.is_none()
+                                || screen.is_some_and(|screen| {
+                                    !matches!(
+                                        screen,
+                                        "display"
+                                            | "nickel-bar"
+                                            | "appearance"
+                                            | "network"
+                                            | "bluetooth"
+                                            | "bluetooth-pair"
+                                            | "default-apps"
+                                            | "optional-features"
+                                            | "plugins"
+                                            | "keyboard-shortcuts"
+                                            | "about"
+                                    )
+                                })
+                            {
+                                self.last_error = Some("Settings screen is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ShowSettings(screen.map(str::to_owned)));
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("show-plugin-surface") =>
@@ -1807,6 +1828,15 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::ControlCenterShow) =>
                         {
                             approved.push(PluginEffect::ToggleControlCenter);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("show-control-center")
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ControlCenterShow) =>
+                        {
+                            approved.push(PluginEffect::ShowControlCenter);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("toggle-on-screen-keyboard")
@@ -2518,26 +2548,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::ToggleLauncherPin { id: id.to_owned() });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-open-settings")
-                            && self.manifest.id == launcher_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::SettingsShow) =>
-                        {
-                            approved.push(PluginEffect::LauncherOpenSettings);
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-open-account")
-                            && self.manifest.id == launcher_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::ControlCenterShow) =>
-                        {
-                            approved.push(PluginEffect::LauncherOpenAccount);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-open-project")
@@ -3974,11 +3984,42 @@ mod tests {
             if granted {
                 assert_eq!(
                     host.application_mut().take_effects(),
-                    vec![PluginEffect::ShowSettings]
+                    vec![PluginEffect::ShowSettings(None)]
                 );
             } else {
                 assert!(host.application_mut().take_effects().is_empty());
                 assert!(host.application_mut().last_error().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn external_plugin_can_open_a_granted_settings_screen() {
+        let manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        for (screen, granted) in [("plugins", true), ("unknown", true), ("plugins", false)] {
+            let mut manifest = manifest.clone();
+            if !granted {
+                manifest.capabilities.clear();
+            }
+            let source = format!(
+                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'settings',onClick:()=>nickel.request({{type:'show-settings',screen:'{screen}'}})}}, 'Settings')); }}"
+            );
+            let mut app =
+                PluginPanelApplication::new_with_manifest(&source, &manifest, None).unwrap();
+            app.update(app.button_message("settings").unwrap());
+            if screen == "plugins" && granted {
+                assert_eq!(
+                    app.take_effects(),
+                    vec![PluginEffect::ShowSettings(Some("plugins".into()))]
+                );
+            } else {
+                assert!(app.take_effects().is_empty());
+                assert!(app.last_error().is_some());
             }
         }
     }
@@ -4033,7 +4074,7 @@ mod tests {
         });
         assert_eq!(
             host.application_mut().take_effects(),
-            vec![PluginEffect::ShowSettings]
+            vec![PluginEffect::ShowSettings(None)]
         );
         assert!(host.application_mut().last_error().is_none());
     }
@@ -4642,6 +4683,11 @@ mod tests {
     fn external_shell_toggles_use_capabilities_instead_of_taskbar_identity() {
         for (action, capability, expected) in [
             (
+                "show-control-center",
+                PluginCapability::ControlCenterShow,
+                PluginEffect::ShowControlCenter,
+            ),
+            (
                 "toggle-launcher",
                 PluginCapability::LauncherShow,
                 PluginEffect::ToggleLauncher,
@@ -4962,6 +5008,13 @@ mod tests {
             }
         ));
         assert!(panel.node.button_action("launcher-settings").is_some());
+        panel.update(panel.button_message("launcher-settings").unwrap());
+        assert_eq!(
+            panel.take_effects(),
+            vec![PluginEffect::ShowSettings(Some("appearance".into()))]
+        );
+        panel.update(panel.button_message("launcher-account").unwrap());
+        assert_eq!(panel.take_effects(), vec![PluginEffect::ShowControlCenter]);
         assert!(panel.node.dialog("launcher-logout-dialog").is_some());
         let host = nickel_ui::UiHost::new(panel, 920, 680);
         let title = host

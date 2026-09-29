@@ -281,6 +281,11 @@ For example, `{ type: "show-settings" }` opens Nickel Settings when the plugin
 has the `settings-show` capability. Nickel launches its bundled Settings
 executable when installed beside the shell, including from a nested session;
 the application catalog remains a fallback.
+Add `screen: "appearance"` (or another Settings screen name) to open a
+specific page. Unknown screen names are rejected before the request reaches
+the desktop.
+`{ type: "show-control-center" }` opens Quick Settings with the
+`control-center-show` capability.
 Declare a typed setting in `plugin.json` to expose it in Settings and read its
 current value from `nickel.data.settings`. A component may save its own declared
 setting with `nickel.request({ type: "set-plugin-setting", key: "open-count",

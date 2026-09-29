@@ -88,10 +88,10 @@ function App() {
                     Next
                 </Button> : null}
             </Row> : null}
-            <Button id="launcher-account" className="launcher-footer-button" onClick={() => nickel.request({type: "launcher-open-account"})}>
+            <Button id="launcher-account" className="launcher-footer-button" onClick={() => nickel.request({type: "show-control-center"})}>
                 {data.accountName}
             </Button>
-            <Button id="launcher-settings" className="launcher-footer-button" onClick={() => nickel.request({type: "launcher-open-settings"})}>
+            <Button id="launcher-settings" className="launcher-footer-button" onClick={() => nickel.request({type: "show-settings", screen: "appearance"})}>
                 Settings
             </Button>
             {data.logoutAvailable ? <Button id="launcher-logout" className="launcher-footer-button" onClick={() => {

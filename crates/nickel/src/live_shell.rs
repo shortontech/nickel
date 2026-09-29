@@ -5981,8 +5981,8 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::ShowLauncher => {
                     changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
                 }
-                crate::plugin_panel::PluginEffect::ShowSettings => {
-                    changed |= self.global_shortcut(platform::GlobalShortcut::OpenSettings);
+                crate::plugin_panel::PluginEffect::ShowSettings(screen) => {
+                    changed |= self.launch_settings(screen.as_deref());
                 }
                 crate::plugin_panel::PluginEffect::ShowPluginSurface {
                     plugin_id,
@@ -6066,6 +6066,14 @@ impl LiveShell {
                 }
                 crate::plugin_panel::PluginEffect::ToggleControlCenter => {
                     self.apply_panel_action(TaskbarAction::Control);
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ShowControlCenter => {
+                    self.control_host.application_mut().show_control_center();
+                    self.set_control_visible(true);
+                    if self.control_visible {
+                        self.set_launcher_visible(false);
+                    }
                     changed = true;
                 }
                 crate::plugin_panel::PluginEffect::ToggleOnScreenKeyboard => {
@@ -6387,20 +6395,6 @@ impl LiveShell {
                     };
                     if visible {
                         self.apply_launcher_action(LauncherAction::TogglePin(id));
-                        changed = true;
-                    }
-                }
-                crate::plugin_panel::PluginEffect::LauncherOpenSettings => {
-                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard {
-                        self.apply_launcher_action(LauncherAction::OpenSettings(
-                            crate::launcher::SettingsDestination::Nickel,
-                        ));
-                        changed = true;
-                    }
-                }
-                crate::plugin_panel::PluginEffect::LauncherOpenAccount => {
-                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard {
-                        self.apply_launcher_action(LauncherAction::OpenAccount);
                         changed = true;
                     }
                 }
