@@ -4837,6 +4837,12 @@ impl LiveShell {
                 self.keyboard_gesture_leases.clear();
             } else if id == crate::plugin_panel::screenshot_manifest().id {
                 self.screenshot.hide();
+                self.screenshot_capture_pending = false;
+                self.screenshot_output = None;
+                #[cfg(target_os = "linux")]
+                {
+                    self.active_window_capture = None;
+                }
                 self.set_screenshot_focus(false);
             } else if id == crate::plugin_panel::window_preview_manifest().id {
                 self.plugin_preview_host = None;

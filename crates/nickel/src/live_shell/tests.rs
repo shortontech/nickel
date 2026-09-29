@@ -571,6 +571,20 @@ fn fixed_shell_surface_keys_follow_bundled_plugin_activation() {
 }
 
 #[test]
+fn disabling_screenshot_cancels_in_flight_host_capture() {
+    let mut shell = LiveShell::new().unwrap();
+    shell.screenshot_capture_pending = true;
+    shell.screenshot_output = Some("secondary".into());
+    let id = crate::plugin_panel::screenshot_manifest().id.clone();
+    shell.set_plugin_enabled(&id, false).unwrap();
+    assert!(!shell.screenshot_capture_pending);
+    assert!(shell.screenshot_output.is_none());
+    assert!(!shell.global_shortcut(GlobalShortcut::Screenshot(
+        super::platform::ScreenshotAction::InteractiveRegion,
+    )));
+}
+
+#[test]
 fn installed_component_window_activates_and_retires_with_its_plugin() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/plugins/example-window");
