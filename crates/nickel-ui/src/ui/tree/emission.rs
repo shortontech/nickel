@@ -54,6 +54,13 @@ pub(super) fn emit_element<Message: Clone>(
 ) {
     let node = tree.resolved.nodes[node_index].clone();
     let rect = node.allocated;
+    if element.focus_message.is_some() || element.blur_message.is_some() {
+        tree.focus_messages.push((
+            node.id.clone(),
+            element.focus_message.clone(),
+            element.blur_message.clone(),
+        ));
+    }
     if node
         .clip
         .is_some_and(|clip| intersection(rect, clip).is_none())

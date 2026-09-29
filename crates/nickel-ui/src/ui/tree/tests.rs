@@ -3194,6 +3194,45 @@ fn focused_text_field_uses_exact_declared_background() {
 }
 
 #[test]
+fn focus_callbacks_follow_component_focus_and_window_blur() {
+    let fields = || {
+        Column::new()
+            .child(
+                TextField::on_change("first", |value| value)
+                    .id("first")
+                    .focus_message("focus-first".to_owned())
+                    .blur_message("blur-first".to_owned()),
+            )
+            .child(
+                TextField::on_change("second", |value| value)
+                    .id("second")
+                    .focus_message("focus-second".to_owned())
+                    .blur_message("blur-second".to_owned()),
+            )
+    };
+    let mut state = UiStateStore::default();
+    let frame = UiFrame::layout_with_state(fields(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    assert_eq!(
+        frame.handle_event(&mut state, UiEvent::FocusNext).messages,
+        ["focus-first"]
+    );
+    assert_eq!(
+        frame.handle_event(&mut state, UiEvent::FocusNext).messages,
+        ["blur-first", "focus-second"]
+    );
+    assert_eq!(
+        frame.handle_event(&mut state, UiEvent::FocusLost).messages,
+        ["blur-second"]
+    );
+    assert_eq!(
+        frame
+            .handle_event(&mut state, UiEvent::FocusGained)
+            .messages,
+        ["focus-second"]
+    );
+}
+
+#[test]
 fn document_selection_crosses_text_runs_and_skips_buttons() {
     let build = |state: &mut UiStateStore| {
         UiFrame::layout_with_state(

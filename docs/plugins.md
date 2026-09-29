@@ -201,8 +201,10 @@ matches `button.primary { padding: 8px; background: #345678; }`. The supported
 selectors are element names, `.class`, and `#id`, combined without descendant
 selectors. Buttons support `:hover`, `:active`, and `:focus`; text fields
 support `:focus`. These state rules currently set a nontransparent background.
-The focused background uses the declared color exactly. Plugin `onFocus` and
-`onBlur` callbacks are not exposed yet. Rules use source order. Supported declarations are `padding`,
+The focused background uses the declared color exactly. `Button` and
+`TextField` accept `onFocus` and `onBlur` callbacks; moving focus dispatches
+blur before focus, and losing window focus dispatches blur. Rules use source
+order. Supported declarations are `padding`,
 `margin`, `border` (solid only), `border-width`, `border-color`,
 `border-radius`, `font-size`, `line-height` (pixel lengths), `background` or
 `background-color`, `color`, `gap`, `width`, `height`, `min-width`, `max-width`,

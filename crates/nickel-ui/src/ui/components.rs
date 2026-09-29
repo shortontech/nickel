@@ -217,6 +217,8 @@ impl<Message> VerticalScroll<Message> {
             style: Style::default(),
             message: Some(message),
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -307,6 +309,8 @@ impl<Message> Grid<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -345,6 +349,8 @@ impl<Message> Grid<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -368,6 +374,8 @@ impl<Message> Grid<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -876,6 +884,8 @@ impl<Message> StyledText<Message> {
             },
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -1139,6 +1149,8 @@ impl<Message> CustomPaint<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -1161,6 +1173,8 @@ impl<Message> CustomPaint<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -1268,6 +1282,8 @@ impl<Message> Image<Message> {
             },
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -1596,6 +1612,16 @@ impl<Message> TextField<Message> {
         self
     }
 
+    pub fn focus_message(mut self, message: Message) -> Self {
+        self.text.0 = self.text.0.focus_message(message);
+        self
+    }
+
+    pub fn blur_message(mut self, message: Message) -> Self {
+        self.text.0 = self.text.0.blur_message(message);
+        self
+    }
+
     pub fn scale(mut self, scale: f32) -> Self {
         self.text = self.text.scale(scale);
         self
@@ -1909,6 +1935,16 @@ impl<Message> Container<Message> {
 
     pub fn context_message(mut self, message: Message) -> Self {
         self.0 = self.0.context_message(message);
+        self
+    }
+
+    pub fn focus_message(mut self, message: Message) -> Self {
+        self.0 = self.0.focus_message(message);
+        self
+    }
+
+    pub fn blur_message(mut self, message: Message) -> Self {
+        self.0 = self.0.blur_message(message);
         self
     }
 
@@ -2961,6 +2997,8 @@ impl<Message> Slider<Message> {
             style: Style::default(),
             message: Some(message),
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -3080,6 +3118,8 @@ impl<Message> Dropdown<Message> {
             style: Style::default(),
             message: Some(toggle_message),
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -3246,6 +3286,8 @@ impl<Message: Clone> Menu<Message> {
             // secondary-click, Shift+F10, controller menu, and accessibility
             // invocation on the same typed transition as ordinary activation.
             context_message: Some(toggle_message),
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,

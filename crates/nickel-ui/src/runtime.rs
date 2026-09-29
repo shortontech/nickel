@@ -1189,6 +1189,14 @@ pub trait Application: Sized {
 
     fn update(&mut self, message: Self::Message);
 
+    /// Apply messages emitted by one UI transition in order. Applications
+    /// with retained callback tables may execute them before rebuilding.
+    fn update_messages(&mut self, messages: Vec<Self::Message>) {
+        for message in messages {
+            self.update(message);
+        }
+    }
+
     /// Whether current application state contains an authentication or other
     /// protected surface. Compositor adapters must reject remote observation
     /// and control of such a surface, regardless of an agent's lease scope.
@@ -2760,9 +2768,7 @@ impl<A: Application> UiHost<A> {
             .expect("system focus is an ordinary frame event");
         let changed =
             transition.invalidation != crate::Invalidation::None || !transition.messages.is_empty();
-        for message in transition.messages {
-            self.application.update(message);
-        }
+        self.application.update_messages(transition.messages);
         let outcome = HostEventOutcome {
             changed,
             clipboard_text: transition.clipboard_text,
@@ -3479,9 +3485,7 @@ impl<A: Application> UiHost<A> {
             if focus.invalidation != Invalidation::None || !focus.messages.is_empty() {
                 combined.changed = true;
                 combined.invalidation = combined.invalidation.merge(focus.invalidation);
-                for message in focus.messages {
-                    self.application.update(message);
-                }
+                self.application.update_messages(focus.messages);
                 let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
                 combined.merge(rebuild_outcome);
                 combined.telemetry.paint_list_us = combined
@@ -3660,9 +3664,7 @@ impl<A: Application> UiHost<A> {
             .iter()
             .map(|message| self.application.message_evidence(message))
             .collect();
-        for message in outcome.messages {
-            self.application.update(message);
-        }
+        self.application.update_messages(outcome.messages);
         let clipboard_text = self
             .application
             .take_clipboard_write()
@@ -3703,9 +3705,7 @@ impl<A: Application> UiHost<A> {
                     .iter()
                     .map(|message| self.application.message_evidence(message))
                     .collect();
-                for message in outcome.messages {
-                    self.application.update(message);
-                }
+                self.application.update_messages(outcome.messages);
                 HostEventOutcome {
                     changed,
                     disposition,

@@ -146,6 +146,10 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onContextMenu) - 1 : null;
     const dragAction = typeof props?.onDrag === 'function'
         ? __handlers.push(props.onDrag) - 1 : null;
+    const focusAction = typeof props?.onFocus === 'function'
+        ? __handlers.push(props.onFocus) - 1 : null;
+    const blurAction = typeof props?.onBlur === 'function'
+        ? __handlers.push(props.onBlur) - 1 : null;
     const selectAction = typeof props?.onSelect === 'function'
         ? __handlers.push(props.onSelect) - 1 : null;
     const moveAction = typeof props?.onMove === 'function'
@@ -176,7 +180,8 @@ function h(kind, props, ...children) {
         'aria-label': props?.['aria-label'], 'aria-checked': props?.['aria-checked'],
         'aria-selected': props?.['aria-selected'],
         state: props?.state, disabled: props?.disabled, icon: props?.icon,
-        showLabel: props?.showLabel, contextAction, dragAction, selectAction, moveAction, fileAction, closeAction,
+        showLabel: props?.showLabel, contextAction, dragAction, focusAction, blurAction,
+        selectAction, moveAction, fileAction, closeAction,
         escapeAction, submitAction,
         value: props?.value, placeholder: props?.placeholder, secure: props?.secure,
         wrap: props?.wrap,
@@ -253,8 +258,11 @@ function __nickelRender(component = App) {
 }
 
 function __nickelDispatch(action, value) {
-    const handler = __handlers[action];
-    if (!handler) return __nickelRender();
+    return __nickelDispatchBatch([[action, value]]);
+}
+
+function __nickelDispatchBatch(events) {
+    if (!events.length) return __nickelRender();
     const hooks = new Map(Array.from(__componentHooks, ([path, slots]) => [path, slots.slice()]));
     const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
@@ -262,7 +270,10 @@ function __nickelDispatch(action, value) {
     __pendingEvent = {handlers: __handlers, hooks, values,
         effectsLength, effects: __effects.slice()};
     try {
-        handler(value);
+        for (const [action, value] of events) {
+            const handler = __handlers[action];
+            if (handler) handler(value);
+        }
         return __nickelRender();
     } catch (error) {
         __nickelRollbackEvent();

@@ -416,6 +416,7 @@ pub struct UiFrame<Message = String> {
     overlay_hits: Vec<HitRegion<Message>>,
     messages: Vec<MessageRegion<Message>>,
     context_messages: Vec<MessageRegion<Message>>,
+    focus_messages: Vec<(UiId, Option<Message>, Option<Message>)>,
     text_inputs: Vec<TextInputRegion<Message>>,
     text_commands: Vec<TextCommandRegion>,
     selection_regions: Vec<SelectionRegionLayout>,
@@ -448,6 +449,7 @@ impl<Message> Default for UiFrame<Message> {
             overlay_hits: Vec::new(),
             messages: Vec::new(),
             context_messages: Vec::new(),
+            focus_messages: Vec::new(),
             text_inputs: Vec::new(),
             text_commands: Vec::new(),
             selection_regions: Vec::new(),
@@ -1729,6 +1731,10 @@ impl<Message: Clone> UiFrame<Message> {
         {
             return Err(SemanticActionError::MissingTarget);
         }
+        let focus_before = state
+            .window_focused()
+            .then(|| state.focused().cloned())
+            .flatten();
         let semantic_invocation = matches!(intent, InteractionIntent::Invoke { .. });
         let enters_text_editing = matches!(
             &intent,
@@ -1909,6 +1915,27 @@ impl<Message: Clone> UiFrame<Message> {
             outcome.invalidation = outcome
                 .invalidation
                 .merge(self.dismiss_blurred_dropdowns(state));
+        }
+        let focus_after = state
+            .window_focused()
+            .then(|| state.focused().cloned())
+            .flatten();
+        if focus_before != focus_after {
+            let mut focus_events = Vec::new();
+            if let Some(before) = focus_before
+                && let Some((_, _, Some(message))) =
+                    self.focus_messages.iter().find(|(id, ..)| id == &before)
+            {
+                focus_events.push(message.clone());
+            }
+            if let Some(after) = focus_after
+                && let Some((_, Some(message), _)) =
+                    self.focus_messages.iter().find(|(id, ..)| id == &after)
+            {
+                focus_events.push(message.clone());
+            }
+            focus_events.append(&mut outcome.messages);
+            outcome.messages = focus_events;
         }
         let semantic_effect = outcome.invalidation != Invalidation::None
             || !outcome.messages.is_empty()

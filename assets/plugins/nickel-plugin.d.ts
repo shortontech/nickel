@@ -80,6 +80,8 @@ interface NickelButtonProps extends NickelProps {
     icon?: string;
     showLabel?: boolean;
     onClick: NickelClick;
+    onFocus?: NickelClick;
+    onBlur?: NickelClick;
     onContextMenu?: NickelClick;
     onDrag?: (gesture: NickelDragGesture) => void;
 }
@@ -90,6 +92,8 @@ interface NickelTextFieldProps extends NickelProps {
     /** Mask the displayed value and protect the surface from remote inspection. */
     secure?: boolean;
     onChange: (value: string) => void;
+    onFocus?: NickelClick;
+    onBlur?: NickelClick;
 }
 interface NickelSliderProps extends NickelProps {
     id?: string;

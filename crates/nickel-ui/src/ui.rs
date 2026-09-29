@@ -1168,6 +1168,8 @@ pub struct Element<Message = String> {
     style: Style,
     message: Option<Message>,
     context_message: Option<Message>,
+    focus_message: Option<Message>,
+    blur_message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
     seeded_value_mapper: Option<fn(Message, f32) -> Message>,
     scroll_extent_mapper: Option<fn(ScrollExtent) -> Message>,
@@ -1189,6 +1191,8 @@ impl<Message> Element<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -1230,6 +1234,8 @@ impl<Message> Element<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
@@ -1493,6 +1499,16 @@ impl<Message> Element<Message> {
         self
     }
 
+    pub fn focus_message(mut self, message: Message) -> Self {
+        self.focus_message = Some(message);
+        self
+    }
+
+    pub fn blur_message(mut self, message: Message) -> Self {
+        self.blur_message = Some(message);
+        self
+    }
+
     pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
         self.style.accessibility_label = Some(label.into());
         self
@@ -1562,6 +1578,8 @@ impl<Message> Element<Message> {
             style: self.style,
             message: self.message.map(&mut *map),
             context_message: self.context_message.map(&mut *map),
+            focus_message: self.focus_message.map(&mut *map),
+            blur_message: self.blur_message.map(&mut *map),
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,

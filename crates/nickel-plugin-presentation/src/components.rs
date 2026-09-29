@@ -344,6 +344,8 @@ pub enum PanelNode {
         placeholder: String,
         secure: bool,
         action: usize,
+        focus_action: Option<usize>,
+        blur_action: Option<usize>,
     },
     Button {
         id: String,
@@ -359,6 +361,8 @@ pub enum PanelNode {
         action: usize,
         context_action: Option<usize>,
         drag_action: Option<usize>,
+        focus_action: Option<usize>,
+        blur_action: Option<usize>,
     },
     Dialog {
         id: String,
@@ -1392,6 +1396,14 @@ impl PanelNode {
                     .and_then(Value::as_u64)
                     .ok_or("text field needs an onChange handler")?
                     as usize,
+                focus_action: value
+                    .get("focusAction")
+                    .and_then(Value::as_u64)
+                    .and_then(|action| usize::try_from(action).ok()),
+                blur_action: value
+                    .get("blurAction")
+                    .and_then(Value::as_u64)
+                    .and_then(|action| usize::try_from(action).ok()),
             }),
             "button" => {
                 let label = child_text(children)?;
@@ -1457,6 +1469,14 @@ impl PanelNode {
                         .and_then(|action| usize::try_from(action).ok()),
                     drag_action: value
                         .get("dragAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
+                    focus_action: value
+                        .get("focusAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
+                    blur_action: value
+                        .get("blurAction")
                         .and_then(Value::as_u64)
                         .and_then(|action| usize::try_from(action).ok()),
                 })
@@ -2345,8 +2365,14 @@ impl PanelNode {
                 placeholder,
                 secure,
                 action,
+                focus_action,
+                blur_action,
             } => {
                 let style = stylesheet.resolve("text-field", Some(id), class_name.as_deref());
+                let focus_message = focus_action
+                    .map(|action| Message::from_plugin_scoped(PluginMessage::Click(action), scope));
+                let blur_message = blur_action
+                    .map(|action| Message::from_plugin_scoped(PluginMessage::Click(action), scope));
                 let scope = scope.map(str::to_owned);
                 let field = if *secure {
                     UiTextField::on_change_masked_with_placeholder_mapped(
@@ -2379,6 +2405,12 @@ impl PanelNode {
                     .accessibility_label(placeholder)
                     .grow(1.0)
                     .wrap(false);
+                if let Some(message) = focus_message {
+                    field = field.focus_message(message);
+                }
+                if let Some(message) = blur_message {
+                    field = field.blur_message(message);
+                }
                 if let Some(size) = style.font_size {
                     field = field.font_size(size);
                 }
@@ -2415,6 +2447,8 @@ impl PanelNode {
                 action,
                 context_action,
                 drag_action,
+                focus_action,
+                blur_action,
             } => {
                 let style = stylesheet.resolve("button", Some(id), class_name.as_deref());
                 let visual = icon
@@ -2474,6 +2508,18 @@ impl PanelNode {
                             scope,
                         ),
                         Message::drag,
+                    ));
+                }
+                if let Some(action) = focus_action.filter(|_| !*disabled) {
+                    container = container.focus_message(Message::from_plugin_scoped(
+                        PluginMessage::Click(action),
+                        scope,
+                    ));
+                }
+                if let Some(action) = blur_action.filter(|_| !*disabled) {
+                    container = container.blur_message(Message::from_plugin_scoped(
+                        PluginMessage::Click(action),
+                        scope,
                     ));
                 }
                 if let Some(background) = stylesheet.resolve_interaction_background(

@@ -1687,44 +1687,47 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn update(&mut self, message: Self::Message) {
-        if message == PluginMessage::Scroll {
+        self.update_messages(vec![message]);
+    }
+
+    fn update_messages(&mut self, messages: Vec<Self::Message>) {
+        let events = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                PluginMessage::Click(action)
+                | PluginMessage::Button { click: action, .. }
+                | PluginMessage::Context(action) => Some(serde_json::json!([action])),
+                PluginMessage::Text(action, value) => Some(serde_json::json!([action, value])),
+                PluginMessage::Value(action, value) => Some(serde_json::json!([action, value])),
+                PluginMessage::Drag(action, gesture) => {
+                    let phase = match gesture.phase {
+                        DragPhase::Started => "start",
+                        DragPhase::Moved => "move",
+                        DragPhase::Ended => "end",
+                        DragPhase::Cancelled => "cancel",
+                    };
+                    Some(serde_json::json!([action, {
+                        "phase": phase,
+                        "x": gesture.position.x,
+                        "y": gesture.position.y,
+                        "bounds": {
+                            "x": gesture.bounds.origin.x,
+                            "y": gesture.bounds.origin.y,
+                            "width": gesture.bounds.size.width,
+                            "height": gesture.bounds.size.height,
+                        },
+                    }]))
+                }
+                PluginMessage::Scroll => None,
+            })
+            .collect::<Vec<_>>();
+        if events.is_empty() {
             return;
         }
-        let expression = match message {
-            PluginMessage::Click(action)
-            | PluginMessage::Button { click: action, .. }
-            | PluginMessage::Context(action) => {
-                format!("__nickelDispatch({action})")
-            }
-            PluginMessage::Text(action, value) => {
-                let encoded = serde_json::to_string(&value).expect("string serialization");
-                format!("__nickelDispatch({action}, {encoded})")
-            }
-            PluginMessage::Value(action, value) => {
-                format!("__nickelDispatch({action}, {value})")
-            }
-            PluginMessage::Drag(action, gesture) => {
-                let phase = match gesture.phase {
-                    DragPhase::Started => "start",
-                    DragPhase::Moved => "move",
-                    DragPhase::Ended => "end",
-                    DragPhase::Cancelled => "cancel",
-                };
-                let encoded = serde_json::json!({
-                    "phase": phase,
-                    "x": gesture.position.x,
-                    "y": gesture.position.y,
-                    "bounds": {
-                        "x": gesture.bounds.origin.x,
-                        "y": gesture.bounds.origin.y,
-                        "width": gesture.bounds.size.width,
-                        "height": gesture.bounds.size.height,
-                    },
-                });
-                format!("__nickelDispatch({action}, {encoded})")
-            }
-            PluginMessage::Scroll => unreachable!(),
-        };
+        let expression = format!(
+            "__nickelDispatchBatch({})",
+            serde_json::Value::Array(events)
+        );
         let rendered = render_panel(
             &mut self.runtime,
             &self.manifest,
@@ -4393,6 +4396,96 @@ mod tests {
         assert_eq!(
             granted.take_effects(),
             vec![PluginEffect::RunSubmit("nickel-test".into())]
+        );
+    }
+
+    #[test]
+    fn one_ui_transition_dispatches_all_jsx_handlers_before_rerendering() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities = vec![PluginCapability::LauncherShow];
+        let source = r#"
+            function App() {
+                const [show, setShow] = useState(true);
+                return h(Window, {width: 320, height: 180},
+                    h(Button, {id: 'hide', onClick: () => setShow(false)}, 'Hide'),
+                    show ? h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open') : null);
+            }
+        "#;
+        let mut app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        let hide = app.button_message("hide").unwrap();
+        let open = app.button_message("open").unwrap();
+        app.update_messages(vec![hide, open]);
+        assert_eq!(app.take_effects(), vec![PluginEffect::ShowLauncher]);
+        assert!(app.button_message("open").is_none());
+        assert!(app.last_error().is_none());
+    }
+
+    #[test]
+    fn jsx_text_fields_dispatch_focus_and_blur_callbacks() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities = vec![
+            PluginCapability::LauncherShow,
+            PluginCapability::ControlCenterShow,
+        ];
+        let source = r#"
+            function App() {
+                return h(Window, {width: 320, height: 180},
+                    h(TextField, {id: 'first', placeholder: 'First', value: '', onChange: () => {},
+                        onFocus: () => nickel.request('show-launcher'),
+                        onBlur: () => nickel.request({type: 'toggle-control-center'})}),
+                    h(TextField, {id: 'second', placeholder: 'Second', value: '', onChange: () => {},
+                        onFocus: () => nickel.request('show-launcher')}),
+                    h(Button, {id: 'focus-button', onClick: () => {},
+                        onFocus: () => nickel.request({type: 'toggle-control-center'})}, 'Focus button'));
+            }
+        "#;
+        let app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 320, 180);
+        let first = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::TextField,
+                name: "First".into(),
+            })
+            .unwrap();
+        let second = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::TextField,
+                name: "Second".into(),
+            })
+            .unwrap();
+        let button = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Focus button".into(),
+            })
+            .unwrap();
+        host.handle_event(nickel_ui::UiEvent::AccessibilityFocus(first.id));
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ShowLauncher]
+        );
+        host.handle_event(nickel_ui::UiEvent::AccessibilityFocus(second.id));
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![
+                PluginEffect::ToggleControlCenter,
+                PluginEffect::ShowLauncher
+            ]
+        );
+        host.handle_event(nickel_ui::UiEvent::AccessibilityFocus(button.id));
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ToggleControlCenter]
         );
     }
 
