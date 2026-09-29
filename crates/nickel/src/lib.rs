@@ -57,7 +57,7 @@ use nickel_core::optional_features::{
     FeatureInstallation, FeatureSupport, OptionalFeatureRuntime, OptionalFeatureSettings,
 };
 use nickel_input::{
-    AggregateModifier, InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent,
+    AggregateModifier, InputEvent, KeyEdge, LogicalKey, PointerButton, PointerEvent,
 };
 #[cfg(any(test, target_os = "linux"))]
 use nickel_ui::ControllerAction;
@@ -415,7 +415,6 @@ mod allocation_summary_tests {
 struct CodexSurfaces {
     enabled: bool,
     source: CodexSource,
-    project_menu: SurfaceId,
     project_menu_cwd: std::path::PathBuf,
     project_menu_host: Option<EmbeddedUiSurface<ChatApplication>>,
     chats: Vec<CodexChatSurface>,
@@ -478,6 +477,7 @@ fn codex_runtime_from(input: CodexRuntimeInput) -> OptionalFeatureRuntime {
         active_windows: input.active_windows,
         background_workers: owned,
         subscriptions: owned + input.active_windows,
+        // The one-pixel discovery UiHost is still retained even without a native menu window.
         warm_surfaces: owned + input.active_windows,
         cache_entries: input.cache_entries,
         source_label: input.source_label,
@@ -496,7 +496,6 @@ struct EmbeddedUiSurface<A: Application> {
 struct EmbeddedControllerTransition {
     open_keyboard: bool,
     changed: bool,
-    dismiss_surface: bool,
 }
 
 fn poll_due_codex_hosts(
@@ -616,22 +615,14 @@ impl<A: Application> EmbeddedUiSurface<A> {
 #[cfg(any(test, target_os = "linux"))]
 fn step_embedded_codex_controller(
     host: &mut EmbeddedUiSurface<ChatApplication>,
-    project_menu: bool,
     action: ControllerAction,
 ) -> EmbeddedControllerTransition {
-    if project_menu && action == ControllerAction::Cancel {
-        return EmbeddedControllerTransition {
-            dismiss_surface: true,
-            ..EmbeddedControllerTransition::default()
-        };
-    }
     let outcome = host.step(HostBatch {
         events: vec![HostEvent::Controller(action)],
         ..HostBatch::default()
     });
     EmbeddedControllerTransition {
         changed: outcome.changed,
-        dismiss_surface: false,
         open_keyboard: action == ControllerAction::Confirm
             && outcome.text_input_active
             && host.host.controller_targets_text_input(),
@@ -740,11 +731,8 @@ impl CodexSurfaces {
         if !self.enabled {
             return (false, Vec::new());
         }
-        let (project_menu_changed, mut redraw) =
+        let (project_menu_changed, redraw) =
             poll_due_codex_hosts(self.project_menu_host.as_mut(), &mut self.chats, now);
-        if project_menu_changed {
-            redraw.insert(0, self.project_menu);
-        }
         (project_menu_changed, redraw)
     }
 
@@ -773,18 +761,12 @@ impl CodexSurfaces {
     }
 
     fn new(
-        shell: &WinitShell,
         settings: &OptionalFeatureSettings,
         theme: nickel_ui::SemanticTheme,
     ) -> Result<Self, String> {
-        let project_menu = shell
-            .surfaces()
-            .find(|surface| surface.role() == SurfaceRole::CodexProjectMenu)
-            .ok_or_else(|| "Codex project_menu surface is missing".to_owned())?;
         Ok(Self {
             enabled: settings.codex_enabled,
             source: settings.codex_source.clone(),
-            project_menu: project_menu.id(),
             project_menu_cwd: std::env::current_dir().map_err(|error| error.to_string())?,
             project_menu_host: None,
             chats: Vec::new(),
@@ -797,31 +779,23 @@ impl CodexSurfaces {
         })
     }
 
-    fn ensure_project_menu(&mut self, shell: &WinitShell) -> Result<(), String> {
+    fn ensure_project_menu(&mut self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
         }
         if self.project_menu_host.is_some() {
             return Ok(());
         }
-        let (width, height) = shell
-            .surface(self.project_menu)
-            .map(|surface| surface.window().size())
-            .ok_or_else(|| "Codex project_menu surface is missing".to_owned())?;
         let mut application = shell_application_with_backend(
             self.project_menu_cwd.clone(),
             true,
             None,
             None,
             self.backend_choice(),
-        )?;
+        )?
+        .as_headless_project_controller();
         application.set_theme(self.theme);
-        self.project_menu_host = Some(EmbeddedUiSurface::new(
-            application,
-            width,
-            height,
-            Instant::now(),
-        ));
+        self.project_menu_host = Some(EmbeddedUiSurface::new(application, 1, 1, Instant::now()));
         Ok(())
     }
 
@@ -836,7 +810,6 @@ impl CodexSurfaces {
             for chat in self.chats.drain(..) {
                 shell.destroy_surface(chat.id);
             }
-            shell.hide(self.project_menu);
         }
         true
     }
@@ -914,29 +887,7 @@ impl CodexSurfaces {
         if !self.enabled {
             return Ok(());
         }
-        if surface == self.project_menu {
-            self.ensure_project_menu(shell)
-                .map_err(|detail| HostFailure {
-                    surface: format!("{surface:?}"),
-                    stage: HostFailureStage::DomainService,
-                    optional: true,
-                    detail,
-                })?;
-            shell
-                .present(
-                    surface,
-                    self.project_menu_host
-                        .as_ref()
-                        .expect("Codex project_menu initialized")
-                        .commands(),
-                )
-                .map_err(|detail| HostFailure {
-                    surface: format!("{surface:?}"),
-                    stage: HostFailureStage::Presenter,
-                    optional: false,
-                    detail,
-                })?;
-        } else if let Some(chat) = self.chats.iter().find(|chat| chat.id == surface) {
+        if let Some(chat) = self.chats.iter().find(|chat| chat.id == surface) {
             shell
                 .present(surface, chat.host.commands())
                 .map_err(|detail| HostFailure {
@@ -950,14 +901,10 @@ impl CodexSurfaces {
     }
 
     fn host_mut(&mut self, surface: SurfaceId) -> Option<&mut EmbeddedUiSurface<ChatApplication>> {
-        if surface == self.project_menu {
-            self.project_menu_host.as_mut()
-        } else {
-            self.chats
-                .iter_mut()
-                .find(|chat| chat.id == surface)
-                .map(|chat| &mut chat.host)
-        }
+        self.chats
+            .iter_mut()
+            .find(|chat| chat.id == surface)
+            .map(|chat| &mut chat.host)
     }
 
     fn remove(&mut self, shell: &mut WinitShell, surface: SurfaceId) {
@@ -971,26 +918,6 @@ impl CodexSurfaces {
             }
             shell.destroy_surface(surface);
         }
-    }
-
-    fn open_requests(&mut self, shell: &mut WinitShell) -> Result<bool, String> {
-        let Some(project_menu_host) = self.project_menu_host.as_mut() else {
-            return Ok(false);
-        };
-        let mut opened = false;
-        for request in project_menu_host.application_mut().take_shell_requests() {
-            opened = true;
-            if let ShellRequest::OpenProject {
-                cwd,
-                project_id,
-                name,
-                initial_thread,
-            } = request
-            {
-                self.open_project(shell, cwd, project_id, name, initial_thread)?;
-            }
-        }
-        Ok(opened)
     }
 
     fn resume_requests(&mut self, shell: &mut WinitShell) {
@@ -1309,7 +1236,7 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         })
         .collect::<Vec<_>>();
     for (id, role, taskbar, output, logical_width, logical_height) in surfaces {
-        if matches!(role, SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat) {
+        if role == SurfaceRole::CodexChat {
             continue;
         }
         if !state.native_surface_visible(
@@ -1696,7 +1623,6 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
         SurfaceRole::Lock,
         SurfaceRole::Launcher,
         SurfaceRole::ControlCenter,
-        SurfaceRole::CodexProjectMenu,
         SurfaceRole::WindowPreview,
         SurfaceRole::Screenshot,
     ] {
@@ -1731,7 +1657,6 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
 fn handle_codex_event(
     codex: &mut CodexSurfaces,
     shell: &mut WinitShell,
-    state: &mut LiveShell,
     event: &ShellEvent,
 ) -> Result<bool, String> {
     let surface = match event {
@@ -1745,28 +1670,18 @@ fn handle_codex_event(
         | ShellEvent::CloseRequested(surface) => *surface,
         _ => return Ok(false),
     };
-    if !shell.surface(surface).is_some_and(|entry| {
-        matches!(
-            entry.role(),
-            SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat
-        )
-    }) {
+    if !shell
+        .surface(surface)
+        .is_some_and(|entry| entry.role() == SurfaceRole::CodexChat)
+    {
         return Ok(false);
-    }
-    if surface == codex.project_menu {
-        codex.ensure_project_menu(shell)?;
     }
     if matches!(event, ShellEvent::FocusChanged { focused: false, .. }) {
         shell.stop_text_input(surface);
     }
     if matches!(event, ShellEvent::CloseRequested(_)) {
         shell.stop_text_input(surface);
-        if surface == codex.project_menu {
-            state.hide_overlay(SurfaceRole::CodexProjectMenu);
-            set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
-        } else {
-            codex.remove(shell, surface);
-        }
+        codex.remove(shell, surface);
         return Ok(true);
     }
     if matches!(event, ShellEvent::Hidden(_)) {
@@ -1777,41 +1692,15 @@ fn handle_codex_event(
         return Ok(true);
     }
     if matches!(event, ShellEvent::Shown(_)) {
-        if surface == codex.project_menu
-            && !state.native_surface_visible(SurfaceRole::CodexProjectMenu, None)
-        {
-            set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
-            return Ok(true);
-        }
         codex
             .present(shell, surface)
             .map_err(|error| format!("{error:?}"))?;
-        return Ok(true);
-    }
-    if surface == codex.project_menu
-        && (matches!(event, ShellEvent::FocusChanged { focused: false, .. })
-            || matches!(
-                event,
-                ShellEvent::Input {
-                    event: InputEvent::Key(key),
-                    ..
-                } if key.edge == KeyEdge::Pressed
-                    && key.logical == LogicalKey::Named(NamedKey::Escape)
-            ))
-    {
-        state.hide_overlay(SurfaceRole::CodexProjectMenu);
-        set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
         return Ok(true);
     }
     if matches!(
         event,
         ShellEvent::LogicalResize { .. } | ShellEvent::PixelResize { .. }
     ) {
-        if surface == codex.project_menu
-            && !state.native_surface_visible(SurfaceRole::CodexProjectMenu, None)
-        {
-            return Ok(true);
-        }
         let (width, height) = shell
             .surface(surface)
             .map(|entry| entry.window().size())
@@ -1888,15 +1777,6 @@ fn handle_codex_event(
             .present(shell, surface)
             .map_err(|error| format!("{error:?}"))?;
     }
-    if codex.open_requests(shell)? {
-        state.hide_overlay(SurfaceRole::CodexProjectMenu);
-        set_surface_visibility(
-            shell,
-            codex.project_menu,
-            SurfaceRole::CodexProjectMenu,
-            false,
-        );
-    }
     codex.resume_requests(shell);
     Ok(true)
 }
@@ -1904,7 +1784,6 @@ fn handle_codex_event(
 fn handle_shell_input(
     shell: &mut WinitShell,
     state: &mut LiveShell,
-    codex: &mut CodexSurfaces,
     surface: SurfaceId,
     event: InputEvent,
     hover_repaint: &mut Option<(SurfaceRole, Instant)>,
@@ -2016,11 +1895,6 @@ fn handle_shell_input(
                 render_role(shell, state, SurfaceRole::WindowContextMenu)?;
                 if !taskbar_motion {
                     focus_visible_overlay(shell, state);
-                    if state.native_surface_visible(SurfaceRole::CodexProjectMenu, None) {
-                        codex
-                            .present(shell, codex.project_menu)
-                            .map_err(|error| format!("{error:?}"))?;
-                    }
                 }
             }
         }
@@ -2359,21 +2233,15 @@ fn handle_controller_action(
         }
         return Ok(());
     }
-    if matches!(role, SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat) {
+    if role == SurfaceRole::CodexChat {
         let transition = codex
             .host_mut(surface)
-            .map(|host| {
-                step_embedded_codex_controller(host, role == SurfaceRole::CodexProjectMenu, action)
-            })
+            .map(|host| step_embedded_codex_controller(host, action))
             .unwrap_or_default();
         if transition.changed {
             codex
                 .present(shell, surface)
                 .map_err(|error| format!("{error:?}"))?;
-        }
-        if transition.dismiss_surface {
-            state.hide_overlay(SurfaceRole::CodexProjectMenu);
-            set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
         }
         if transition.open_keyboard {
             state.set_keyboard_visible(true);
@@ -2606,7 +2474,7 @@ pub fn run() -> Result<(), String> {
     )?;
     let mut feature_settings = OptionalFeatureSettings::load_default();
     feature_settings.codex_enabled = feature_settings.effective_codex_enabled();
-    let mut codex = CodexSurfaces::new(&shell, &feature_settings, state.semantic_theme())?;
+    let mut codex = CodexSurfaces::new(&feature_settings, state.semantic_theme())?;
     state.apply_codex_projection(CodexAvailabilityProjection::new(
         FeatureSupport::Supported,
         codex.installation,
@@ -2615,7 +2483,7 @@ pub fn run() -> Result<(), String> {
         feature_settings.codex_generation,
         Some("Checking the selected Codex backend…".into()),
     ));
-    codex.ensure_project_menu(&shell)?;
+    codex.ensure_project_menu()?;
     let _ = codex
         .runtime_snapshot(feature_settings.codex_generation)
         .save_default();
@@ -2700,7 +2568,7 @@ pub fn run() -> Result<(), String> {
         elapsed_ms = launcher_warm_started.elapsed().as_secs_f64() * 1_000.0,
         "winit launcher presenter and frame prewarmed"
     );
-    if let Err(error) = codex.ensure_project_menu(&shell) {
+    if let Err(error) = codex.ensure_project_menu() {
         tracing::warn!(%error, "Codex integration is unavailable");
     }
     let schedule_now = Instant::now();
@@ -2811,11 +2679,6 @@ pub fn run() -> Result<(), String> {
         state.sync_codex_approval_notifications(codex.approval_notifications());
         project_menu_changed_since_refresh |= project_menu_changed;
         for surface in due_codex_redraw {
-            if surface == codex.project_menu
-                && !state.native_surface_visible(SurfaceRole::CodexProjectMenu, None)
-            {
-                continue;
-            }
             codex
                 .present(&mut shell, surface)
                 .map_err(|error| format!("{error:?}"))?;
@@ -2878,7 +2741,7 @@ pub fn run() -> Result<(), String> {
             continue;
         }
         if let Some(ref event) = event
-            && handle_codex_event(&mut codex, &mut shell, &mut state, event)?
+            && handle_codex_event(&mut codex, &mut shell, event)?
         {
             continue;
         }
@@ -3029,14 +2892,8 @@ pub fn run() -> Result<(), String> {
             }
             Some(ShellEvent::Input { surface, event }) => {
                 shell.begin_input_observation(Instant::now());
-                let result = handle_shell_input(
-                    &mut shell,
-                    &mut state,
-                    &mut codex,
-                    surface,
-                    event,
-                    &mut hover_repaint,
-                );
+                let result =
+                    handle_shell_input(&mut shell, &mut state, surface, event, &mut hover_repaint);
                 shell.finish_input_observation();
                 result?;
             }
@@ -3310,10 +3167,8 @@ pub fn run() -> Result<(), String> {
         }
         if fast_subscription.is_due(Instant::now()) {
             let refresh_now = Instant::now();
-            let mut codex_redraw = Vec::new();
             let project_menu_changed = std::mem::take(&mut project_menu_changed_since_refresh);
             if project_menu_changed {
-                codex_redraw.push(codex.project_menu);
                 if let Some(host) = codex.project_menu_host.as_mut() {
                     let snapshot = &host.application_mut().state;
                     tracing::info!(
@@ -3394,27 +3249,7 @@ pub fn run() -> Result<(), String> {
                 }
             }
             codex.resume_requests(&mut shell);
-            let codex_changed = !codex_redraw.is_empty();
-            for surface in codex_redraw {
-                if surface == codex.project_menu
-                    && !state.native_surface_visible(SurfaceRole::CodexProjectMenu, None)
-                {
-                    continue;
-                }
-                codex
-                    .present(&mut shell, surface)
-                    .map_err(|error| format!("{error:?}"))?;
-            }
-            let opened_codex = codex.open_requests(&mut shell)?;
-            if opened_codex {
-                state.hide_overlay(SurfaceRole::CodexProjectMenu);
-                set_surface_visibility(
-                    &mut shell,
-                    codex.project_menu,
-                    SurfaceRole::CodexProjectMenu,
-                    false,
-                );
-            }
+            let codex_changed = project_menu_changed;
             let fast_changed = state.refresh_fast();
             if fast_changed {
                 sync_visibility(&mut shell, &state);
@@ -3423,7 +3258,7 @@ pub fn run() -> Result<(), String> {
             let _ = codex
                 .runtime_snapshot(feature_settings.codex_generation)
                 .save_default();
-            fast_subscription.observed(refresh_now, fast_changed || codex_changed || opened_codex);
+            fast_subscription.observed(refresh_now, fast_changed || codex_changed);
         }
         if system_subscription.is_due(Instant::now()) {
             let refresh_now = Instant::now();
@@ -3445,7 +3280,7 @@ pub fn run() -> Result<(), String> {
                             feature_settings.codex_generation,
                             Some("Checking the selected Codex backend…".into()),
                         ));
-                        if let Err(error) = codex.ensure_project_menu(&shell) {
+                        if let Err(error) = codex.ensure_project_menu() {
                             tracing::warn!(%error, "Codex integration could not be enabled");
                         }
                     } else {
@@ -3478,9 +3313,7 @@ pub fn run() -> Result<(), String> {
                 sync_visibility(&mut shell, &state);
                 render_all(&mut shell, &mut state)?;
                 if codex_theme_changed {
-                    let mut surfaces = vec![codex.project_menu];
-                    surfaces.extend(codex.chats.iter().map(|chat| chat.id));
-                    for surface in surfaces {
+                    for surface in codex.chats.iter().map(|chat| chat.id).collect::<Vec<_>>() {
                         codex.present(&mut shell, surface).map_err(|error| {
                             format!("could not redraw Codex surface after theme change: {error:?}")
                         })?;
@@ -3844,6 +3677,28 @@ mod tests {
     }
 
     #[test]
+    fn codex_discovery_host_runs_without_a_native_menu_viewport() {
+        let backend = ReplayBackend::from_json(r#"{"name":"headless-menu","events":[]}"#)
+            .expect("static replay is valid");
+        let application = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_project_menu()
+        .as_headless_project_controller();
+        let mut controller = EmbeddedUiSurface::new(application, 1, 1, Instant::now());
+        assert!(
+            controller
+                .host
+                .accessibility_nodes()
+                .iter()
+                .all(|node| { node.semantic_role != Some(SemanticRole::TextField) })
+        );
+        let due = controller.deadline().expect("discovery poll is scheduled");
+        assert!(controller.poll_due(due).is_some());
+    }
+
+    #[test]
     fn controller_launcher_action_toggles_launcher() {
         assert_eq!(
             super::controller_launcher_shortcut(ControllerAction::Launcher),
@@ -3966,50 +3821,14 @@ mod tests {
 
     use std::path::Path;
 
-    use nickel_codex::{Project, ReplayBackend, ThreadId};
-    use nickel_codex_ui::{
-        BackendMode, ChatApplication, ChatItem, ChatItemKind, ConnectionStatus, ShellRequest,
-    };
+    use nickel_codex::{ReplayBackend, ThreadId};
+    use nickel_codex_ui::{BackendMode, ChatApplication, ChatItem, ChatItemKind, ConnectionStatus};
     use nickel_input::{
         DeviceId, EventOrder, InputEvent, Point as InputPoint, PointerEvent, TextEvent, Vector,
     };
-    use nickel_ui::{
-        ActionKind, HostBatch, HostEvent, SemanticAction, SemanticRole, SemanticValueInput, UiEvent,
-    };
+    use nickel_ui::{ActionKind, HostBatch, HostEvent, SemanticRole, UiEvent};
 
-    use super::{
-        EmbeddedUiSurface, WriterLeases, codex_project_application_id,
-        step_embedded_codex_controller,
-    };
-
-    fn embedded_project_menu() -> EmbeddedUiSurface<ChatApplication> {
-        let backend = ReplayBackend::from_json(r#"{"name":"embedded-menu","events":[]}"#)
-            .expect("static replay is valid");
-        let mut application = ChatApplication::new(BackendMode::Replay {
-            backend,
-            cwd: "/projects/nickel".into(),
-        })
-        .as_shell_project_menu();
-        application.state.projects = vec![
-            Project {
-                id: "nickel".into(),
-                name: "Nickel".into(),
-                roots: vec!["/projects/nickel".into()],
-            },
-            Project {
-                id: "vesalius".into(),
-                name: "Vesalius".into(),
-                roots: vec!["/projects/vesalius".into()],
-            },
-        ];
-        application.state.status = nickel_codex_ui::ConnectionStatus::Ready;
-        let mut embedded = EmbeddedUiSurface::new(application, 920, 680, std::time::Instant::now());
-        embedded.step(HostBatch {
-            window_focused: Some(true),
-            ..HostBatch::default()
-        });
-        embedded
-    }
+    use super::{EmbeddedUiSurface, WriterLeases, codex_project_application_id};
 
     #[cfg(target_os = "linux")]
     fn shell_readiness(
@@ -4136,82 +3955,6 @@ mod tests {
         let other = codex_project_application_id(None, Path::new("/other/sample"));
         assert_eq!(first, same);
         assert_ne!(first, other);
-    }
-
-    #[test]
-    fn embedded_project_menu_accessibility_set_value_uses_the_production_host() {
-        let mut embedded = embedded_project_menu();
-        let search = embedded
-            .host
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.semantic_role == Some(SemanticRole::TextField))
-            .expect("project search is exposed as a textbox")
-            .clone();
-        assert!(search.actions.contains(&ActionKind::SetValue));
-
-        let outcome = embedded.step(HostBatch {
-            events: vec![HostEvent::Accessibility {
-                target: search.id,
-                action: SemanticAction::SetValue(SemanticValueInput::Text("nick".into())),
-            }],
-            ..HostBatch::default()
-        });
-
-        assert!(outcome.changed);
-        assert!(outcome.semantic_failures.is_empty());
-        assert_eq!(embedded.host.application().state.draft, "nick");
-        let labels = embedded
-            .host
-            .accessibility_nodes()
-            .iter()
-            .filter_map(|node| node.label.as_deref())
-            .collect::<Vec<_>>();
-        assert!(labels.contains(&"Nickel"));
-        assert!(!labels.contains(&"Vesalius"));
-    }
-
-    #[test]
-    fn embedded_project_menu_controller_opens_the_selected_project() {
-        let mut embedded = embedded_project_menu();
-        for action in [
-            ControllerAction::Down,
-            ControllerAction::Down,
-            ControllerAction::Down,
-            ControllerAction::Confirm,
-        ] {
-            step_embedded_codex_controller(&mut embedded, true, action);
-        }
-
-        assert_eq!(
-            embedded.host.application_mut().take_shell_requests(),
-            vec![ShellRequest::OpenProject {
-                cwd: "/projects/nickel".into(),
-                project_id: "nickel".into(),
-                name: "Nickel".into(),
-                initial_thread: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn embedded_project_menu_cancel_requests_dismiss_and_retains_selection_for_reopen() {
-        let mut embedded = embedded_project_menu();
-        step_embedded_codex_controller(&mut embedded, true, ControllerAction::Down);
-        step_embedded_codex_controller(&mut embedded, true, ControllerAction::Down);
-        let selected = embedded.host.inspect().controller_target;
-        assert!(selected.is_some(), "controller acquired a semantic target");
-
-        let transition =
-            step_embedded_codex_controller(&mut embedded, true, ControllerAction::Cancel);
-        assert!(transition.dismiss_surface);
-        assert!(!transition.changed);
-        assert_eq!(embedded.host.inspect().controller_target, selected);
-
-        // Production dismissal hides and suspends this reusable overlay; it
-        // does not destroy the host or route an ordinary-window focus loss.
-        embedded.suspend();
-        assert_eq!(embedded.host.inspect().controller_target, selected);
     }
 
     #[test]

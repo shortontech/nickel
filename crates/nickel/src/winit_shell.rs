@@ -877,7 +877,6 @@ impl WinitShell {
         if self.taskbar_panel_enabled {
             self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
         }
-        self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Screenshot, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::OnScreenKeyboard, 0, primary, primary_name)?;
         tracing::info!(

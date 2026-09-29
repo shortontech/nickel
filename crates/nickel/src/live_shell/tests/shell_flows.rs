@@ -514,6 +514,8 @@
         let key = crate::plugin_panel::codex_projects_surface_key();
         shell.launcher.set_codex_available(true);
         assert!(shell.plugin_surface_matches(&key));
+        assert!(shell.shell_panel_surfaces().iter().any(|(surface, _)| surface == &key));
+        assert!(shell.plugin_panels().iter().all(|(surface, _)| surface != &key));
         assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
         shell.apply_panel_action(super::TaskbarAction::Codex);
         assert!(shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));

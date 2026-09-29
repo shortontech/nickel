@@ -169,6 +169,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib codex_project_menu_uses_a_plugin_surface_and_retires_on_disable
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib codex_discovery_host_runs_without_a_native_menu_viewport
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel-codex-ui projection_hides_roots_and_rejects_stale_or_forged_open_requests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib display_projection_recovery_survives_control_plugin_disablement
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib live_shell::tests::disabling_plugin_retires_host_and_clears_reported_memory
@@ -263,6 +267,33 @@ jobs:
             $taskbarPeak = [long]$taskbar.memory.tracked_peak_bytes
             if ($taskbarBytes -le 0 -or $taskbarPeak -lt $taskbarBytes) {
               throw "Windows taskbar plugin has no valid retained UI memory report"
+            }
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            using System.Text;
+            public static class NickelCodexMenuWindowProbe {
+                private delegate bool EnumWindowsProc(IntPtr handle, IntPtr context);
+                [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr context);
+                [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+                [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder title, int capacity);
+                public static bool HasFixedMenu(uint processId) {
+                    bool found = false;
+                    EnumWindows((handle, context) => {
+                        uint owner;
+                        GetWindowThreadProcessId(handle, out owner);
+                        if (owner != processId) return true;
+                        var title = new StringBuilder(256);
+                        GetWindowText(handle, title, title.Capacity);
+                        if (title.ToString() == "Nickel Codex Projects") { found = true; return false; }
+                        return true;
+                    }, IntPtr.Zero);
+                    return found;
+                }
+            }
+            '@
+            if ([NickelCodexMenuWindowProbe]::HasFixedMenu([uint32]$shell.Id)) {
+              throw "The retired fixed Codex project menu window is still present"
             }
             Write-Host "Live Windows launcher, taskbar, desktop, and Codex project plugins are running."
             Write-Host "Taskbar retained UI: $taskbarBytes bytes; peak: $taskbarPeak bytes."

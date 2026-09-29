@@ -3535,6 +3535,7 @@ impl LiveShell {
         panels.extend(
             self.plugin_panel_extra_hosts
                 .iter()
+                .filter(|(key, _)| **key != crate::plugin_panel::codex_projects_surface_key())
                 .map(|(key, (surface, _))| (key.clone(), surface.clone())),
         );
         panels
@@ -3562,6 +3563,10 @@ impl LiveShell {
             panels.push((key, surface.clone()));
         }
         panels.extend(self.plugin_panels());
+        let codex_key = crate::plugin_panel::codex_projects_surface_key();
+        if let Some((surface, _)) = self.plugin_panel_extra_hosts.get(&codex_key) {
+            panels.push((codex_key, surface.clone()));
+        }
         if self.plugin_notification_host.is_some() {
             panels.push((
                 crate::plugin_panel::notification_surface_key(),

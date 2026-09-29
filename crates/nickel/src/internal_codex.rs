@@ -288,7 +288,8 @@ impl InternalCodexHost {
             None,
             None,
             self.backend_choice(),
-        )?;
+        )?
+        .as_headless_project_controller();
         application.set_theme(self.theme);
         let scale = placement.scale;
         let id = runtime.insert(

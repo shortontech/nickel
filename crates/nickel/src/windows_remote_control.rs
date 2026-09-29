@@ -6020,7 +6020,7 @@ impl WindowsRemoteControl {
         *feature_settings = settings.clone();
         codex.apply_settings(shell, &settings);
         let runtime_error = if settings.codex_enabled {
-            match codex.ensure_project_menu(shell) {
+            match codex.ensure_project_menu() {
                 Ok(()) => {
                     state.apply_codex_projection(CodexAvailabilityProjection::new(
                         FeatureSupport::Supported,
