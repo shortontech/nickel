@@ -412,21 +412,32 @@ impl LiveShell {
                     .plugin_launcher_host
                     .as_mut()
                     .expect("launcher plugin exists");
-                let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
+                let outcome = mutate(plugin, generation, node, action, clipboard_limit);
                 let requested = plugin.application_mut().take_effects();
+                if let Some(error) = plugin.application_mut().take_runtime_failure() {
+                    self.fail_launcher_plugin_runtime(error);
+                    return Err("launcher plugin failed".into());
+                }
+                let outcome = outcome?;
                 let [crate::plugin_panel::PluginEffect::SetLauncherQuery(query)] =
                     requested.as_slice()
                 else {
                     return Err("launcher plugin requested an unguarded effect".into());
                 };
                 self.apply_launcher_action(LauncherAction::SetQuery(query.clone()));
-                if self.sync_plugin_launcher()
+                if self
+                    .sync_plugin_launcher()
+                    .ok_or("launcher plugin failed")?
                     && let Some(plugin) = self.plugin_launcher_host.as_mut()
                 {
                     plugin.step(HostBatch {
                         application_changed: true,
                         ..HostBatch::default()
                     });
+                    if let Some(error) = plugin.application_mut().take_runtime_failure() {
+                        self.fail_launcher_plugin_runtime(error);
+                        return Err("launcher plugin failed".into());
+                    }
                 }
                 outcome
             }

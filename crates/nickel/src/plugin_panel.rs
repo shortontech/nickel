@@ -3123,6 +3123,17 @@ impl PluginPanelApplication {
         Ok(application)
     }
 
+    #[cfg(test)]
+    pub(crate) fn launcher_with_test_source(
+        source: &str,
+        projection: &LauncherPluginProjection,
+    ) -> Result<Self, String> {
+        let mut application =
+            Self::new_with_manifest(source, launcher_manifest(), Some(projection.to_json()))?;
+        application.launcher_shortcuts = Some(projection.into());
+        Ok(application)
+    }
+
     pub fn taskbar_with_projection(projection: &TaskbarPluginProjection) -> Result<Self, String> {
         let source = bundled_source(
             taskbar_manifest(),

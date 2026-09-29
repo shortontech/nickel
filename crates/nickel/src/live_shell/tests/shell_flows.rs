@@ -898,6 +898,88 @@
     }
 
     #[test]
+    fn launcher_callback_failure_retires_its_surface_and_can_restart() {
+        let mut shell = LiveShell::new().unwrap();
+        let projection = shell.current_plugin_launcher_projection();
+        let application = crate::plugin_panel::PluginPanelApplication::launcher_with_test_source(
+            "function App() { return h(Panel, {}, h(Button, {id: 'launcher-fail', onClick: () => { throw Error('launcher callback exploded'); }}, 'Break launcher')); }",
+            &projection,
+        )
+        .unwrap();
+        shell.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+        shell.apply_session_launcher_visibility(true);
+        let target = shell
+            .plugin_launcher_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Break launcher".into(),
+            })
+            .unwrap();
+        assert!(!shell.launcher_host_ui(
+            UiEvent::AccessibilityActivate(target.id),
+            920,
+            680,
+        ));
+        let id = &crate::plugin_panel::launcher_manifest().id;
+        let entry = shell.plugin_registry().get(id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("launcher callback exploded")));
+        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+        assert!(!shell.launcher_visible);
+        assert!(!shell.can_show_launcher());
+        assert!(shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.can_show_launcher());
+        assert!(!shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
+    }
+
+    #[test]
+    fn launcher_projection_failure_retires_its_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let projection = shell.current_plugin_launcher_projection();
+        let application = crate::plugin_panel::PluginPanelApplication::launcher_with_test_source(
+            "function App() { if (nickel.data.query !== '') throw Error('launcher projection exploded'); return h(Panel, {}, h(Text, {}, 'Launcher ready')); }",
+            &projection,
+        )
+        .unwrap();
+        shell.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+        shell.launcher.set_query("trigger");
+        assert!(shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
+        let entry = shell
+            .plugin_registry()
+            .get(&crate::plugin_panel::launcher_manifest().id)
+            .unwrap();
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("launcher projection exploded")));
+        assert!(!shell.can_show_launcher());
+    }
+
+    #[test]
+    fn launcher_failure_preserves_the_active_run_plugin() {
+        let mut shell = LiveShell::new().unwrap();
+        let projection = shell.current_plugin_launcher_projection();
+        let application = crate::plugin_panel::PluginPanelApplication::launcher_with_test_source(
+            "function App() { if (nickel.data.query !== '') throw Error('launcher projection exploded'); return h(Panel, {}, h(Text, {}, 'Launcher ready')); }",
+            &projection,
+        )
+        .unwrap();
+        shell.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+        shell.apply_session_launcher_visibility(true);
+        assert!(shell.set_run_visible(true));
+        shell.launcher.set_query("trigger");
+        assert!(shell.sync_plugin_launcher().is_none());
+        assert!(shell.run_visible);
+        assert!(shell.launcher_visible);
+        assert_eq!(
+            shell.active_launcher_surface_key(),
+            Some(crate::plugin_panel::run_surface_key())
+        );
+        assert!(!shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
+    }
+
+    #[test]
     fn disabled_taskbar_retires_its_visible_role() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::taskbar_manifest().id;

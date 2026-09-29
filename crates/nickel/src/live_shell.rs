@@ -4741,6 +4741,25 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
+    fn retire_launcher_plugin_state(&mut self) {
+        self.plugin_launcher_host = None;
+        self.launcher_plugin_result_page = 0;
+        self.launcher_plugin_dashboard_page = 0;
+        if self.launcher_visible && !self.run_visible {
+            self.set_launcher_visible(false);
+        }
+    }
+
+    fn fail_launcher_plugin_runtime(&mut self, error: String) {
+        let id = &crate::plugin_panel::launcher_manifest().id;
+        tracing::warn!(plugin = id, %error, "bundled launcher plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.retire_launcher_plugin_state();
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -4880,12 +4899,7 @@ impl LiveShell {
                 self.plugin_panel_owner = crate::plugin_panel::manifest().id.clone();
                 self.plugin_panel_surface = crate::plugin_panel::surface().clone();
             } else if id == crate::plugin_panel::launcher_manifest().id {
-                self.plugin_launcher_host = None;
-                self.launcher_plugin_result_page = 0;
-                self.launcher_plugin_dashboard_page = 0;
-                if self.launcher_visible && !self.run_visible {
-                    self.set_launcher_visible(false);
-                }
+                self.retire_launcher_plugin_state();
             } else if id == crate::plugin_panel::run_manifest().id {
                 self.plugin_run_host = None;
                 if self.run_visible {
@@ -5390,7 +5404,9 @@ impl LiveShell {
             return nickel_ui::HostEventOutcome::default();
         }
         if self.plugin_launcher_host.is_some() {
-            let application_changed = self.sync_plugin_launcher();
+            let Some(application_changed) = self.sync_plugin_launcher() else {
+                return nickel_ui::HostEventOutcome::default();
+            };
             let host = self
                 .plugin_launcher_host
                 .as_mut()
@@ -5429,6 +5445,10 @@ impl LiveShell {
                 ..HostBatch::default()
             });
             let effects = host.application_mut().take_effects();
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_launcher_plugin_runtime(error);
+                return nickel_ui::HostEventOutcome::default();
+            }
             self.apply_plugin_effects(effects);
             self.host_runtime_samples.record(outcome.telemetry);
             return outcome;
@@ -5467,7 +5487,9 @@ impl LiveShell {
             return false;
         }
         if self.plugin_launcher_host.is_some() {
-            let application_changed = self.sync_plugin_launcher();
+            let Some(application_changed) = self.sync_plugin_launcher() else {
+                return false;
+            };
             let host = self
                 .plugin_launcher_host
                 .as_mut()
@@ -5485,6 +5507,10 @@ impl LiveShell {
                 && outcome.text_input_active
                 && host.controller_targets_text_input();
             let effects = host.application_mut().take_effects();
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_launcher_plugin_runtime(error);
+                return false;
+            }
             if show_keyboard {
                 self.set_keyboard_visible(true);
             }
@@ -6721,9 +6747,9 @@ impl LiveShell {
         changed
     }
 
-    fn sync_plugin_launcher(&mut self) -> bool {
+    fn sync_plugin_launcher(&mut self) -> Option<bool> {
         if self.plugin_launcher_host.is_none() {
-            return false;
+            return None;
         }
         let projection = self.current_plugin_launcher_projection();
         self.launcher_plugin_result_page = projection.result_page;
@@ -6738,11 +6764,11 @@ impl LiveShell {
         {
             Ok(changed) => changed,
             Err(error) => {
-                tracing::error!(%error, "launcher plugin projection failed");
-                false
+                self.fail_launcher_plugin_runtime(error);
+                return None;
             }
         };
-        image_changed || projection_changed
+        Some(image_changed || projection_changed)
     }
 
     fn current_plugin_launcher_projection(&self) -> crate::plugin_panel::LauncherPluginProjection {
@@ -9153,7 +9179,9 @@ impl LiveShell {
             return false;
         }
         if self.plugin_launcher_host.is_some() {
-            let application_changed = self.sync_plugin_launcher();
+            let Some(application_changed) = self.sync_plugin_launcher() else {
+                return false;
+            };
             let host = self
                 .plugin_launcher_host
                 .as_mut()
@@ -9165,6 +9193,10 @@ impl LiveShell {
                     ..HostBatch::default()
                 })
                 .changed;
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_launcher_plugin_runtime(error);
+                return false;
+            }
             if let Ok(search) =
                 host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
             {
@@ -11017,7 +11049,9 @@ impl LiveShell {
 
     fn launcher_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         if self.plugin_launcher_host.is_some() {
-            let changed = self.sync_plugin_launcher();
+            let Some(changed) = self.sync_plugin_launcher() else {
+                return Vec::new();
+            };
             let host = self
                 .plugin_launcher_host
                 .as_mut()
@@ -11030,6 +11064,10 @@ impl LiveShell {
             });
             let commands = host.commands().to_vec();
             let effects = host.application_mut().take_effects();
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_launcher_plugin_runtime(error);
+                return Vec::new();
+            }
             let image_bytes = host.application().retained_image_bytes();
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::launcher_manifest().id,
