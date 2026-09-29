@@ -1760,11 +1760,11 @@ impl PanelNode {
                         if style.flex_direction.unwrap_or_default() == FlexDirection::Row =>
                     {
                         let mut row = Row::new();
-                        if style.width == Some(Length::Percent(1.0)) {
-                            row = row.fill_width();
+                        if let Some(width) = style.width {
+                            row = row.width_length(width);
                         }
-                        if style.height == Some(Length::Percent(1.0)) {
-                            row = row.fill_height();
+                        if let Some(height) = style.height {
+                            row = row.height_length(height);
                         }
                         if let Some(gap) = style.gap {
                             row = row.gap(gap);
@@ -1789,11 +1789,11 @@ impl PanelNode {
                     }
                     Display::Block | Display::Flex => {
                         let mut column = Column::new();
-                        if style.width == Some(Length::Percent(1.0)) {
-                            column = column.fill_width();
+                        if let Some(width) = style.width {
+                            column = column.width_length(width);
                         }
-                        if style.height == Some(Length::Percent(1.0)) {
-                            column = column.fill_height();
+                        if let Some(height) = style.height {
+                            column = column.height_length(height);
                         }
                         if let Some(gap) = style.gap {
                             column = column.gap(gap);

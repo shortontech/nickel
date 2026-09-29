@@ -3970,6 +3970,33 @@ mod tests {
     }
 
     #[test]
+    fn generic_div_flex_uses_explicit_css_dimensions_for_alignment() {
+        let package = PluginPackage {
+            manifest: manifest().clone(),
+            images: Default::default(),
+            stylesheet: "div.toolbar { display: flex; width: 100%; height: 80px; align-items: center; justify-content: space-between; } button { width: 50px; height: 20px; }".into(),
+            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h('div', {className: 'toolbar'}, h(Button, {id: 'left', onClick: () => {}}, 'Left'), h(Button, {id: 'right', onClick: () => {}}, 'Right'))); }".into(),
+        };
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package(&package).unwrap(),
+            400,
+            220,
+        );
+        let button = |name: &str| {
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .bounds
+        };
+        let left = button("Left");
+        let right = button("Right");
+        assert!(left.origin.y > 20.0);
+        assert!(right.origin.x > left.origin.x + 250.0);
+    }
+
+    #[test]
     fn row_and_column_classes_apply_css_flex_alignment() {
         let package = PluginPackage {
             manifest: manifest().clone(),
