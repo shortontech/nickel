@@ -1613,7 +1613,7 @@ impl PluginPanelApplication {
             taskbar_manifest(),
             "menu.js",
             include_str!("../../../assets/plugins/taskbar/menu.js"),
-            None,
+            Some(include_str!("../../../assets/plugins/taskbar/ui.css")),
             projection.to_json(),
         )
     }
@@ -1625,7 +1625,7 @@ impl PluginPanelApplication {
             taskbar_manifest(),
             "window-menu.js",
             include_str!("../../../assets/plugins/taskbar/window-menu.js"),
-            None,
+            Some(include_str!("../../../assets/plugins/taskbar/ui.css")),
             projection.to_json(),
         )
     }

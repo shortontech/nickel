@@ -8,6 +8,11 @@ tsc --allowJs --checkJs false --jsx react --jsxFactory h --target ES2020 \
   --outDir assets/plugins/taskbar assets/plugins/taskbar/main.jsx
 ```
 
+`menu.jsx` and `window-menu.jsx` are the sources for its two context menus.
+Compile them with the same command, replacing `main.jsx` with the desired
+source. `nickel-plugin dev assets/plugins/taskbar` compiles all three JSX
+sources into its isolated profile when they change.
+
 The bundled taskbar runs by default. The host supplies bounded grouped tasks,
 tray items, icon slots, and a clock label. The plugin requests typed launcher,
 task, tray, and control-center actions; the host rechecks item IDs against live

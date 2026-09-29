@@ -30,17 +30,15 @@ fn jsx_source(directory: &Path, entry: &str) -> Result<Option<PathBuf>, String> 
     }
     let resolved = std::fs::canonicalize(directory.join(source))
         .map_err(|error| format!("could not resolve JSX source: {error}"))?;
+    let directory = std::fs::canonicalize(directory)
+        .map_err(|error| format!("could not resolve plugin directory: {error}"))?;
     if !resolved.starts_with(directory) {
         return Err("JSX source escapes its plugin directory".into());
     }
     Ok(Some(source.clone()))
 }
 
-fn compile_jsx(
-    directory: &Path,
-    manifest: &PluginManifest,
-    source: &Path,
-) -> Result<String, String> {
+fn compile_jsx(directory: &Path, entry: &str, source: &Path) -> Result<String, String> {
     let output = tempfile::tempdir()
         .map_err(|error| format!("could not create JSX build directory: {error}"))?;
     let compiler = directory.join("node_modules/.bin").join(tsc_executable());
@@ -78,9 +76,9 @@ fn compile_jsx(
     if !status.success() {
         return Err(format!("JSX compilation failed with {status}"));
     }
-    let compiled = output.path().join(&manifest.entry);
+    let compiled = output.path().join(entry);
     let metadata = std::fs::symlink_metadata(&compiled)
-        .map_err(|error| format!("compiler did not produce {}: {error}", manifest.entry))?;
+        .map_err(|error| format!("compiler did not produce {entry}: {error}"))?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.len() > MAX_PLUGIN_ENTRY_BYTES as u64
@@ -109,7 +107,7 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
     let manifest = PluginManifest::from_json(manifest_source)?;
     if let Some(source) = jsx_source(&directory, &manifest.entry)? {
         Ok(PluginPackage {
-            source: compile_jsx(&directory, &manifest, &source)?,
+            source: compile_jsx(&directory, &manifest.entry, &source)?,
             stylesheet: PluginPackage::load_stylesheet(&directory, &manifest)?,
             images: PluginPackage::load_images(&directory, &manifest)?,
             manifest,
@@ -122,7 +120,7 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod platform {
     use std::{
-        collections::{HashSet, hash_map::DefaultHasher},
+        collections::{BTreeSet, HashSet, hash_map::DefaultHasher},
         hash::{Hash, Hasher},
         path::{Path, PathBuf},
         process::{Child, Command},
@@ -133,9 +131,9 @@ mod platform {
         time::Duration,
     };
 
-    use super::load_package;
     #[cfg(test)]
     use super::tsc_executable;
+    use super::{compile_jsx, jsx_source, load_package};
     use nickel_core::plugins::{
         MAX_PLUGIN_ENTRY_BYTES, PluginActivationSettings, PluginContributionMode, PluginManifest,
         PluginPackage, PluginSlotContract, PluginSurfaceKind,
@@ -253,7 +251,11 @@ mod platform {
             .map_err(|error| format!("could not watch plugin sources: {error}"))?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "js"))
+            .filter(|path| {
+                path.extension().is_some_and(|extension| {
+                    matches!(extension.to_str(), Some("js" | "jsx" | "tsx"))
+                })
+            })
             .collect::<Vec<_>>();
         siblings.sort();
         for sibling in siblings {
@@ -316,18 +318,35 @@ mod platform {
             }
             std::fs::create_dir_all(&target)
                 .map_err(|error| format!("could not stage bundled source: {error}"))?;
+            let mut siblings = BTreeSet::new();
             for entry in std::fs::read_dir(directory)
                 .map_err(|error| format!("could not read bundled plugin directory: {error}"))?
             {
                 let entry = entry.map_err(|error| error.to_string())?;
                 let path = entry.path();
-                if path.extension().is_none_or(|extension| extension != "js")
-                    || path.file_name().is_some_and(|name| {
-                        Some(name) == Path::new(&package.manifest.entry).file_name()
-                    })
-                {
+                if !path.extension().is_some_and(|extension| {
+                    matches!(extension.to_str(), Some("js" | "jsx" | "tsx"))
+                }) {
                     continue;
                 }
+                siblings.insert(path.with_extension("js").file_name().unwrap().to_owned());
+            }
+            for name in siblings {
+                if Some(name.as_os_str()) == Path::new(&package.manifest.entry).file_name() {
+                    continue;
+                }
+                let entry_name = name
+                    .to_str()
+                    .ok_or("bundled JavaScript file name is not UTF-8")?;
+                if let Some(source) = jsx_source(directory, entry_name)? {
+                    std::fs::write(
+                        target.join(&name),
+                        compile_jsx(directory, entry_name, &source)?,
+                    )
+                    .map_err(|error| format!("could not stage compiled JSX: {error}"))?;
+                    continue;
+                }
+                let path = directory.join(&name);
                 let metadata = std::fs::symlink_metadata(&path)
                     .map_err(|error| format!("could not inspect bundled JavaScript: {error}"))?;
                 if !metadata.is_file()
@@ -338,7 +357,7 @@ mod platform {
                         "bundled JavaScript must be an ordinary file of at most 2 MiB".into(),
                     );
                 }
-                std::fs::copy(&path, target.join(entry.file_name()))
+                std::fs::copy(&path, target.join(&name))
                     .map_err(|error| format!("could not stage bundled JavaScript: {error}"))?;
             }
             let entry = target.join(&package.manifest.entry);
@@ -731,6 +750,50 @@ mod platform {
                     assert!(staged.join("window-menu.js").is_file());
                 }
             }
+        }
+
+        #[test]
+        fn stages_and_watches_bundled_auxiliary_jsx() {
+            if Command::new(tsc_executable())
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let source = tempfile::tempdir().unwrap();
+            let taskbar = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/taskbar"
+            ));
+            for name in ["plugin.json", "main.js", "ui.css"] {
+                std::fs::copy(taskbar.join(name), source.path().join(name)).unwrap();
+            }
+            std::fs::write(source.path().join("menu.js"), "stale menu").unwrap();
+            std::fs::write(
+                source.path().join("menu.jsx"),
+                "function App() { return <FixedWindow width=\"100%\" height=\"100%\"><Text>Fresh menu</Text></FixedWindow>; }",
+            )
+            .unwrap();
+            let package = load_dev_package(source.path()).unwrap();
+            let profile = tempfile::tempdir().unwrap();
+            stage(&package, source.path(), profile.path()).unwrap();
+            let staged = profile
+                .path()
+                .join("bundled-source/org.nickel.taskbar/menu.js");
+            let compiled = std::fs::read_to_string(staged).unwrap();
+            assert!(compiled.contains("Fresh menu"));
+            assert!(!compiled.contains("stale menu"));
+            let before = source_fingerprint(source.path(), "main.js").unwrap();
+            std::fs::write(
+                source.path().join("menu.jsx"),
+                "function App() { return <FixedWindow width=\"100%\" height=\"100%\"><Text>Updated menu</Text></FixedWindow>; }",
+            )
+            .unwrap();
+            assert_ne!(
+                source_fingerprint(source.path(), "main.js").unwrap(),
+                before
+            );
         }
 
         #[test]
