@@ -239,6 +239,8 @@ declare function Select(props: NickelSelectProps): JSX.Element;
 declare function Option(props: NickelOptionProps): JSX.Element;
 declare function Button(props: NickelButtonProps): JSX.Element;
 declare function Spacer(props: NickelProps): JSX.Element;
+/** Host-provided content placed inside this component's layout box. */
+declare function Slot(props: NickelProps & { id: string }): JSX.Element;
 declare function Dialog(props: NickelDialogProps): JSX.Element;
 declare function Menu(props: NickelMenuProps): JSX.Element;
 declare function MenuItem(props: NickelMenuItemProps): JSX.Element;

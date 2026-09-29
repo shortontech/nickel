@@ -1,0 +1,123 @@
+window.settings-window {
+    width: 100%;
+    height: 100%;
+    background: @window@;
+}
+
+div.settings-shell {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    height: 100%;
+}
+
+div.settings-shell.narrow {
+    flex-direction: column;
+}
+
+div.settings-sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 280px;
+    min-width: 280px;
+    height: 100%;
+    gap: @control@px;
+    padding: @content@px;
+    background: @sidebar@;
+}
+
+div.settings-sidebar.narrow {
+    width: 100%;
+    min-width: 0px;
+}
+
+text-field.settings-search {
+    width: 100%;
+    height: 40px;
+    padding: 8px 10px;
+    background: @raised@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 14px;
+}
+
+column.settings-destinations {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 2px;
+}
+
+text.settings-section {
+    color: @secondary@;
+    font-size: 12px;
+    line-height: 18px;
+    margin: 10px 8px 3px;
+}
+
+button.settings-destination {
+    width: 100%;
+    min-height: 38px;
+    padding: 7px 10px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 14px;
+}
+
+button.settings-destination.active {
+    background: @accent-soft@;
+    border: 1px solid @selected@;
+}
+
+text.settings-empty {
+    color: @secondary@;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+div.settings-detail {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    flex-grow: 1;
+    background: @window@;
+}
+
+row.settings-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 88px;
+    flex-shrink: 0;
+    padding: @content@px;
+}
+
+text.settings-title {
+    color: @primary@;
+    font-size: 22px;
+    line-height: 28px;
+}
+
+text.settings-subtitle {
+    color: @secondary@;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+button.settings-back {
+    width: 40px;
+    height: 40px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: @primary@;
+    font-size: 22px;
+}
+
+slot.settings-content {
+    width: 100%;
+    flex-grow: 1;
+}

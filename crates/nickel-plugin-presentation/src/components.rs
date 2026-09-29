@@ -358,6 +358,10 @@ pub enum PanelNode {
     Spacer {
         class_name: Option<String>,
     },
+    Slot {
+        id: String,
+        class_name: Option<String>,
+    },
     TextField {
         id: String,
         class_name: Option<String>,
@@ -509,6 +513,7 @@ impl PanelNode {
             Self::Section {
                 id, label, value, ..
             } => capacity(id) + capacity(label) + capacity(value),
+            Self::Slot { id, class_name } => capacity(id) + class_name.as_ref().map_or(0, capacity),
             Self::ColorSwatch {
                 id,
                 class_name,
@@ -686,6 +691,7 @@ impl PanelNode {
                     | "scroll-view"
                     | "text"
                     | "spacer"
+                    | "slot"
                     | "text-field"
                     | "slider"
                     | "switch"
@@ -697,6 +703,20 @@ impl PanelNode {
             return Err(format!("className is not supported on {kind} yet"));
         }
         match kind {
+            "slot" => {
+                if !children.is_empty() {
+                    return Err("slot cannot have children".into());
+                }
+                let id = value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty() && id.len() <= 128)
+                    .ok_or("slot needs an id of 1 to 128 bytes")?;
+                Ok(Self::Slot {
+                    id: id.to_owned(),
+                    class_name,
+                })
+            }
             "section" => {
                 if !children.is_empty() {
                     return Err("section cannot have children".into());
@@ -1779,6 +1799,26 @@ impl PanelNode {
         stylesheet: &StyleSheet,
         scope: Option<&str>,
     ) -> AnyView<Message> {
+        self.view_as_with_slots(images, stylesheet, scope, &mut |_| None)
+    }
+
+    pub fn view_as_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        self.view_as_scoped_with_slots(images, stylesheet, scope, slots)
+    }
+
+    fn view_as_scoped_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
         match self {
             Self::Badge {
                 label,
@@ -1890,8 +1930,9 @@ impl PanelNode {
                             grid = grid.gap(gap);
                         }
                         for child in children {
-                            grid = grid
-                                .child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                            grid = grid.child(child.view_as_scoped_with_slots::<Message>(
+                                images, stylesheet, scope, slots,
+                            ));
                         }
                         AnyView::new(grid)
                     }
@@ -1915,8 +1956,9 @@ impl PanelNode {
                             row = row.justify_content(justify);
                         }
                         for child in children {
-                            row = row
-                                .child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                            row = row.child(child.view_as_scoped_with_slots::<Message>(
+                                images, stylesheet, scope, slots,
+                            ));
                         }
                         AnyView::new(row)
                     }
@@ -1938,8 +1980,9 @@ impl PanelNode {
                             column = column.justify_content(justify);
                         }
                         for child in children {
-                            column = column
-                                .child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                            column = column.child(child.view_as_scoped_with_slots::<Message>(
+                                images, stylesheet, scope, slots,
+                            ));
                         }
                         AnyView::new(column)
                     }
@@ -1983,8 +2026,10 @@ impl PanelNode {
                 let style = stylesheet.resolve("box", None, class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column =
-                        column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                    column = column
+                        .child(child.view_as_scoped_with_slots::<Message>(
+                            images, stylesheet, scope, slots,
+                        ));
                 }
                 let container = Container::new()
                     .position(Point {
@@ -2022,8 +2067,9 @@ impl PanelNode {
                 let mut layer = Layer::new().width_length(*width).height_length(*height);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        layer =
-                            layer.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                        layer = layer.child(child.view_as_scoped_with_slots::<Message>(
+                            images, stylesheet, scope, slots,
+                        ));
                     }
                 }
                 let mut container = Container::new()
@@ -2047,8 +2093,10 @@ impl PanelNode {
             } => {
                 let mut column = Column::new().fill_width().fill_height();
                 for child in children {
-                    column =
-                        column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                    column = column
+                        .child(child.view_as_scoped_with_slots::<Message>(
+                            images, stylesheet, scope, slots,
+                        ));
                 }
                 let style = stylesheet.resolve("viewport", None, class_name.as_deref());
                 let container = Container::new()
@@ -2077,7 +2125,9 @@ impl PanelNode {
                     .height((*height).saturating_sub(16) as f32);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        row = row.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                        row = row.child(child.view_as_scoped_with_slots::<Message>(
+                            images, stylesheet, scope, slots,
+                        ));
                     }
                 }
                 let style = stylesheet.resolve("panel", None, class_name.as_deref());
@@ -2102,7 +2152,10 @@ impl PanelNode {
                     row = row.gap(gap);
                 }
                 for child in children {
-                    row = row.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                    row = row
+                        .child(child.view_as_scoped_with_slots::<Message>(
+                            images, stylesheet, scope, slots,
+                        ));
                 }
                 if style == ControlStyle::default() {
                     AnyView::new(row)
@@ -2123,8 +2176,10 @@ impl PanelNode {
                     column = column.gap(gap);
                 }
                 for child in children {
-                    column =
-                        column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                    column = column
+                        .child(child.view_as_scoped_with_slots::<Message>(
+                            images, stylesheet, scope, slots,
+                        ));
                 }
                 if style == ControlStyle::default() {
                     AnyView::new(column)
@@ -2151,8 +2206,10 @@ impl PanelNode {
                     column = column.gap(gap);
                 }
                 for child in children {
-                    column =
-                        column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
+                    column = column
+                        .child(child.view_as_scoped_with_slots::<Message>(
+                            images, stylesheet, scope, slots,
+                        ));
                 }
                 let scroll = VerticalScroll::new(
                     Message::from_plugin_scoped(PluginMessage::Scroll, scope),
@@ -2283,6 +2340,17 @@ impl PanelNode {
             Self::Spacer { class_name } => {
                 let style = stylesheet.resolve("spacer", None, class_name.as_deref());
                 AnyView::new(Spacer::flex().grow(style.grow.unwrap_or(1.0)))
+            }
+            Self::Slot { id, class_name } => {
+                let style = stylesheet.resolve("slot", Some(id), class_name.as_deref());
+                let mut container = Container::new().id(id.clone()).fill_width().fill_height();
+                if let Some(content) = slots(id) {
+                    container = container.child(content);
+                }
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
+                )
             }
             Self::Slider {
                 id,

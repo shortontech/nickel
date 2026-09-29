@@ -1,6 +1,70 @@
 use super::*;
 
 impl SettingsApp {
+    fn settings_detail(&self, page: SettingsPage, width: f32) -> AnyView<SettingsMessage> {
+        match page {
+            SettingsPage::Display => AnyView::new(self.display_components(if width < 720.0 {
+                width
+            } else {
+                (width - SIDEBAR_WIDTH as f32).max(0.0)
+            })),
+            SettingsPage::Bar => AnyView::new(self.bar_components()),
+            SettingsPage::Appearance => AnyView::new(self.appearance_components()),
+            SettingsPage::Network => AnyView::new(self.network_components()),
+            SettingsPage::Bluetooth | SettingsPage::BluetoothPair => {
+                AnyView::new(self.bluetooth_components())
+            }
+            SettingsPage::DefaultApps => AnyView::new(self.default_apps_components()),
+            SettingsPage::OptionalFeatures => AnyView::new(self.optional_features_components()),
+            SettingsPage::Plugins => AnyView::new(self.plugins_components()),
+            SettingsPage::KeyboardShortcuts => self.keyboard_shortcuts_components(),
+            SettingsPage::About => self.about_components(),
+        }
+    }
+
+    fn settings_view_jsx(
+        &self,
+        width: f32,
+        height: f32,
+    ) -> Result<AnyView<SettingsMessage>, String> {
+        let destinations = self.navigation_destinations();
+        let active = self.active_destination.map(|_| self.page);
+        let selected = destinations
+            .iter()
+            .find(|destination| destination.page == self.page);
+        let query = self.sidebar_query.trim().to_lowercase();
+        let entries = self.navigation_search_entries();
+        let results = search_settings(&query, &entries);
+        let data = serde_json::json!({
+            "width": width, "height": height,
+            "active": active.is_some(),
+            "query": self.sidebar_query,
+            "searchPlaceholder": self.localizer.text("settings-search-placeholder"),
+            "noResults": self.localizer.text("settings-search-no-results"),
+            "title": selected.map_or("Settings", |destination| destination.title.as_str()),
+            "subtitle": selected.map_or("", |destination| destination.subtitle.as_str()),
+            "destinations": destinations.iter().filter(|destination| destination.page != SettingsPage::BluetoothPair)
+                .map(|destination| serde_json::json!({
+                    "id": destination.page.to_string(),
+                    "label": destination.label,
+                    "section": destination.section,
+                    "active": active == Some(destination.page),
+                })).collect::<Vec<_>>(),
+            "results": results.iter().map(|result| serde_json::json!({
+                "target": result.target.as_str(),
+                "label": result.disambiguated_label(),
+                "available": result.available,
+            })).collect::<Vec<_>>(),
+        });
+        let content = self.settings_detail(self.page, width);
+        let mut shell = self.settings_shell.borrow_mut();
+        shell
+            .get_or_insert_with(crate::settings_shell::SettingsShell::new)
+            .as_mut()
+            .map_err(|error| error.clone())?
+            .render(&data, self.ui_theme(), content)
+    }
+
     #[cfg(test)]
     pub(crate) fn build_ui(&self, width: f32, height: f32) -> UiFrame<SettingsMessage> {
         self.build_ui_internal(width, height, false)
@@ -16,6 +80,23 @@ impl SettingsApp {
     }
 
     pub(crate) fn settings_view(
+        &self,
+        width: f32,
+        height: f32,
+        modality: InputModality,
+    ) -> AnyView<SettingsMessage> {
+        if self.settings_jsx_enabled
+            && self.page != SettingsPage::BluetoothPair
+            && modality != InputModality::Controller
+            && let Ok(view) = self.settings_view_jsx(width, height)
+        {
+            let _ = self.settings_plugin_memory();
+            return view;
+        }
+        self.settings_view_native(width, height, modality)
+    }
+
+    fn settings_view_native(
         &self,
         width: f32,
         height: f32,
@@ -109,28 +190,7 @@ impl SettingsApp {
             .iter()
             .map(|destination| {
                 let page = destination.page;
-                let detail = match page {
-                    SettingsPage::Display => {
-                        AnyView::new(self.display_components(if width < 720.0 {
-                            width
-                        } else {
-                            (width - SIDEBAR_WIDTH as f32).max(0.0)
-                        }))
-                    }
-                    SettingsPage::Bar => AnyView::new(self.bar_components()),
-                    SettingsPage::Appearance => AnyView::new(self.appearance_components()),
-                    SettingsPage::Network => AnyView::new(self.network_components()),
-                    SettingsPage::Bluetooth | SettingsPage::BluetoothPair => {
-                        AnyView::new(self.bluetooth_components())
-                    }
-                    SettingsPage::DefaultApps => AnyView::new(self.default_apps_components()),
-                    SettingsPage::OptionalFeatures => {
-                        AnyView::new(self.optional_features_components())
-                    }
-                    SettingsPage::Plugins => AnyView::new(self.plugins_components()),
-                    SettingsPage::KeyboardShortcuts => self.keyboard_shortcuts_components(),
-                    SettingsPage::About => self.about_components(),
-                };
+                let detail = self.settings_detail(page, width);
                 let icon = match page {
                     SettingsPage::Display => SidebarIconKind::Display,
                     SettingsPage::Bar => SidebarIconKind::Bar,

@@ -68,6 +68,18 @@ pub(super) fn stylesheet_template(
             format!("#{:06x}", theme.surfaces.card & 0x00ff_ffff),
         ),
         (
+            "@window@",
+            format!("#{:06x}", theme.surfaces.window & 0x00ff_ffff),
+        ),
+        (
+            "@sidebar@",
+            format!("#{:06x}", theme.surfaces.sidebar & 0x00ff_ffff),
+        ),
+        (
+            "@raised@",
+            format!("#{:06x}", theme.surfaces.raised & 0x00ff_ffff),
+        ),
+        (
             "@border@",
             format!("#{:06x}", theme.surfaces.raised & 0x00ff_ffff),
         ),

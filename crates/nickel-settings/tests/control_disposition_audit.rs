@@ -4,6 +4,7 @@ const LEDGER: &str = include_str!("../../../docs/settings-control-dispositions.t
 const MAIN: &str = include_str!("../src/main.rs");
 const PAGES: &str = include_str!("../src/view/pages.rs");
 const SHELL: &str = include_str!("../src/view/shell.rs");
+const JSX_SHELL: &str = include_str!("../../../assets/plugins/settings/settings-shell.jsx");
 
 const HEADER: [&str; 10] = [
     "page",
@@ -55,7 +56,7 @@ fn every_disposition_is_complete_unique_and_tied_to_production_source() {
             .collect::<Vec<_>>(),
         HEADER
     );
-    let source = format!("{MAIN}\n{PAGES}\n{SHELL}");
+    let source = format!("{MAIN}\n{PAGES}\n{SHELL}\n{JSX_SHELL}");
     let mut identities = HashSet::new();
     let expected_pages = [
         "Shell",
@@ -113,7 +114,7 @@ fn every_disposition_is_complete_unique_and_tied_to_production_source() {
 
 #[test]
 fn every_view_action_has_a_checked_in_disposition() {
-    let source = format!("{PAGES}\n{SHELL}");
+    let source = format!("{PAGES}\n{SHELL}\n{JSX_SHELL}");
     let missing = settings_messages(&source)
         .into_iter()
         .filter(|message| !LEDGER.contains(message))

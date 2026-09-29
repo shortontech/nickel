@@ -16,6 +16,8 @@ pub(super) struct SettingsApp {
         std::cell::RefCell<Option<Result<crate::plugin_list::PluginList, String>>>,
     pub(super) navigation_plugin:
         std::cell::RefCell<Option<Result<crate::navigation_plugin::NavigationPlugin, String>>>,
+    pub(super) settings_shell:
+        std::cell::RefCell<Option<Result<crate::settings_shell::SettingsShell, String>>>,
     pub(super) bar_page: std::cell::RefCell<Option<Result<crate::bar_plugin::BarPage, String>>>,
     pub(super) optional_features_page: std::cell::RefCell<
         Option<Result<crate::optional_features_plugin::OptionalFeaturesPage, String>>,
@@ -239,6 +241,7 @@ impl Default for SettingsApp {
             ordinary_pages: std::cell::RefCell::new(None),
             plugin_list: std::cell::RefCell::new(None),
             navigation_plugin: std::cell::RefCell::new(None),
+            settings_shell: std::cell::RefCell::new(None),
             bar_page: std::cell::RefCell::new(None),
             optional_features_page: std::cell::RefCell::new(None),
             network_page: std::cell::RefCell::new(None),

@@ -23,6 +23,7 @@ const PAGE_SERVICE_GRANTS: [PluginCapability; 8] = [
 
 #[derive(Clone, Copy)]
 pub(super) enum Script {
+    Shell,
     Navigation,
     Plugins,
     OrdinaryPages,
@@ -41,7 +42,7 @@ pub(super) fn manifest() -> Result<&'static PluginManifest, String> {
         .get_or_init(|| {
             let manifest = PluginManifest::from_json(MANIFEST_SOURCE)?;
             if manifest.id != ID
-                || manifest.entry != "settings-navigation.js"
+                || manifest.entry != "settings-shell.js"
                 || manifest.surfaces.len() != 1
                 || manifest.surfaces[0].id != "main"
                 || manifest.surfaces[0].kind != PluginSurfaceKind::Window
@@ -96,6 +97,7 @@ pub(super) fn local_snapshot(enabled: bool) -> Result<PluginStatusSnapshot, Stri
 pub(super) fn source(script: Script) -> Result<&'static str, String> {
     manifest()?;
     Ok(match script {
+        Script::Shell => include_str!("../../../assets/plugins/settings/settings-shell.js"),
         Script::Navigation => {
             include_str!("../../../assets/plugins/settings/settings-navigation.js")
         }
@@ -136,8 +138,9 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/plugins/settings");
         let package = PluginPackage::load(path).unwrap();
         assert_eq!(package.manifest, *manifest().unwrap());
-        assert_eq!(package.source, source(Script::Navigation).unwrap());
+        assert_eq!(package.source, source(Script::Shell).unwrap());
         for script in [
+            Script::Shell,
             Script::Navigation,
             Script::Plugins,
             Script::OrdinaryPages,

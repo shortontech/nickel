@@ -4,7 +4,8 @@
   "name": "Nickel Settings",
   "author": "Nickel",
   "version": "0.1.0",
-  "entry": "settings-navigation.js",
+  "entry": "settings-shell.js",
+  "stylesheet": "settings-shell.css",
   "surfaces": [
     {"id": "main", "kind": "window", "width": 1100, "height": 800}
   ],

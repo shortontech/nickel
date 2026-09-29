@@ -29,6 +29,7 @@ const Option = 'option';
 const TextField = 'text-field';
 const Button = 'button';
 const Spacer = 'spacer';
+const Slot = 'slot';
 const Dialog = 'dialog';
 const Menu = 'menu';
 const MenuItem = 'menu-item';

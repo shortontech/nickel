@@ -17,6 +17,7 @@ mod platform;
 mod plugin_list;
 mod settings_package;
 mod settings_plugin;
+mod settings_shell;
 mod view;
 
 use model::SettingsApp;
@@ -1100,6 +1101,18 @@ impl SettingsApp {
         } else {
             None
         };
+        let shell = if enabled {
+            match settings_shell::SettingsShell::new() {
+                Ok(shell) => Some(shell),
+                Err(error) => {
+                    self.plugin_notice = Some(format!("Could not start Settings plugin: {error}"));
+                    self.request_redraw();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if persist
             && self.persistence_enabled
             && let Err(error) = nickel_core::plugins::PluginActivationSettings::update_default(
@@ -1118,6 +1131,7 @@ impl SettingsApp {
         self.ordinary_pages.get_mut().take();
         self.plugin_list.get_mut().take();
         self.navigation_plugin.get_mut().take();
+        self.settings_shell.get_mut().take();
         self.bar_page.get_mut().take();
         self.optional_features_page.get_mut().take();
         self.network_page.get_mut().take();
@@ -1134,6 +1148,9 @@ impl SettingsApp {
         self.pending_transient_request = None;
         if let Some(navigation) = navigation {
             *self.navigation_plugin.get_mut() = Some(Ok(navigation));
+        }
+        if let Some(shell) = shell {
+            *self.settings_shell.get_mut() = Some(Ok(shell));
         }
         if let Some(snapshot) = self.plugin_status.as_mut() {
             snapshot
@@ -1160,6 +1177,12 @@ impl SettingsApp {
             .as_ref()
             .and_then(|page| page.as_ref().ok())
             .map_or(0, navigation_plugin::NavigationPlugin::retained_bytes)
+            + self
+                .settings_shell
+                .borrow()
+                .as_ref()
+                .and_then(|shell| shell.as_ref().ok())
+                .map_or(0, settings_shell::SettingsShell::retained_bytes)
             + self
                 .ordinary_pages
                 .borrow()
@@ -1907,6 +1930,7 @@ impl SettingsApp {
             SettingsMessage::JsxScopedAction(scope, index, value) => {
                 if let Ok(value) = serde_json::from_str(&value) {
                     match scope.as_str() {
+                        "settings-shell" => self.handle_shell_jsx_action(index, value),
                         "default-app-picker" => {
                             self.handle_default_app_picker_jsx_action(index, value)
                         }
@@ -3343,6 +3367,14 @@ mod tests {
     };
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
+
+    fn shell_target(host: &UiHost<SettingsApp>, suffix: &str) -> nickel_ui::UiId {
+        host.semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with(suffix) && !node.actions.is_empty())
+            .unwrap_or_else(|| panic!("missing Settings control {suffix}"))
+            .id
+    }
 
     fn optional_features_action(app: &SettingsApp, id: &str) -> usize {
         app.optional_features_page
@@ -5842,11 +5874,11 @@ mod tests {
         let tree = app.build_ui(850.0, 580.0);
 
         assert_eq!(app.page, SettingsPage::Appearance);
-        let message = SettingsMessage::NavigateTarget(
-            SettingsPage::Appearance,
-            "appearance-mode-system".into(),
-        );
-        assert!(!tree.semantic_targets_for_message(&message).is_empty());
+        assert!(tree.accessibility_nodes().iter().any(|node| {
+            node.id
+                .as_str()
+                .ends_with("search-result-appearance-mode-system")
+        }));
         assert!(tree.accessibility_nodes().iter().any(|node| {
             node.label
                 .as_deref()
@@ -5854,11 +5886,7 @@ mod tests {
         }));
 
         let mut scenario = nickel_ui_testkit::Scenario::new(app, 850, 580);
-        let search_result = scenario
-            .host()
-            .unique_semantic_target_for_message(&message)
-            .expect("search result has a production semantic target")
-            .id;
+        let search_result = shell_target(scenario.host(), "search-result-appearance-mode-system");
         scenario
             .accessibility_action(
                 &nickel_ui_testkit::Selector::id(search_result),
@@ -5896,12 +5924,7 @@ mod tests {
                 850,
                 580,
             );
-            let id = host
-                .unique_semantic_target_for_message(&SettingsMessage::Navigate(
-                    SettingsPage::Appearance,
-                ))
-                .unwrap()
-                .id;
+            let id = shell_target(&host, "settings-navigation/destination/appearance");
             match modality {
                 "keyboard" => {
                     host.request_focus(id);
@@ -5958,10 +5981,7 @@ mod tests {
             850,
             580,
         );
-        let destination = host
-            .unique_semantic_target_for_message(&SettingsMessage::Navigate(SettingsPage::Display))
-            .expect("display destination semantics")
-            .id;
+        let destination = shell_target(&host, "settings-navigation/destination/display");
         host.perform_accessibility_action(
             destination,
             nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
@@ -6084,17 +6104,12 @@ mod tests {
 
     #[test]
     fn normalized_keyboard_and_pointer_reach_production_navigation_once() {
-        let destination = SettingsMessage::Navigate(SettingsPage::Appearance);
-
         let mut keyboard = UiHost::new(
             SettingsApp::with_initial_page(SettingsPage::Display),
             850,
             580,
         );
-        let id = keyboard
-            .unique_semantic_target_for_message(&destination)
-            .unwrap()
-            .id;
+        let id = shell_target(&keyboard, "settings-navigation/destination/appearance");
         keyboard.request_focus(id);
         keyboard.handle_input(&enter_event(), None);
         assert_eq!(keyboard.application_mut().page, SettingsPage::Appearance);
@@ -6105,7 +6120,10 @@ mod tests {
             580,
         );
         let target = pointer
-            .unique_semantic_target_for_message(&destination)
+            .query_unique(&nickel_ui::SemanticSelector::Id(shell_target(
+                &pointer,
+                "settings-navigation/destination/appearance",
+            )))
             .unwrap();
         let bounds = target.bounds;
         let x = f64::from(bounds.origin.x + bounds.size.width / 2.0);
@@ -6234,23 +6252,24 @@ mod tests {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         let content = app.build_ui(560.0, 760.0);
         assert!(
-            !content
-                .semantic_targets_for_message(&SettingsMessage::ShowNavigation)
-                .is_empty()
-        );
-        assert!(
             content
-                .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Display))
-                .is_empty()
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.id.as_str().ends_with("settings-show-navigation") })
         );
+        assert!(!content.accessibility_nodes().iter().any(|node| {
+            node.id
+                .as_str()
+                .ends_with("settings-navigation/destination/display")
+        }));
 
         app.handle_settings_message(SettingsMessage::ShowNavigation);
         let navigation = app.build_ui(560.0, 760.0);
-        assert!(
-            !navigation
-                .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Display))
-                .is_empty()
-        );
+        assert!(navigation.accessibility_nodes().iter().any(|node| {
+            node.id
+                .as_str()
+                .ends_with("settings-navigation/destination/display")
+        }));
         assert_eq!(app.page, SettingsPage::Appearance);
 
         app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));

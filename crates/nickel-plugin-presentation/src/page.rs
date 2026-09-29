@@ -101,6 +101,10 @@ impl JsxPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        components::{PluginImages, PluginMessage},
+        css::StyleSheet,
+    };
     use serde_json::json;
 
     #[test]
@@ -251,5 +255,39 @@ mod tests {
         )
         .unwrap();
         assert!(page.render(&json!({})).is_err());
+    }
+
+    #[test]
+    fn window_slot_places_host_content_inside_the_jsx_layout() {
+        let manifest =
+            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
+                .unwrap();
+        let source = "function App() { return h(Window, {id: 'main', width: '100%', height: '100%'}, h(Div, {}, h(Slot, {id: 'content'}))); }";
+        let mut page = JsxPage::new(source, manifest, Some("main".into())).unwrap();
+        let node = page.render(&json!({})).unwrap();
+        let mut called = false;
+        let stylesheet = StyleSheet::compile("window { background: #232831; }").unwrap();
+        let view = node.view_as_with_slots::<PluginMessage>(
+            &PluginImages::new(),
+            &stylesheet,
+            None,
+            &mut |id| {
+                assert_eq!(id, "content");
+                called = true;
+                Some(nickel_ui::AnyView::new(
+                    nickel_ui::Container::new()
+                        .id("injected-content")
+                        .child(nickel_ui::Text::new("Host content")),
+                ))
+            },
+        );
+        let frame = nickel_ui::UiFrame::layout(view, nickel_ui::Rect::new(0.0, 0.0, 1100.0, 800.0));
+        assert!(called);
+        assert!(
+            frame
+                .accessibility_nodes()
+                .iter()
+                .any(|node| node.id.as_str().ends_with("injected-content"))
+        );
     }
 }
