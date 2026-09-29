@@ -6,7 +6,6 @@ function FixedWindow(props) {
     const {children, ...windowProps} = props;
     return h(Window, {...windowProps, placement: 'fixed'}, ...children);
 }
-const Viewport = 'viewport';
 const Box = 'box';
 const Div = 'div';
 const FileTile = 'file-tile';

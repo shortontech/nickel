@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn rejected_event_restores_hook_state_for_the_next_host() {
-        let source = "function App() { const [count, setCount] = useState(0); return h(Panel, {}, h(Button, {onClick: () => setCount(count + 1)}, String(count))); }";
+        let source = "function App() { const [count, setCount] = useState(0); return h(Window, {}, h(Button, {onClick: () => setCount(count + 1)}, String(count))); }";
         let mut runtime = JsxRuntime::new(source, None).unwrap();
         let initial = runtime
             .render("__nickelRender()", |node| Ok(node.clone()))
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn infinite_loop_in_handler_does_not_poison_the_runtime() {
-        let source = "function App() { return h(Panel, {}, h(Button, {onClick: () => { while (true) {} }}, 'Loop')); }";
+        let source = "function App() { return h(Window, {}, h(Button, {onClick: () => { while (true) {} }}, 'Loop')); }";
         let mut runtime = JsxRuntime::new(source, None).unwrap();
         let initial = runtime
             .render("__nickelRender()", |node| Ok(node.clone()))

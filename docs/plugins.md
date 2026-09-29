@@ -185,12 +185,12 @@ and child indexes. IDs can change when a surface is recreated. These queries
 are available only when nested test control is enabled; protected surfaces are
 excluded.
 
-The runtime provides `h`, `Panel`, `Viewport`, `Div`, `Row`, `Column`, `Text`, `Button`,
+The runtime provides `h`, `Panel`, `Div`, `Row`, `Column`, `Text`, `Button`,
 `Window`, `FixedWindow`, `Slot`, `Dialog`, `Image`, `ImageButton`, `Slider`, `useState`, `useRef`, and other small native
 components.
 An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
 256 KiB. `className` accepts space-separated class names on `Surface`, `Window`, `Panel`,
-`Viewport`, `Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Slot`, `Text`, `Button`,
+`Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Slot`, `Text`, `Button`,
 `TextField`, and `Slider`. For example, `<Button className="primary" onClick={save}>Save</Button>`
 matches `button.primary { padding: 8px; background: #345678; }`. The supported
 selectors are element names, `.class`, and `#id`, combined without descendant
@@ -221,7 +221,7 @@ and thumb; width and spacing use the ordinary CSS declarations.
 `<Window width={520} height={340}>...</Window>` is the JSX
 surface root. `<FixedWindow>` is a JavaScript helper that returns a `Window`
 with fixed placement; it does not create a second renderer. In the current
-manifest version, numeric root dimensions must match the declared surface;
+manifest version, numeric root dimensions must stay within the declared surface bounds;
 `"100%"` fills the host surface. Requested output, edge, anchor, work-area
 reservation, and bottom offset are checked against the manifest before the
 render is accepted. The manifest still determines native placement until the
@@ -241,8 +241,7 @@ host-provided content is empty. CSS can style the slot box with `slot#content`
 or a class name. The Settings window uses this to place its active page while
 its window and navigation are authored in JSX.
 
-`Viewport` is retained for older plugins. New full-window layouts use `<Window>`.
-Inside a `Viewport`, `<ScrollView id="items" grow={true}>` takes the remaining
+Inside a `<Window>`, `<ScrollView id="items" grow={true}>` takes the remaining
 height and shrinks when the window does. Use `height` for a fixed-size scroll
 area; `grow` and `height` cannot be combined.
 JavaScript execution has a 100,000-iteration limit per call frame. A loop that
