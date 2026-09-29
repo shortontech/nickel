@@ -1712,20 +1712,24 @@
         application_id: &str,
         expected_label: &str,
     ) -> bool {
-        let mut host = UiHost::new(
-            LauncherApplication::new(
-                launcher.clone(),
-                crate::launcher_view::LauncherViewState::default(),
-                crate::launcher_icon_cache::LauncherIconCache::new(),
-                palette,
-            ),
-            920,
-            680,
-        );
+        let mut application = crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::launcher_manifest(),
+            "main.js",
+            crate::plugin_panel::LauncherPluginProjection::from_launcher(launcher).to_json(),
+        )
+        .expect("bundled launcher");
+        application.sync_theme_palette(palette).expect("launcher palette");
+        let mut host = UiHost::new(application, 920, 680);
+        let application_name = launcher
+            .applications()
+            .find(|application| application.id() == application_id)
+            .expect("catalog application")
+            .name();
         let target = host
-            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
-                application_id.to_owned(),
-            ))
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: application_name.into(),
+            })
             .expect("application semantic target");
         let outcome = host.perform_accessibility_action(
             target.id.clone(),

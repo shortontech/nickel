@@ -3244,28 +3244,6 @@ mod tests {
             .join("../../target/nickel-ui-snapshots/launcher-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         image.save(output).unwrap();
-
-        let native = nickel_ui::UiHost::new(
-            crate::launcher_view::LauncherApplication::new(
-                Launcher::default(),
-                crate::launcher_view::LauncherViewState::default(),
-                crate::launcher_icon_cache::LauncherIconCache::new(),
-                nickel_core::theme::ThemePalette::from_appearance(
-                    nickel_core::theme::Appearance::default(),
-                ),
-            ),
-            920,
-            680,
-        );
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(920, 680, 1.0);
-        native.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(920, 680, |x, y| {
-            let pixel = renderer.pixels()[(y * 920 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/launcher-native.png");
-        image.save(output).unwrap();
     }
 
     #[test]

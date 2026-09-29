@@ -916,12 +916,10 @@
     }
 
     #[test]
-    fn desktop_native_tiles_share_the_file_plane_component() {
+    fn desktop_and_file_manager_tiles_share_the_file_plane_component() {
         let file = include_str!("../../../../nickel-file/src/components.rs");
-        let launcher = include_str!("../../launcher_view.rs");
         let desktop_production = include_str!("../../live_shell/desktop.rs");
         assert!(file.contains("FileGridItem::new_with_generation"));
-        assert!(launcher.matches("FilePlaneItem::new").count() >= 2);
         assert!(desktop_production.contains("FilePlaneItem::new_with_generation"));
         assert!(desktop_production.contains(".semantic_role(SemanticRole::GridCell)"));
         let shared = include_str!("../../../../nickel-ui/src/ui/components.rs");
