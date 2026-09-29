@@ -2532,10 +2532,10 @@ impl NickelSession {
                         .map(|surface| (shell, surface))
                 });
                 let plugin = shell_entry
-                    .and_then(|(_, surface)| surface.plugin.as_ref())
+                    .and_then(|(shell, surface)| shell.surface_plugin_identity(surface))
                     .map(|key| nickel_session_protocol::PluginSurfaceIdentity {
-                        plugin_id: key.plugin_id.clone(),
-                        surface_id: key.surface_id.clone(),
+                        plugin_id: key.plugin_id,
+                        surface_id: key.surface_id,
                     });
                 let node_count = shell_entry
                     .and_then(|(shell, surface)| shell.layout_snapshot(surface.id))
@@ -2654,10 +2654,10 @@ impl NickelSession {
                         role,
                         geometry,
                         output: surface.output.clone(),
-                        plugin: surface.plugin.as_ref().map(|key| {
+                        plugin: shell.surface_plugin_identity(surface).map(|key| {
                             nickel_session_protocol::PluginSurfaceIdentity {
-                                plugin_id: key.plugin_id.clone(),
-                                surface_id: key.surface_id.clone(),
+                                plugin_id: key.plugin_id,
+                                surface_id: key.surface_id,
                             }
                         }),
                     })

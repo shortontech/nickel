@@ -621,6 +621,17 @@ impl InternalShellCoordinator {
         &self.entries
     }
 
+    pub(crate) fn surface_plugin_identity(
+        &self,
+        surface: &InternalShellSurface,
+    ) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+        surface.plugin.clone().or_else(|| {
+            (surface.role == SurfaceRole::Launcher)
+                .then(|| self.shell.active_launcher_surface_key())
+                .flatten()
+        })
+    }
+
     pub(crate) fn launcher_preferred_surface_size(&mut self, maximum: (u32, u32)) -> (u32, u32) {
         self.shell.launcher_preferred_surface_size(maximum)
     }

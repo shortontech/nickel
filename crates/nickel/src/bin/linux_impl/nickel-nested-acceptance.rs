@@ -232,7 +232,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, screenshot plugin input and lifecycle, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked typed surface hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, screenshot plugin input and lifecycle, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked live component layouts, typed surface hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
     );
     Ok(())
 }
@@ -318,6 +318,8 @@ fn exercise(
     }) {
         return Err(format!("preview plugin surface is missing: {surfaces:?}"));
     }
+    verify_layout_snapshot(test_input, &environment, "org.nickel.taskbar/main")?;
+    verify_layout_snapshot(test_input, &environment, "org.nickel.desktop/main")?;
     let plugin_output = checked(test_input, &environment, &["plugins"])?;
     let plugins: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&plugin_output).map_err(|error| error.to_string())?;
@@ -350,6 +352,7 @@ fn exercise(
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
     wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
+    verify_layout_snapshot(test_input, &environment, "org.nickel.launcher/main")?;
     let launcher_memory = wait_for_plugin_native_memory(
         test_input,
         &environment,
@@ -515,7 +518,7 @@ fn exercise(
         .lines()
         .find(|line| line.starts_with("Launcher\t"))
         .ok_or("internal launcher disappeared after injected Meta input")?;
-    if launcher.ends_with("hidden") {
+    if !launcher_line_visible(launcher) {
         return Err("injected Meta did not make the internal launcher visible".into());
     }
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
@@ -578,7 +581,10 @@ fn verify_run_plugin_owns_dialog(
     press_super_r(test_input, environment)?;
     thread::sleep(Duration::from_millis(250));
     let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if surfaces.lines().any(|line| line.starts_with("Launcher\t") && !line.ends_with("hidden")) {
+    if surfaces
+        .lines()
+        .any(|line| line.starts_with("Launcher\t") && launcher_line_visible(line))
+    {
         return Err(format!("disabled Run opened a fallback dialog: {surfaces}"));
     }
     checked(test_input, environment, &["plugin-set", id, "enabled"])?;
@@ -1954,7 +1960,7 @@ fn wait_for_launcher_visibility(
         let launcher = surfaces
             .lines()
             .find(|line| line.starts_with("Launcher\t"));
-        if launcher.is_some_and(|line| !line.ends_with("hidden")) == expected_visible {
+        if launcher.is_some_and(launcher_line_visible) == expected_visible {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -1969,6 +1975,10 @@ fn wait_for_launcher_visibility(
         }
         thread::sleep(POLL);
     }
+}
+
+fn launcher_line_visible(line: &str) -> bool {
+    line.split('\t').nth(2) != Some("hidden")
 }
 
 fn wait_for_plugin_native_memory(
@@ -2040,6 +2050,28 @@ fn assert_no_shell_child(compositor: u32) -> Result<(), String> {
                 "unified runtime spawned shell child {pid}: {command}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn verify_layout_snapshot(
+    test_input: &Path,
+    environment: &[(String, String)],
+    plugin_surface: &str,
+) -> Result<(), String> {
+    let layouts = checked(test_input, environment, &["layouts"])?;
+    let surface = layouts
+        .lines()
+        .find(|line| line.ends_with(plugin_surface))
+        .and_then(|line| line.split('\t').next())
+        .ok_or_else(|| format!("{plugin_surface} is absent from layout inventory: {layouts}"))?;
+    let layout = checked(test_input, environment, &["layout", surface])?;
+    if !layout.lines().any(|line| {
+        line.contains(" source=") && line.contains(" allocated=") && line.contains(" children=")
+    }) {
+        return Err(format!(
+            "{plugin_surface} has no computed component layout: {layout}"
+        ));
     }
     Ok(())
 }
