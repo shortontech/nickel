@@ -26,6 +26,7 @@ struct HitRegion<Message> {
     target_bounds: Rect,
     message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
+    seeded_value_mapper: Option<fn(Message, f32) -> Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
 }
 
@@ -55,6 +56,18 @@ struct MessageRegion<Message> {
     rect: Rect,
     message: Message,
     message_mapper: Option<fn(f32) -> Message>,
+    seeded_value_mapper: Option<fn(Message, f32) -> Message>,
+}
+
+fn map_value<Message: Clone>(
+    seed: &Message,
+    direct: Option<fn(f32) -> Message>,
+    seeded: Option<fn(Message, f32) -> Message>,
+    value: f32,
+) -> Option<Message> {
+    seeded
+        .map(|map| map(seed.clone(), value))
+        .or_else(|| direct.map(|map| map(value)))
 }
 
 struct OverlayMenuLevel<'a, Message> {
@@ -884,6 +897,7 @@ impl<Message: Clone> UiFrame<Message> {
                 target_bounds: item_rect,
                 message: item.action.clone(),
                 message_mapper: None,
+                seeded_value_mapper: None,
                 drag_mapper: None,
             });
             if let Some(message) = item.action.clone() {
@@ -893,6 +907,7 @@ impl<Message: Clone> UiFrame<Message> {
                     rect: item_rect,
                     message,
                     message_mapper: None,
+                    seeded_value_mapper: None,
                 });
             }
             if let Some(command) = item.text_command {
@@ -2116,10 +2131,14 @@ impl<Message: Clone> UiFrame<Message> {
                     .iter()
                     .rev()
                     .find(|region| &region.id == id)
-                    .and_then(|region| region.message_mapper)
                     .zip(node.controller_value)
-                    .map(|(map, value)| {
-                        map((value + direction * node.adjustment_step).clamp(0.0, 1.0))
+                    .and_then(|(region, value)| {
+                        map_value(
+                            &region.message,
+                            region.message_mapper,
+                            region.seeded_value_mapper,
+                            (value + direction * node.adjustment_step).clamp(0.0, 1.0),
+                        )
                     })
             }
             SemanticAction::SetValue(SemanticValueInput::Number(value)) => self
@@ -2127,8 +2146,14 @@ impl<Message: Clone> UiFrame<Message> {
                 .iter()
                 .rev()
                 .find(|region| &region.id == id)
-                .and_then(|region| region.message_mapper)
-                .map(|map| map((value as f32).clamp(0.0, 1.0))),
+                .and_then(|region| {
+                    map_value(
+                        &region.message,
+                        region.message_mapper,
+                        region.seeded_value_mapper,
+                        (value as f32).clamp(0.0, 1.0),
+                    )
+                }),
             SemanticAction::SetValue(SemanticValueInput::Text(value)) => self
                 .text_inputs
                 .iter()
@@ -2399,9 +2424,15 @@ impl<Message: Clone> UiFrame<Message> {
             .and_then(|hit| {
                 let fraction =
                     ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0);
-                hit.message_mapper
-                    .map(|map| map(fraction))
-                    .or_else(|| hit.message.clone())
+                hit.message.as_ref().and_then(|message| {
+                    map_value(
+                        message,
+                        hit.message_mapper,
+                        hit.seeded_value_mapper,
+                        fraction,
+                    )
+                    .or_else(|| Some(message.clone()))
+                })
             })
     }
 
@@ -2739,12 +2770,16 @@ impl<Message: Clone> UiFrame<Message> {
                 }
                 if let Some(captured) = state.captured()
                     && let Some(hit) = self.hits.iter().rev().find(|hit| &hit.id == captured)
-                    && let Some(map) = hit.message_mapper
+                    && let Some(seed) = hit.message.as_ref()
                 {
                     let fraction = ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0))
                         .clamp(0.0, 1.0);
-                    outcome.messages.push(map(fraction));
-                    invalidation = invalidation.merge(Invalidation::Paint);
+                    if let Some(message) =
+                        map_value(seed, hit.message_mapper, hit.seeded_value_mapper, fraction)
+                    {
+                        outcome.messages.push(message);
+                        invalidation = invalidation.merge(Invalidation::Paint);
+                    }
                 }
                 if let Some(region_id) = state.captured().cloned()
                     && let Some(region) = self.selection_region(&region_id)
@@ -3216,21 +3251,24 @@ impl<Message: Clone> UiFrame<Message> {
             UiEvent::ControllerAdjust(direction) => {
                 if !state.navigation().controller_editing() {
                     Invalidation::None
-                } else if let Some((value, step, map)) =
+                } else if let Some((value, step, region)) =
                     state.navigation().controller_selected().and_then(|id| {
                         let node = self.resolved.nodes.iter().find(|node| &node.id == id)?;
-                        let map = self
-                            .messages
-                            .iter()
-                            .find(|region| &region.id == id)?
-                            .message_mapper?;
-                        Some((node.controller_value?, node.adjustment_step, map))
+                        let region = self.messages.iter().find(|region| &region.id == id)?;
+                        Some((node.controller_value?, node.adjustment_step, region))
                     })
                 {
-                    outcome
-                        .messages
-                        .push(map((value + direction.signum() * step).clamp(0.0, 1.0)));
-                    Invalidation::Layout
+                    if let Some(message) = map_value(
+                        &region.message,
+                        region.message_mapper,
+                        region.seeded_value_mapper,
+                        (value + direction.signum() * step).clamp(0.0, 1.0),
+                    ) {
+                        outcome.messages.push(message);
+                        Invalidation::Layout
+                    } else {
+                        Invalidation::None
+                    }
                 } else if let Some(invalidation) =
                     self.operate_navigation_scroll(state, direction, &mut outcome.messages)
                 {
@@ -4477,19 +4515,24 @@ impl<Message: Clone> UiFrame<Message> {
         direction: f32,
         messages: &mut Vec<Message>,
     ) -> Invalidation {
-        let Some((value, step, map)) = state.navigation().controller_selected().and_then(|id| {
+        let Some((value, step, region)) = state.navigation().controller_selected().and_then(|id| {
             let node = self.resolved.nodes.iter().find(|node| &node.id == id)?;
-            let map = self
-                .messages
-                .iter()
-                .find(|region| &region.id == id)?
-                .message_mapper?;
-            Some((node.controller_value?, node.adjustment_step, map))
+            let region = self.messages.iter().find(|region| &region.id == id)?;
+            Some((node.controller_value?, node.adjustment_step, region))
         }) else {
             return Invalidation::None;
         };
-        messages.push(map((value + direction.signum() * step).clamp(0.0, 1.0)));
-        Invalidation::Layout
+        if let Some(message) = map_value(
+            &region.message,
+            region.message_mapper,
+            region.seeded_value_mapper,
+            (value + direction.signum() * step).clamp(0.0, 1.0),
+        ) {
+            messages.push(message);
+            Invalidation::Layout
+        } else {
+            Invalidation::None
+        }
     }
 
     fn node_has_controller_action(&self, index: usize) -> bool {

@@ -14,8 +14,8 @@ use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, DragPhase, FilePlaneItem,
     FrameOverlay, Grid, Image, ImageFit, Insets, Layer, Length, OverlayAnchor, OverlayId,
-    OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Row, SemanticRole, Shortcut, Size, Spacer,
-    Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
+    OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Row, SemanticRole, Shortcut, Size, Slider,
+    Spacer, Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
 };
 use serde_json::Value;
 
@@ -606,6 +606,13 @@ enum PanelNode {
         width: u32,
         height: u32,
     },
+    Slider {
+        id: String,
+        class_name: Option<String>,
+        value: f32,
+        label: String,
+        action: usize,
+    },
     Spacer {
         class_name: Option<String>,
     },
@@ -897,6 +904,7 @@ impl PanelNode {
                     | "text"
                     | "spacer"
                     | "text-field"
+                    | "slider"
                     | "button"
             )
         {
@@ -1408,6 +1416,37 @@ impl PanelNode {
                 })
             }
             "spacer" => Ok(Self::Spacer { class_name }),
+            "slider" => {
+                if !children.is_empty() {
+                    return Err("slider cannot have children".into());
+                }
+                let fraction = value
+                    .get("value")
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                    .ok_or("slider value must be between 0 and 1")?;
+                Ok(Self::Slider {
+                    id: value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 128)
+                        .ok_or("slider needs a bounded id")?
+                        .to_owned(),
+                    class_name,
+                    value: fraction as f32,
+                    label: value
+                        .get("accessibilityLabel")
+                        .and_then(Value::as_str)
+                        .filter(|label| !label.is_empty() && label.len() <= 256)
+                        .ok_or("slider needs an accessibility label")?
+                        .to_owned(),
+                    action: value
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok())
+                        .ok_or("slider needs an onChange handler")?,
+                })
+            }
             "text-field" => Ok(Self::TextField {
                 class_name,
                 id: value
@@ -2158,6 +2197,43 @@ impl PanelNode {
                 let style = stylesheet.resolve("spacer", None, class_name.as_deref());
                 AnyView::new(Spacer::flex().grow(style.grow.unwrap_or(1.0)))
             }
+            Self::Slider {
+                id,
+                class_name,
+                value,
+                label,
+                action,
+            } => {
+                let style = stylesheet.resolve("slider", Some(id), class_name.as_deref());
+                let slider = Slider::on_change_with(
+                    PluginMessage::Value(*action, *value),
+                    map_plugin_value,
+                    *value,
+                )
+                .id(id.clone())
+                .colors(
+                    style.background.unwrap_or(0x354158),
+                    style.color.unwrap_or(0x68b8ff),
+                    style.border_color.unwrap_or(0xf4f7ff),
+                );
+                let slider = match style.width {
+                    Some(Length::Px(width)) => slider.width(width),
+                    Some(Length::Percent(1.0)) => slider.grow(1.0),
+                    _ => slider,
+                }
+                .accessibility_label(label.clone());
+                let mut wrapper_style = style.clone();
+                wrapper_style.background = None;
+                wrapper_style.color = None;
+                wrapper_style.border_color = None;
+                with_margin(
+                    AnyView::new(apply_container_style(
+                        Container::new().child(slider),
+                        &wrapper_style,
+                    )),
+                    &wrapper_style,
+                )
+            }
             Self::TextField {
                 id,
                 class_name,
@@ -2489,7 +2565,7 @@ fn parse_panel_for_manifest(
             return;
         };
         let kind = node.get("kind").and_then(Value::as_str).unwrap_or("");
-        if matches!(kind, "text-field" | "image-button") && !node.contains_key("id") {
+        if matches!(kind, "text-field" | "image-button" | "slider") && !node.contains_key("id") {
             let mut hash = 0xcbf29ce484222325_u64;
             for byte in path.bytes().chain(kind.bytes()) {
                 hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
@@ -3062,6 +3138,7 @@ pub enum PluginMessage {
     Context(usize),
     Drag(usize, DragGesture),
     Text(usize, String),
+    Value(usize, f32),
     Scroll,
 }
 
@@ -3070,6 +3147,13 @@ fn map_plugin_drag(seed: PluginMessage, gesture: DragGesture) -> PluginMessage {
         unreachable!("plugin drag seed retains its handler")
     };
     PluginMessage::Drag(drag, gesture)
+}
+
+fn map_plugin_value(seed: PluginMessage, value: f32) -> PluginMessage {
+    let PluginMessage::Value(action, _) = seed else {
+        unreachable!("plugin slider seed retains its handler")
+    };
+    PluginMessage::Value(action, value)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4645,6 +4729,9 @@ impl nickel_ui::Application for PluginPanelApplication {
             PluginMessage::Text(action, value) => {
                 let encoded = serde_json::to_string(&value).expect("string serialization");
                 format!("__nickelDispatch({action}, {encoded})")
+            }
+            PluginMessage::Value(action, value) => {
+                format!("__nickelDispatch({action}, {value})")
             }
             PluginMessage::Drag(action, gesture) => {
                 let phase = match gesture.phase {
@@ -6453,6 +6540,87 @@ mod tests {
             .unwrap();
         assert!(second.bounds.origin.x > first.bounds.origin.x);
         assert!(second.bounds.origin.x + second.bounds.size.width <= 600.0);
+    }
+
+    #[test]
+    fn independent_jsx_sliders_dispatch_their_own_values() {
+        let source = "function App() { const [hue, setHue] = useState(0.2); const [intensity, setIntensity] = useState(0.6); return h(Panel, {}, h(Slider, {value: hue, accessibilityLabel: 'Hue', className: 'hue', onChange: setHue}), h(Slider, {value: intensity, accessibilityLabel: 'Intensity', onChange: setIntensity})); }";
+        let mut host =
+            nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 440, 220);
+        let hue = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Slider,
+                name: "Hue".into(),
+            })
+            .unwrap();
+        let intensity = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Slider,
+                name: "Intensity".into(),
+            })
+            .unwrap();
+        assert_ne!(hue.id, intensity.id);
+        host.perform_semantic_action(
+            hue.id,
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(0.75)),
+        );
+        let PanelNode::Panel { children, .. } = &host.application_mut().node else {
+            panic!("plugin root changed");
+        };
+        assert!(
+            matches!(&children[0], PanelNode::Slider { value, .. } if (*value - 0.75).abs() < 0.001)
+        );
+        assert!(
+            matches!(&children[1], PanelNode::Slider { value, .. } if (*value - 0.6).abs() < 0.001)
+        );
+        host.perform_semantic_action(
+            intensity.id,
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(0.35)),
+        );
+        let PanelNode::Panel { children, .. } = &host.application_mut().node else {
+            panic!("plugin root changed");
+        };
+        assert!(
+            matches!(&children[0], PanelNode::Slider { value, .. } if (*value - 0.75).abs() < 0.001)
+        );
+        assert!(
+            matches!(&children[1], PanelNode::Slider { value, .. } if (*value - 0.35).abs() < 0.001)
+        );
+        let hue = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Slider,
+                name: "Hue".into(),
+            })
+            .unwrap();
+        let pointer = Point {
+            x: hue.bounds.origin.x + hue.bounds.size.width * 0.2,
+            y: hue.bounds.origin.y + hue.bounds.size.height / 2.0,
+        };
+        host.handle_event(nickel_ui::UiEvent::PointerPressed(pointer));
+        host.handle_event(nickel_ui::UiEvent::PointerReleased(pointer));
+        let PanelNode::Panel { children, .. } = &host.application_mut().node else {
+            panic!("plugin root changed");
+        };
+        assert!(
+            matches!(&children[0], PanelNode::Slider { value, .. } if (*value - 0.2).abs() < 0.02),
+            "{:?} bounds={:?} pointer={pointer:?}",
+            children[0],
+            hue.bounds
+        );
+    }
+
+    #[test]
+    fn jsx_slider_requires_a_bounded_value_label_and_handler() {
+        for props in [
+            "value: -0.1, accessibilityLabel: 'Hue', onChange: value => {}",
+            "value: 1.1, accessibilityLabel: 'Hue', onChange: value => {}",
+            "value: 0.5, onChange: value => {}",
+            "value: 0.5, accessibilityLabel: 'Hue'",
+        ] {
+            let source =
+                format!("function App() {{ return h(Panel, {{}}, h(Slider, {{{props}}})); }}");
+            assert!(PluginPanelApplication::new(&source).is_err(), "{props}");
+        }
     }
 
     #[test]

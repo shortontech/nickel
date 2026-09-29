@@ -67,6 +67,7 @@ pub(super) fn emit_element<Message: Clone>(
                 rect,
                 message: message.clone(),
                 message_mapper: element.message_mapper,
+                seeded_value_mapper: element.seeded_value_mapper,
             });
         }
         if let Some(message) = &element.context_message {
@@ -76,6 +77,7 @@ pub(super) fn emit_element<Message: Clone>(
                 rect,
                 message: message.clone(),
                 message_mapper: None,
+                seeded_value_mapper: None,
             });
         }
         let foreground = element.style.foreground.or(inherited_foreground);
@@ -149,6 +151,7 @@ pub(super) fn emit_element<Message: Clone>(
             rect,
             message: message.clone(),
             message_mapper: element.message_mapper,
+            seeded_value_mapper: element.seeded_value_mapper,
         });
         if !is_scroll_container(element)
             && let Some(hit_rect) = node
@@ -163,6 +166,7 @@ pub(super) fn emit_element<Message: Clone>(
                 target_bounds: rect,
                 message: Some(message.clone()),
                 message_mapper: element.message_mapper,
+                seeded_value_mapper: element.seeded_value_mapper,
                 drag_mapper: element.drag_mapper,
             });
         }
@@ -174,6 +178,7 @@ pub(super) fn emit_element<Message: Clone>(
             rect,
             message: message.clone(),
             message_mapper: None,
+            seeded_value_mapper: None,
         });
         if element.message.is_none()
             && !is_scroll_container(element)
@@ -189,6 +194,7 @@ pub(super) fn emit_element<Message: Clone>(
                 target_bounds: rect,
                 message: None,
                 message_mapper: None,
+                seeded_value_mapper: None,
                 drag_mapper: element.drag_mapper,
             });
         }
@@ -253,6 +259,7 @@ pub(super) fn emit_element<Message: Clone>(
                 target_bounds: rect,
                 message: None,
                 message_mapper: None,
+                seeded_value_mapper: None,
                 drag_mapper: None,
             });
         }
@@ -410,6 +417,7 @@ pub(super) fn emit_element<Message: Clone>(
                             rect: glyph.rect,
                             message: message.clone(),
                             message_mapper: None,
+                            seeded_value_mapper: None,
                         });
                         tree.hits.push(HitRegion {
                             id: link_id.clone(),
@@ -417,6 +425,7 @@ pub(super) fn emit_element<Message: Clone>(
                             target_bounds: glyph.rect,
                             message: Some(message.clone()),
                             message_mapper: None,
+                            seeded_value_mapper: None,
                             drag_mapper: None,
                         });
                     }
@@ -594,6 +603,7 @@ pub(super) fn emit_element<Message: Clone>(
                             ),
                             message: message.clone(),
                             message_mapper: None,
+                            seeded_value_mapper: None,
                         });
                     }
                 }
@@ -676,6 +686,7 @@ pub(super) fn emit_element<Message: Clone>(
                             rect: option_rect,
                             message: message.clone(),
                             message_mapper: None,
+                            seeded_value_mapper: None,
                         });
                     }
                     if let Some(hit_rect) = node
@@ -694,6 +705,7 @@ pub(super) fn emit_element<Message: Clone>(
                             target_bounds: option_rect,
                             message,
                             message_mapper: None,
+                            seeded_value_mapper: None,
                             drag_mapper: None,
                         });
                     }

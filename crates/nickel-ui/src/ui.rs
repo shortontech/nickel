@@ -1165,6 +1165,7 @@ pub struct Element<Message = String> {
     message: Option<Message>,
     context_message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
+    seeded_value_mapper: Option<fn(Message, f32) -> Message>,
     scroll_extent_mapper: Option<fn(ScrollExtent) -> Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
     text_mapper: Option<TextMessageMapper<Message>>,
@@ -1185,6 +1186,7 @@ impl<Message> Element<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -1224,6 +1226,7 @@ impl<Message> Element<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -1537,6 +1540,7 @@ impl<Message> Element<Message> {
     {
         assert!(
             self.message_mapper.is_none()
+                && self.seeded_value_mapper.is_none()
                 && self.drag_mapper.is_none()
                 && self.text_mapper.is_none(),
             "map value-producing messages at the control constructor"
@@ -1549,6 +1553,7 @@ impl<Message> Element<Message> {
             message: self.message.map(&mut *map),
             context_message: self.context_message.map(&mut *map),
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,

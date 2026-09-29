@@ -218,6 +218,7 @@ impl<Message> VerticalScroll<Message> {
             message: Some(message),
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -307,6 +308,7 @@ impl<Message> Grid<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -344,6 +346,7 @@ impl<Message> Grid<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -366,6 +369,7 @@ impl<Message> Grid<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -873,6 +877,7 @@ impl<Message> StyledText<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -1135,6 +1140,7 @@ impl<Message> CustomPaint<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -1156,6 +1162,7 @@ impl<Message> CustomPaint<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -1262,6 +1269,7 @@ impl<Message> Image<Message> {
             message: None,
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -2934,6 +2942,7 @@ impl<Message> Slider<Message> {
             message: Some(message),
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -2951,6 +2960,12 @@ impl<Message> Slider<Message> {
     pub fn on_change(map: fn(f32) -> Message, value: f32) -> Self {
         let mut slider = Self::new(map(value.clamp(0.0, 1.0)), value);
         slider.0.message_mapper = Some(map);
+        slider
+    }
+
+    pub fn on_change_with(seed: Message, map: fn(Message, f32) -> Message, value: f32) -> Self {
+        let mut slider = Self::new(seed, value);
+        slider.0.seeded_value_mapper = Some(map);
         slider
     }
 
@@ -3046,6 +3061,7 @@ impl<Message> Dropdown<Message> {
             message: Some(toggle_message),
             context_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,
@@ -3211,6 +3227,7 @@ impl<Message: Clone> Menu<Message> {
             // invocation on the same typed transition as ordinary activation.
             context_message: Some(toggle_message),
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
             text_mapper: None,

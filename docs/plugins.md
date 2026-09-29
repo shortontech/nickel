@@ -186,12 +186,12 @@ are available only when nested test control is enabled; protected surfaces are
 excluded.
 
 The runtime provides `h`, `Panel`, `Viewport`, `Div`, `Row`, `Column`, `Text`, `Button`,
-`Window`, `FixedWindow`, `Dialog`, `Image`, `ImageButton`, `useState`, `useRef`, and other small native
+`Window`, `FixedWindow`, `Dialog`, `Image`, `ImageButton`, `Slider`, `useState`, `useRef`, and other small native
 components.
 An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
-256 KiB. `className` accepts space-separated class names on `Surface`, `Panel`,
+256 KiB. `className` accepts space-separated class names on `Surface`, `Window`, `Panel`,
 `Viewport`, `Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Text`, `Button`, and
-`TextField`. For example, `<Button className="primary" onClick={save}>Save</Button>`
+`TextField`, and `Slider`. For example, `<Button className="primary" onClick={save}>Save</Button>`
 matches `button.primary { padding: 8px; background: #345678; }`. The supported
 selectors are element names, `.class`, and `#id`, combined without descendant
 selectors. Pseudo-classes such as `:focus` and plugin `onFocus`/`onBlur`
@@ -212,6 +212,12 @@ their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
 props remain available. Row, Column, and specialized widgets still have some
 legacy sizing behavior while the generic layout path expands.
 
+`<Slider value={hue / 359} accessibilityLabel="Hue" onChange={fraction =>
+nickel.request({type: "appearance-hue", fraction})} />` is a native slider with a
+value from 0 to 1. It receives a stable automatic control ID unless `id` is
+provided. CSS `background`, `color`, and `border-color` style its track, fill,
+and thumb; width and spacing use the ordinary CSS declarations.
+
 `<Window width={520} height={340}>...</Window>` is the JSX
 surface root. `<FixedWindow>` is a JavaScript helper that returns a `Window`
 with fixed placement; it does not create a second renderer. In the current
@@ -230,9 +236,7 @@ Controls do not need explicit IDs for ordinary rendering or event handling.
 Nickel derives stable control IDs from the tree path; list items rendered from
 arrays inside a `Window` must use unique `key` values, such as `key={item.id}`.
 
-`Viewport` fills its host window and accepts an ARGB `background` and `padding`
-from 0 to 256 logical pixels. Use it as the root for a full-window layout such
-as the bundled launcher; its size follows the declared surface and output.
+`Viewport` is retained for older plugins. New full-window layouts use `<Window>`.
 Inside a `Viewport`, `<ScrollView id="items" grow={true}>` takes the remaining
 height and shrinks when the window does. Use `height` for a fixed-size scroll
 area; `grow` and `height` cannot be combined.

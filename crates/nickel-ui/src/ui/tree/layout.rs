@@ -68,7 +68,7 @@ pub(super) fn layout_element<Message: Clone>(
                 actions
             } else {
                 if let Kind::Slider { value, .. } = &element.kind
-                    && element.message_mapper.is_some()
+                    && (element.message_mapper.is_some() || element.seeded_value_mapper.is_some())
                 {
                     if *value < 1.0 {
                         actions.push(ActionKind::Increment);
