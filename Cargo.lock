@@ -3461,7 +3461,6 @@ dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
  "bytemuck",
- "cssparser",
  "ctrlc",
  "dirs",
  "evdev",
@@ -3482,6 +3481,7 @@ dependencies = [
  "nickel-input",
  "nickel-logging",
  "nickel-platform",
+ "nickel-plugin-presentation",
  "nickel-plugin-runtime",
  "nickel-remote-control",
  "nickel-render-assets",
@@ -3751,6 +3751,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-plugin-presentation"
+version = "0.1.0"
+dependencies = [
+ "cssparser",
+ "image",
+ "nickel-core",
+ "nickel-plugin-runtime",
+ "nickel-ui",
+ "serde_json",
+]
+
+[[package]]
 name = "nickel-plugin-runtime"
 version = "0.1.0"
 dependencies = [
@@ -3825,6 +3837,7 @@ dependencies = [
  "nickel-input",
  "nickel-logging",
  "nickel-platform",
+ "nickel-plugin-presentation",
  "nickel-plugin-runtime",
  "nickel-session-protocol",
  "nickel-ui",

@@ -44,6 +44,7 @@ nickel-input = { path = "../nickel-input", features = ["winit", "windows"] }
 nickel-remote-control = { path = "../nickel-remote-control" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-plugin-runtime = { path = "../nickel-plugin-runtime" }
+nickel-plugin-presentation = { path = "../nickel-plugin-presentation" }
 nickel-render-assets = { path = "../nickel-render-assets" }
 nickel-storage = { path = "../nickel-storage" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
@@ -58,7 +59,6 @@ nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
 serde_json.workspace = true
 tempfile = "3.25.0"
 ctrlc.workspace = true
-cssparser = "0.38.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit = "0.24.1"

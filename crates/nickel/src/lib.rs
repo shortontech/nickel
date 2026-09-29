@@ -137,7 +137,6 @@ mod notification_view;
 mod places;
 #[allow(dead_code, unused_imports)]
 mod platform;
-mod plugin_css;
 pub mod plugin_panel;
 mod screenshot;
 mod session_host;

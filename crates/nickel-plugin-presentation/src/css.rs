@@ -7,7 +7,7 @@ use cssparser::{
 use nickel_ui::{Align, Insets, Justify, Length, Track};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum Display {
+pub enum Display {
     #[default]
     Block,
     Flex,
@@ -15,14 +15,14 @@ pub(crate) enum Display {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum FlexDirection {
+pub enum FlexDirection {
     #[default]
     Row,
     Column,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct ControlStyle {
+pub struct ControlStyle {
     pub display: Option<Display>,
     pub flex_direction: Option<FlexDirection>,
     pub grid_columns: Option<Vec<Track>>,
@@ -539,7 +539,7 @@ impl<'i> RuleBodyItemParser<'i, Declaration, String> for CssDeclarationParser {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct StyleSheet {
+pub struct StyleSheet {
     rules: Vec<Rule>,
 }
 
