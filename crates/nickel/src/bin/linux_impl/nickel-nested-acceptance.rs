@@ -232,7 +232,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked typed surface hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, screenshot plugin input and lifecycle, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked typed surface hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
     );
     Ok(())
 }
@@ -345,6 +345,7 @@ fn exercise(
             return Err(format!("bundled plugin {id} is not running: {:?}", plugin.health));
         }
     }
+    verify_screenshot_plugin_lifecycle(test_input, &environment)?;
     assert_no_shell_child(compositor.id())?;
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
@@ -989,6 +990,90 @@ fn wait_for_notification_visibility(
         }
         thread::sleep(POLL);
     }
+}
+
+fn wait_for_screenshot_visibility(
+    test_input: &Path,
+    environment: &[(String, String)],
+    expected: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        let visible = surfaces.lines().any(|line| {
+            line.starts_with("PluginSurface\t")
+                && line.ends_with("org.nickel.screenshot/main")
+                && line.split('\t').nth(2) != Some("hidden")
+        });
+        if visible == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("screenshot visibility did not become {expected}: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn verify_screenshot_plugin_lifecycle(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let press_print_screen = || -> Result<(), String> {
+        checked(test_input, environment, &["key", "print-screen", "pressed"])?;
+        checked(test_input, environment, &["key", "print-screen", "released"])?;
+        Ok(())
+    };
+    press_print_screen()?;
+    wait_for_screenshot_visibility(test_input, environment, true, Duration::from_secs(5))?;
+    if wait_for_plugin_native_memory(
+        test_input,
+        environment,
+        "org.nickel.screenshot",
+        Duration::from_secs(2),
+    )? == 0
+    {
+        return Err("rendered screenshot plugin reported zero native UI memory".into());
+    }
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    let (x, y, width, height) = surface_geometry(
+        &surfaces,
+        "PluginSurface",
+        "org.nickel.screenshot/main",
+    )
+    .ok_or_else(|| format!("screenshot plugin geometry is missing: {surfaces}"))?;
+    let start = (x + width as i32 / 4, y + height as i32 / 4);
+    let end = (x + width as i32 * 3 / 4, y + height as i32 * 3 / 4);
+    checked(test_input, environment, &["move", &start.0.to_string(), &start.1.to_string()])?;
+    checked(test_input, environment, &["button", "left", "pressed"])?;
+    checked(test_input, environment, &["move", &end.0.to_string(), &end.1.to_string()])?;
+    checked(test_input, environment, &["button", "left", "released"])?;
+    let center = (x + width as i32 / 2, y + height as i32 / 2);
+    click_at(test_input, environment, center.0, center.1)?;
+    click_at(test_input, environment, center.0, center.1)?;
+    checked(test_input, environment, &["key", "escape", "pressed"])?;
+    checked(test_input, environment, &["key", "escape", "released"])?;
+    wait_for_screenshot_visibility(test_input, environment, false, Duration::from_secs(2))?;
+
+    checked(
+        test_input,
+        environment,
+        &["plugin-set", "org.nickel.screenshot", "disabled"],
+    )?;
+    press_print_screen()?;
+    wait_for_screenshot_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    checked(
+        test_input,
+        environment,
+        &["plugin-set", "org.nickel.screenshot", "enabled"],
+    )?;
+    press_print_screen()?;
+    wait_for_screenshot_visibility(test_input, environment, true, Duration::from_secs(5))?;
+    checked(test_input, environment, &["key", "escape", "pressed"])?;
+    checked(test_input, environment, &["key", "escape", "released"])?;
+    wait_for_screenshot_visibility(test_input, environment, false, Duration::from_secs(2))?;
+    Ok(())
 }
 
 fn wait_for_taskbar_presence(
