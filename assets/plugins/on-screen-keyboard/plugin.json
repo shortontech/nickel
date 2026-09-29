@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.on-screen-keyboard",
+  "name": "Nickel On-Screen Keyboard",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "surfaces": [{"id":"main","kind":"overlay","width":1056,"height":368,"anchor":"bottom-left","passive":true}],
+  "capabilities": ["on-screen-keyboard-input"]
+}

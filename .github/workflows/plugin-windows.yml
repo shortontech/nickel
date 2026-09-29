@@ -249,7 +249,7 @@ jobs:
                 try { $snapshot = $json | ConvertFrom-Json } catch { $snapshot = $null }
                 if ($snapshot -and $snapshot.plugins) {
                   $ready = $true
-                  foreach ($id in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects")) {
+                foreach ($id in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects", "org.nickel.on-screen-keyboard")) {
                     $plugin = $snapshot.plugins | Where-Object { $_.id -eq $id } | Select-Object -First 1
                     if (-not $plugin -or $plugin.health.state -ne "running") { $ready = $false }
                   }
@@ -259,7 +259,7 @@ jobs:
             }
             if (-not $snapshot) { throw "Nickel Settings could not query the live shell plugin status (last exit $lastExit)" }
             if (-not $ready) {
-              $states = $snapshot.plugins | Where-Object { $_.id -in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects") } | ForEach-Object { "$($_.id)=$($_.health.state)" }
+              $states = $snapshot.plugins | Where-Object { $_.id -in @("org.nickel.launcher", "org.nickel.taskbar", "org.nickel.desktop", "org.nickel.codex-projects", "org.nickel.on-screen-keyboard") } | ForEach-Object { "$($_.id)=$($_.health.state)" }
               throw "Windows shell plugins did not reach running: $($states -join ', ')"
             }
             $taskbar = $snapshot.plugins | Where-Object { $_.id -eq "org.nickel.taskbar" } | Select-Object -First 1
@@ -291,11 +291,11 @@ jobs:
                     return found;
                 }
             }
-            '@
+          '@
             if ([NickelCodexMenuWindowProbe]::HasFixedMenu([uint32]$shell.Id)) {
               throw "The retired fixed Codex project menu window is still present"
             }
-            Write-Host "Live Windows launcher, taskbar, desktop, and Codex project plugins are running."
+            Write-Host "Live Windows launcher, taskbar, desktop, Codex project, and keyboard plugins are running."
             Write-Host "Taskbar retained UI: $taskbarBytes bytes; peak: $taskbarPeak bytes."
           } finally {
             $shell.Refresh()

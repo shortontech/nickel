@@ -15851,6 +15851,9 @@ fn adjust_internal_plugin_surface_placement(
         (offset_x, offset_y),
         outputs,
     );
+    if *key == crate::plugin_panel::on_screen_keyboard_surface_key() {
+        placement.role = crate::session::InternalSurfaceRole::OnScreenKeyboard;
+    }
 }
 
 fn place_reserved_plugin_panel(

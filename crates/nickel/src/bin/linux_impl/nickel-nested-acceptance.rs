@@ -408,6 +408,7 @@ fn exercise(
     verify_bundled_overlay_surface_retires(test_input, &environment, "org.nickel.window-preview", "Preview")?;
     verify_control_plugin_retires(test_input, &environment)?;
     verify_codex_project_plugin_retires(test_input, &environment)?;
+    verify_keyboard_plugin_retires(test_input, &environment)?;
     verify_notification_plugin_retires(test_input, &environment)?;
     verify_reserved_panel_stacks_and_reflows(test_input, &environment)?;
     let panel_id = "org.example.acceptance-panel";
@@ -824,6 +825,44 @@ fn verify_codex_project_plugin_retires(
     let surfaces = checked(test_input, environment, &["surfaces"])?;
     if !surface_present(&surfaces) {
         return Err(format!("Codex project plugin surface did not return: {surfaces}"));
+    }
+    Ok(())
+}
+
+fn verify_keyboard_plugin_retires(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    let id = "org.nickel.on-screen-keyboard";
+    let surface_present = |surfaces: &str| {
+        surfaces.lines().any(|line| {
+            line.starts_with("PluginSurface\t")
+                && line.ends_with("org.nickel.on-screen-keyboard/main")
+        })
+    };
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if !surface_present(&surfaces) {
+        return Err(format!("keyboard plugin surface is missing: {surfaces}"));
+    }
+    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    let disabled: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
+    let plugin = disabled
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .ok_or("keyboard plugin missing after disable")?;
+    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
+        return Err("disabled keyboard plugin retained native UI memory".into());
+    }
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if surface_present(&surfaces) {
+        return Err(format!("keyboard plugin surface survived disable: {surfaces}"));
+    }
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if !surface_present(&surfaces) {
+        return Err(format!("keyboard plugin surface did not return: {surfaces}"));
     }
     Ok(())
 }

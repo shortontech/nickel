@@ -188,6 +188,23 @@ pub fn codex_projects_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     }
 }
 
+pub fn on_screen_keyboard_manifest() -> &'static PluginManifest {
+    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/on-screen-keyboard/plugin.json"
+        ))
+        .expect("bundled keyboard plugin manifest must be valid")
+    })
+}
+
+pub fn on_screen_keyboard_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: on_screen_keyboard_manifest().id.clone(),
+        surface_id: on_screen_keyboard_manifest().surfaces[0].id.clone(),
+    }
+}
+
 pub fn window_preview_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -431,6 +448,8 @@ enum PanelNode {
         id: String,
         label: String,
         accessibility_label: String,
+        width: Option<u32>,
+        height: Option<u32>,
         icon: Option<String>,
         show_label: bool,
         action: usize,
@@ -1022,6 +1041,17 @@ impl PanelNode {
             }),
             "button" => {
                 let label = child_text(children)?;
+                let dimension = |name: &str| -> Result<Option<u32>, String> {
+                    match value.get(name) {
+                        None => Ok(None),
+                        Some(value) => value
+                            .as_u64()
+                            .and_then(|size| u32::try_from(size).ok())
+                            .filter(|size| (24..=512).contains(size))
+                            .map(Some)
+                            .ok_or_else(|| format!("button {name} must be 24 to 512")),
+                    }
+                };
                 Ok(Self::Button {
                     id: value
                         .get("id")
@@ -1038,6 +1068,8 @@ impl PanelNode {
                         .and_then(Value::as_str)
                         .unwrap_or(&label)
                         .to_owned(),
+                    width: dimension("width")?,
+                    height: dimension("height")?,
                     icon: value
                         .get("icon")
                         .and_then(Value::as_str)
@@ -1595,6 +1627,8 @@ impl PanelNode {
                 id,
                 label,
                 accessibility_label,
+                width,
+                height,
                 icon,
                 show_label,
                 action,
@@ -1625,10 +1659,13 @@ impl PanelNode {
                     .accessibility_label(accessibility_label)
                     .semantic_role(SemanticRole::Button)
                     .message(PluginMessage::Click(*action))
-                    .height(42.0)
+                    .height(height.unwrap_or(42) as f32)
                     .padding(Insets::all(10.0))
                     .background(0x6645_5675)
                     .radius(10.0);
+                if let Some(width) = width {
+                    container = container.width(*width as f32);
+                }
                 if let Some(action) = context_action {
                     container = container.context_message(PluginMessage::Context(*action));
                 }
@@ -2040,6 +2077,23 @@ pub enum PluginEffect {
     RunDismiss,
     ToggleLauncher,
     ToggleOnScreenKeyboard,
+    KeyboardKey {
+        id: String,
+        generation: u64,
+    },
+    KeyboardHide {
+        generation: u64,
+    },
+    KeyboardDock {
+        generation: u64,
+    },
+    KeyboardHold {
+        generation: u64,
+    },
+    KeyboardResize {
+        delta: i32,
+        generation: u64,
+    },
     ToggleCodexProjects,
     CodexProjectRefresh,
     CodexProjectClose,
@@ -2774,6 +2828,20 @@ fn validation_surface_projection(
             "projectionModes": [],
         }));
     }
+    if id == on_screen_keyboard_manifest().id {
+        return Some(serde_json::json!({
+            "generation": 1,
+            "height": surface.height,
+            "dockTop": false,
+            "recipientAvailable": false,
+            "rows": nickel_core::on_screen_keyboard::keyboard_display_rows(
+                nickel_core::on_screen_keyboard::KeyboardPanel::Letters,
+                nickel_core::on_screen_keyboard::VirtualModifiers::default(),
+                true,
+                false,
+            ),
+        }));
+    }
     if id == window_preview_manifest().id {
         return Some(serde_json::json!({ "windows": [] }));
     }
@@ -3137,6 +3205,33 @@ impl PluginPanelApplication {
             codex_projects_manifest(),
             Some(serde_json::to_string(projection).map_err(|error| error.to_string())?),
         )
+    }
+
+    pub fn on_screen_keyboard_with_data(data: &Value) -> Result<Self, String> {
+        let source = bundled_source(
+            on_screen_keyboard_manifest(),
+            "main.js",
+            include_str!("../../../assets/plugins/on-screen-keyboard/main.js"),
+        )?;
+        Self::new_with_manifest(
+            source.as_ref(),
+            on_screen_keyboard_manifest(),
+            Some(data.to_string()),
+        )
+    }
+
+    pub fn sync_on_screen_keyboard_data(&mut self, data: &Value) -> Result<bool, String> {
+        if self.manifest.id != on_screen_keyboard_manifest().id {
+            return Err("this plugin is not the on-screen keyboard".into());
+        }
+        let serialized = data.to_string();
+        if self.projection_data.as_deref() == Some(serialized.as_str()) {
+            return Ok(false);
+        }
+        self.runtime.set_data(&serialized)?;
+        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.projection_data = Some(serialized);
+        Ok(true)
     }
 
     pub fn sync_codex_projects_projection(
@@ -3541,6 +3636,16 @@ impl nickel_ui::Application for PluginPanelApplication {
         if self.manifest.id == codex_projects_manifest().id && shortcut == Shortcut::Escape {
             self.effects.push(PluginEffect::CodexProjectClose);
             return nickel_ui::ShortcutOutcome::handled(true);
+        }
+        if self.manifest.id == on_screen_keyboard_manifest().id && shortcut == Shortcut::Escape {
+            if let Some(generation) = self.projection_data.as_deref().and_then(|data| {
+                serde_json::from_str::<Value>(data)
+                    .ok()
+                    .and_then(|data| data.get("generation").and_then(Value::as_u64))
+            }) {
+                self.effects.push(PluginEffect::KeyboardHide { generation });
+                return nickel_ui::ShortcutOutcome::handled(true);
+            }
         }
         let Some(shortcuts) = &self.launcher_shortcuts else {
             return nickel_ui::ShortcutOutcome::from_changed(false);
@@ -4360,6 +4465,97 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 token: token.unwrap().to_owned(),
                                 revision: revision.unwrap(),
                             });
+                        }
+                        _ if self.manifest.id == on_screen_keyboard_manifest().id
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::OnScreenKeyboardInput)
+                            && matches!(
+                                effect.get("type").and_then(Value::as_str),
+                                Some(
+                                    "keyboard-key"
+                                        | "keyboard-hide"
+                                        | "keyboard-dock"
+                                        | "keyboard-hold"
+                                        | "keyboard-resize"
+                                )
+                            ) =>
+                        {
+                            let projected = self
+                                .projection_data
+                                .as_deref()
+                                .and_then(|data| serde_json::from_str::<Value>(data).ok());
+                            let generation = effect.get("generation").and_then(Value::as_u64);
+                            if generation.is_none()
+                                || generation
+                                    != projected.as_ref().and_then(|data| {
+                                        data.get("generation").and_then(Value::as_u64)
+                                    })
+                            {
+                                self.last_error = Some("keyboard request is stale".into());
+                                return;
+                            }
+                            let generation = generation.unwrap();
+                            match effect.get("type").and_then(Value::as_str) {
+                                Some("keyboard-key") => {
+                                    let id = effect.get("id").and_then(Value::as_str);
+                                    let displayed = id.is_some_and(|id| {
+                                        id.len() <= 64
+                                            && projected.as_ref().is_some_and(|data| {
+                                                data.get("rows")
+                                                    .and_then(Value::as_array)
+                                                    .is_some_and(|rows| {
+                                                        rows.iter().any(|row| {
+                                                            row.as_array().is_some_and(|keys| {
+                                                                keys.iter().any(|key| {
+                                                                    key.get("id")
+                                                                        .and_then(Value::as_str)
+                                                                        == Some(id)
+                                                                        && key
+                                                                            .get("enabled")
+                                                                            .and_then(
+                                                                                Value::as_bool,
+                                                                            )
+                                                                            == Some(true)
+                                                                })
+                                                            })
+                                                        })
+                                                    })
+                                            })
+                                    });
+                                    if !displayed {
+                                        self.last_error =
+                                            Some("keyboard key is unavailable".into());
+                                        return;
+                                    }
+                                    approved.push(PluginEffect::KeyboardKey {
+                                        id: id.unwrap().to_owned(),
+                                        generation,
+                                    });
+                                }
+                                Some("keyboard-hide") => {
+                                    approved.push(PluginEffect::KeyboardHide { generation });
+                                }
+                                Some("keyboard-dock") => {
+                                    approved.push(PluginEffect::KeyboardDock { generation });
+                                }
+                                Some("keyboard-hold") => {
+                                    approved.push(PluginEffect::KeyboardHold { generation });
+                                }
+                                Some("keyboard-resize") => {
+                                    let delta = effect.get("delta").and_then(Value::as_i64);
+                                    if !matches!(delta, Some(-32 | 32)) {
+                                        self.last_error = Some("keyboard resize is invalid".into());
+                                        return;
+                                    }
+                                    approved.push(PluginEffect::KeyboardResize {
+                                        delta: delta.unwrap() as i32,
+                                        generation,
+                                    });
+                                }
+                                _ => unreachable!(),
+                            }
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
@@ -6098,6 +6294,53 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::CodexProjectClose]
         );
+    }
+
+    #[test]
+    fn bundled_keyboard_renders_host_keys_and_emits_typed_effects() {
+        use nickel_core::on_screen_keyboard::{
+            KeyboardPanel, VirtualModifiers, keyboard_display_rows,
+        };
+        let rows = keyboard_display_rows(
+            KeyboardPanel::Letters,
+            VirtualModifiers::default(),
+            false,
+            true,
+        );
+        let data = serde_json::json!({
+            "generation": 7,
+            "height": 368,
+            "dockTop": false,
+            "recipientAvailable": true,
+            "rows": rows,
+        });
+        let mut plugin = PluginPanelApplication::on_screen_keyboard_with_data(&data).unwrap();
+        let message = plugin.button_message("osk-char-113").unwrap();
+        plugin.update(message);
+        assert_eq!(
+            plugin.take_effects(),
+            vec![PluginEffect::KeyboardKey {
+                id: "osk-char-113".into(),
+                generation: 7,
+            }]
+        );
+        assert!(plugin.last_error().is_none());
+        let disabled = serde_json::json!({
+            "generation": 8,
+            "height": 368,
+            "dockTop": false,
+            "recipientAvailable": false,
+            "rows": keyboard_display_rows(
+                KeyboardPanel::Letters,
+                VirtualModifiers::default(),
+                false,
+                false,
+            ),
+        });
+        assert!(plugin.sync_on_screen_keyboard_data(&disabled).unwrap());
+        let message = plugin.button_message("osk-char-113").unwrap();
+        plugin.update(message);
+        assert!(plugin.take_effects().is_empty());
     }
 
     #[test]

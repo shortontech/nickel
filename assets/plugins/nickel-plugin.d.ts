@@ -47,6 +47,8 @@ interface NickelBoxProps extends NickelProps {
 interface NickelTextProps extends NickelProps { color?: NickelColor }
 interface NickelButtonProps extends NickelProps {
     id?: string;
+    width?: number;
+    height?: number;
     accessibilityLabel?: string;
     icon?: string;
     showLabel?: boolean;

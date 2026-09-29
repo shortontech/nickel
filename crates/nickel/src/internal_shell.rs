@@ -636,6 +636,9 @@ impl InternalShellCoordinator {
             || (roles.contains(&SurfaceRole::ControlCenter)
                 && surface.plugin.as_ref()
                     == Some(&crate::plugin_panel::control_center_surface_key()))
+            || (roles.contains(&SurfaceRole::OnScreenKeyboard)
+                && surface.plugin.as_ref()
+                    == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()))
     }
 
     pub fn visible(&self, id: InternalSurfaceId) -> bool {
@@ -1003,7 +1006,11 @@ impl InternalShellCoordinator {
                 });
         }
         let mut dependent_roles = Vec::new();
-        if entry.role == SurfaceRole::OnScreenKeyboard && batch.window_focused == Some(false) {
+        if (entry.role == SurfaceRole::OnScreenKeyboard
+            || entry.plugin.as_ref()
+                == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()))
+            && batch.window_focused == Some(false)
+        {
             changed |= self.shell.keyboard_host_input(
                 nickel_input::InputEvent::FocusLost {
                     order: nickel_input::EventOrder(0),

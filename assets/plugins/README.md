@@ -62,3 +62,5 @@ The [task action example](example-task-action/) adds a callback to the
 taskbar's JSX application menu.
 The [control section example](example-control-section/) adds a callback row
 to the bundled Control Center.
+The bundled [on-screen keyboard](on-screen-keyboard/) shows a keyboard layout
+written in JSX with host-checked key effects and recipient leases.
