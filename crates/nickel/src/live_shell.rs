@@ -6479,19 +6479,6 @@ impl LiveShell {
                         changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::LaunchDashboardApplication { id } => {
-                    let projection = self.current_plugin_launcher_projection();
-                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard
-                        && projection
-                            .dashboard
-                            .iter()
-                            .chain(projection.places.iter())
-                            .any(|item| item.id == id)
-                    {
-                        self.apply_launcher_action(LauncherAction::LaunchApplication(id));
-                        changed = true;
-                    }
-                }
                 crate::plugin_panel::PluginEffect::LaunchApplication { id } => {
                     if self
                         .launcher
@@ -11505,7 +11492,6 @@ impl LiveShell {
             LauncherShellEffect::RetryPreferencePersistence => {
                 self.persist_launcher_preferences();
             }
-            LauncherShellEffect::LaunchApplication(id) => self.launch_application_by_id(&id),
             LauncherShellEffect::OpenProject(id) => {
                 self.set_launcher_visible(false);
                 self.requested_codex_project = Some(id);

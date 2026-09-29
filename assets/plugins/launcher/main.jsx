@@ -29,7 +29,7 @@ function App() {
                     className="launcher-app-button"
                     icon={"place:" + place.index} showLabel={true}
                     onContextMenu={() => openAppMenu(place, "dashboard", "launcher-place-" + place.index)}
-                    onClick={() => nickel.request({type: "launcher-launch-dashboard", id: place.id})}>
+                    onClick={() => nickel.request({type: "applications.launch", id: place.id})}>
                     {place.name}
                 </Button>
                 <Button id={"launcher-pin-place-" + place.index} className="launcher-pin-button"
@@ -68,7 +68,7 @@ function App() {
                     className="launcher-icon-button"
                     icon={"dashboard:" + app.index} accessibilityLabel={app.name}
                     onContextMenu={() => openAppMenu(app, "dashboard", "launcher-dashboard-" + app.index)}
-                    onClick={() => nickel.request({type: "launcher-launch-dashboard", id: app.id})}>
+                    onClick={() => nickel.request({type: "applications.launch", id: app.id})}>
                     {app.name.charAt(0).toUpperCase()}
                 </Button>
                 <Text className="launcher-app-name" wrap={true}>{app.name}</Text>
@@ -141,7 +141,7 @@ function App() {
                 if (menuTarget.kind === "search") {
                     nickel.request({type: "launcher-activate-result", index: menuTarget.index, id: menuTarget.id});
                 } else {
-                    nickel.request({type: "launcher-launch-dashboard", id: menuTarget.id});
+                    nickel.request({type: "applications.launch", id: menuTarget.id});
                 }
             }}>Launch</MenuItem>
             <MenuItem id="toggle-pin" onClick={() => nickel.request({type: "launcher-toggle-pin", id: menuTarget.id})}>

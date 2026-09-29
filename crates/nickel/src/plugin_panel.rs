@@ -439,9 +439,6 @@ pub enum PluginEffect {
         index: usize,
         id: String,
     },
-    LaunchDashboardApplication {
-        id: String,
-    },
     LaunchApplication {
         id: String,
     },
@@ -2626,27 +2623,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             };
                             approved.push(PluginEffect::LaunchApplication { id: id.to_owned() });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-launch-dashboard")
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::ApplicationsLaunch) =>
-                        {
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error =
-                                    Some("dashboard application ID is missing".into());
-                                return;
-                            };
-                            if id.is_empty() || id.len() > 256 {
-                                self.last_error =
-                                    Some("dashboard application ID is invalid".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::LaunchDashboardApplication {
-                                id: id.to_owned(),
-                            });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-set-view")
@@ -5481,9 +5457,9 @@ mod tests {
             ),
             (
                 "launch",
-                "{type: 'launcher-launch-dashboard', id: 'org.example.app'}",
+                "{type: 'applications.launch', id: 'org.example.app'}",
                 PluginCapability::ApplicationsLaunch,
-                PluginEffect::LaunchDashboardApplication {
+                PluginEffect::LaunchApplication {
                     id: "org.example.app".into(),
                 },
             ),

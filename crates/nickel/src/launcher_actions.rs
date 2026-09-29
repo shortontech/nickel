@@ -8,7 +8,6 @@ pub enum LauncherAction {
     ActivateResult(usize),
     TogglePin(String),
     RetryPreferencePersistence,
-    LaunchApplication(String),
     OpenProject(String),
     SeeAllProjects,
     RequestLogout,
@@ -21,7 +20,6 @@ pub enum LauncherShellEffect {
     ActivateResult(usize),
     TogglePin(String),
     RetryPreferencePersistence,
-    LaunchApplication(String),
     OpenProject(String),
     SeeAllProjects,
     RequestLogout,
@@ -43,7 +41,6 @@ pub fn reduce_launcher_action(
         LauncherAction::RetryPreferencePersistence => {
             Some(LauncherShellEffect::RetryPreferencePersistence)
         }
-        LauncherAction::LaunchApplication(id) => Some(LauncherShellEffect::LaunchApplication(id)),
         LauncherAction::OpenProject(id) => Some(LauncherShellEffect::OpenProject(id)),
         LauncherAction::SeeAllProjects => Some(LauncherShellEffect::SeeAllProjects),
         LauncherAction::RequestLogout => Some(LauncherShellEffect::RequestLogout),
