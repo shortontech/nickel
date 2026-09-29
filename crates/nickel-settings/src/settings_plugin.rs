@@ -26,15 +26,30 @@ impl PluginUiMessage for SettingsMessage {
         }
     }
 
+    fn from_plugin_scoped(message: PluginMessage, scope: Option<&str>) -> Self {
+        let ordinary = Self::from_plugin(message);
+        match (scope, ordinary) {
+            (Some(scope), Self::JsxAction(index, value)) => {
+                Self::JsxScopedAction(scope.to_owned(), index, value)
+            }
+            (_, ordinary) => ordinary,
+        }
+    }
+
     fn drag(_seed: Self, _gesture: DragGesture) -> Self {
         Self::IgnoredPluginPresentation
     }
 
     fn value(seed: Self, value: f32) -> Self {
-        let Self::JsxAction(action, _) = seed else {
-            unreachable!("slider seed retains its handler")
-        };
-        Self::JsxAction(action, value.clamp(0.0, 1.0).to_string())
+        match seed {
+            Self::JsxAction(action, _) => {
+                Self::JsxAction(action, value.clamp(0.0, 1.0).to_string())
+            }
+            Self::JsxScopedAction(scope, action, _) => {
+                Self::JsxScopedAction(scope, action, value.clamp(0.0, 1.0).to_string())
+            }
+            _ => unreachable!("slider seed retains its handler"),
+        }
     }
 }
 

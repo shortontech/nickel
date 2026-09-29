@@ -2,12 +2,16 @@
 // Candidate controls inside the host-owned association picker popover.
 function App() {
     const data = nickel.data;
-    return h("settings-stack", null,
-        h("settings-card", { label: data.status, value: "" },
-            h("settings-input", { id: `default-app-handler-search-${data.row}`, value: data.query, onChange: value => nickel.request({ type: 'search-handlers', value }) })),
-        h("settings-compact-list", null, data.handlers.map(handler => h("settings-row", { key: handler.id, label: handler.name, value: handler.detail },
-            h("settings-button", { id: `default-app-handler-${handler.id}`, label: handler.current ? data.currentLabel : data.chooseLabel, value: handler.editable ? 'quiet' : 'disabled', onClick: handler.editable ? () => nickel.request({
+    return h("div", { className: "app-picker-page" },
+        h("div", { className: "app-picker-header" },
+            h(Text, { className: "app-picker-status", wrap: true }, data.status),
+            h(TextField, { id: `default-app-handler-search-${data.row}`, className: "app-picker-search", value: data.query, placeholder: data.searchPlaceholder, onChange: value => nickel.request({ type: 'search-handlers', value }) })),
+        h("div", { className: "app-picker-candidates" }, data.handlers.map(handler => h("div", { key: handler.id, className: "app-picker-row" },
+            h("div", { className: "app-picker-label" },
+                h(Text, { className: "app-picker-name" }, handler.name),
+                h(Text, { className: "app-picker-detail" }, handler.detail)),
+            h(Button, { id: `default-app-handler-${handler.id}`, className: handler.editable ? 'app-picker-action' : 'app-picker-action disabled', disabled: !handler.editable, onClick: () => nickel.request({
                     type: 'choose-handler', row: data.row,
                     target: data.target, handler: handler.id
-                }) : undefined })))));
+                }) }, handler.current ? data.currentLabel : data.chooseLabel)))));
 }

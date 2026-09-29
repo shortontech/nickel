@@ -700,9 +700,21 @@ impl SettingsApp {
                 } else {
                     None
                 };
-                let (plugin_header, plugin_nodes) = plugin_picker.map_or_else(
-                    || (None, std::collections::BTreeMap::new()),
-                    |(header, nodes)| (Some(header), nodes),
+                let (plugin_header, plugin_nodes, plugin_stylesheet) = plugin_picker.map_or_else(
+                    || {
+                        (
+                            None,
+                            std::collections::BTreeMap::new(),
+                            nickel_plugin_presentation::css::StyleSheet::default(),
+                        )
+                    },
+                    |rendered| {
+                        (
+                            Some(rendered.header),
+                            rendered.candidates,
+                            rendered.stylesheet,
+                        )
+                    },
                 );
                 let current = effective_id.clone();
                 let collection = Collection::try_new(
@@ -710,10 +722,10 @@ impl SettingsApp {
                     |handler: &nickel_platform::ApplicationHandler| handler.id.clone(),
                     move |handler: nickel_platform::ApplicationHandler| {
                         if let Some(node) = plugin_nodes.get(&handler.id) {
-                            return node.view(
-                                theme,
-                                "",
-                                SettingsMessage::DefaultAppPickerJsxAction,
+                            return node.view_as_scoped::<SettingsMessage>(
+                                &nickel_plugin_presentation::components::PluginImages::new(),
+                                &plugin_stylesheet,
+                                Some("default-app-picker"),
                             );
                         }
                         let is_current = current.as_ref() == Some(&handler.id);

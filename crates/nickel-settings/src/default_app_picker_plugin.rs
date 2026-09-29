@@ -2,60 +2,84 @@
 
 use std::collections::BTreeMap;
 
+use nickel_plugin_presentation::{
+    components::{PanelNode, PluginImages},
+    css::StyleSheet,
+    page::{JsxPage, STALE_DATA},
+};
 use nickel_ui::{AnyView, CollectionState, SemanticTheme, VirtualWindow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    SettingsApp, SettingsMessage,
-    settings_components::{Node, SettingsJsxContext},
-};
+use crate::{SettingsApp, SettingsMessage};
 
-const STALE_STATUS: &str = "Default application choices changed; refresh the picker";
+const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct DefaultAppPickerPage {
-    context: SettingsJsxContext,
+    page: JsxPage,
+    stylesheet: StyleSheet,
+    last_theme: Option<SemanticTheme>,
     data: Option<Value>,
     data_bytes: usize,
+}
+
+pub(super) struct DefaultAppPickerRendered {
+    pub header: AnyView<SettingsMessage>,
+    pub candidates: BTreeMap<String, PanelNode>,
+    pub stylesheet: StyleSheet,
 }
 
 impl DefaultAppPickerPage {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            context: SettingsJsxContext::new(
+            page: JsxPage::new(
                 crate::settings_package::source(crate::settings_package::Script::DefaultAppPicker)?,
-                parse_tree,
-                STALE_STATUS,
-                "Default application picker must request one operation",
+                crate::settings_package::manifest()?.clone(),
+                None,
             )?,
+            stylesheet: StyleSheet::default(),
+            last_theme: None,
             data: None,
             data_bytes: 0,
         })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.context.retained_bytes() + self.data_bytes
+        self.page.retained_bytes()
+            + self.stylesheet.estimated_retained_bytes() as usize
+            + self.data_bytes
     }
 
     pub(super) fn render(
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<(AnyView<SettingsMessage>, BTreeMap<String, Node>), String> {
-        let node = self.context.render(data)?;
-        let Node::Stack(children) = node else {
+    ) -> Result<DefaultAppPickerRendered, String> {
+        self.page.render(data)?;
+        if self.last_theme != Some(theme) {
+            self.stylesheet = crate::settings_plugin::stylesheet_template(
+                include_str!("../../../assets/plugins/settings/settings-default-app-picker.css"),
+                theme,
+            )?;
+            self.last_theme = Some(theme);
+        }
+        let Some(PanelNode::Div { children, .. }) = self.page.node() else {
             return Err("Default application picker structure is invalid".into());
         };
-        let Node::CompactList(candidates) = &children[1] else {
+        if children.len() != 2 {
+            return Err("Default application picker needs header and candidate sections".into());
+        }
+        let PanelNode::Div {
+            children: candidates,
+            ..
+        } = &children[1]
+        else {
             return Err("Default application candidate list is invalid".into());
         };
         let projected = data["handlers"]
             .as_array()
             .ok_or("Default application candidates are invalid")?;
-        let placeholder = data["searchPlaceholder"]
-            .as_str()
-            .ok_or("Default application search placeholder is invalid")?;
-        if candidates.len() != projected.len() {
+        if candidates.len() != projected.len() || candidates.len() > 32 {
             return Err("Default application candidate count changed".into());
         }
         let nodes = projected
@@ -76,13 +100,15 @@ impl DefaultAppPickerPage {
         }
         self.data = Some(data.clone());
         self.data_bytes = data.to_string().len();
-        let header = children[0].view_with_input(
-            theme,
-            placeholder,
-            SettingsMessage::DefaultAppPickerJsxAction,
-            SettingsMessage::DefaultAppPickerJsxInput,
-        );
-        Ok((header, nodes))
+        Ok(DefaultAppPickerRendered {
+            header: children[0].view_as_scoped::<SettingsMessage>(
+                &PluginImages::new(),
+                &self.stylesheet,
+                Some("default-app-picker"),
+            ),
+            candidates: nodes,
+            stylesheet: self.stylesheet.clone(),
+        })
     }
 
     pub(super) fn dispatch(
@@ -95,38 +121,20 @@ impl DefaultAppPickerPage {
             .data
             .as_ref()
             .ok_or("Default application picker is unavailable")?;
-        self.context.dispatch(index, &value, data, |effect| {
+        self.page.dispatch(index, &value, data, |effect| {
             let request: PickerRequest =
-                serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
+                serde_json::from_value(effect).map_err(|error| error.to_string())?;
             validate_request(request, data, app)
         })
     }
 
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.context.action_for_id(id)
+        self.page.node().and_then(|node| {
+            node.button_action(id)
+                .or_else(|| node.text_field_action(id))
+        })
     }
-}
-
-fn parse_tree(value: &Value) -> Result<Node, String> {
-    let children = value
-        .get("children")
-        .and_then(Value::as_array)
-        .ok_or("Default application picker has no children")?;
-    if value.get("kind").and_then(Value::as_str) != Some("settings-stack")
-        || children.len() != 2
-        || children[0].get("kind").and_then(Value::as_str) != Some("settings-card")
-        || children[1].get("kind").and_then(Value::as_str) != Some("settings-compact-list")
-        || children[1]
-            .get("children")
-            .and_then(Value::as_array)
-            .is_none_or(|rows| {
-                rows.len() > 32 || rows.iter().any(|row| row["kind"] != "settings-row")
-            })
-    {
-        return Err("Default application picker structure is invalid".into());
-    }
-    Node::parse(value)
 }
 
 #[derive(Deserialize)]
@@ -301,8 +309,8 @@ mod tests {
         let state = CollectionState::Ready(vec![handler]);
         let data = projection(&app, 0, &state, true, "Choose an application below.");
         let mut page = DefaultAppPickerPage::new().unwrap();
-        let (_, nodes) = page.render(&data, app.ui_theme()).unwrap();
-        assert!(nodes.contains_key("fixture.desktop"));
+        let rendered = page.render(&data, app.ui_theme()).unwrap();
+        assert!(rendered.candidates.contains_key("fixture.desktop"));
         let search = page.action_for_id("default-app-handler-search-0").unwrap();
         assert_eq!(
             page.dispatch(search, Value::String("fixture".into()), &app)

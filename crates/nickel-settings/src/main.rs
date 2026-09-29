@@ -519,8 +519,6 @@ enum SettingsMessage {
     DefaultAppsScroll(u32),
     DefaultAppTargetChanged(String),
     DefaultAppTargetFamily(Option<nickel_platform::AssociationFamily>),
-    DefaultAppPickerJsxAction(usize),
-    DefaultAppPickerJsxInput(usize, String),
     DefaultAppPickerDismissed,
     DefaultAppHandlerSearchChanged(String),
     DefaultAppHandlerScroll(u32),
@@ -585,6 +583,7 @@ enum SettingsMessage {
     BarDisplayWindows,
     BarAllWindows,
     JsxAction(usize, String),
+    JsxScopedAction(String, usize, String),
     SetDesktopCount(u8),
     DisplayScroll,
     DisplayIdentify,
@@ -1924,6 +1923,13 @@ impl SettingsApp {
                     }
                 }
             }
+            SettingsMessage::JsxScopedAction(scope, index, value) => {
+                if scope == "default-app-picker"
+                    && let Ok(value) = serde_json::from_str(&value)
+                {
+                    self.handle_default_app_picker_jsx_action(index, value);
+                }
+            }
             SettingsMessage::DisplayIdentify => {
                 match session_request(SessionRequest::Command(SessionCommand::IdentifyOutputs)) {
                     Ok(ServerMessage::Ack) => {
@@ -2082,12 +2088,6 @@ impl SettingsApp {
             SettingsMessage::DefaultAppTargetFamily(family) => {
                 self.default_app_target_family = family;
                 self.default_app_catalog_scroll_offset = 0.0;
-            }
-            SettingsMessage::DefaultAppPickerJsxAction(index) => {
-                self.handle_default_app_picker_jsx_action(index, serde_json::Value::Null);
-            }
-            SettingsMessage::DefaultAppPickerJsxInput(index, value) => {
-                self.handle_default_app_picker_jsx_action(index, serde_json::Value::String(value));
             }
             SettingsMessage::DefaultAppPickerDismissed => {
                 self.default_app_picker_row.set(None);
@@ -4640,8 +4640,10 @@ mod tests {
             .expect("open picker renders the candidate through JSX");
         assert!(
             !host
-                .semantic_targets_for_message(&SettingsMessage::DefaultAppPickerJsxAction(
+                .semantic_targets_for_message(&SettingsMessage::JsxScopedAction(
+                    "default-app-picker".into(),
                     picker_action,
+                    "null".into(),
                 ))
                 .is_empty()
         );

@@ -57,6 +57,9 @@ pub enum PluginMessage {
 /// whose value or drag messages are produced after hit testing.
 pub trait PluginUiMessage: Clone + 'static {
     fn from_plugin(message: PluginMessage) -> Self;
+    fn from_plugin_scoped(message: PluginMessage, _scope: Option<&str>) -> Self {
+        Self::from_plugin(message)
+    }
     fn drag(seed: Self, gesture: DragGesture) -> Self;
     fn value(seed: Self, value: f32) -> Self;
 }
@@ -1520,6 +1523,15 @@ impl PanelNode {
         images: &PluginImages,
         stylesheet: &StyleSheet,
     ) -> AnyView<Message> {
+        self.view_as_scoped(images, stylesheet, None)
+    }
+
+    pub fn view_as_scoped<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+    ) -> AnyView<Message> {
         match self {
             Self::Badge {
                 label,
@@ -1573,7 +1585,10 @@ impl PanelNode {
                 );
                 let icon_id = images.get(asset).map_or(0, |(id, _)| *id);
                 let mut tile = FilePlaneItem::new(
-                    Message::from_plugin(PluginMessage::Click(action.unwrap_or(usize::MAX))),
+                    Message::from_plugin_scoped(
+                        PluginMessage::Click(action.unwrap_or(usize::MAX)),
+                        scope,
+                    ),
                     label.clone(),
                     icon_id,
                     icon,
@@ -1623,7 +1638,8 @@ impl PanelNode {
                             grid = grid.gap(gap);
                         }
                         for child in children {
-                            grid = grid.child(child.view_as::<Message>(images, stylesheet));
+                            grid = grid
+                                .child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                         }
                         AnyView::new(grid)
                     }
@@ -1647,7 +1663,8 @@ impl PanelNode {
                             row = row.justify_content(justify);
                         }
                         for child in children {
-                            row = row.child(child.view_as::<Message>(images, stylesheet));
+                            row = row
+                                .child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                         }
                         AnyView::new(row)
                     }
@@ -1669,7 +1686,8 @@ impl PanelNode {
                             column = column.justify_content(justify);
                         }
                         for child in children {
-                            column = column.child(child.view_as::<Message>(images, stylesheet));
+                            column = column
+                                .child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                         }
                         AnyView::new(column)
                     }
@@ -1696,7 +1714,8 @@ impl PanelNode {
                 let style = stylesheet.resolve("box", None, class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column = column.child(child.view_as::<Message>(images, stylesheet));
+                    column =
+                        column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                 }
                 let container = Container::new()
                     .position(Point {
@@ -1734,7 +1753,8 @@ impl PanelNode {
                 let mut layer = Layer::new().width_length(*width).height_length(*height);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        layer = layer.child(child.view_as::<Message>(images, stylesheet));
+                        layer =
+                            layer.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                     }
                 }
                 let mut container = Container::new()
@@ -1758,7 +1778,8 @@ impl PanelNode {
             } => {
                 let mut column = Column::new().fill_width().fill_height();
                 for child in children {
-                    column = column.child(child.view_as::<Message>(images, stylesheet));
+                    column =
+                        column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                 }
                 let style = stylesheet.resolve("viewport", None, class_name.as_deref());
                 let container = Container::new()
@@ -1787,7 +1808,7 @@ impl PanelNode {
                     .height((*height).saturating_sub(16) as f32);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        row = row.child(child.view_as::<Message>(images, stylesheet));
+                        row = row.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                     }
                 }
                 let style = stylesheet.resolve("panel", None, class_name.as_deref());
@@ -1812,7 +1833,7 @@ impl PanelNode {
                     row = row.gap(gap);
                 }
                 for child in children {
-                    row = row.child(child.view_as::<Message>(images, stylesheet));
+                    row = row.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                 }
                 if style == ControlStyle::default() {
                     AnyView::new(row)
@@ -1833,7 +1854,8 @@ impl PanelNode {
                     column = column.gap(gap);
                 }
                 for child in children {
-                    column = column.child(child.view_as::<Message>(images, stylesheet));
+                    column =
+                        column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                 }
                 if style == ControlStyle::default() {
                     AnyView::new(column)
@@ -1857,11 +1879,15 @@ impl PanelNode {
                 let style = stylesheet.resolve("scroll-view", Some(id), class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column = column.child(child.view_as::<Message>(images, stylesheet));
+                    column =
+                        column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));
                 }
-                let scroll = VerticalScroll::new(Message::from_plugin(PluginMessage::Scroll), 0.0)
-                    .id(id.clone())
-                    .child(column);
+                let scroll = VerticalScroll::new(
+                    Message::from_plugin_scoped(PluginMessage::Scroll, scope),
+                    0.0,
+                )
+                .id(id.clone())
+                .child(column);
                 let scroll = if *grow {
                     scroll.grow(1.0)
                 } else {
@@ -1946,10 +1972,14 @@ impl PanelNode {
                                 .expect("image button has a label")
                                 .clone(),
                         )
-                        .message(Message::from_plugin(PluginMessage::Click(*action)));
+                        .message(Message::from_plugin_scoped(
+                            PluginMessage::Click(*action),
+                            scope,
+                        ));
                     if let Some(context_action) = context_action {
-                        container = container.context_message(Message::from_plugin(
+                        container = container.context_message(Message::from_plugin_scoped(
                             PluginMessage::Context(*context_action),
+                            scope,
                         ));
                     }
                 } else if let Some(label) = accessibility_label {
@@ -1992,7 +2022,7 @@ impl PanelNode {
             } => {
                 let style = stylesheet.resolve("slider", Some(id), class_name.as_deref());
                 let slider = Slider::on_change_with(
-                    Message::from_plugin(PluginMessage::Value(*action, *value)),
+                    Message::from_plugin_scoped(PluginMessage::Value(*action, *value), scope),
                     Message::value,
                     *value,
                 )
@@ -2078,7 +2108,10 @@ impl PanelNode {
                     .justify_content(nickel_ui::Justify::Center)
                     .child(track);
                 if let Some(action) = action {
-                    control = control.message(Message::from_plugin(PluginMessage::Click(*action)));
+                    control = control.message(Message::from_plugin_scoped(
+                        PluginMessage::Click(*action),
+                        scope,
+                    ));
                 }
                 with_margin(AnyView::new(control), &style)
             }
@@ -2091,6 +2124,7 @@ impl PanelNode {
                 action,
             } => {
                 let style = stylesheet.resolve("text-field", Some(id), class_name.as_deref());
+                let scope = scope.map(str::to_owned);
                 let field = if *secure {
                     UiTextField::on_change_masked_with_placeholder_mapped(
                         value,
@@ -2098,13 +2132,23 @@ impl PanelNode {
                         '•',
                         {
                             let action = *action;
-                            move |value| Message::from_plugin(PluginMessage::Text(action, value))
+                            move |value| {
+                                Message::from_plugin_scoped(
+                                    PluginMessage::Text(action, value),
+                                    scope.as_deref(),
+                                )
+                            }
                         },
                     )
                 } else {
                     UiTextField::on_change_with_placeholder_mapped(value, placeholder, {
                         let action = *action;
-                        move |value| Message::from_plugin(PluginMessage::Text(action, value))
+                        move |value| {
+                            Message::from_plugin_scoped(
+                                PluginMessage::Text(action, value),
+                                scope.as_deref(),
+                            )
+                        }
                     })
                 };
                 let mut field = field
@@ -2171,8 +2215,10 @@ impl PanelNode {
                     .semantic_role(SemanticRole::Button)
                     .height(height.unwrap_or(42) as f32);
                 if !disabled {
-                    container =
-                        container.message(Message::from_plugin(PluginMessage::Click(*action)));
+                    container = container.message(Message::from_plugin_scoped(
+                        PluginMessage::Click(*action),
+                        scope,
+                    ));
                 }
                 if let Some(state) = accessibility_state {
                     container = container.accessibility_state(state);
@@ -2184,15 +2230,20 @@ impl PanelNode {
                     container = container.width(*width as f32);
                 }
                 if let Some(action) = context_action.filter(|_| !*disabled) {
-                    container = container
-                        .context_message(Message::from_plugin(PluginMessage::Context(action)));
+                    container = container.context_message(Message::from_plugin_scoped(
+                        PluginMessage::Context(action),
+                        scope,
+                    ));
                 }
                 if let Some(drag) = drag_action.filter(|_| !*disabled) {
                     container = container.on_drag((
-                        Message::from_plugin(PluginMessage::Button {
-                            click: *action,
-                            drag,
-                        }),
+                        Message::from_plugin_scoped(
+                            PluginMessage::Button {
+                                click: *action,
+                                drag,
+                            },
+                            scope,
+                        ),
                         Message::drag,
                     ));
                 }

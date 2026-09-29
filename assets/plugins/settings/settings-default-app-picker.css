@@ -1,0 +1,75 @@
+div.app-picker-page,
+div.app-picker-header,
+div.app-picker-candidates {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 8px;
+}
+
+div.app-picker-header {
+    padding: 12px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+}
+
+div.app-picker-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 56px;
+    gap: 8px;
+    padding: 3px 6px;
+    background: @card@;
+    border-radius: @radius@px;
+}
+
+div.app-picker-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+text.app-picker-status,
+text.app-picker-name {
+    height: auto;
+    color: @primary@;
+    font-size: 13px;
+    line-height: 18px;
+}
+
+text.app-picker-detail {
+    height: auto;
+    color: @secondary@;
+    font-size: 12px;
+    line-height: 17px;
+}
+
+text-field.app-picker-search {
+    width: 100%;
+    height: 40px;
+    padding: 8px 10px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 13px;
+    line-height: 18px;
+}
+
+button.app-picker-action {
+    height: 40px;
+    padding: 8px 12px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 13px;
+}
+
+button.app-picker-action.disabled {
+    color: @secondary@;
+}
