@@ -1552,6 +1552,7 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
             width,
             height,
             windows,
+            ..
         } => SessionCommand::ShowOverlay {
             role: SessionShellRole::Preview,
             geometry: SessionGeometry {
@@ -1569,6 +1570,7 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
             width,
             height,
             windows,
+            ..
         } => SessionCommand::ShowOverlay {
             role: SessionShellRole::Preview,
             geometry: SessionGeometry {

@@ -11,10 +11,6 @@ pub const TASK_SWITCHER_CARD_WIDTH: f32 = 220.0;
 pub const PREVIEW_HEIGHT: f32 = 214.0;
 const GAP: f32 = 10.0;
 const PADDING: f32 = 12.0;
-const CLOSE_SIZE: f32 = 28.0;
-const CARD_PADDING: f32 = 8.0;
-const CARD_GAP: f32 = 2.0;
-const THUMBNAIL_HEIGHT: f32 = 116.0;
 pub const MENU_WIDTH: f32 = 220.0;
 const MENU_ROW_HEIGHT: f32 = 32.0;
 const MENU_ROW_GAP: f32 = 2.0;
@@ -336,30 +332,6 @@ pub fn task_switcher_dimensions(window_count: usize) -> (u32, u32) {
     )
 }
 
-#[cfg(any(test, target_os = "windows"))]
-pub fn native_thumbnail_bounds(index: usize) -> (i32, i32, i32, i32) {
-    let left = PADDING + index as f32 * (CARD_WIDTH + GAP) + CARD_PADDING;
-    let top = PADDING + CARD_PADDING + CLOSE_SIZE + CARD_GAP;
-    (
-        left.round() as i32,
-        top.round() as i32,
-        (left + CARD_WIDTH - CARD_PADDING * 2.0).round() as i32,
-        (top + THUMBNAIL_HEIGHT).round() as i32,
-    )
-}
-
-#[cfg(any(test, target_os = "windows"))]
-pub fn native_task_switcher_thumbnail_bounds(index: usize) -> (i32, i32, i32, i32) {
-    let left = PADDING + index as f32 * (TASK_SWITCHER_CARD_WIDTH + GAP) + CARD_PADDING;
-    let top = PADDING + CARD_PADDING + CLOSE_SIZE + CARD_GAP;
-    (
-        left.round() as i32,
-        top.round() as i32,
-        (left + TASK_SWITCHER_CARD_WIDTH - CARD_PADDING * 2.0).round() as i32,
-        (top + THUMBNAIL_HEIGHT).round() as i32,
-    )
-}
-
 pub fn menu_height(workspaces: &[WorkspaceSummary]) -> f32 {
     let destination_count = workspace_move_destinations(workspaces).len();
     let row_count = 4 + destination_count;
@@ -388,19 +360,9 @@ mod tests {
     use crate::model::OpenWindow;
 
     #[test]
-    fn native_thumbnails_follow_card_geometry() {
-        assert_eq!(native_thumbnail_bounds(0), (20, 50, 280, 166));
-        assert_eq!(native_thumbnail_bounds(1), (306, 50, 566, 166));
-    }
-
-    #[test]
     fn five_task_switcher_cards_fit_a_1280_pixel_output() {
         let (width, _) = task_switcher_dimensions(5);
         assert!(width <= 1_200);
-        assert_eq!(
-            native_task_switcher_thumbnail_bounds(1).0,
-            native_task_switcher_thumbnail_bounds(0).0 + 230
-        );
     }
 
     #[test]

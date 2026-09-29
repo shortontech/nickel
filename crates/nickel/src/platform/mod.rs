@@ -753,6 +753,14 @@ impl GlobalShortcutFeed {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreviewThumbnailBounds {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
 #[derive(Clone)]
 pub enum ShellCommand {
     Show,
@@ -773,11 +781,15 @@ pub enum ShellCommand {
         width: i32,
         height: i32,
         windows: Vec<WindowId>,
+        #[cfg(any(target_os = "windows", test))]
+        thumbnail_bounds: Vec<PreviewThumbnailBounds>,
     },
     ShowTaskSwitcher {
         width: i32,
         height: i32,
         windows: Vec<WindowId>,
+        #[cfg(any(target_os = "windows", test))]
+        thumbnail_bounds: Vec<PreviewThumbnailBounds>,
     },
     #[cfg(target_os = "windows")]
     ShowTaskSwitcherPeek {

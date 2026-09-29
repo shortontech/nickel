@@ -7647,7 +7647,7 @@ impl LiveShell {
                     .and_then(|index| {
                         let groups = self.panel_groups();
                         let group = groups.get(index)?;
-                        let (width, _) = preview_dimensions(group.windows.len());
+                        let (width, _) = preview_dimensions(group.windows.len().min(12));
                         let preview_origin = self.preview_origin_x(index, width);
                         let card = self.preview_plugin_bounds(PreviewAction::Activate(window))?;
                         Some(preview_origin + card.origin.x.round() as i32)
@@ -8027,15 +8027,20 @@ impl LiveShell {
             let windows = group
                 .windows
                 .iter()
+                .take(5)
                 .map(|window| window.id)
                 .collect::<Vec<_>>();
             let (width, height) = task_switcher_dimensions(windows.len());
+            #[cfg(any(target_os = "windows", test))]
+            let thumbnail_bounds = self.preview_thumbnail_bounds(&windows).unwrap_or_default();
             let _ = self.send_session_command(
                 "show-task-switcher",
                 ShellCommand::ShowTaskSwitcher {
                     width: width as i32,
                     height: height as i32,
                     windows,
+                    #[cfg(any(target_os = "windows", test))]
+                    thumbnail_bounds,
                 },
             );
         } else if let Some(index) = self.preview_group {
@@ -8044,10 +8049,13 @@ impl LiveShell {
                 let windows = group
                     .windows
                     .iter()
+                    .take(12)
                     .map(|window| window.id)
                     .collect::<Vec<_>>();
                 let (width, height) = preview_dimensions(windows.len());
                 let x = self.preview_origin_x(index, width);
+                #[cfg(any(target_os = "windows", test))]
+                let thumbnail_bounds = self.preview_thumbnail_bounds(&windows).unwrap_or_default();
                 let _ = self.send_session_command(
                     "show-preview",
                     ShellCommand::ShowPreview {
@@ -8056,6 +8064,8 @@ impl LiveShell {
                         width: width as i32,
                         height: height as i32,
                         windows,
+                        #[cfg(any(target_os = "windows", test))]
+                        thumbnail_bounds,
                     },
                 );
                 if self.preview_focus_requested {
@@ -9339,7 +9349,7 @@ impl LiveShell {
         let index = self.preview_group?;
         let groups = self.panel_groups();
         let group = groups.get(index)?;
-        let (width, height) = preview_dimensions(group.windows.len());
+        let (width, height) = preview_dimensions(group.windows.len().min(12));
         Some((
             self.preview_origin_x(index, width),
             self.panel_origin_y,
@@ -10299,9 +10309,9 @@ impl LiveShell {
             };
             let images_changed = host.application_mut().sync_images(images);
             let (width, height) = if self.task_switcher_group.is_some() {
-                task_switcher_dimensions(group.windows.len())
+                task_switcher_dimensions(group.windows.len().min(5))
             } else {
-                preview_dimensions(group.windows.len())
+                preview_dimensions(group.windows.len().min(12))
             };
             let outcome = host.step(HostBatch {
                 application_changed: data_changed || images_changed,
@@ -10400,12 +10410,46 @@ impl LiveShell {
             .map(|target| target.bounds)
     }
 
+    #[cfg(any(target_os = "windows", test))]
+    fn preview_thumbnail_bounds(
+        &mut self,
+        windows: &[crate::model::WindowId],
+    ) -> Option<Vec<crate::platform::PreviewThumbnailBounds>> {
+        // The preview can open before its first paint. Resolve the JSX tree now
+        // so the native thumbnail uses the same image-button geometry.
+        let _ = self.window_preview_scene();
+        let (width, height) = self.preview_plugin_size()?;
+        windows
+            .iter()
+            .map(|window| {
+                let bounds = self.preview_plugin_bounds(PreviewAction::Activate(*window))?;
+                let x = bounds.origin.x;
+                let y = bounds.origin.y;
+                let right = x + bounds.size.width;
+                let bottom = y + bounds.size.height;
+                if ![x, y, right, bottom].into_iter().all(f32::is_finite) {
+                    return None;
+                }
+                let left = (x.floor() as i32).clamp(0, width as i32);
+                let top = (y.floor() as i32).clamp(0, height as i32);
+                let right = (right.ceil() as i32).clamp(0, width as i32);
+                let bottom = (bottom.ceil() as i32).clamp(0, height as i32);
+                (right > left && bottom > top).then_some(crate::platform::PreviewThumbnailBounds {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                })
+            })
+            .collect()
+    }
+
     fn preview_plugin_size(&mut self) -> Option<(u32, u32)> {
         let group = self.preview_plugin_group()?;
         Some(if self.task_switcher_group.is_some() {
-            task_switcher_dimensions(group.windows.len())
+            task_switcher_dimensions(group.windows.len().min(5))
         } else {
-            preview_dimensions(group.windows.len())
+            preview_dimensions(group.windows.len().min(12))
         })
     }
 

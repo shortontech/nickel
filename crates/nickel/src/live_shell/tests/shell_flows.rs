@@ -524,6 +524,19 @@
         let action = crate::window_preview::PreviewAction::Activate(WindowId(71));
         let bounds = shell.preview_plugin_bounds(action).unwrap();
         host.take_commands();
+        shell.sync_transient_overlays();
+        let thumbnails = host
+            .take_commands()
+            .into_iter()
+            .find_map(|command| match command {
+                crate::platform::ShellCommand::ShowTaskSwitcher {
+                    thumbnail_bounds, ..
+                } => Some(thumbnail_bounds),
+                _ => None,
+            })
+            .expect("task switcher command includes live JSX thumbnail bounds");
+        assert_eq!(thumbnails.len(), 2);
+        assert_eq!(thumbnails[0].left, bounds.origin.x.floor() as i32);
         assert!(shell.preview_click(
             bounds.origin.x + bounds.size.width / 2.0,
             bounds.origin.y + bounds.size.height / 2.0,
@@ -2522,6 +2535,16 @@
         assert!(shell
             .preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(71)))
             .is_some());
+        let thumbnails = shell
+            .preview_thumbnail_bounds(&[WindowId(71), WindowId(72)])
+            .expect("JSX preview provides thumbnail bounds");
+        assert_eq!(thumbnails.len(), 2);
+        let first_image = shell
+            .preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(71)))
+            .unwrap();
+        assert_eq!(thumbnails[0].left, first_image.origin.x.floor() as i32);
+        assert_eq!(thumbnails[0].top, first_image.origin.y.floor() as i32);
+        assert!(thumbnails[1].left > thumbnails[0].right);
         let (preview_width, preview_height) = super::preview_dimensions(2);
         assert_eq!(
             shell.preview_geometry(),
@@ -2555,6 +2578,28 @@
         );
         assert_eq!(shell.window_menu, Some(WindowId(71)));
         assert_eq!(shell.window_menu_anchor_x, Some(first));
+    }
+
+    #[test]
+    fn preview_geometry_and_thumbnail_bounds_follow_the_projected_card_limit() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher.set_preferences(LauncherPreferences::default());
+        shell.windows = (1..=13)
+            .map(|index| OpenWindow {
+                id: WindowId(index),
+                application_id: Some(ApplicationId::new("org.example.Editor")),
+                active: index == 1,
+                title: format!("Document {index}"),
+                state: crate::model::WindowState::default(),
+            })
+            .collect();
+        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
+        shell.open_window_preview(0);
+        let (_, _, width, height) = shell.preview_geometry().expect("preview is open");
+        assert_eq!((width, height), super::preview_dimensions(12));
+        let windows = (1..=12).map(WindowId).collect::<Vec<_>>();
+        assert_eq!(shell.preview_thumbnail_bounds(&windows).unwrap().len(), 12);
+        assert!(shell.preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(13))).is_none());
     }
 
     #[test]

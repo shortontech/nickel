@@ -5194,6 +5194,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             width,
             height,
             windows,
+            thumbnail_bounds,
         } => {
             let preview = PREVIEW_WINDOW_HANDLE.load(Ordering::Relaxed);
             if preview == 0 {
@@ -5222,12 +5223,13 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 }
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
-            return show_dwm_previews(&windows, false);
+            return show_dwm_previews(&windows, &thumbnail_bounds);
         }
         ShellCommand::ShowTaskSwitcher {
             width,
             height,
             windows,
+            thumbnail_bounds,
         } => {
             let preview = PREVIEW_WINDOW_HANDLE.load(Ordering::Relaxed);
             if preview == 0 {
@@ -5263,7 +5265,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 }
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
-            return show_dwm_previews(&windows, true);
+            return show_dwm_previews(&windows, &thumbnail_bounds);
         }
         ShellCommand::ShowTaskSwitcherPeek { window } => {
             return show_task_switcher_peek(window);
@@ -5374,10 +5376,17 @@ fn work_area_above_panel(mut work_area: RECT, panel: RECT) -> RECT {
     work_area
 }
 
-fn show_dwm_previews(windows: &[WindowId], task_switcher: bool) -> bool {
+fn show_dwm_previews(
+    windows: &[WindowId],
+    thumbnail_bounds: &[crate::platform::PreviewThumbnailBounds],
+) -> bool {
     use std::sync::atomic::Ordering;
 
     clear_dwm_thumbnails();
+    if thumbnail_bounds.len() != windows.len() {
+        record_dwm_preview_failures(u64::try_from(windows.len().max(1)).unwrap_or(u64::MAX));
+        return false;
+    }
     let destination = PREVIEW_WINDOW_HANDLE.load(Ordering::Relaxed);
     if destination == 0 {
         record_dwm_preview_failures(1);
@@ -5385,21 +5394,16 @@ fn show_dwm_previews(windows: &[WindowId], task_switcher: bool) -> bool {
     }
     let destination = HWND(destination as *mut c_void);
     let mut registered = Vec::new();
-    for (index, window) in windows.iter().enumerate() {
+    for (window, bounds) in windows.iter().zip(thumbnail_bounds) {
         let source = hwnd(*window);
         let Ok(thumbnail) = (unsafe { DwmRegisterThumbnail(destination, source) }) else {
             continue;
         };
-        let (left, top, right, bottom) = if task_switcher {
-            crate::window_preview::native_task_switcher_thumbnail_bounds(index)
-        } else {
-            crate::window_preview::native_thumbnail_bounds(index)
-        };
         let bounds = RECT {
-            left,
-            top,
-            right,
-            bottom,
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: bounds.bottom,
         };
         let destination_rect = unsafe { DwmQueryThumbnailSourceSize(thumbnail) }
             .map(|source_size| contain_rect(bounds, source_size))
