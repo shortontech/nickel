@@ -1,0 +1,22 @@
+window.example-window {
+    background: #202830;
+    padding: 20px;
+}
+
+div.details-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+text {
+    color: #f4f6fa;
+    font-size: 18px;
+}
+
+button {
+    background: #455675;
+    color: #f4f6fa;
+    border-radius: 8px;
+    padding: 8px;
+}

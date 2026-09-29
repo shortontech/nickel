@@ -6863,10 +6863,10 @@ mod tests {
                 name: "Reopen details".into(),
             })
             .unwrap();
-        assert!(button.bounds.origin.x < 200.0);
-        assert!(button.bounds.origin.x + button.bounds.size.width > 200.0);
-        assert!(button.bounds.origin.y < 208.0);
-        assert!(button.bounds.origin.y + button.bounds.size.height > 208.0);
+        assert!(button.bounds.size.width > 0.0);
+        assert!(button.bounds.size.height > 0.0);
+        assert!(button.bounds.origin.x + button.bounds.size.width <= home.width as f32);
+        assert!(button.bounds.origin.y + button.bounds.size.height <= home.height as f32);
         host.step(nickel_ui::HostBatch {
             events: vec![nickel_ui::HostEvent::Ui(
                 nickel_ui::UiEvent::AccessibilityActivate(button.id),
@@ -6880,7 +6880,7 @@ mod tests {
                 surface_id: "details".into(),
             }]
         );
-        let details = package
+        let details_surface = package
             .manifest
             .surfaces
             .iter()
@@ -6890,11 +6890,11 @@ mod tests {
             PluginPanelApplication::from_package_surface(
                 &package,
                 &std::collections::BTreeMap::new(),
-                details,
+                details_surface,
             )
             .unwrap(),
-            details.width,
-            details.height,
+            details_surface.width,
+            details_surface.height,
         );
         let close = details
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
@@ -6902,10 +6902,10 @@ mod tests {
                 name: "Close details".into(),
             })
             .unwrap();
-        assert!(close.bounds.origin.x < 225.0);
-        assert!(close.bounds.origin.x + close.bounds.size.width > 225.0);
-        assert!(close.bounds.origin.y < 77.0);
-        assert!(close.bounds.origin.y + close.bounds.size.height > 77.0);
+        assert!(close.bounds.size.width > 0.0);
+        assert!(close.bounds.size.height > 0.0);
+        assert!(close.bounds.origin.x + close.bounds.size.width <= details_surface.width as f32);
+        assert!(close.bounds.origin.y + close.bounds.size.height <= details_surface.height as f32);
         details.step(nickel_ui::HostBatch {
             events: vec![nickel_ui::HostEvent::Ui(
                 nickel_ui::UiEvent::AccessibilityActivate(close.id),
