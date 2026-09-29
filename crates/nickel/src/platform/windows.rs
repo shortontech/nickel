@@ -2,6 +2,9 @@
 mod desktop;
 #[path = "windows_focus.rs"]
 mod focus;
+#[path = "windows_keyboard.rs"]
+mod keyboard;
+pub use keyboard::{deliver_on_screen_keyboard_input, on_screen_keyboard_snapshot};
 #[path = "windows_remote_observation.rs"]
 pub(crate) mod remote_observation;
 use std::{

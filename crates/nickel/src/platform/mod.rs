@@ -1173,14 +1173,15 @@ pub use windows::{
     configure_notification_window, configure_panel_window, configure_plugin_dialog_window,
     configure_preview_window, configure_screenshot_window, configure_volume_osd_window,
     configured_primary_output, copy_image_to_clipboard, copy_temp_image_path,
-    ensure_panel_tray_host, execute_run_command, handle_consumer_control, handle_focused_shortcut,
-    hide_preview_window, launch_application, launcher_has_foreground_focus,
-    launcher_hotkey_receiver, launcher_visibility_applied, launcher_window_visible,
-    lock_workstation, network_status, observe_nickel_window_key, register_internal_window_thread,
-    register_session_shell, release_panel_window, release_pointer, reposition_panel_window,
-    select_audio_device, send_shell_command, set_audio_volume, set_bluetooth_discovery,
-    set_bluetooth_powered, set_wifi_enabled, show_overlay_window_without_activation,
-    show_window_system_menu, toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
+    deliver_on_screen_keyboard_input, ensure_panel_tray_host, execute_run_command,
+    handle_consumer_control, handle_focused_shortcut, hide_preview_window, launch_application,
+    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
+    launcher_window_visible, lock_workstation, network_status, observe_nickel_window_key,
+    on_screen_keyboard_snapshot, register_internal_window_thread, register_session_shell,
+    release_panel_window, release_pointer, reposition_panel_window, select_audio_device,
+    send_shell_command, set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered,
+    set_wifi_enabled, show_overlay_window_without_activation, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

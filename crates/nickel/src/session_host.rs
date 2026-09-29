@@ -143,6 +143,15 @@ impl SessionHost for PlatformSessionHost {
     ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
         platform::on_screen_keyboard_snapshot()
     }
+    #[cfg(target_os = "windows")]
+    fn keyboard_snapshot(
+        &self,
+    ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
+        platform::on_screen_keyboard_snapshot().map_err(|error| {
+            tracing::warn!(%error, "Windows keyboard recipient observation failed");
+            SessionRequestError::Receive
+        })
+    }
     #[cfg(target_os = "linux")]
     fn configure_keyboard(
         &self,
@@ -169,6 +178,17 @@ impl SessionHost for PlatformSessionHost {
         input: nickel_session_protocol::OnScreenKeyboardInput,
     ) -> Result<(), SessionRequestError> {
         platform::deliver_on_screen_keyboard_input(epoch, input)
+    }
+    #[cfg(target_os = "windows")]
+    fn keyboard_input(
+        &self,
+        epoch: u64,
+        input: nickel_session_protocol::OnScreenKeyboardInput,
+    ) -> Result<(), SessionRequestError> {
+        platform::deliver_on_screen_keyboard_input(epoch, input).map_err(|error| {
+            tracing::warn!(%error, "Windows keyboard input rejected");
+            SessionRequestError::Send
+        })
     }
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
         #[cfg(target_os = "linux")]

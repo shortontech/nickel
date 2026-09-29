@@ -938,8 +938,8 @@ impl WinitShell {
                 self.plugin_panel_surface.clone(),
             );
         }
-        let keyboard_plugin_active = cfg!(target_os = "linux")
-            && active_panels.contains_key(&crate::plugin_panel::on_screen_keyboard_surface_key());
+        let keyboard_plugin_active =
+            active_panels.contains_key(&crate::plugin_panel::on_screen_keyboard_surface_key());
         let mut desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
         let taskbar_key = crate::plugin_panel::taskbar_surface_key();
         let outputs = panel_outputs(

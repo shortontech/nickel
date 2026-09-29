@@ -3437,10 +3437,9 @@ impl LiveShell {
             SurfaceRole::Screenshot => self.screenshot.visible(),
             SurfaceRole::OnScreenKeyboard => {
                 self.keyboard_visible
-                    && (!cfg!(target_os = "linux")
-                        || !self.plugin_surface_matches(
-                            &crate::plugin_panel::on_screen_keyboard_surface_key(),
-                        ))
+                    && !self.plugin_surface_matches(
+                        &crate::plugin_panel::on_screen_keyboard_surface_key(),
+                    )
             }
             SurfaceRole::CodexChat => true,
             #[cfg(target_os = "windows")]
@@ -3460,7 +3459,6 @@ impl LiveShell {
         }
         if key == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()) {
             return role == SurfaceRole::Panel
-                && cfg!(target_os = "linux")
                 && self.keyboard_visible
                 && self.keyboard_enabled
                 && self.plugin_surface_matches(&crate::plugin_panel::on_screen_keyboard_surface_key());

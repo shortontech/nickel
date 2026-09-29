@@ -117,6 +117,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib run_plugin_can_start_render_and_retire
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib platform::windows::keyboard::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib jsx_keyboard_delivers_with_windows_recipient_lease
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib volume_osd_plugin_retires_without_native_fallback
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel --lib volume_overlay_uses_bundled_manifest_size_and_bottom_placement
@@ -191,7 +195,7 @@ jobs:
       - name: Validate shipped extension examples
         shell: pwsh
         run: |
-          foreach ($package in @("hello-panel", "taskbar", "launcher", "desktop", "notification", "run", "control-center", "codex-projects", "window-preview", "volume-osd")) {
+          foreach ($package in @("hello-panel", "taskbar", "launcher", "desktop", "notification", "run", "control-center", "codex-projects", "on-screen-keyboard", "window-preview", "volume-osd")) {
             cargo run --locked -p nickel --bin nickel-plugin -- validate "assets/plugins/$package"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -277,7 +281,7 @@ jobs:
                 [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr context);
                 [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
                 [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder title, int capacity);
-                public static bool HasFixedMenu(uint processId) {
+                public static bool HasWindowTitle(uint processId, string expected) {
                     bool found = false;
                     EnumWindows((handle, context) => {
                         uint owner;
@@ -285,15 +289,18 @@ jobs:
                         if (owner != processId) return true;
                         var title = new StringBuilder(256);
                         GetWindowText(handle, title, title.Capacity);
-                        if (title.ToString() == "Nickel Codex Projects") { found = true; return false; }
+                        if (title.ToString() == expected) { found = true; return false; }
                         return true;
                     }, IntPtr.Zero);
                     return found;
                 }
             }
           '@
-            if ([NickelCodexMenuWindowProbe]::HasFixedMenu([uint32]$shell.Id)) {
+            if ([NickelCodexMenuWindowProbe]::HasWindowTitle([uint32]$shell.Id, "Nickel Codex Projects")) {
               throw "The retired fixed Codex project menu window is still present"
+            }
+            if ([NickelCodexMenuWindowProbe]::HasWindowTitle([uint32]$shell.Id, "On-screen keyboard — Nickel")) {
+              throw "The retired fixed keyboard window is still present"
             }
             Write-Host "Live Windows launcher, taskbar, desktop, Codex project, and keyboard plugins are running."
             Write-Host "Taskbar retained UI: $taskbarBytes bytes; peak: $taskbarPeak bytes."

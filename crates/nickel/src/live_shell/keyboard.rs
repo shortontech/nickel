@@ -1,9 +1,7 @@
 use super::*;
-#[cfg(target_os = "linux")]
 use nickel_core::on_screen_keyboard::{
     KeyboardKey, Latch, TouchscreenPresence, VirtualModifiers, resolve_enablement,
 };
-#[cfg(target_os = "linux")]
 use nickel_session_protocol::OnScreenKeyboardInput;
 use nickel_ui::on_screen_keyboard::KeyboardEffect;
 
@@ -217,7 +215,25 @@ impl LiveShell {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            false
+            let Ok(snapshot) = self.session_host.keyboard_snapshot() else {
+                return false;
+            };
+            let previous = self.keyboard_recipient.as_ref();
+            let changed = previous != Some(&snapshot);
+            if previous.is_none_or(|old| {
+                old.epoch != snapshot.epoch || old.recipient != snapshot.recipient
+            }) {
+                self.keyboard_gesture_leases.clear();
+                self.keyboard_resize = None;
+                self.keyboard_host
+                    .application_mut()
+                    .recipient_changed(snapshot.has_recipient());
+            }
+            if changed {
+                self.keyboard_plugin_generation = self.keyboard_plugin_generation.saturating_add(1);
+            }
+            self.keyboard_recipient = Some(snapshot);
+            changed
         }
     }
 
@@ -252,6 +268,10 @@ impl LiveShell {
                 .application_mut()
                 .recipient_changed(false);
             self.keyboard_recipient = None;
+        }
+        #[cfg(target_os = "windows")]
+        if visible {
+            self.refresh_keyboard();
         }
         // Native configuration is queued. Re-reading the pre-command snapshot here
         // can recursively re-enter auto-show; the authority wakes us on completion.
@@ -490,11 +510,7 @@ impl LiveShell {
                     self.set_keyboard_visible(false);
                 }
                 KeyboardEffect::Input { key, modifiers } => {
-                    #[cfg(not(target_os = "linux"))]
-                    let _ = (key, modifiers, epoch);
-                    #[cfg(target_os = "linux")]
                     if let (Some(epoch), Some(input)) = (epoch, keyboard_input(key, modifiers)) {
-                        #[cfg(target_os = "linux")]
                         if self.session_host.keyboard_input(epoch, input).is_err() {
                             self.keyboard_host
                                 .application_mut()
@@ -510,7 +526,6 @@ impl LiveShell {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn keyboard_input(key: KeyboardKey, modifiers: VirtualModifiers) -> Option<OnScreenKeyboardInput> {
     use nickel_input::NamedKey::*;
     let chord = modifiers.control != Latch::Off
@@ -577,6 +592,76 @@ fn keyboard_input(key: KeyboardKey, modifiers: VirtualModifiers) -> Option<OnScr
     .filter_map(|(latch, key)| (latch != Latch::Off).then_some(key))
     .collect();
     Some(OnScreenKeyboardInput::Key { keysym, modifiers })
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+    use nickel_session_protocol::{OnScreenKeyboardSnapshot, WindowId};
+    use std::sync::{Arc, Mutex};
+
+    struct Host {
+        snapshot: Mutex<OnScreenKeyboardSnapshot>,
+        inputs: Mutex<Vec<(u64, OnScreenKeyboardInput)>>,
+    }
+
+    impl crate::session_host::SessionHost for Host {
+        fn dispatch(&self, _: platform::ShellCommand) -> Result<(), platform::SessionRequestError> {
+            Ok(())
+        }
+
+        fn keyboard_snapshot(
+            &self,
+        ) -> Result<OnScreenKeyboardSnapshot, platform::SessionRequestError> {
+            Ok(self.snapshot.lock().unwrap().clone())
+        }
+
+        fn keyboard_input(
+            &self,
+            epoch: u64,
+            input: OnScreenKeyboardInput,
+        ) -> Result<(), platform::SessionRequestError> {
+            self.inputs.lock().unwrap().push((epoch, input));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn jsx_keyboard_delivers_with_windows_recipient_lease() {
+        let host = Arc::new(Host {
+            snapshot: Mutex::new(OnScreenKeyboardSnapshot {
+                epoch: 19,
+                recipient: Some(WindowId(7)),
+                ..Default::default()
+            }),
+            inputs: Mutex::new(Vec::new()),
+        });
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.keyboard_enabled = true;
+        shell.set_keyboard_visible(true);
+        assert!(shell.native_surface_visible(
+            SurfaceRole::Panel,
+            Some(&crate::plugin_panel::on_screen_keyboard_surface_key())
+        ));
+        assert!(!shell.surface_visible(SurfaceRole::OnScreenKeyboard));
+        let effect = crate::plugin_panel::PluginEffect::KeyboardKey {
+            id: "osk-char-97".into(),
+            generation: shell.keyboard_plugin_generation,
+        };
+        assert!(shell.apply_keyboard_plugin_effect(effect.clone(), Some(19)));
+        assert_eq!(
+            *host.inputs.lock().unwrap(),
+            vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
+        );
+        host.snapshot.lock().unwrap().epoch = 20;
+        shell.refresh_keyboard();
+        let stale = crate::plugin_panel::PluginEffect::KeyboardKey {
+            id: "osk-char-97".into(),
+            generation: shell.keyboard_plugin_generation,
+        };
+        assert!(!shell.apply_keyboard_plugin_effect(stale, Some(19)));
+        assert_eq!(host.inputs.lock().unwrap().len(), 1);
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
