@@ -8,7 +8,7 @@ function App() {
         setMenuTarget({id: item.id, index: item.index, pinned: item.pinned, kind, anchor});
         nickel.openMenu("launcher-app-actions");
     };
-    return <Window width={920} height={680} className="launcher-window">
+    return <Window title="Nickel Launcher" width={920} height={680} className="launcher-window">
       <div className="launcher-content">
         <Text className="launcher-title">Nickel Launcher</Text>
         {data.status ? <Text className="launcher-status">{data.status}</Text> : null}

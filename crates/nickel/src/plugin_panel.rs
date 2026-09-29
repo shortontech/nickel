@@ -3723,7 +3723,7 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn title(&self) -> &str {
-        &self.manifest.name
+        self.node.window_title().unwrap_or(&self.manifest.name)
     }
 }
 
@@ -3932,6 +3932,7 @@ mod tests {
             920,
             680,
         );
+        assert_eq!(host.application().title(), "Nickel Launcher");
         let firefox = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,

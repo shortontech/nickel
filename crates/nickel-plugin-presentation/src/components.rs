@@ -87,6 +87,7 @@ impl PluginUiMessage for PluginMessage {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowRequest {
     id: String,
+    title: Option<String>,
     placement: String,
     output: Option<String>,
     edge: Option<String>,
@@ -1045,6 +1046,17 @@ impl PanelNode {
                         };
                     let placement = optional_token("placement", &["managed", "fixed"])?
                         .unwrap_or_else(|| "managed".into());
+                    let title = match value.get("title") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(title))
+                            if !title.is_empty()
+                                && title.len() <= 128
+                                && !title.chars().any(char::is_control) =>
+                        {
+                            Some(title.clone())
+                        }
+                        _ => return Err("window title must be 1 to 128 printable bytes".into()),
+                    };
                     let output = optional_token("output", &["primary", "all"])?;
                     let edge = optional_token("edge", &["top", "bottom", "left", "right"])?;
                     let anchor = optional_token(
@@ -1074,6 +1086,7 @@ impl PanelNode {
                     };
                     Some(WindowRequest {
                         id,
+                        title,
                         placement,
                         output,
                         edge,
@@ -2606,6 +2619,16 @@ impl PanelNode {
             Self::Dialog { .. } | Self::Menu { .. } | Self::MenuItem { .. } => {
                 AnyView::new(Spacer::fixed(0.0))
             }
+        }
+    }
+
+    pub fn window_title(&self) -> Option<&str> {
+        match self {
+            Self::Surface {
+                window_request: Some(request),
+                ..
+            } => request.title.as_deref(),
+            _ => None,
         }
     }
 
