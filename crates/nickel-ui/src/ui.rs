@@ -933,6 +933,8 @@ pub struct Style {
     pub hover_background: Option<Background>,
     /// Semantic background applied while an interactive element is pressed.
     pub pressed_background: Option<Background>,
+    /// Explicit background for a focused control, used by declarative styles.
+    pub focus_background: Option<Background>,
     /// Semantic hue/lightness cue applied to the child background for keyboard
     /// or accessibility focus.
     pub focus_background_tint: Option<Color>,
@@ -1002,6 +1004,7 @@ impl Default for Style {
             foreground: None,
             hover_background: None,
             pressed_background: None,
+            focus_background: None,
             focus_background_tint: None,
             controller_focus_background_tint: None,
             scrollbar_palette: crate::theme::FALLBACK_SCROLLBAR_PALETTE,
@@ -1305,6 +1308,11 @@ impl<Message> Element<Message> {
 
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.style.focus_background_tint = Some(color);
+        self
+    }
+
+    pub fn focus_background(mut self, background: impl Into<Background>) -> Self {
+        self.style.focus_background = Some(background.into());
         self
     }
 

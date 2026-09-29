@@ -743,13 +743,23 @@ pub(super) fn apply_transient_state<Message>(
         {
             element.style.background = Some(background);
         }
+        let exact_focus_background = (!scope_background_active
+            && state.window_focused()
+            && state.pressed() != Some(id)
+            && (state.focused() == Some(id)
+                || state.navigation().controller_selected() == Some(id)))
+        .then_some(element.style.focus_background)
+        .flatten();
+        if let Some(background) = exact_focus_background {
+            element.style.background = Some(background);
+        }
         // A transparent editor already exposes keyboard focus through its caret.
         // Filling its entire text node with the generic fallback tint makes a
         // blue/purple strip appear and disappear as input modality changes.
         let transparent_editor = element.text_mapper.is_some()
             && matches!(element.kind, Kind::Text { .. })
             && element.style.background.is_none();
-        let active_focus_tint = if scope_background_active {
+        let active_focus_tint = if scope_background_active || exact_focus_background.is_some() {
             None
         } else {
             if state.window_focused() && state.navigation().controller_selected() == Some(id) {

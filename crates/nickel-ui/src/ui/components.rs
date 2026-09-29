@@ -1626,6 +1626,11 @@ impl<Message> TextField<Message> {
         self
     }
 
+    pub fn focus_background(mut self, background: impl Into<Background>) -> Self {
+        self.text.0 = self.text.0.focus_background(background);
+        self
+    }
+
     pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
         self.text.0 = self.text.0.controller_focus_background_tint(color);
         self
@@ -1734,6 +1739,11 @@ impl<Message> Container<Message> {
 
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.0 = self.0.focus_background_tint(color);
+        self
+    }
+
+    pub fn focus_background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.focus_background(background);
         self
     }
 

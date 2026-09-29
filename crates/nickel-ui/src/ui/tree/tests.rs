@@ -3164,6 +3164,36 @@ fn focused_text_field_transforms_its_explicit_surface() {
 }
 
 #[test]
+fn focused_text_field_uses_exact_declared_background() {
+    const NORMAL: Color = 0xff253044;
+    const FOCUSED: Color = 0xff356a92;
+    fn query(value: String) -> TestMessage {
+        TestMessage::Query(value)
+    }
+    let field = || {
+        TextField::on_change("query", query)
+            .id("query")
+            .background(NORMAL)
+            .focus_background(FOCUSED)
+    };
+    let mut state = UiStateStore::default();
+    let initial = UiFrame::layout_with_state(field(), Rect::new(0.0, 0.0, 200.0, 32.0), &mut state);
+    assert!(
+        initial
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::Fill { color, .. } if *color == NORMAL))
+    );
+    initial.handle_event(&mut state, UiEvent::FocusNext);
+    let focused = UiFrame::layout_with_state(field(), Rect::new(0.0, 0.0, 200.0, 32.0), &mut state);
+    assert!(
+        focused.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == FOCUSED)
+        )
+    );
+}
+
+#[test]
 fn document_selection_crosses_text_runs_and_skips_buttons() {
     let build = |state: &mut UiStateStore| {
         UiFrame::layout_with_state(

@@ -3920,7 +3920,7 @@ mod tests {
         let package = PluginPackage {
             manifest: external_manifest,
             images: Default::default(),
-            stylesheet: "button.primary { background-color: #345678; padding: 8px; border: 2px solid #abc; border-radius: 6px; color: #fff; font-size: 18px; } text-field.entry { background-color: rgba(10, 20, 30, 0.5); padding: 4px; line-height: 24px; }".into(),
+            stylesheet: "button.primary { background-color: #345678; padding: 8px; border: 2px solid #abc; border-radius: 6px; color: #fff; font-size: 18px; } button.primary:focus { background-color: #123abc; } text-field.entry { background-color: rgba(10, 20, 30, 0.5); padding: 4px; line-height: 24px; } text-field.entry:focus { background-color: #3479ab; }".into(),
             source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h(Button, {id: 'go', className: 'primary', onClick: () => nickel.request('show-launcher')}, 'Go'), h(TextField, {id: 'name', className: 'entry', value: '', onChange: value => {}})); }".into(),
         };
         PluginPanelApplication::validate_package(&package).unwrap();
@@ -3945,7 +3945,7 @@ mod tests {
             .unwrap();
         host.step(nickel_ui::HostBatch {
             events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(button.id),
+                nickel_ui::UiEvent::AccessibilityActivate(button.id.clone()),
             )],
             ..Default::default()
         });
@@ -3953,10 +3953,41 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowLauncher]
         );
-        assert!(
-            host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-                .is_ok()
-        );
+        let field = host
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .unwrap();
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityFocus(button.id),
+            )],
+            ..Default::default()
+        });
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill {
+                color: 0xff123abc,
+                ..
+            } | nickel_ui::backend::PaintCommand::Fill {
+                color: 0xff123abc,
+                ..
+            }
+        )));
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityFocus(field.id),
+            )],
+            ..Default::default()
+        });
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill {
+                color: 0xff3479ab,
+                ..
+            } | nickel_ui::backend::PaintCommand::Fill {
+                color: 0xff3479ab,
+                ..
+            }
+        )));
     }
 
     #[test]

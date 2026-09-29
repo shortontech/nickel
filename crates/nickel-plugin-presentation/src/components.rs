@@ -2388,6 +2388,14 @@ impl PanelNode {
                 if let Some(color) = style.color {
                     field = field.color(color);
                 }
+                if let Some(background) = stylesheet.resolve_interaction_background(
+                    "text-field",
+                    Some(id),
+                    class_name.as_deref(),
+                    InteractionState::Focus,
+                ) {
+                    field = field.focus_background(background);
+                }
                 with_margin(
                     AnyView::new(apply_container_style(Container::new().child(field), &style)),
                     &style,
@@ -2483,6 +2491,14 @@ impl PanelNode {
                     InteractionState::Active,
                 ) {
                     container = container.pressed_background(background);
+                }
+                if let Some(background) = stylesheet.resolve_interaction_background(
+                    "button",
+                    Some(id),
+                    class_name.as_deref(),
+                    InteractionState::Focus,
+                ) {
+                    container = container.focus_background(background);
                 }
                 with_margin(
                     AnyView::new(apply_container_style(container.child(visual), &style)),

@@ -64,6 +64,7 @@ struct Selector {
 pub enum InteractionState {
     Hover,
     Active,
+    Focus,
 }
 
 impl Selector {
@@ -93,6 +94,7 @@ impl Selector {
                     selector.state = Some(match parser.expect_ident() {
                         Ok(name) if name.eq_ignore_ascii_case("hover") => InteractionState::Hover,
                         Ok(name) if name.eq_ignore_ascii_case("active") => InteractionState::Active,
+                        Ok(name) if name.eq_ignore_ascii_case("focus") => InteractionState::Focus,
                         _ => return Err("unsupported plugin CSS pseudo-class".into()),
                     });
                 }
@@ -531,19 +533,20 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                     "state selectors cannot share a rule with ordinary selectors",
                 ));
             }
-            if selectors
-                .iter()
-                .any(|selector| selector.kind.as_deref() != Some("button"))
-            {
+            if selectors.iter().any(|selector| {
+                !matches!(selector.kind.as_deref(), Some("button" | "text-field"))
+                    || selector.state != Some(InteractionState::Focus)
+                        && selector.kind.as_deref() == Some("text-field")
+            }) {
                 return Err(ParseError::custom(
-                    "plugin CSS state selectors currently require button",
+                    "plugin CSS state selectors require button, or text-field:focus",
                 ));
             }
             if declarations.iter().any(
                 |declaration| !matches!(declaration, Declaration::Background(color) if *color != 0),
             ) {
                 return Err(ParseError::custom(
-                    "plugin CSS :hover and :active currently require a nontransparent background",
+                    "plugin CSS state selectors require a nontransparent background",
                 ));
             }
         }
@@ -822,7 +825,7 @@ mod tests {
             "button { padding: 10000px }",
             "@import 'remote.css';",
             "button:hover { color: #fff }",
-            "button:focus { background: #fff }",
+            "text-field:hover { background: #fff }",
             "button:hover { background: transparent }",
             "div:hover { background: #fff }",
         ] {
@@ -834,7 +837,9 @@ mod tests {
     fn interaction_backgrounds_are_separate_from_base_styles() {
         let css = StyleSheet::compile(
             "button { background: #111; } button.primary:hover { background: #222; } \
-             button.primary:active { background: #333; }",
+             button.primary:active { background: #333; } \
+             button.primary:focus { background: #444; } \
+             text-field.entry:focus { background: #555; }",
         )
         .unwrap();
         assert_eq!(
@@ -858,6 +863,24 @@ mod tests {
                 InteractionState::Active
             ),
             Some(0xff333333)
+        );
+        assert_eq!(
+            css.resolve_interaction_background(
+                "button",
+                None,
+                Some("primary"),
+                InteractionState::Focus
+            ),
+            Some(0xff444444)
+        );
+        assert_eq!(
+            css.resolve_interaction_background(
+                "text-field",
+                None,
+                Some("entry"),
+                InteractionState::Focus
+            ),
+            Some(0xff555555)
         );
         assert_eq!(
             css.resolve_interaction_background(
