@@ -3362,6 +3362,14 @@ impl PluginPanelApplication {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn window_preview_with_test_source(
+        source: &str,
+        data: &Value,
+    ) -> Result<Self, String> {
+        Self::new_with_manifest(source, window_preview_manifest(), Some(data.to_string()))
+    }
+
     pub fn desktop_with_data(data: &Value) -> Result<Self, String> {
         let source = bundled_source(
             desktop_manifest(),

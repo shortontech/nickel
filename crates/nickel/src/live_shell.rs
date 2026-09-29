@@ -4828,6 +4828,29 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
+    fn retire_preview_plugin_state(&mut self) {
+        self.plugin_preview_host = None;
+        let preview_was_open = self.preview_group.is_some() || self.task_switcher_group.is_some();
+        if self.task_switcher_group.is_some() {
+            self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
+        }
+        if preview_was_open {
+            self.close_window_preview();
+        } else {
+            self.preview_pending = None;
+        }
+    }
+
+    fn fail_preview_plugin_runtime(&mut self, error: String) {
+        let id = &crate::plugin_panel::window_preview_manifest().id;
+        tracing::warn!(plugin = id, %error, "bundled Window Preview plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.retire_preview_plugin_state();
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -4993,17 +5016,7 @@ impl LiveShell {
                 }
                 self.set_screenshot_focus(false);
             } else if id == crate::plugin_panel::window_preview_manifest().id {
-                self.plugin_preview_host = None;
-                let preview_was_open =
-                    self.preview_group.is_some() || self.task_switcher_group.is_some();
-                if self.task_switcher_group.is_some() {
-                    self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
-                }
-                if preview_was_open {
-                    self.close_window_preview();
-                } else {
-                    self.preview_pending = None;
-                }
+                self.retire_preview_plugin_state();
             } else if id == crate::plugin_panel::desktop_manifest().id {
                 self.retire_desktop_plugin_state();
             }
@@ -8503,16 +8516,26 @@ impl LiveShell {
 
     fn clear_preview_plugin_payload(&mut self) {
         if let Some(host) = self.plugin_preview_host.as_mut() {
-            let data_changed = host
+            let data_changed = match host
                 .application_mut()
                 .sync_window_preview_data(&serde_json::json!({"windows": []}))
-                .unwrap_or(false);
+            {
+                Ok(changed) => changed,
+                Err(error) => {
+                    self.fail_preview_plugin_runtime(error);
+                    return;
+                }
+            };
             let images_changed = host.application_mut().sync_images(Default::default());
             let outcome = host.step(HostBatch {
                 application_changed: data_changed || images_changed,
                 events: vec![HostEvent::Poll],
                 ..HostBatch::default()
             });
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_preview_plugin_runtime(error);
+                return;
+            }
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::window_preview_manifest().id,
                 nickel_core::plugins::PluginMemory {
@@ -10707,13 +10730,13 @@ impl LiveShell {
         if self.preview_plugin_active() {
             let (data, images) = self.preview_plugin_projection(&group);
             let host = self.plugin_preview_host.as_mut().unwrap();
-            let data_changed = host
-                .application_mut()
-                .sync_window_preview_data(&data)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "window preview plugin projection failed");
-                    false
-                });
+            let data_changed = match host.application_mut().sync_window_preview_data(&data) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    self.fail_preview_plugin_runtime(error);
+                    return Vec::new();
+                }
+            };
             let images_changed = host.application_mut().sync_images(images);
             let (width, height) = if self.task_switcher_group.is_some() {
                 task_switcher_dimensions(group.windows.len())
@@ -10726,6 +10749,10 @@ impl LiveShell {
                 events: vec![HostEvent::Poll],
                 ..HostBatch::default()
             });
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_preview_plugin_runtime(error);
+                return Vec::new();
+            }
             let commands = host.commands().to_vec();
             let image_bytes = host.application().retained_image_bytes();
             let _ = self.plugin_registry.record_memory(
@@ -10929,17 +10956,16 @@ impl LiveShell {
             return Default::default();
         };
         let (data, images) = self.preview_plugin_projection(&group);
-        let host = self
-            .plugin_preview_host
-            .as_mut()
-            .expect("active preview plugin");
-        let data_changed = host
-            .application_mut()
-            .sync_window_preview_data(&data)
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "window preview plugin projection failed");
-                false
-            });
+        let Some(host) = self.plugin_preview_host.as_mut() else {
+            return Default::default();
+        };
+        let data_changed = match host.application_mut().sync_window_preview_data(&data) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.fail_preview_plugin_runtime(error);
+                return Default::default();
+            }
+        };
         let images_changed = host.application_mut().sync_images(images);
         let mut outcome = host.step(HostBatch {
             application_changed: data_changed || images_changed,
@@ -10949,6 +10975,10 @@ impl LiveShell {
             ..Default::default()
         });
         let effects = host.application_mut().take_effects();
+        if let Some(error) = host.application_mut().take_runtime_failure() {
+            self.fail_preview_plugin_runtime(error);
+            return Default::default();
+        }
         outcome.changed |= self.apply_plugin_effects(effects);
         outcome
     }
