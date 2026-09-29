@@ -1528,6 +1528,10 @@ impl PluginPanelApplication {
         self.stylesheet.set_palette(palette)
     }
 
+    pub fn sync_reading_direction(&mut self, direction: nickel_ui::ReadingDirection) -> bool {
+        self.stylesheet.set_reading_direction(direction)
+    }
+
     pub fn sync_images(&mut self, images: PluginImages) -> bool {
         let changed = self.images.len() != images.len()
             || self.images.iter().any(|(key, (id, image))| {
@@ -5029,6 +5033,38 @@ mod tests {
             Some(0xff00_0000 | light.panel)
         );
         assert!(!app.sync_theme_palette(light).unwrap());
+    }
+
+    #[test]
+    fn plugin_rows_and_grids_mirror_for_right_to_left_layout() {
+        let package = PluginPackage {
+            manifest: manifest().clone(),
+            images: Default::default(),
+            stylesheet: ".grid { display: grid; grid-template-columns: 80px 80px; } button { width: 70px; height: 30px; }".into(),
+            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h(Column, {}, h(Row, {}, h(Button, {id: 'row-first', onClick: () => {}}, 'Row first'), h(Button, {id: 'row-second', onClick: () => {}}, 'Row second')), h('div', {className: 'grid'}, h(Button, {id: 'grid-first', onClick: () => {}}, 'Grid first'), h(Button, {id: 'grid-second', onClick: () => {}}, 'Grid second')))); }".into(),
+        };
+        let ltr = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package(&package).unwrap(),
+            240,
+            120,
+        );
+        let mut rtl_app = PluginPanelApplication::from_package(&package).unwrap();
+        assert!(rtl_app.sync_reading_direction(nickel_ui::ReadingDirection::RightToLeft));
+        let rtl = nickel_ui::UiHost::new(rtl_app, 240, 120);
+        let x = |host: &nickel_ui::UiHost<PluginPanelApplication>, name: &str| {
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .bounds
+            .origin
+            .x
+        };
+        assert!(x(&ltr, "Row first") < x(&ltr, "Row second"));
+        assert!(x(&rtl, "Row first") > x(&rtl, "Row second"));
+        assert!(x(&ltr, "Grid first") < x(&ltr, "Grid second"));
+        assert!(x(&rtl, "Grid first") > x(&rtl, "Grid second"));
     }
 
     #[test]

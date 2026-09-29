@@ -1747,6 +1747,7 @@ impl PanelNode {
                                 images, stylesheet, scope, slots,
                             ));
                         }
+                        grid = grid.direction(stylesheet.reading_direction());
                         AnyView::new(grid)
                     }
                     Display::Flex
@@ -1772,6 +1773,11 @@ impl PanelNode {
                             row = row.child(child.view_as_scoped_with_slots::<Message>(
                                 images, stylesheet, scope, slots,
                             ));
+                        }
+                        if stylesheet.reading_direction()
+                            == nickel_ui::ReadingDirection::RightToLeft
+                        {
+                            row = row.reverse();
                         }
                         AnyView::new(row)
                     }
@@ -1912,6 +1918,9 @@ impl PanelNode {
                         ));
                     }
                 }
+                if stylesheet.reading_direction() == nickel_ui::ReadingDirection::RightToLeft {
+                    row = row.reverse();
+                }
                 let style = stylesheet.resolve("panel", None, class_name.as_deref());
                 let container = Container::new()
                     .height(*height as f32)
@@ -1938,6 +1947,9 @@ impl PanelNode {
                         .child(child.view_as_scoped_with_slots::<Message>(
                             images, stylesheet, scope, slots,
                         ));
+                }
+                if stylesheet.reading_direction() == nickel_ui::ReadingDirection::RightToLeft {
+                    row = row.reverse();
                 }
                 if style == ControlStyle::default() {
                     AnyView::new(row)

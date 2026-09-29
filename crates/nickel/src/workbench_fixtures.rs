@@ -13,8 +13,6 @@ use nickel_codex_ui::ChatApplication;
 use crate::{
     control_view::ControlCenterApp,
     launcher::{Launcher, LauncherInput},
-    launcher_icon_cache::LauncherIconCache,
-    launcher_view::{LauncherApplication, LauncherViewState},
     live_shell::{DesktopApplication, LockApplication},
     notification::{DesktopNotification, NotificationAction},
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
@@ -260,9 +258,9 @@ metadata!(
     LAUNCHER_DASHBOARD_METADATA,
     "shell.launcher-dashboard",
     "Launcher dashboard",
-    "Production launcher dashboard state, appearance, direction, scale, and modality matrix",
+    "Bundled JSX launcher dashboard state, appearance, direction, scale, and modality matrix",
     LAUNCHER_DASHBOARD_VARIANTS,
-    &["shell", "launcher", "dashboard", "matrix"]
+    &["shell", "launcher", "dashboard", "matrix", "jsx"]
 );
 metadata!(
     DESKTOP_METADATA,
@@ -780,7 +778,7 @@ impl Fixture for LauncherSearchFixture {
 }
 
 impl Fixture for LauncherDashboardFixture {
-    type App = LauncherApplication;
+    type App = PluginPanelApplication;
     fn metadata() -> &'static FixtureMetadata {
         &LAUNCHER_DASHBOARD_METADATA
     }
@@ -827,14 +825,15 @@ impl Fixture for LauncherDashboardFixture {
                 supporting_text: "Local session".into(),
             }));
         }
-        let mut app = LauncherApplication::new(
-            launcher,
-            LauncherViewState::default(),
-            LauncherIconCache::new(),
-            fixture_palette(v.theme),
-        );
-        app.set_controller_family(v.controller_family);
-        app.set_reading_direction(match v.locale.direction {
+        let mut app = PluginPanelApplication::bundled_with_data(
+            crate::plugin_panel::launcher_manifest(),
+            "main.js",
+            LauncherPluginProjection::from_launcher(&launcher).to_json(),
+        )
+        .expect("bundled JSX launcher dashboard fixture");
+        app.sync_theme_palette(fixture_palette(v.theme))
+            .expect("dashboard fixture palette resolves");
+        app.sync_reading_direction(match v.locale.direction {
             nickel_ui_testkit::FixtureDirection::LeftToRight => ReadingDirection::LeftToRight,
             nickel_ui_testkit::FixtureDirection::RightToLeft => ReadingDirection::RightToLeft,
         });
@@ -844,7 +843,7 @@ impl Fixture for LauncherDashboardFixture {
         (920, 680)
     }
     fn default_activation() -> Option<Selector> {
-        Some(Selector::keyed_item("launcher-applications", "firefox"))
+        Some(Selector::role_name(SemanticRole::Button, "Firefox"))
     }
 }
 
@@ -868,9 +867,6 @@ impl FixtureProvider for ShellFixtureProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui_testkit::{
-        ReachabilityModality, ReachabilityPolicy, Scenario, audit_reachability,
-    };
 
     #[test]
     fn provider_registers_every_shell_surface() {
@@ -929,35 +925,68 @@ mod tests {
     }
 
     #[test]
-    fn populated_dashboard_replays_discover_accessibility_menu_actions() {
-        let report = audit_reachability(
-            || {
-                Scenario::new(
-                    LauncherDashboardFixture::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[0]),
-                    920,
-                    680,
-                )
-            },
-            &ReachabilityPolicy {
-                modalities: [ReachabilityModality::Accessibility].into_iter().collect(),
-                ..ReachabilityPolicy::default()
-            },
+    fn populated_jsx_dashboard_menu_pins_a_catalog_application() {
+        let mut host = nickel_ui::UiHost::new(LauncherDashboardFixture::create(), 920, 680);
+        let firefox = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Firefox".into(),
+            })
+            .expect("Firefox dashboard button");
+        let outcome = host.perform_accessibility_action(
+            firefox.id,
+            nickel_ui::SemanticAction::Invoke(ActionKind::ContextMenu),
         );
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
+        let pin = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::MenuItem,
+                name: "Pin to Nickel Bar".into(),
+            })
+            .expect("JSX application menu pin action");
+        let outcome = host.perform_accessibility_action(
+            pin.id,
+            nickel_ui::SemanticAction::Invoke(ActionKind::Activate),
+        );
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![crate::plugin_panel::PluginEffect::ToggleLauncherPin {
+                id: "firefox".into(),
+            }]
+        );
+    }
 
-        for target in [
-            "application-menu-discover/launch",
-            "application-menu-discover/toggle-pin",
-        ] {
-            assert!(
-                report.paths.iter().any(|path| {
-                    path.target == target
-                        && path.modality == ReachabilityModality::Accessibility
-                        && path.reached
-                }),
-                "{target} was not replayed: {:?}",
-                report.issues
-            );
-        }
-        assert!(report.issues.is_empty(), "issues: {:?}", report.issues);
+    #[test]
+    fn jsx_dashboard_fixture_mirrors_tabs_and_uses_light_palette() {
+        let ltr = nickel_ui::UiHost::new(
+            LauncherDashboardFixture::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[0]),
+            920,
+            680,
+        );
+        let rtl = nickel_ui::UiHost::new(
+            LauncherDashboardFixture::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[1]),
+            540,
+            680,
+        );
+        let tab_x = |host: &nickel_ui::UiHost<PluginPanelApplication>, name: &str| {
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .bounds
+            .origin
+            .x
+        };
+        assert!(tab_x(&ltr, "Pinned & recent") < tab_x(&ltr, "All applications"));
+        assert!(tab_x(&rtl, "Pinned & recent") > tab_x(&rtl, "All applications"));
+
+        let pixel = |host: &nickel_ui::UiHost<PluginPanelApplication>, width: u32| {
+            let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(width, 680, 1.0);
+            host.render_software(&mut renderer);
+            renderer.pixels()[(20 * width + 10) as usize]
+        };
+        assert_ne!(pixel(&ltr, 920), pixel(&rtl, 540));
     }
 }

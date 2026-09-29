@@ -7,7 +7,7 @@ use cssparser::{
     QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser,
 };
 use nickel_core::theme::{Appearance, ThemePalette};
-use nickel_ui::{Align, Insets, Justify, Length, Track};
+use nickel_ui::{Align, Insets, Justify, Length, ReadingDirection, Track};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Display {
@@ -639,6 +639,7 @@ pub struct StyleSheet {
     rules: Vec<Rule>,
     source_with_palette_tokens: Option<String>,
     palette: Option<ThemePalette>,
+    reading_direction: ReadingDirection,
 }
 
 impl StyleSheet {
@@ -674,7 +675,18 @@ impl StyleSheet {
             rules,
             source_with_palette_tokens: source.contains("var(--nickel-").then(|| source.to_owned()),
             palette: Some(palette),
+            reading_direction: ReadingDirection::LeftToRight,
         })
+    }
+
+    pub fn reading_direction(&self) -> ReadingDirection {
+        self.reading_direction
+    }
+
+    pub fn set_reading_direction(&mut self, direction: ReadingDirection) -> bool {
+        let changed = self.reading_direction != direction;
+        self.reading_direction = direction;
+        changed
     }
 
     pub fn set_palette(&mut self, palette: ThemePalette) -> Result<bool, String> {
@@ -685,7 +697,9 @@ impl StyleSheet {
             self.palette = Some(palette);
             return Ok(false);
         };
-        *self = Self::compile_with_palette(source, palette)?;
+        let mut updated = Self::compile_with_palette(source, palette)?;
+        updated.reading_direction = self.reading_direction;
+        *self = updated;
         Ok(true)
     }
 
@@ -773,7 +787,9 @@ mod tests {
             sheet.resolve("text", None, None).color,
             Some(0xff00_0000 | dark.text)
         );
+        assert!(sheet.set_reading_direction(ReadingDirection::RightToLeft));
         assert!(sheet.set_palette(light).unwrap());
+        assert_eq!(sheet.reading_direction(), ReadingDirection::RightToLeft);
         assert_eq!(
             sheet.resolve("window", None, None).background,
             Some(0xff00_0000 | light.panel)

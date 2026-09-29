@@ -214,6 +214,10 @@ their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
 props remain available. Row, Column, and specialized widgets still have some
 legacy sizing behavior while the generic layout path expands.
 
+When the host supplies a right to left reading direction, `Row`, horizontal
+flex layouts, and grids mirror their visual child order. Text and artwork keep
+their own content direction.
+
 Color declarations may use Nickel palette tokens such as
 `var(--nickel-panel)`, `var(--nickel-surface)`, `var(--nickel-text)`,
 `var(--nickel-muted)`, and `var(--nickel-accent)`. The complete token set is
