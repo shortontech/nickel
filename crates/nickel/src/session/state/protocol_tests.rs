@@ -7928,9 +7928,9 @@ fn screenshot_plugin_captures_and_opens_on_the_invoking_pointer_output() {
         }
         fn capture_desktop(&self, output: Option<&str>) -> DesktopCapturePoll {
             self.0.lock().unwrap().push(output.map(str::to_owned));
-            DesktopCapturePoll::Ready(Ok(crate::platform::DesktopCapture {
-                image: image::RgbaImage::new(1000, 800),
-            }))
+            let mut image = image::RgbaImage::new(1000, 800);
+            image.put_pixel(23, 19, image::Rgba([17, 91, 213, 255]));
+            DesktopCapturePoll::Ready(Ok(crate::platform::DesktopCapture { image }))
         }
     }
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
@@ -8003,6 +8003,23 @@ fn screenshot_plugin_captures_and_opens_on_the_invoking_pointer_output() {
         )
     );
     assert_eq!(session.internal_ui.focused(), Some(runtime));
+    let rendered_capture = session
+        .internal_shell
+        .as_mut()
+        .unwrap()
+        .scene(screenshot)
+        .unwrap()
+        .into_iter()
+        .find_map(|command| match command {
+            nickel_ui::backend::PaintCommand::Image { image, .. }
+                if image.dimensions() == (1000, 800) =>
+            {
+                Some(image)
+            }
+            _ => None,
+        })
+        .expect("JSX screenshot renders the captured image on the selected output");
+    assert_eq!(rendered_capture.get_pixel(23, 19).0, [17, 91, 213, 255]);
 
     session
         .inject_test_input(TestInput::PointerMove {
