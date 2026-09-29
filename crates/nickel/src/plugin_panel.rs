@@ -3136,6 +3136,14 @@ impl PluginPanelApplication {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn taskbar_with_test_source(
+        source: &str,
+        projection: &TaskbarPluginProjection,
+    ) -> Result<Self, String> {
+        Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
+    }
+
     pub fn taskbar_menu_with_projection(
         projection: &TaskbarMenuPluginProjection,
     ) -> Result<Self, String> {

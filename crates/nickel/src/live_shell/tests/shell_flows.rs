@@ -942,6 +942,77 @@
     }
 
     #[test]
+    fn taskbar_callback_failure_retires_only_its_plugin_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let (projection, _) = shell.taskbar_plugin_projection("12:00");
+        let application = crate::plugin_panel::PluginPanelApplication::taskbar_with_test_source(
+            "function App() { return h(Panel, {}, h(Button, {id: 'taskbar-launcher', onClick: () => { throw Error('taskbar callback exploded'); }}, 'Break taskbar')); }",
+            &projection,
+        )
+        .unwrap();
+        shell.plugin_taskbar_host = Some(nickel_ui::UiHost::new(application, 800, 56));
+        let target = shell
+            .plugin_taskbar_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Break taskbar".into(),
+            })
+            .unwrap();
+        assert!(shell
+            .step_taskbar_plugin_batch(
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(
+                        nickel_ui::UiEvent::AccessibilityActivate(target.id),
+                    )],
+                    ..Default::default()
+                },
+                800,
+                56,
+            )
+            .is_none());
+        let entry = shell
+            .plugin_registry()
+            .get(&crate::plugin_panel::taskbar_manifest().id)
+            .unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("taskbar callback exploded")));
+        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+        assert!(!shell.surface_visible(SurfaceRole::Taskbar));
+        assert_eq!(shell.taskbar_reservation_height(), 0);
+        assert!(shell.scene(SurfaceRole::Taskbar, 800, 56).is_empty());
+        assert!(!shell.panel_click(20.0, 800, false));
+        assert!(shell.plugin_launcher_host.is_some());
+        let id = &crate::plugin_panel::taskbar_manifest().id;
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.surface_visible(SurfaceRole::Taskbar));
+    }
+
+    #[test]
+    fn taskbar_projection_failure_retires_its_plugin_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let (projection, _) = shell.taskbar_plugin_projection("fixture-clock");
+        let application = crate::plugin_panel::PluginPanelApplication::taskbar_with_test_source(
+            "function App() { if (nickel.data.clock !== 'fixture-clock') throw Error('taskbar projection exploded'); return h(Panel, {}, h(Text, {}, 'Clock ready')); }",
+            &projection,
+        )
+        .unwrap();
+        shell.plugin_taskbar_host = Some(nickel_ui::UiHost::new(application, 800, 56));
+        assert!(shell
+            .step_taskbar_plugin_batch(Default::default(), 800, 56)
+            .is_none());
+        let entry = shell
+            .plugin_registry()
+            .get(&crate::plugin_panel::taskbar_manifest().id)
+            .unwrap();
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("taskbar projection exploded")));
+        assert!(!shell.surface_visible(SurfaceRole::Taskbar));
+        assert_eq!(shell.taskbar_reservation_height(), 0);
+    }
+
+    #[test]
     fn plugin_launcher_submit_activates_the_focused_search_result() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new(vec![

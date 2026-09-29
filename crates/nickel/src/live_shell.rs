@@ -4717,6 +4717,30 @@ impl LiveShell {
         true
     }
 
+    fn retire_taskbar_plugin_state(&mut self) {
+        if self.window_menu.is_some() || self.application_menu_target.is_some() {
+            self.dismiss_window_menu();
+        }
+        self.plugin_taskbar_host = None;
+        self.plugin_taskbar_hosts.clear();
+        self.plugin_taskbar_memory.clear();
+        self.plugin_taskbar_menu_memory = 0;
+        self.panel_pet_deadline = None;
+        self.panel_deadline = None;
+        self.application_menu_plugin_host = None;
+        self.window_menu_plugin_host = None;
+    }
+
+    fn fail_taskbar_plugin_runtime(&mut self, error: String) {
+        let id = &crate::plugin_panel::taskbar_manifest().id;
+        tracing::warn!(plugin = id, %error, "bundled taskbar plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.retire_taskbar_plugin_state();
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -4869,16 +4893,7 @@ impl LiveShell {
                     self.set_launcher_visible(false);
                 }
             } else if id == crate::plugin_panel::taskbar_manifest().id {
-                if self.window_menu.is_some() || self.application_menu_target.is_some() {
-                    self.dismiss_window_menu();
-                }
-                self.plugin_taskbar_host = None;
-                self.plugin_taskbar_hosts.clear();
-                self.plugin_taskbar_memory.clear();
-                self.plugin_taskbar_menu_memory = 0;
-                self.panel_pet_deadline = None;
-                self.application_menu_plugin_host = None;
-                self.window_menu_plugin_host = None;
+                self.retire_taskbar_plugin_state();
             } else if id == crate::plugin_panel::notification_manifest().id {
                 self.plugin_notification_host = None;
                 if !self.trusted_notification_visible() {
@@ -11114,14 +11129,20 @@ impl LiveShell {
         let projection_changed = match host.application_mut().sync_taskbar_projection(&projection) {
             Ok(changed) => changed,
             Err(error) => {
-                tracing::error!(%error, "taskbar plugin projection failed");
-                false
+                self.fail_taskbar_plugin_runtime(error);
+                return None;
             }
         };
+        let host = self.plugin_taskbar_host.as_mut()?;
         batch.application_changed |= image_changed || projection_changed;
         batch.surface_size = Some((width, height));
         let mut outcome = host.step(batch);
-        let effects = host.application_mut().take_effects();
+        let application = host.application_mut();
+        let effects = application.take_effects();
+        if let Some(error) = application.take_runtime_failure() {
+            self.fail_taskbar_plugin_runtime(error);
+            return None;
+        }
         if self.plugin_taskbar_memory.len() >= 32
             && !self.plugin_taskbar_memory.contains_key(&self.panel_output)
         {
