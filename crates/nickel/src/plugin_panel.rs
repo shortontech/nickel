@@ -387,30 +387,10 @@ pub struct PluginPanelApplication {
     manifest: PluginManifest,
     expected_surface_id: Option<String>,
     projection_data: Option<String>,
-    launcher_shortcuts: Option<LauncherShortcutState>,
     notification_shortcuts: Option<(Option<u32>, bool)>,
     overlay_open: bool,
     images: PluginImages,
     stylesheet: StyleSheet,
-}
-
-struct LauncherShortcutState {
-    query: String,
-    dashboard_visible: bool,
-    first_result: Option<(usize, String)>,
-}
-
-impl From<&LauncherPluginProjection> for LauncherShortcutState {
-    fn from(projection: &LauncherPluginProjection) -> Self {
-        Self {
-            query: projection.query.clone(),
-            dashboard_visible: projection.dashboard_visible,
-            first_result: projection
-                .results
-                .first()
-                .map(|result| (result.index, result.id.clone())),
-        }
-    }
 }
 
 pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, String> {
@@ -1575,15 +1555,13 @@ impl PluginPanelApplication {
     }
 
     pub fn launcher_with_projection(projection: &LauncherPluginProjection) -> Result<Self, String> {
-        let mut application = Self::bundled_application(
+        Self::bundled_application(
             launcher_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/launcher/main.js"),
             Some(include_str!("../../../assets/plugins/launcher/ui.css")),
             projection.to_json(),
-        )?;
-        application.launcher_shortcuts = Some(projection.into());
-        Ok(application)
+        )
     }
 
     #[cfg(test)]
@@ -1591,10 +1569,7 @@ impl PluginPanelApplication {
         source: &str,
         projection: &LauncherPluginProjection,
     ) -> Result<Self, String> {
-        let mut application =
-            Self::new_with_manifest(source, launcher_manifest(), Some(projection.to_json()))?;
-        application.launcher_shortcuts = Some(projection.into());
-        Ok(application)
+        Self::new_with_manifest(source, launcher_manifest(), Some(projection.to_json()))
     }
 
     pub fn taskbar_with_projection(projection: &TaskbarPluginProjection) -> Result<Self, String> {
@@ -1893,7 +1868,6 @@ impl PluginPanelApplication {
             manifest: manifest.clone(),
             expected_surface_id: expected_surface_id.map(str::to_owned),
             projection_data: data,
-            launcher_shortcuts: None,
             notification_shortcuts: None,
             overlay_open: false,
             images: PluginImages::new(),
@@ -1957,7 +1931,6 @@ impl PluginPanelApplication {
         }
         let data = projection.to_json();
         let changed = self.sync_serialized_data(data)?;
-        self.launcher_shortcuts = Some(projection.into());
         Ok(changed)
     }
 
@@ -2120,31 +2093,7 @@ impl nickel_ui::Application for PluginPanelApplication {
             self.update(PluginMessage::Click(action));
             return nickel_ui::ShortcutOutcome::handled(true);
         }
-        let Some(shortcuts) = &self.launcher_shortcuts else {
-            return nickel_ui::ShortcutOutcome::from_changed(false);
-        };
-        match shortcut {
-            Shortcut::Escape => {
-                if shortcuts.query.is_empty() {
-                    self.effects.push(PluginEffect::DismissLauncher);
-                } else {
-                    self.effects
-                        .push(PluginEffect::SetLauncherQuery(String::new()));
-                }
-                nickel_ui::ShortcutOutcome::handled(true)
-            }
-            Shortcut::Submit if !shortcuts.dashboard_visible => {
-                let Some((index, id)) = &shortcuts.first_result else {
-                    return nickel_ui::ShortcutOutcome::handled(false);
-                };
-                self.effects.push(PluginEffect::ActivateLauncherResult {
-                    index: *index,
-                    id: id.clone(),
-                });
-                nickel_ui::ShortcutOutcome::handled(true)
-            }
-            _ => nickel_ui::ShortcutOutcome::from_changed(false),
-        }
+        nickel_ui::ShortcutOutcome::from_changed(false)
     }
 
     fn update(&mut self, message: Self::Message) {
@@ -2214,6 +2163,15 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
                             approved.push(PluginEffect::ShowLauncher);
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("dismiss-launcher")
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::LauncherShow) =>
+                        {
+                            approved.push(PluginEffect::DismissLauncher);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("show-settings")
@@ -5451,6 +5409,29 @@ mod tests {
     }
 
     #[test]
+    fn external_launcher_dismiss_requires_capability() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.launcher-dismiss".into();
+        external_manifest.capabilities.clear();
+        let mut package = PluginPackage {
+            manifest: external_manifest,
+            images: Default::default(),
+            stylesheet: String::new(),
+            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%', onEscape: () => nickel.request({type: 'dismiss-launcher'})}); }".into(),
+        };
+        let mut denied = PluginPanelApplication::from_package(&package).unwrap();
+        denied.shortcut_outcome(Shortcut::Escape);
+        assert!(denied.take_effects().is_empty());
+        package
+            .manifest
+            .capabilities
+            .push(PluginCapability::LauncherShow);
+        let mut granted = PluginPanelApplication::from_package(&package).unwrap();
+        granted.shortcut_outcome(Shortcut::Escape);
+        assert_eq!(granted.take_effects(), vec![PluginEffect::DismissLauncher]);
+    }
+
+    #[test]
     fn external_control_center_toggle_requires_capability() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.control-toggle".into();
@@ -5747,7 +5728,9 @@ mod tests {
     #[test]
     fn launcher_plugin_uses_window_root_and_keeps_nested_controls_reachable() {
         let launcher = Launcher::new(Vec::new());
-        let panel = PluginPanelApplication::launcher(&launcher).unwrap();
+        let mut panel = PluginPanelApplication::launcher(&launcher).unwrap();
+        assert!(!panel.shortcut_outcome(Shortcut::Submit).changed);
+        assert!(panel.take_effects().is_empty());
         assert!(matches!(
             &panel.node,
             PanelNode::Surface {

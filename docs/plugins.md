@@ -244,6 +244,7 @@ shortcut handler.
 The same pattern supports `toggle-launcher` with `launcher-show`,
 `toggle-on-screen-keyboard` with `on-screen-keyboard-show`, and
 `toggle-projects-menu` with `projects-menu-show`.
+`dismiss-launcher` also requires `launcher-show`.
 
 `<Slot id="content" />` marks a place where a host can insert its own component
 tree into the JSX layout. The ID names the insertion point; a slot with no

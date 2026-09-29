@@ -8,7 +8,15 @@ function App() {
         setMenuTarget({ id: item.id, index: item.index, pinned: item.pinned, kind, anchor });
         nickel.openMenu("launcher-app-actions");
     };
-    return h(Window, { title: "Nickel Launcher", width: 920, height: 680, className: "launcher-window" },
+    const escape = () => data.query
+        ? nickel.request({ type: "launcher-set-query", query: "" })
+        : nickel.request({ type: "dismiss-launcher" });
+    const submit = () => {
+        const first = !data.dashboardVisible && data.results[0];
+        if (first)
+            nickel.request({ type: "launcher-activate-result", index: first.index, id: first.id });
+    };
+    return h(Window, { title: "Nickel Launcher", width: 920, height: 680, className: "launcher-window", onEscape: escape, onSubmit: !data.dashboardVisible && data.results.length ? submit : undefined },
         h("div", { className: "launcher-content" },
             h(Text, { className: "launcher-title" }, "Nickel Launcher"),
             data.status ? h(Text, { className: "launcher-status" }, data.status) : null,
