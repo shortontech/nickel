@@ -759,7 +759,7 @@ pub struct VolumeOsdPluginProjection {
 }
 
 impl VolumeOsdPluginProjection {
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         serde_json::json!({
             "label": self.label.chars().take(640).collect::<String>(),
             "percent": self.percent.min(100),
@@ -776,7 +776,7 @@ pub struct TaskbarWindowMenuPluginProjection {
 }
 
 impl TaskbarWindowMenuPluginProjection {
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         let entries = |items: &Vec<(String, Option<&'static str>)>| {
             items
                 .iter()
@@ -868,7 +868,7 @@ impl NotificationPluginProjection {
         }
     }
 
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         let item = |item: &NotificationPluginItem| {
             serde_json::json!({"id": item.id, "appName": item.app_name,
                 "summary": item.summary, "body": item.body,
@@ -916,7 +916,7 @@ impl TaskbarPluginProjection {
         }
     }
 
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         serde_json::json!({"items": self.items.iter().map(|item| serde_json::json!({
             "index": item.index, "id": item.id, "name": item.name,
             "active": item.active, "pinned": item.pinned, "icon": item.icon,
@@ -1040,7 +1040,7 @@ impl LauncherPluginProjection {
         self
     }
 
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         let results = self.results.iter().map(|result| {
             serde_json::json!({"index": result.index, "id": result.id, "name": result.name, "pinned": result.pinned})
         }).collect::<Vec<_>>();
@@ -1541,7 +1541,7 @@ impl PluginPanelApplication {
         self.sync_serialized_data(serialized)
     }
 
-    fn sync_serialized_data(&mut self, serialized: String) -> Result<bool, String> {
+    pub(crate) fn sync_serialized_data(&mut self, serialized: String) -> Result<bool, String> {
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
@@ -1554,17 +1554,6 @@ impl PluginPanelApplication {
         )?;
         self.projection_data = Some(serialized);
         Ok(true)
-    }
-
-    pub fn sync_codex_projects_projection(
-        &mut self,
-        projection: &ProjectMenuProjection,
-    ) -> Result<bool, String> {
-        if self.manifest.id != codex_projects_manifest().id {
-            return Err("this plugin is not Codex projects".into());
-        }
-        let data = serde_json::to_string(projection).map_err(|error| error.to_string())?;
-        self.sync_serialized_data(data)
     }
 
     pub fn window_preview_with_data(data: &Value) -> Result<Self, String> {
@@ -1604,14 +1593,6 @@ impl PluginPanelApplication {
             run_manifest(),
             Some(serde_json::json!({ "status": null }).to_string()),
         )
-    }
-
-    pub fn sync_run_status(&mut self, status: Option<&str>) -> Result<bool, String> {
-        if self.manifest.id != run_manifest().id {
-            return Err("this plugin is not the Run dialog".into());
-        }
-        let data = serde_json::json!({ "status": status }).to_string();
-        self.sync_serialized_data(data)
     }
 
     fn new_with_manifest(
@@ -1690,35 +1671,8 @@ impl PluginPanelApplication {
         self.sync_data(&data)
     }
 
-    pub fn sync_launcher(&mut self, launcher: &Launcher) -> Result<bool, String> {
-        self.sync_launcher_projection(&LauncherPluginProjection::from_launcher(launcher))
-    }
-
     pub fn set_overlay_open(&mut self, open: bool) {
         self.overlay_open = open;
-    }
-
-    pub fn sync_launcher_projection(
-        &mut self,
-        projection: &LauncherPluginProjection,
-    ) -> Result<bool, String> {
-        if self.manifest.id != launcher_manifest().id {
-            return Err("this plugin is not the launcher".into());
-        }
-        let data = projection.to_json();
-        let changed = self.sync_serialized_data(data)?;
-        Ok(changed)
-    }
-
-    pub fn sync_taskbar_projection(
-        &mut self,
-        projection: &TaskbarPluginProjection,
-    ) -> Result<bool, String> {
-        if self.manifest.id != taskbar_manifest().id {
-            return Err("this plugin is not the taskbar".into());
-        }
-        let data = projection.to_json();
-        self.sync_serialized_data(data)
     }
 
     pub fn rendered_taskbar_item_matches(&self, index: usize, id: &str) -> bool {
@@ -1739,39 +1693,6 @@ impl PluginPanelApplication {
                         })
                     })
             })
-    }
-
-    pub fn sync_taskbar_window_menu_projection(
-        &mut self,
-        projection: &TaskbarWindowMenuPluginProjection,
-    ) -> Result<bool, String> {
-        if self.manifest.id != taskbar_manifest().id {
-            return Err("this plugin is not the taskbar".into());
-        }
-        let data = projection.to_json();
-        self.sync_serialized_data(data)
-    }
-
-    pub fn sync_notification_projection(
-        &mut self,
-        projection: &NotificationPluginProjection,
-    ) -> Result<bool, String> {
-        if self.manifest.id != notification_manifest().id {
-            return Err("this plugin is not notifications".into());
-        }
-        let data = projection.to_json();
-        self.sync_serialized_data(data)
-    }
-
-    pub fn sync_volume_osd_projection(
-        &mut self,
-        projection: &VolumeOsdPluginProjection,
-    ) -> Result<bool, String> {
-        if self.manifest.id != volume_osd_manifest().id {
-            return Err("this plugin is not the volume overlay".into());
-        }
-        let data = projection.to_json();
-        self.sync_serialized_data(data)
     }
 
     pub fn take_effects(&mut self) -> Vec<PluginEffect> {
@@ -4689,7 +4610,7 @@ mod tests {
         );
         assert!(
             panel
-                .sync_run_status(Some("Could not run command: missing"))
+                .sync_data(&serde_json::json!({ "status": "Could not run command: missing" }))
                 .unwrap()
         );
         assert!(format!("{:?}", panel.node).contains("Could not run command: missing"));
@@ -4903,7 +4824,7 @@ mod tests {
         assert!(format!("{:?}", panel.node).contains("Could not launch Demo"));
         assert!(
             panel
-                .sync_launcher_projection(&LauncherPluginProjection::from_launcher(&launcher))
+                .sync_serialized_data(LauncherPluginProjection::from_launcher(&launcher).to_json())
                 .unwrap()
         );
         assert!(!format!("{:?}", panel.node).contains("Could not launch Demo"));
@@ -4940,11 +4861,19 @@ mod tests {
         let rendered = format!("{:?}", panel.node);
         assert!(rendered.contains("Example project"));
         assert!(!rendered.contains("/private/work"));
-        assert!(!panel.sync_codex_projects_projection(&projection).unwrap());
+        assert!(
+            !panel
+                .sync_serialized_data(serde_json::to_string(&projection).unwrap())
+                .unwrap()
+        );
         let mut disconnected = projection.clone();
         disconnected.status = "disconnected";
         disconnected.projects.clear();
-        assert!(panel.sync_codex_projects_projection(&disconnected).unwrap());
+        assert!(
+            panel
+                .sync_serialized_data(serde_json::to_string(&disconnected).unwrap())
+                .unwrap()
+        );
         assert!(!format!("{:?}", panel.node).contains("Example project"));
 
         let mut host = nickel_ui::UiHost::new(

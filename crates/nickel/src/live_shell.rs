@@ -1171,13 +1171,17 @@ impl LiveShell {
         projection: &nickel_codex_ui::ProjectMenuProjection,
     ) -> bool {
         let key = crate::plugin_panel::codex_projects_surface_key();
+        let data = match serde_json::to_string(projection) {
+            Ok(data) => data,
+            Err(error) => {
+                self.fail_plugin_panel_runtime(&key.plugin_id, error.to_string());
+                return false;
+            }
+        };
         let Some((_, host)) = self.plugin_panel_extra_hosts.get_mut(&key) else {
             return false;
         };
-        let changed = match host
-            .application_mut()
-            .sync_codex_projects_projection(projection)
-        {
+        let changed = match host.application_mut().sync_serialized_data(data) {
             Ok(changed) => changed,
             Err(error) => {
                 self.fail_plugin_panel_runtime(&key.plugin_id, error);
@@ -5975,7 +5979,10 @@ impl LiveShell {
                             let status =
                                 format!("Could not run command: {}", launch_error_summary(&error));
                             if let Some(host) = self.plugin_run_host.as_mut() {
-                                match host.application_mut().sync_run_status(Some(&status)) {
+                                match host
+                                    .application_mut()
+                                    .sync_data(&serde_json::json!({ "status": status }))
+                                {
                                     Ok(projected) => changed |= projected,
                                     Err(error) => self.fail_run_plugin_runtime(error),
                                 }
@@ -6420,7 +6427,9 @@ impl LiveShell {
             .as_mut()
             .expect("launcher plugin host exists");
         let image_changed = host.application_mut().sync_images(images);
-        let projection_changed = match host.application_mut().sync_launcher_projection(&projection)
+        let projection_changed = match host
+            .application_mut()
+            .sync_serialized_data(projection.to_json())
         {
             Ok(changed) => changed,
             Err(error) => {
@@ -8745,7 +8754,10 @@ impl LiveShell {
         self.run_visible = visible;
         if visible {
             if let Some(host) = self.plugin_run_host.as_mut() {
-                if let Err(error) = host.application_mut().sync_run_status(None) {
+                if let Err(error) = host
+                    .application_mut()
+                    .sync_data(&serde_json::json!({ "status": null }))
+                {
                     self.fail_run_plugin_runtime(error);
                     return false;
                 }
@@ -9428,7 +9440,7 @@ impl LiveShell {
         if let Some(host) = self.plugin_volume_osd_host.as_mut() {
             let changed = match host
                 .application_mut()
-                .sync_volume_osd_projection(&projection)
+                .sync_serialized_data(projection.to_json())
             {
                 Ok(changed) => changed,
                 Err(error) => {
@@ -9653,7 +9665,7 @@ impl LiveShell {
         let host = self.plugin_notification_host.as_mut()?;
         batch.application_changed |= match host
             .application_mut()
-            .sync_notification_projection(&projection)
+            .sync_serialized_data(projection.to_json())
         {
             Ok(changed) => changed,
             Err(error) => {
@@ -10486,7 +10498,7 @@ impl LiveShell {
             if let Some(host) = self.window_menu_plugin_host.as_mut() {
                 let changed = host
                     .application_mut()
-                    .sync_taskbar_window_menu_projection(&projection)
+                    .sync_serialized_data(projection.to_json())
                     .unwrap_or_else(|error| {
                         tracing::warn!(%error, "taskbar JSX window menu projection failed");
                         false
@@ -10688,7 +10700,10 @@ impl LiveShell {
         compose_taskbar_badges(&mut projection, &self.plugin_taskbar_badge_hosts);
         let host = self.plugin_taskbar_host.as_mut()?;
         let image_changed = host.application_mut().sync_images(images);
-        let projection_changed = match host.application_mut().sync_taskbar_projection(&projection) {
+        let projection_changed = match host
+            .application_mut()
+            .sync_serialized_data(projection.to_json())
+        {
             Ok(changed) => changed,
             Err(error) => {
                 self.fail_taskbar_plugin_runtime(error);
