@@ -6953,7 +6953,9 @@ impl NickelSession {
         let focused = self.internal_ui.focused();
         let control_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
             shell.surfaces().iter().any(|surface| {
-                surface.role == SurfaceRole::ControlCenter
+                (surface.role == SurfaceRole::ControlCenter
+                    || surface.plugin.as_ref()
+                        == Some(&crate::plugin_panel::control_center_surface_key()))
                     && shell.visible(surface.id)
                     && self
                         .internal_shell_surfaces
@@ -10656,8 +10658,15 @@ impl NickelSession {
             let changed = shell.global_shortcut(action);
             if changed {
                 self.sync_internal_shell();
-                if action == nickel_session_protocol::ShortcutAction::ShowNotifications {
-                    let key = crate::plugin_panel::notification_surface_key();
+                if let Some(key) = match action {
+                    nickel_session_protocol::ShortcutAction::ShowNotifications => {
+                        Some(crate::plugin_panel::notification_surface_key())
+                    }
+                    nickel_session_protocol::ShortcutAction::ShowControlCenter => {
+                        Some(crate::plugin_panel::control_center_surface_key())
+                    }
+                    _ => None,
+                } {
                     self.focus_plugin_surface(&key.plugin_id, &key.surface_id);
                 }
                 self.schedule_internal_ui_frame();
