@@ -95,6 +95,11 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     fs::write(
+        window.join("ui.css"),
+        include_str!("../../../../../assets/plugins/example-window/ui.css"),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
         window.join("icon.png"),
         include_bytes!("../../../../../assets/plugins/example-window/icon.png"),
     )
@@ -125,6 +130,11 @@ fn run() -> Result<(), String> {
         include_str!("../../../../../assets/plugins/example-surface-dialog/main.js"),
     )
     .map_err(|error| error.to_string())?;
+    fs::write(
+        dialog.join("ui.css"),
+        include_str!("../../../../../assets/plugins/example-surface-dialog/ui.css"),
+    )
+    .map_err(|error| error.to_string())?;
     let overlay = runtime.join("config/nickel/plugins/org.example.overlay");
     fs::create_dir_all(&overlay).map_err(|error| error.to_string())?;
     fs::write(
@@ -135,6 +145,11 @@ fn run() -> Result<(), String> {
     fs::write(
         overlay.join("main.js"),
         include_str!("../../../../../assets/plugins/example-overlay/main.js"),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        overlay.join("ui.css"),
+        include_str!("../../../../../assets/plugins/example-overlay/ui.css"),
     )
     .map_err(|error| error.to_string())?;
     for (id, manifest, source) in [
