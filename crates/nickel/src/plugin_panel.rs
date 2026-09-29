@@ -4104,11 +4104,16 @@ impl PluginPanelApplication {
             "main.js",
             include_str!("../../../assets/plugins/window-preview/main.js"),
         )?;
-        Self::new_with_manifest(
+        let mut application = Self::new_with_manifest(
             source.as_ref(),
             window_preview_manifest(),
             Some(data.to_string()),
-        )
+        )?;
+        application.stylesheet = bundled_stylesheet(
+            window_preview_manifest(),
+            include_str!("../../../assets/plugins/window-preview/ui.css"),
+        )?;
+        Ok(application)
     }
 
     #[cfg(test)]
@@ -5880,7 +5885,6 @@ impl nickel_ui::Application for PluginPanelApplication {
             &self.node,
             PanelNode::Viewport { .. } | PanelNode::Surface { .. }
         ) || self.manifest.id == taskbar_manifest().id
-            || self.manifest.id == window_preview_manifest().id
             || self.manifest.id == desktop_manifest().id
         {
             AnyView::new(self.node.view(&self.images, &self.stylesheet))
@@ -6399,6 +6403,15 @@ mod tests {
             "closable": true, "index": 0, "imageWidth": 244, "selected": false
         }]});
         let app = PluginPanelApplication::window_preview_with_data(&data).unwrap();
+        assert!(matches!(
+            &app.node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                width: Length::Percent(1.0),
+                height: Length::Percent(1.0),
+                ..
+            }
+        ));
         let mut host = nickel_ui::UiHost::new(app, 300, 214);
         let target = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
@@ -6418,6 +6431,30 @@ mod tests {
                 crate::model::WindowId(71)
             ))]
         );
+
+        let two_windows = serde_json::json!({"windows": [
+            {"id":"71","title":"Document","accessibleName":"Document","closable":true,"imageWidth":244,"selected":false},
+            {"id":"72","title":"Mail","accessibleName":"Mail","closable":true,"imageWidth":244,"selected":false}
+        ]});
+        let wide = nickel_ui::UiHost::new(
+            PluginPanelApplication::window_preview_with_data(&two_windows).unwrap(),
+            600,
+            214,
+        );
+        let first = wide
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Document".into(),
+            })
+            .unwrap();
+        let second = wide
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Mail".into(),
+            })
+            .unwrap();
+        assert!(second.bounds.origin.x > first.bounds.origin.x);
+        assert!(second.bounds.origin.x + second.bounds.size.width <= 600.0);
     }
 
     #[test]
