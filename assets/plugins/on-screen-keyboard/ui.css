@@ -1,0 +1,43 @@
+window.keyboard-window {
+    background: #242931f1;
+    border: 1px solid #596274;
+    border-radius: 12px;
+    padding: 10px;
+}
+
+column.keyboard-content {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 8px;
+}
+
+row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+row.keyboard-key-row {
+    width: 100%;
+}
+
+text {
+    color: #f3f5f8;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+button {
+    min-height: 39px;
+    padding: 6px;
+    background: #353c4b;
+    border: 1px solid #596274;
+    border-radius: 6px;
+    color: #f3f5f8;
+    font-size: 14px;
+}
+
+button.keyboard-key {
+    flex-grow: 1;
+}

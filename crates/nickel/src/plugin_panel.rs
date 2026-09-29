@@ -1747,11 +1747,16 @@ impl PluginPanelApplication {
             "main.js",
             include_str!("../../../assets/plugins/on-screen-keyboard/main.js"),
         )?;
-        Self::new_with_manifest(
+        let mut application = Self::new_with_manifest(
             source.as_ref(),
             on_screen_keyboard_manifest(),
             Some(data.to_string()),
-        )
+        )?;
+        application.stylesheet = bundled_stylesheet(
+            on_screen_keyboard_manifest(),
+            include_str!("../../../assets/plugins/on-screen-keyboard/ui.css"),
+        )?;
+        Ok(application)
     }
 
     pub fn screenshot_with_data(data: &Value) -> Result<Self, String> {
@@ -4006,6 +4011,47 @@ mod tests {
         });
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/nickel-ui-snapshots/control-center-shared.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
+    }
+
+    #[test]
+    fn bundled_keyboard_uses_shared_window_and_keeps_key_actions() {
+        let package = PluginPackage::load(format!(
+            "{}/../../assets/plugins/on-screen-keyboard",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let data = validation_surface_projection(&package, &package.manifest.surfaces[0]).unwrap();
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::on_screen_keyboard_with_data(&data).unwrap(),
+            1056,
+            368,
+        );
+        assert!(matches!(
+            host.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
+        for name in ["Hold modifiers", "Hide", "Smaller"] {
+            assert!(
+                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: name.into(),
+                })
+                .is_ok()
+            );
+        }
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(1056, 368, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(1056, 368, |x, y| {
+            let pixel = renderer.pixels()[(y * 1056 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/keyboard-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         image.save(output).unwrap();
     }
