@@ -639,8 +639,8 @@
         assert_eq!(rebuilt.frame_generation, initial.frame_generation + 1);
         assert!(
             scene.iter().any(|command| matches!(command,
-                nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. })),
-            "the desktop plugin must paint the arriving wallpaper"
+                nickel_ui::backend::PaintCommand::Image { id: 1, .. })),
+            "the native desktop must paint the arriving wallpaper"
         );
     }
 

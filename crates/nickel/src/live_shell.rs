@@ -468,7 +468,6 @@ pub struct LiveShell {
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
     desktop_host: nickel_ui::UiHost<DesktopApplication>,
-    plugin_desktop_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     desktop_viewports: HashMap<String, DesktopSurfaceViewport>,
     desktop_active_viewport: String,
     desktop_change_token: HostChangeToken,
@@ -1425,8 +1424,6 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::codex_projects_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::on_screen_keyboard_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::window_preview_manifest().clone())?;
-        #[cfg(test)]
-        plugin_registry.register(crate::plugin_panel::desktop_manifest().clone())?;
         plugin_registry.register(crate::settings_plugin_report::manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
@@ -1697,7 +1694,6 @@ impl LiveShell {
             wallpaper,
             wallpaper_size,
             desktop_host,
-            plugin_desktop_host: None,
             desktop_viewports: HashMap::new(),
             desktop_active_viewport: "primary".into(),
             desktop_change_token: HostChangeToken::default(),
@@ -1915,23 +1911,6 @@ impl LiveShell {
                         surface.width,
                         surface.height,
                     ));
-                    shell.plugin_registry.mark_running(id)?;
-                }
-                Err(error) => {
-                    tracing::error!(plugin = id, %error, "plugin failed to start");
-                    shell.plugin_registry.mark_failed(id, error)?;
-                }
-            }
-        }
-        #[cfg(test)]
-        if plugin_activation.desired_enabled(&crate::plugin_panel::desktop_manifest().id, true) {
-            let id = &crate::plugin_panel::desktop_manifest().id;
-            shell.plugin_registry.set_enabled(id, true)?;
-            let data = serde_json::json!({"width": 1, "height": 1,
-                "background": palette.background, "wallpaper": false});
-            match crate::plugin_panel::PluginPanelApplication::desktop_with_data(&data) {
-                Ok(application) => {
-                    shell.plugin_desktop_host = Some(nickel_ui::UiHost::new(application, 1, 1));
                     shell.plugin_registry.mark_running(id)?;
                 }
                 Err(error) => {
@@ -2543,10 +2522,6 @@ impl LiveShell {
             SurfaceRole::Desktop => {
                 self.desktop_host.remote_access_protected()
                     || self
-                        .plugin_desktop_host
-                        .as_ref()
-                        .is_some_and(|host| host.remote_access_protected())
-                    || self
                         .desktop_viewports
                         .values()
                         .any(|viewport| viewport.host.remote_access_protected())
@@ -2624,16 +2599,10 @@ impl LiveShell {
             return None;
         }
         let snapshot = match role {
-            SurfaceRole::Desktop => self
-                .plugin_desktop_host
-                .as_ref()
-                .map(|host| host.layout_snapshot())
-                .or_else(|| {
-                    output
-                        .filter(|output| *output != self.desktop_active_viewport)
-                        .and_then(|output| self.desktop_viewports.get(output))
-                        .map(|viewport| viewport.host.layout_snapshot())
-                })
+            SurfaceRole::Desktop => output
+                .filter(|output| *output != self.desktop_active_viewport)
+                .and_then(|output| self.desktop_viewports.get(output))
+                .map(|viewport| viewport.host.layout_snapshot())
                 .or_else(|| Some(self.desktop_host.layout_snapshot())),
             SurfaceRole::Taskbar => {
                 let host = if output == self.panel_output.as_deref() {
@@ -2997,69 +2966,6 @@ impl LiveShell {
             }
             application.cancel_pointer_transaction();
             self.desktop_overlay_pointer_capture = None;
-            if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
-                if let Some(host) = self.plugin_desktop_host.as_mut() {
-                    host.step(HostBatch {
-                        events: vec![HostEvent::Ui(UiEvent::Dismiss)],
-                        ..HostBatch::default()
-                    });
-                    if let Some(error) = host.application_mut().take_runtime_failure() {
-                        self.fail_desktop_plugin_runtime(error);
-                        return false;
-                    }
-                }
-            }
-        }
-        let plugin_desktop_menu_open = !pointer_cancelled
-            && self.desktop_host.application().plugin_background
-            && self.desktop_host.application().context_menu.is_some()
-            && self
-                .plugin_desktop_host
-                .as_ref()
-                .is_some_and(|host| host.inspect().open_overlay.is_some());
-        if plugin_desktop_menu_open {
-            let captured_release = matches!(
-                &event,
-                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-                    button,
-                    edge: nickel_input::KeyEdge::Released,
-                    ..
-                }) if self.desktop_overlay_pointer_capture.as_ref() == Some(button)
-            );
-            let (outcome, effects, menu_still_open, failure) = {
-                let host = self.plugin_desktop_host.as_mut().expect("menu host exists");
-                let outcome = host.step(HostBatch {
-                    events: vec![ingress],
-                    normalized_authorities: authority.into_iter().collect(),
-                    ..HostBatch::default()
-                });
-                let effects = host.application_mut().take_effects();
-                let menu_still_open = host.inspect().open_overlay.is_some();
-                let failure = host.application_mut().take_runtime_failure();
-                (outcome, effects, menu_still_open, failure)
-            };
-            if let Some(error) = failure {
-                self.fail_desktop_plugin_runtime(error);
-                return false;
-            }
-            if captured_release {
-                self.desktop_overlay_pointer_capture = None;
-            }
-            let effect_changed = self.apply_plugin_effects(effects);
-            let dismissed =
-                !menu_still_open && self.desktop_host.application().context_menu.is_some();
-            if dismissed {
-                self.desktop_host
-                    .application_mut()
-                    .dismiss_context_menu(desktop::DesktopMenuDismissReason::OutsidePress);
-                let outcome = self.desktop_host.step(HostBatch {
-                    application_changed: true,
-                    ..HostBatch::default()
-                });
-                self.desktop_change_token = outcome.change_token;
-                self.desktop_deadline = outcome.next_deadline;
-            }
-            return outcome.changed | effect_changed | dismissed;
         }
         if let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
             button: nickel_input::PointerButton::Secondary,
@@ -3133,12 +3039,10 @@ impl LiveShell {
             });
             self.desktop_change_token = outcome.change_token;
             self.desktop_deadline = outcome.next_deadline;
-            let plugin_changed = self.dispatch_desktop_plugin_open();
-            let plugin_changed = plugin_changed | self.dispatch_desktop_plugin_file_action();
             if captured_release {
                 self.desktop_overlay_pointer_capture = None;
             }
-            return outcome.changed | plugin_changed;
+            return outcome.changed;
         }
         let coalesce_motion = matches!(
             &event,
@@ -3151,8 +3055,6 @@ impl LiveShell {
             nickel_input::InputEvent::Key(_)
                 | nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button { .. })
         );
-        let plugin_desktop_active =
-            self.plugin_desktop_host.is_some() && self.desktop_host.application().plugin_background;
         let application = self.desktop_host.application_mut();
         let changed = match event {
             nickel_input::InputEvent::Key(key) => application.key(&key),
@@ -3169,17 +3071,9 @@ impl LiveShell {
                 if edge == nickel_input::KeyEdge::Pressed
                     && button == nickel_input::PointerButton::Primary
                 {
-                    if plugin_desktop_active {
-                        application.pointer_press_for_plugin(point, application.modifiers)
-                    } else {
-                        application.pointer_press(point, false, application.modifiers)
-                    }
+                    application.pointer_press(point, false, application.modifiers)
                 } else if button == nickel_input::PointerButton::Primary {
-                    if plugin_desktop_active {
-                        application.pointer_release_for_plugin(point, Instant::now())
-                    } else {
-                        application.pointer_release(point, Instant::now())
-                    }
+                    application.pointer_release(point, Instant::now())
                 } else {
                     false
                 }
@@ -3208,12 +3102,8 @@ impl LiveShell {
             }
             _ => false,
         };
-        let changed = changed | self.dispatch_desktop_plugin_select();
-        let changed = changed | self.dispatch_desktop_plugin_move();
         let changed =
             changed | (reveal_selection && self.desktop_host.application_mut().reveal_active());
-        let changed = changed | self.dispatch_desktop_plugin_open();
-        let changed = changed | self.dispatch_desktop_plugin_file_action();
         if changed && coalesce_motion {
             self.desktop_application_dirty = true;
         } else if changed {
@@ -3227,144 +3117,11 @@ impl LiveShell {
         changed
     }
 
-    fn perform_desktop_plugin_action(
-        &mut self,
-        action: impl FnOnce(&mut crate::plugin_panel::PluginPanelApplication) -> bool,
-    ) -> Result<(bool, Vec<crate::plugin_panel::PluginEffect>), ()> {
-        let Some(host) = self.plugin_desktop_host.as_mut() else {
-            return Ok((false, Vec::new()));
-        };
-        let handled = action(host.application_mut());
-        let effects = host.application_mut().take_effects();
-        if handled {
-            host.step(HostBatch {
-                application_changed: true,
-                ..HostBatch::default()
-            });
-        }
-        if let Some(error) = host.application_mut().take_runtime_failure() {
-            self.fail_desktop_plugin_runtime(error);
-            return Err(());
-        }
-        Ok((handled, effects))
-    }
-
-    fn dispatch_desktop_plugin_open(&mut self) -> bool {
-        let Some(entry) = self
-            .desktop_host
-            .application_mut()
-            .pending_plugin_open
-            .take()
-        else {
-            return false;
-        };
-        let id = format!("{}:{}", entry.0.0, entry.0.1);
-        let Ok((handled, effects)) = self
-            .perform_desktop_plugin_action(|application| application.activate_desktop_tile(&id))
-        else {
-            return false;
-        };
-        if handled {
-            self.apply_plugin_effects(effects)
-        } else {
-            self.desktop_host.application_mut().activate(entry);
-            true
-        }
-    }
-
-    fn dispatch_desktop_plugin_file_action(&mut self) -> bool {
-        let Some((entry, action)) = self
-            .desktop_host
-            .application_mut()
-            .pending_plugin_file_action
-            .take()
-        else {
-            return false;
-        };
-        let desktop = self.desktop_host.application();
-        let visible = desktop
-            .layout
-            .items()
-            .iter()
-            .any(|item| item.id == entry && item.output == desktop.active_output);
-        if !visible {
-            return false;
-        }
-        let id = format!("{}:{}", entry.0.0, entry.0.1);
-        let Ok((handled, effects)) = self.perform_desktop_plugin_action(|application| {
-            application.file_action_desktop_tile(&id, action)
-        }) else {
-            return false;
-        };
-        if handled {
-            self.apply_plugin_effects(effects)
-        } else {
-            self.desktop_host
-                .application_mut()
-                .execute_context_action(entry, action);
-            true
-        }
-    }
-
-    fn dispatch_desktop_plugin_select(&mut self) -> bool {
-        let Some((entry, modifiers)) = self
-            .desktop_host
-            .application_mut()
-            .pending_plugin_select
-            .take()
-        else {
-            return false;
-        };
-        let id = format!("{}:{}", entry.0.0, entry.0.1);
-        let Ok((handled, effects)) =
-            self.perform_desktop_plugin_action(|application| application.select_desktop_tile(&id))
-        else {
-            return false;
-        };
-        if handled {
-            self.apply_plugin_effects(effects)
-        } else {
-            self.desktop_host
-                .application_mut()
-                .layout
-                .select(entry, modifiers);
-            true
-        }
-    }
-
-    fn dispatch_desktop_plugin_move(&mut self) -> bool {
-        let Some((entry, delta)) = self
-            .desktop_host
-            .application_mut()
-            .pending_plugin_move
-            .take()
-        else {
-            return false;
-        };
-        let id = format!("{}:{}", entry.0.0, entry.0.1);
-        let Ok((handled, effects)) = self.perform_desktop_plugin_action(|application| {
-            application.move_desktop_tile(&id, delta.x, delta.y)
-        }) else {
-            return false;
-        };
-        if handled {
-            self.apply_plugin_effects(effects)
-        } else {
-            self.desktop_host
-                .application_mut()
-                .commit_move(entry, delta);
-            true
-        }
-    }
-
     pub fn set_file_clipboard_available(&mut self, available: bool) {
         self.desktop_host.application_mut().file_clipboard_available = available;
     }
 
     pub fn desktop_controller(&mut self, action: ControllerAction) -> bool {
-        if self.plugin_desktop_host.is_none() {
-            return false;
-        }
         let application = self.desktop_host.application_mut();
         let changed = match action {
             ControllerAction::Left => {
@@ -3403,8 +3160,6 @@ impl LiveShell {
             | ControllerAction::NextPane => false,
         };
         let changed = changed | application.reveal_active();
-        let changed = changed | self.dispatch_desktop_plugin_open();
-        let changed = changed | self.dispatch_desktop_plugin_file_action();
         if !changed {
             return false;
         }
@@ -3418,9 +3173,6 @@ impl LiveShell {
     }
 
     pub fn desktop_file_drop(&mut self, source: &std::path::Path) -> bool {
-        if self.plugin_desktop_host.is_none() {
-            return false;
-        }
         let application = self.desktop_host.application_mut();
         let target = application
             .hit(application.pointer_position)
@@ -3586,9 +3338,7 @@ impl LiveShell {
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> bool {
-        (self.plugin_desktop_host.is_some() && crate::plugin_panel::desktop_surface_key() == *key)
-            || (self.plugin_launcher_host.is_some()
-                && crate::plugin_panel::launcher_surface_key() == *key)
+        (self.plugin_launcher_host.is_some() && crate::plugin_panel::launcher_surface_key() == *key)
             || (self.plugin_run_host.is_some() && crate::plugin_panel::run_surface_key() == *key)
             || (self.plugin_volume_osd_host.is_some()
                 && crate::plugin_panel::volume_osd_surface_key() == *key)
@@ -3828,12 +3578,6 @@ impl LiveShell {
                     .semantic_generation
                     .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
             });
-        }
-        if *key == crate::plugin_panel::desktop_surface_key() {
-            return self
-                .plugin_desktop_host
-                .as_ref()
-                .map(|_| self.desktop_change_token);
         }
         if *key == crate::plugin_panel::volume_osd_surface_key() {
             let inspection = self.plugin_volume_osd_host.as_ref()?.inspect();
@@ -4084,12 +3828,6 @@ impl LiveShell {
                 return None;
             }
             return Some(self.scene(SurfaceRole::ControlCenter, width, height));
-        }
-        if *key == crate::plugin_panel::desktop_surface_key() {
-            if self.plugin_desktop_host.is_none() {
-                return None;
-            }
-            return Some(self.desktop_scene(width, height));
         }
         if *key == crate::plugin_panel::volume_osd_surface_key() {
             if self.plugin_volume_osd_host.is_none() {
@@ -5069,8 +4807,6 @@ impl LiveShell {
                 self.retire_keyboard_plugin_state();
             } else if id == crate::plugin_panel::window_preview_manifest().id {
                 self.retire_preview_plugin_state();
-            } else if id == crate::plugin_panel::desktop_manifest().id {
-                self.retire_desktop_plugin_state();
             }
             if let Some((target, _)) = &extension_target {
                 self.refresh_plugin_slot_hosts(target);
@@ -5254,15 +4990,6 @@ impl LiveShell {
                     ));
                 },
             )
-        } else if id == crate::plugin_panel::desktop_manifest().id {
-            let data = serde_json::json!({"width": 1, "height": 1,
-                "background": self.palette.background, "wallpaper": false});
-            crate::plugin_panel::PluginPanelApplication::desktop_with_data(&data).map(
-                |application| {
-                    self.plugin_desktop_host = Some(nickel_ui::UiHost::new(application, 1, 1));
-                    self.desktop_application_dirty = true;
-                },
-            )
         } else {
             Err(format!("plugin {id:?} has no runtime host"))
         };
@@ -5285,11 +5012,6 @@ impl LiveShell {
             }
         };
         if result.is_ok() {
-            if id == crate::plugin_panel::desktop_manifest().id {
-                // The directory watcher is parked while the plugin is disabled.
-                // Reconcile files before the first enabled frame is projected.
-                let _ = self.desktop_host.application_mut().refresh_directory(true);
-            }
             if let Some((target, _)) = &extension_target {
                 self.refresh_plugin_slot_hosts(target);
             }
@@ -6241,98 +5963,6 @@ impl LiveShell {
                         Err(error) => {
                             tracing::warn!(plugin = plugin_id, setting = key, %error, "plugin setting failed");
                         }
-                    }
-                }
-                crate::plugin_panel::PluginEffect::DesktopSelect { id } => {
-                    let entry = id.split_once(':').and_then(|(first, second)| {
-                        Some(nickel_file::desktop::DesktopEntryId(
-                            nickel_file::FileIdentity(first.parse().ok()?, second.parse().ok()?),
-                        ))
-                    });
-                    if let Some(entry) = entry.filter(|_| self.plugin_desktop_host.is_some()) {
-                        let desktop = self.desktop_host.application();
-                        let visible =
-                            desktop.layout.items().iter().any(|item| {
-                                item.id == entry && item.output == desktop.active_output
-                            });
-                        if visible {
-                            let desktop = self.desktop_host.application_mut();
-                            desktop.layout.select(entry, desktop.modifiers);
-                            changed = true;
-                        }
-                    }
-                }
-                crate::plugin_panel::PluginEffect::DesktopMove { id, dx, dy } => {
-                    let entry = id.split_once(':').and_then(|(first, second)| {
-                        Some(nickel_file::desktop::DesktopEntryId(
-                            nickel_file::FileIdentity(first.parse().ok()?, second.parse().ok()?),
-                        ))
-                    });
-                    if let Some(entry) = entry.filter(|_| self.plugin_desktop_host.is_some()) {
-                        let desktop = self.desktop_host.application();
-                        let visible =
-                            desktop.layout.items().iter().any(|item| {
-                                item.id == entry && item.output == desktop.active_output
-                            });
-                        if visible
-                            && dx.is_finite()
-                            && dy.is_finite()
-                            && (-8192.0..=8192.0).contains(&dx)
-                            && (-8192.0..=8192.0).contains(&dy)
-                        {
-                            self.desktop_host
-                                .application_mut()
-                                .commit_move(entry, DesktopPoint { x: dx, y: dy });
-                            changed = true;
-                        }
-                    }
-                }
-                crate::plugin_panel::PluginEffect::DesktopOpen { id } => {
-                    let entry = id.split_once(':').and_then(|(first, second)| {
-                        Some(nickel_file::desktop::DesktopEntryId(
-                            nickel_file::FileIdentity(first.parse().ok()?, second.parse().ok()?),
-                        ))
-                    });
-                    if let Some(entry) = entry.filter(|_| self.plugin_desktop_host.is_some()) {
-                        let desktop = self.desktop_host.application();
-                        let visible =
-                            desktop.layout.items().iter().any(|item| {
-                                item.id == entry && item.output == desktop.active_output
-                            });
-                        if visible {
-                            let desktop = self.desktop_host.application_mut();
-                            desktop.activate(entry);
-                            desktop.dismiss_context_menu(desktop::DesktopMenuDismissReason::Action);
-                            changed = true;
-                        }
-                    }
-                }
-                crate::plugin_panel::PluginEffect::DesktopFileAction { id, action } => {
-                    let entry = id.split_once(':').and_then(|(first, second)| {
-                        Some(nickel_file::desktop::DesktopEntryId(
-                            nickel_file::FileIdentity(first.parse().ok()?, second.parse().ok()?),
-                        ))
-                    });
-                    if let Some(entry) = entry.filter(|_| self.plugin_desktop_host.is_some()) {
-                        let desktop = self.desktop_host.application();
-                        let visible =
-                            desktop.layout.items().iter().any(|item| {
-                                item.id == entry && item.output == desktop.active_output
-                            });
-                        if visible {
-                            self.desktop_host
-                                .application_mut()
-                                .execute_context_action(entry, action);
-                            changed = true;
-                        }
-                    }
-                }
-                crate::plugin_panel::PluginEffect::DesktopBackgroundAction(action) => {
-                    if self.plugin_desktop_host.is_some() {
-                        changed |= self
-                            .desktop_host
-                            .application_mut()
-                            .apply_background_plugin_action(action);
                     }
                 }
                 crate::plugin_panel::PluginEffect::RunSubmit(command) => {
@@ -9687,43 +9317,8 @@ impl LiveShell {
         }
     }
 
-    fn retire_desktop_plugin_state(&mut self) {
-        self.plugin_desktop_host = None;
-        self.wallpaper = None;
-        self.wallpaper_size = (0, 0);
-        self.wallpaper_loaded_source_fingerprint = None;
-        let desktop = self.desktop_host.application_mut();
-        desktop.plugin_background = false;
-        desktop.watch = nickel_file::DirectoryWatch::start(&nickel_file::desktop_directory()).ok();
-        desktop.wallpaper = None;
-        desktop.icon_cache.clear();
-        desktop.dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
-        desktop.cancel_pointer_transaction();
-        desktop.pending_plugin_open = None;
-        desktop.pending_plugin_select = None;
-        desktop.pending_plugin_move = None;
-        desktop.pending_plugin_file_action = None;
-        self.desktop_overlay_pointer_capture = None;
-        self.desktop_application_dirty = true;
-    }
-
-    fn fail_desktop_plugin_runtime(&mut self, error: String) {
-        self.fail_bundled_plugin_runtime(
-            &crate::plugin_panel::desktop_manifest().id,
-            error,
-            Self::retire_desktop_plugin_state,
-        );
-    }
-
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         self.load_wallpaper_for(width, height);
-        if self.plugin_desktop_host.is_some() {
-            let desktop = self.desktop_host.application_mut();
-            if !desktop.plugin_background {
-                desktop.watch =
-                    nickel_file::DirectoryWatch::start(&nickel_file::desktop_directory()).ok();
-            }
-        }
         let application = self.desktop_host.application_mut();
         let wallpaper_changed = match (&application.wallpaper, &self.wallpaper) {
             (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
@@ -9739,137 +9334,8 @@ impl LiveShell {
             application.wallpaper_generation = application.wallpaper_generation.wrapping_add(1);
         }
         application.palette = self.palette;
-        let icons_changed = self.plugin_desktop_host.is_some() && application.prepare_icons();
-        let (tiles, tile_images) = if self.plugin_desktop_host.is_some() {
-            application.plugin_tiles(width, height)
-        } else {
-            (Vec::new(), crate::plugin_panel::PluginImages::new())
-        };
-        let context = application
-            .context_menu
-            .as_ref()
-            .filter(|context| context.output == application.active_output)
-            .and_then(|context| {
-                if let Some(entry) = context.entry {
-                    let id = format!("{}:{}", entry.0.0, entry.0.1);
-                    return tiles
-                        .iter()
-                        .any(|tile| tile.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()))
-                        .then(|| serde_json::json!({ "kind": "file", "id": id }));
-                }
-                let arrangement = match application.layout.arrangement() {
-                    nickel_file::desktop::Arrangement::Manual => "manual",
-                    nickel_file::desktop::Arrangement::Sorted { key, direction } => {
-                        match (key, direction) {
-                            (nickel_file::desktop::SortKey::Name, nickel_file::desktop::SortDirection::Ascending) => "sort-name",
-                            (nickel_file::desktop::SortKey::Name, nickel_file::desktop::SortDirection::Descending) => "sort-name-descending",
-                            (nickel_file::desktop::SortKey::Kind, nickel_file::desktop::SortDirection::Ascending) => "sort-kind",
-                            (nickel_file::desktop::SortKey::Kind, nickel_file::desktop::SortDirection::Descending) => "sort-kind-descending",
-                            (nickel_file::desktop::SortKey::Size, nickel_file::desktop::SortDirection::Ascending) => "sort-size",
-                            (nickel_file::desktop::SortKey::Size, nickel_file::desktop::SortDirection::Descending) => "sort-size-descending",
-                            (nickel_file::desktop::SortKey::Modified, nickel_file::desktop::SortDirection::Ascending) => "sort-modified-ascending",
-                            (nickel_file::desktop::SortKey::Modified, nickel_file::desktop::SortDirection::Descending) => "sort-modified",
-                        }
-                    }
-                };
-                let point = context.anchor.unwrap_or(application.pointer_position);
-                Some(serde_json::json!({
-                    "kind": "background",
-                    "x": point.x,
-                    "y": point.y,
-                    "iconsVisible": application.layout.icons_visible(),
-                    "iconWidth": application.layout.grid().0,
-                    "arrangement": arrangement,
-                    "foldersFirst": application.layout.folder_grouping() == nickel_file::desktop::FolderGrouping::FoldersFirst,
-                    "pasteAvailable": context.paste_available && !application.paste_in_progress,
-                    "desktopWritable": context.desktop_writable,
-                }))
-            });
-        let menu_anchor = context.as_ref().and_then(|context| {
-            if context.get("kind").and_then(serde_json::Value::as_str) == Some("background") {
-                Some(("plugin-menu-desktop-background-actions", "main".to_owned()))
-            } else {
-                context
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|id| ("plugin-menu-desktop-file-actions", id.to_owned()))
-            }
-        });
-        let plugin_commands = if let Some(host) = self.plugin_desktop_host.as_mut() {
-            let data = serde_json::json!({
-                "width": width.clamp(1, 8192),
-                "height": height.clamp(1, 8192),
-                "background": self.palette.background,
-                "wallpaper": self.wallpaper.is_some(),
-                "surfaceColor": self.palette.surface,
-                "text": self.palette.text,
-                "error": self.desktop_host.application().error,
-                "tiles": tiles,
-                "context": context,
-            });
-            match host.application_mut().sync_data(&data) {
-                Ok(data_changed) => 'render: {
-                    let mut images = crate::plugin_panel::PluginImages::new();
-                    if let Some(wallpaper) = &self.wallpaper {
-                        images.insert("wallpaper".into(), (0x6000, Arc::clone(wallpaper)));
-                    }
-                    images.extend(tile_images);
-                    let images_changed = host.application_mut().sync_images(images);
-                    let outcome = host.step(HostBatch {
-                        application_changed: data_changed || images_changed,
-                        surface_size: Some((width, height)),
-                        events: vec![HostEvent::Poll],
-                        ..HostBatch::default()
-                    });
-                    if let Some(error) = host.application_mut().take_runtime_failure() {
-                        self.fail_desktop_plugin_runtime(error);
-                        break 'render None;
-                    }
-                    let retained_frame_bytes = if let Some((menu_id, anchor)) = menu_anchor.as_ref()
-                        && host.inspect().open_overlay.is_none()
-                    {
-                        host.open_transient(
-                            nickel_ui::OverlayId::new(*menu_id),
-                            nickel_ui::UiId::new(anchor),
-                        )
-                        .telemetry
-                        .retained_frame_bytes
-                    } else {
-                        outcome.telemetry.retained_frame_bytes
-                    };
-                    if let Some(error) = host.application_mut().take_runtime_failure() {
-                        self.fail_desktop_plugin_runtime(error);
-                        break 'render None;
-                    }
-                    let commands = host.commands().to_vec();
-                    let image_bytes = host.application().retained_image_bytes();
-                    let _ = self.plugin_registry.record_memory(
-                        &crate::plugin_panel::desktop_manifest().id,
-                        nickel_core::plugins::PluginMemory {
-                            native_ui_bytes: Some(
-                                (retained_frame_bytes as u64).saturating_add(image_bytes),
-                            ),
-                            ..Default::default()
-                        },
-                    );
-                    Some(commands)
-                }
-                Err(error) => {
-                    self.fail_desktop_plugin_runtime(error);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let application = self.desktop_host.application_mut();
-        let background_changed = application.plugin_background != plugin_commands.is_some();
-        application.plugin_background = plugin_commands.is_some();
-        let application_changed = self.desktop_application_dirty
-            || background_changed
-            || wallpaper_changed
-            || palette_changed
-            || icons_changed;
+        let application_changed =
+            self.desktop_application_dirty || wallpaper_changed || palette_changed;
         let outcome = self.desktop_host.step(HostBatch {
             application_changed,
             surface_size: Some((width, height)),
@@ -9878,11 +9344,10 @@ impl LiveShell {
         self.desktop_application_dirty = false;
         self.desktop_change_token = outcome.change_token;
         self.desktop_deadline = outcome.next_deadline;
-        let mut commands = plugin_commands.unwrap_or_default();
-        commands.extend_from_slice(self.desktop_host.commands());
-        self.maybe_publish_plugin_status();
+        let commands = self.desktop_host.commands().to_vec();
         #[cfg(target_os = "windows")]
         let commands = {
+            let mut commands = commands;
             if let Some((output, _, index)) = &self.output_identification
                 && output == &self.desktop_active_viewport
             {

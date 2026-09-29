@@ -186,29 +186,6 @@ interface NickelProgressProps extends NickelProps {
     width: number;
     height: number;
 }
-interface NickelFileTileProps extends NickelProps {
-    id: string;
-    asset: string;
-    label: string;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    selected?: boolean;
-    hovered?: boolean;
-    dragging?: boolean;
-    color: NickelColor;
-    outline: NickelColor;
-    hoverBackground: NickelColor;
-    selectedBackground: NickelColor;
-    accent: NickelColor;
-    complement: NickelColor;
-    onClick?: NickelClick;
-    onSelect?: NickelClick;
-    onMove?: (delta: { dx: number; dy: number }) => void;
-    onFileAction?: (request: { action: "cut" | "copy" | "rename" | "properties" | "open-terminal" }) => void;
-}
-
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
 declare function Panel(props: NickelPanelProps): JSX.Element;
 declare function Surface(props: NickelSurfaceProps): JSX.Element;
@@ -219,7 +196,6 @@ declare function Viewport(props: NickelViewportProps): JSX.Element;
 declare function Box(props: NickelBoxProps): JSX.Element;
 /** Generic CSS layout box. Defaults to block layout. */
 declare function Div(props: NickelDivProps): JSX.Element;
-declare function FileTile(props: NickelFileTileProps): JSX.Element;
 declare function Badge(props: NickelBadgeProps): JSX.Element;
 declare function Widget(props: NickelWidgetProps): JSX.Element;
 declare function Action(props: NickelActionProps): JSX.Element;

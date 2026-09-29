@@ -542,10 +542,6 @@ fn fixed_shell_surface_keys_follow_bundled_plugin_activation() {
     let mut shell = LiveShell::new().unwrap();
     for (key, id) in [
         (
-            crate::plugin_panel::desktop_surface_key(),
-            crate::plugin_panel::desktop_manifest().id.clone(),
-        ),
-        (
             crate::plugin_panel::launcher_surface_key(),
             crate::plugin_panel::launcher_manifest().id.clone(),
         ),

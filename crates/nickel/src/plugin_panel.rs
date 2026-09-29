@@ -234,31 +234,6 @@ pub fn window_preview_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     }
 }
 
-pub fn desktop_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!(
-            "../../../tests/fixtures/legacy-desktop-plugin/plugin.json"
-        ))
-        .expect("bundled desktop plugin manifest must be valid")
-    })
-}
-
-pub fn desktop_surface() -> &'static PluginSurface {
-    desktop_manifest()
-        .surfaces
-        .iter()
-        .find(|surface| surface.kind == PluginSurfaceKind::Desktop)
-        .expect("bundled desktop needs a desktop surface")
-}
-
-pub fn desktop_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: desktop_manifest().id.clone(),
-        surface_id: desktop_surface().id.clone(),
-    }
-}
-
 pub fn run_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -407,62 +382,6 @@ pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, St
         .collect()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DesktopBackgroundAction {
-    ToggleIcons,
-    SmallIcons,
-    MediumIcons,
-    LargeIcons,
-    SortName,
-    SortNameDescending,
-    SortKind,
-    SortKindDescending,
-    SortSize,
-    SortSizeDescending,
-    SortModified,
-    SortModifiedAscending,
-    Manual,
-    AlignGrid,
-    AutoArrange,
-    FoldersFirst,
-    FoldersMixed,
-    Refresh,
-    Paste,
-    NewFolder,
-    DisplaySettings,
-    Personalize,
-}
-
-impl DesktopBackgroundAction {
-    fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "toggle-icons" => Self::ToggleIcons,
-            "small-icons" => Self::SmallIcons,
-            "medium-icons" => Self::MediumIcons,
-            "large-icons" => Self::LargeIcons,
-            "sort-name" => Self::SortName,
-            "sort-name-descending" => Self::SortNameDescending,
-            "sort-kind" => Self::SortKind,
-            "sort-kind-descending" => Self::SortKindDescending,
-            "sort-size" => Self::SortSize,
-            "sort-size-descending" => Self::SortSizeDescending,
-            "sort-modified" => Self::SortModified,
-            "sort-modified-ascending" => Self::SortModifiedAscending,
-            "manual" => Self::Manual,
-            "align-grid" => Self::AlignGrid,
-            "auto-arrange" => Self::AutoArrange,
-            "folders-first" => Self::FoldersFirst,
-            "folders-mixed" => Self::FoldersMixed,
-            "refresh" => Self::Refresh,
-            "paste" => Self::Paste,
-            "new-folder" => Self::NewFolder,
-            "display-settings" => Self::DisplaySettings,
-            "personalize" => Self::Personalize,
-            _ => return None,
-        })
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
     ShowLauncher,
@@ -480,22 +399,6 @@ pub enum PluginEffect {
         key: String,
         value: serde_json::Value,
     },
-    DesktopSelect {
-        id: String,
-    },
-    DesktopMove {
-        id: String,
-        dx: f32,
-        dy: f32,
-    },
-    DesktopOpen {
-        id: String,
-    },
-    DesktopFileAction {
-        id: String,
-        action: nickel_file::desktop::DesktopContextAction,
-    },
-    DesktopBackgroundAction(DesktopBackgroundAction),
     RunSubmit(String),
     RunDismiss,
     ToggleLauncher,
@@ -1185,20 +1088,6 @@ fn validation_surface_projection(
     surface: &PluginSurface,
 ) -> Option<Value> {
     let id = package.manifest.id.as_str();
-    if surface.kind == PluginSurfaceKind::Desktop || id == desktop_manifest().id {
-        return Some(serde_json::json!({
-            "width": surface.width,
-            "height": surface.height,
-            "background": 0xff202124_u32,
-            "wallpaper": false,
-            "surfaceColor": 0xff30343a_u32,
-            "text": 0xffffffff_u32,
-            "error": null,
-            "tiles": [],
-            "widgets": [],
-            "context": null,
-        }));
-    }
     if id == launcher_manifest().id {
         return Some(serde_json::json!({
             "query": "",
@@ -1754,21 +1643,6 @@ impl PluginPanelApplication {
         Self::new_with_manifest(source, window_preview_manifest(), Some(data.to_string()))
     }
 
-    pub fn desktop_with_data(data: &Value) -> Result<Self, String> {
-        Self::bundled_application(
-            desktop_manifest(),
-            "main.js",
-            include_str!("../../../tests/fixtures/legacy-desktop-plugin/main.js"),
-            None,
-            data.to_string(),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn desktop_with_test_source(source: &str, data: &Value) -> Result<Self, String> {
-        Self::new_with_manifest(source, desktop_manifest(), Some(data.to_string()))
-    }
-
     pub fn run_with_status(status: Option<&str>) -> Result<Self, String> {
         Self::bundled_application(
             run_manifest(),
@@ -1956,57 +1830,6 @@ impl PluginPanelApplication {
         self.sync_serialized_data(data)
     }
 
-    pub fn activate_desktop_tile(&mut self, id: &str) -> bool {
-        if self.manifest.id != desktop_manifest().id {
-            return false;
-        }
-        let Some(action) = self.node.file_tile_action(id) else {
-            return false;
-        };
-        nickel_ui::Application::update(self, PluginMessage::Click(action));
-        self.last_error.is_none()
-    }
-
-    pub fn select_desktop_tile(&mut self, id: &str) -> bool {
-        if self.manifest.id != desktop_manifest().id {
-            return false;
-        }
-        let Some(action) = self.node.file_tile_select_action(id) else {
-            return false;
-        };
-        nickel_ui::Application::update(self, PluginMessage::Click(action));
-        self.last_error.is_none()
-    }
-
-    pub fn move_desktop_tile(&mut self, id: &str, dx: f32, dy: f32) -> bool {
-        if self.manifest.id != desktop_manifest().id || !dx.is_finite() || !dy.is_finite() {
-            return false;
-        }
-        let Some(action) = self.node.file_tile_move_action(id) else {
-            return false;
-        };
-        nickel_ui::Application::update(self, PluginMessage::TileMove(action, dx, dy));
-        self.last_error.is_none()
-    }
-
-    pub fn file_action_desktop_tile(
-        &mut self,
-        id: &str,
-        action: nickel_file::desktop::DesktopContextAction,
-    ) -> bool {
-        if self.manifest.id != desktop_manifest().id {
-            return false;
-        }
-        let Some(handler) = self.node.file_tile_file_action(id) else {
-            return false;
-        };
-        nickel_ui::Application::update(
-            self,
-            PluginMessage::FileAction(handler, action.as_str().to_owned()),
-        );
-        self.last_error.is_none()
-    }
-
     pub fn take_effects(&mut self) -> Vec<PluginEffect> {
         std::mem::take(&mut self.effects)
     }
@@ -2046,14 +1869,6 @@ impl nickel_ui::Application for PluginPanelApplication {
             | PluginMessage::Button { click: action, .. }
             | PluginMessage::Context(action) => {
                 format!("__nickelDispatch({action})")
-            }
-            PluginMessage::TileMove(action, dx, dy) => {
-                let encoded = serde_json::json!({ "dx": dx, "dy": dy });
-                format!("__nickelDispatch({action}, {encoded})")
-            }
-            PluginMessage::FileAction(action, kind) => {
-                let encoded = serde_json::json!({ "action": kind });
-                format!("__nickelDispatch({action}, {encoded})")
             }
             PluginMessage::Text(action, value) => {
                 let encoded = serde_json::to_string(&value).expect("string serialization");
@@ -2205,152 +2020,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 plugin_id: self.manifest.id.clone(),
                                 key: key.to_owned(),
                                 value: value.clone(),
-                            });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("desktop-background-action")
-                            && self.manifest.id == desktop_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::DesktopControl) =>
-                        {
-                            let Some(action) = effect
-                                .get("action")
-                                .and_then(Value::as_str)
-                                .and_then(DesktopBackgroundAction::parse)
-                            else {
-                                self.last_error =
-                                    Some("desktop background action is invalid".into());
-                                return;
-                            };
-                            if matches!(
-                                action,
-                                DesktopBackgroundAction::Paste | DesktopBackgroundAction::NewFolder
-                            ) && !self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::DesktopFilesManage)
-                            {
-                                self.last_error =
-                                    Some("desktop file management grant is missing".into());
-                                return;
-                            }
-                            if !matches!(
-                                self.node.menu("desktop-background-actions"),
-                                Some(PanelNode::Menu { open: true, .. })
-                            ) {
-                                self.last_error =
-                                    Some("desktop background menu is not active".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::DesktopBackgroundAction(action));
-                        }
-                        _ if effect.get("type").and_then(Value::as_str) == Some("desktop-open")
-                            && self.manifest.id == desktop_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::DesktopFilesOpen) =>
-                        {
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error = Some("desktop file ID is missing".into());
-                                return;
-                            };
-                            let valid_id = id.split_once(':').is_some_and(|(first, second)| {
-                                first.parse::<u64>().is_ok() && second.parse::<u64>().is_ok()
-                            });
-                            if !valid_id || self.node.file_tile_action(id).is_none() {
-                                self.last_error = Some("desktop file ID is stale".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::DesktopOpen { id: id.to_owned() });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("desktop-file-action")
-                            && self.manifest.id == desktop_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::DesktopFilesManage) =>
-                        {
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error = Some("desktop file ID is missing".into());
-                                return;
-                            };
-                            let Some(action) = effect
-                                .get("action")
-                                .and_then(Value::as_str)
-                                .and_then(nickel_file::desktop::DesktopContextAction::parse)
-                            else {
-                                self.last_error = Some("desktop file action is invalid".into());
-                                return;
-                            };
-                            let valid_id = id.split_once(':').is_some_and(|(first, second)| {
-                                first.parse::<u64>().is_ok() && second.parse::<u64>().is_ok()
-                            });
-                            if !valid_id || self.node.file_tile_file_action(id).is_none() {
-                                self.last_error = Some("desktop file ID is stale".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::DesktopFileAction {
-                                id: id.to_owned(),
-                                action,
-                            });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("desktop-select")
-                            && self.manifest.id == desktop_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::DesktopRead) =>
-                        {
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error = Some("desktop file ID is missing".into());
-                                return;
-                            };
-                            let valid_id = id.split_once(':').is_some_and(|(first, second)| {
-                                first.parse::<u64>().is_ok() && second.parse::<u64>().is_ok()
-                            });
-                            if !valid_id || self.node.file_tile_select_action(id).is_none() {
-                                self.last_error = Some("desktop file ID is stale".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::DesktopSelect { id: id.to_owned() });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str) == Some("desktop-move")
-                            && self.manifest.id == desktop_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::DesktopArrange) =>
-                        {
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error = Some("desktop file ID is missing".into());
-                                return;
-                            };
-                            let valid_id = id.split_once(':').is_some_and(|(first, second)| {
-                                first.parse::<u64>().is_ok() && second.parse::<u64>().is_ok()
-                            });
-                            let bounded_delta = |name| {
-                                effect.get(name).and_then(Value::as_f64).filter(|delta| {
-                                    delta.is_finite() && (-8192.0..=8192.0).contains(delta)
-                                })
-                            };
-                            let (Some(dx), Some(dy)) = (bounded_delta("dx"), bounded_delta("dy"))
-                            else {
-                                self.last_error = Some("desktop move delta is invalid".into());
-                                return;
-                            };
-                            if !valid_id || self.node.file_tile_move_action(id).is_none() {
-                                self.last_error = Some("desktop file ID is stale".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::DesktopMove {
-                                id: id.to_owned(),
-                                dx: dx as f32,
-                                dy: dy as f32,
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str) == Some("run-submit")
@@ -3859,108 +3528,6 @@ mod tests {
         );
         app.update(stale_click);
         assert!(app.take_effects().is_empty());
-    }
-
-    #[test]
-    fn bundled_desktop_tile_selection_requests_a_typed_effect() {
-        let data = serde_json::json!({
-            "width": 400, "height": 300, "background": 0xff101820_u32,
-            "wallpaper": false, "surfaceColor": 0xff202830_u32,
-            "text": 0xfff0f0f0_u32, "error": null, "widgets": [],
-            "tiles": [{
-                "id": "7:9", "asset": "file", "label": "Example",
-                "x": 0, "y": 0, "width": 90, "height": 110,
-                "selected": false, "hovered": false, "dragging": false,
-                "color": 0xffffffff_u32, "outline": 0xff101820_u32,
-                "hoverBackground": 0xff202830_u32,
-                "selectedBackground": 0xff304050_u32,
-                "accent": 0xff507090_u32, "complement": 0xff90a0b0_u32,
-            }],
-        });
-        let mut application = PluginPanelApplication::desktop_with_data(&data).unwrap();
-        assert!(application.select_desktop_tile("7:9"));
-        assert_eq!(
-            application.take_effects(),
-            vec![PluginEffect::DesktopSelect { id: "7:9".into() }]
-        );
-        assert!(!application.select_desktop_tile("7:10"));
-        assert!(application.take_effects().is_empty());
-        assert!(application.move_desktop_tile("7:9", 97.0, 0.0));
-        assert_eq!(
-            application.take_effects(),
-            vec![PluginEffect::DesktopMove {
-                id: "7:9".into(),
-                dx: 97.0,
-                dy: 0.0,
-            }]
-        );
-        assert!(!application.move_desktop_tile("7:9", 9000.0, 0.0));
-        assert!(application.take_effects().is_empty());
-        assert!(
-            application.file_action_desktop_tile(
-                "7:9",
-                nickel_file::desktop::DesktopContextAction::Rename,
-            )
-        );
-        assert_eq!(
-            application.take_effects(),
-            vec![PluginEffect::DesktopFileAction {
-                id: "7:9".into(),
-                action: nickel_file::desktop::DesktopContextAction::Rename,
-            }]
-        );
-        assert!(
-            !application.file_action_desktop_tile(
-                "7:10",
-                nickel_file::desktop::DesktopContextAction::Rename,
-            )
-        );
-        assert!(application.take_effects().is_empty());
-        application
-            .manifest
-            .capabilities
-            .retain(|capability| *capability != PluginCapability::DesktopFilesManage);
-        assert!(
-            !application.file_action_desktop_tile(
-                "7:9",
-                nickel_file::desktop::DesktopContextAction::Rename,
-            )
-        );
-        assert!(application.take_effects().is_empty());
-    }
-
-    #[test]
-    fn bundled_desktop_window_fills_large_output_and_anchors_background_menu() {
-        let data = serde_json::json!({
-            "width": 2560, "height": 1440, "background": 0xff101820_u32,
-            "wallpaper": false, "surfaceColor": 0xff202830_u32,
-            "text": 0xfff0f0f0_u32, "error": null, "widgets": [], "tiles": [],
-            "context": {
-                "kind": "background", "x": 80, "y": 90,
-                "iconsVisible": true, "iconWidth": 96, "arrangement": "manual",
-                "foldersFirst": false, "pasteAvailable": false, "desktopWritable": false
-            },
-        });
-        let application = PluginPanelApplication::desktop_with_data(&data).unwrap();
-        assert!(matches!(
-            application.node,
-            PanelNode::Surface {
-                id: Some(ref id),
-                window_request: Some(_),
-                ..
-            } if id == "main"
-        ));
-        assert!(matches!(
-            application.node.menu("desktop-background-actions"),
-            Some(PanelNode::Menu { anchor, .. }) if anchor == "main"
-        ));
-        let host = nickel_ui::UiHost::new(application, 2560, 1440);
-        assert!(host.commands().iter().any(|command| matches!(
-            command,
-            nickel_ui::backend::PaintCommand::Fill { rect, color }
-                if *color == 0xff101820 && rect.origin.x == 0.0 && rect.origin.y == 0.0
-                    && rect.size.width == 2560.0 && rect.size.height == 1440.0
-        )));
     }
 
     #[test]

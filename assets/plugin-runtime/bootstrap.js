@@ -7,7 +7,6 @@ function FixedWindow(props) {
 }
 const Box = 'box';
 const Div = 'div';
-const FileTile = 'file-tile';
 const Badge = 'badge';
 const Widget = 'widget';
 const Action = 'action';

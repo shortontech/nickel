@@ -675,19 +675,6 @@ mod platform {
         }
 
         #[test]
-        fn native_desktop_is_not_a_developer_plugin() {
-            let root = Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/legacy-desktop-plugin"
-            ));
-            assert!(
-                load_dev_package(root)
-                    .unwrap_err()
-                    .contains("native Rust UI")
-            );
-        }
-
-        #[test]
         fn stages_a_provider_and_multiple_contributors_together() {
             let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
             let host = root.join("example-widget-host");

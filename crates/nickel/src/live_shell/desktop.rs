@@ -22,11 +22,9 @@ use nickel_ui::{
 
 use super::desktop_label_foreground;
 use crate::file_window_host::FileWindowHost;
-use crate::plugin_panel::DesktopBackgroundAction;
 
 pub struct DesktopApplication {
     pub(super) wallpaper: Option<Arc<image::RgbaImage>>,
-    pub(super) plugin_background: bool,
     pub(super) wallpaper_generation: u64,
     pub(super) palette: ThemePalette,
     pub(super) browser: Option<DirectoryBrowser>,
@@ -45,10 +43,6 @@ pub struct DesktopApplication {
     pub(super) pointer_seen: bool,
     pub(super) pointer_dragged: bool,
     pub(super) last_click: Option<(DesktopEntryId, Instant)>,
-    pub(super) pending_plugin_open: Option<DesktopEntryId>,
-    pub(super) pending_plugin_select: Option<(DesktopEntryId, SelectionModifiers)>,
-    pub(super) pending_plugin_move: Option<(DesktopEntryId, DesktopPoint)>,
-    pub(super) pending_plugin_file_action: Option<(DesktopEntryId, DesktopContextAction)>,
     pub(super) modifiers: SelectionModifiers,
     pub(super) context_menu: Option<DesktopMenuContext>,
     pub(super) last_menu_dismissal: Option<DesktopMenuDismissal>,
@@ -205,7 +199,6 @@ impl DesktopApplication {
         }
         Self {
             wallpaper,
-            plugin_background: false,
             wallpaper_generation: 0,
             palette,
             browser,
@@ -222,10 +215,6 @@ impl DesktopApplication {
             pointer_seen: false,
             pointer_dragged: false,
             last_click: None,
-            pending_plugin_open: None,
-            pending_plugin_select: None,
-            pending_plugin_move: None,
-            pending_plugin_file_action: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             last_menu_dismissal: None,
@@ -503,29 +492,8 @@ impl DesktopApplication {
         secondary: bool,
         modifiers: SelectionModifiers,
     ) -> bool {
-        self.pointer_press_with_selection(local, secondary, modifiers, false)
-    }
-
-    pub(super) fn pointer_press_for_plugin(
-        &mut self,
-        local: DesktopPoint,
-        modifiers: SelectionModifiers,
-    ) -> bool {
-        self.pointer_press_with_selection(local, false, modifiers, true)
-    }
-
-    fn pointer_press_with_selection(
-        &mut self,
-        local: DesktopPoint,
-        secondary: bool,
-        modifiers: SelectionModifiers,
-        defer_selection: bool,
-    ) -> bool {
         self.pointer_position = local;
         self.pointer_seen = true;
-        self.pending_plugin_select = None;
-        self.pending_plugin_move = None;
-        self.pending_plugin_file_action = None;
         let hit = self.hit(local);
         if secondary {
             self.replacing_context_menu();
@@ -550,11 +518,7 @@ impl DesktopApplication {
         }
         self.dismiss_context_menu(DesktopMenuDismissReason::OutsidePress);
         if let Some(id) = hit {
-            if defer_selection {
-                self.pending_plugin_select = Some((id, modifiers));
-            } else {
-                self.layout.select(id, modifiers);
-            }
+            self.layout.select(id, modifiers);
             self.pointer_down = Some((id, local));
             self.selection_start = None;
             self.pointer_dragged = false;
@@ -611,20 +575,6 @@ impl DesktopApplication {
     }
 
     pub(super) fn pointer_release(&mut self, local: DesktopPoint, now: Instant) -> bool {
-        self.pointer_release_with_move(local, now, false)
-    }
-
-    pub(super) fn pointer_release_for_plugin(&mut self, local: DesktopPoint, now: Instant) -> bool {
-        self.pointer_release_with_move(local, now, true)
-    }
-
-    fn pointer_release_with_move(
-        &mut self,
-        local: DesktopPoint,
-        now: Instant,
-        defer_move: bool,
-    ) -> bool {
-        self.pending_plugin_move = None;
         if self.selection_start.take().is_some() {
             return true;
         }
@@ -649,11 +599,7 @@ impl DesktopApplication {
                 x: local.x - pressed.x,
                 y: local.y - pressed.y,
             };
-            if defer_move {
-                self.pending_plugin_move = Some((id, delta));
-            } else {
-                self.commit_move(id, delta);
-            }
+            self.commit_move(id, delta);
             self.last_click = None;
         } else if self.last_click.is_some_and(|(last, at)| {
             last == id && now.duration_since(at) <= Duration::from_millis(500)
@@ -674,9 +620,6 @@ impl DesktopApplication {
     pub(super) fn cancel_pointer_transaction(&mut self) -> bool {
         let changed = self.pointer_down.take().is_some() || self.selection_start.take().is_some();
         self.pointer_dragged = false;
-        self.pending_plugin_select = None;
-        self.pending_plugin_move = None;
-        self.pending_plugin_file_action = None;
         changed
     }
 
@@ -714,11 +657,7 @@ impl DesktopApplication {
     }
 
     pub(super) fn request_activate(&mut self, id: DesktopEntryId) {
-        if self.plugin_background {
-            self.pending_plugin_open = Some(id);
-        } else {
-            self.activate(id);
-        }
+        self.activate(id);
     }
 
     #[cfg(target_os = "linux")]
@@ -866,74 +805,6 @@ impl DesktopApplication {
             self.save_layout();
         }
         self.dismiss_context_menu(DesktopMenuDismissReason::Action);
-    }
-
-    pub(super) fn apply_background_plugin_action(
-        &mut self,
-        action: DesktopBackgroundAction,
-    ) -> bool {
-        let Some(context) = self.context_menu.as_ref() else {
-            return false;
-        };
-        if context.entry.is_some() || context.output != self.active_output {
-            return false;
-        }
-        if matches!(action, DesktopBackgroundAction::Paste)
-            && (!context.paste_available || self.paste_in_progress)
-        {
-            return false;
-        }
-        if matches!(action, DesktopBackgroundAction::NewFolder) && !context.desktop_writable {
-            return false;
-        }
-        let command = match action {
-            DesktopBackgroundAction::ToggleIcons => {
-                DesktopCommand::IconsVisible(!self.layout.icons_visible())
-            }
-            DesktopBackgroundAction::SmallIcons => DesktopCommand::IconSize(72.0, 88.0),
-            DesktopBackgroundAction::MediumIcons => DesktopCommand::IconSize(96.0, 112.0),
-            DesktopBackgroundAction::LargeIcons => DesktopCommand::IconSize(128.0, 144.0),
-            DesktopBackgroundAction::SortName => {
-                DesktopCommand::Sort(DesktopSortKey::Name, DesktopSortDirection::Ascending)
-            }
-            DesktopBackgroundAction::SortNameDescending => {
-                DesktopCommand::Sort(DesktopSortKey::Name, DesktopSortDirection::Descending)
-            }
-            DesktopBackgroundAction::SortKind => {
-                DesktopCommand::Sort(DesktopSortKey::Kind, DesktopSortDirection::Ascending)
-            }
-            DesktopBackgroundAction::SortKindDescending => {
-                DesktopCommand::Sort(DesktopSortKey::Kind, DesktopSortDirection::Descending)
-            }
-            DesktopBackgroundAction::SortSize => {
-                DesktopCommand::Sort(DesktopSortKey::Size, DesktopSortDirection::Ascending)
-            }
-            DesktopBackgroundAction::SortSizeDescending => {
-                DesktopCommand::Sort(DesktopSortKey::Size, DesktopSortDirection::Descending)
-            }
-            DesktopBackgroundAction::SortModified => {
-                DesktopCommand::Sort(DesktopSortKey::Modified, DesktopSortDirection::Descending)
-            }
-            DesktopBackgroundAction::SortModifiedAscending => {
-                DesktopCommand::Sort(DesktopSortKey::Modified, DesktopSortDirection::Ascending)
-            }
-            DesktopBackgroundAction::Manual => DesktopCommand::Manual,
-            DesktopBackgroundAction::AlignGrid => DesktopCommand::AlignGrid,
-            DesktopBackgroundAction::AutoArrange => DesktopCommand::AutoArrange,
-            DesktopBackgroundAction::FoldersFirst => {
-                DesktopCommand::FolderGrouping(FolderGrouping::FoldersFirst)
-            }
-            DesktopBackgroundAction::FoldersMixed => {
-                DesktopCommand::FolderGrouping(FolderGrouping::Mixed)
-            }
-            DesktopBackgroundAction::Refresh => DesktopCommand::Refresh,
-            DesktopBackgroundAction::Paste => DesktopCommand::Paste,
-            DesktopBackgroundAction::NewFolder => DesktopCommand::NewFolder,
-            DesktopBackgroundAction::DisplaySettings => DesktopCommand::DisplaySettings,
-            DesktopBackgroundAction::Personalize => DesktopCommand::Personalize,
-        };
-        self.apply_desktop_command(command);
-        self.context_menu.is_none()
     }
 
     fn launch_settings(&mut self, destination: SettingsDestination) {
@@ -1122,102 +993,6 @@ impl DesktopApplication {
         }
         self.icon_cache.len() != previous_len
     }
-
-    pub(super) fn plugin_tiles(
-        &self,
-        width: u32,
-        height: u32,
-    ) -> (Vec<serde_json::Value>, crate::plugin_panel::PluginImages) {
-        let mut tiles = Vec::new();
-        let mut images = crate::plugin_panel::PluginImages::new();
-        if !self.layout.icons_visible() {
-            return (tiles, images);
-        }
-        let origin = self.projection_origin();
-        let hovered = self
-            .pointer_seen
-            .then(|| self.hit(self.pointer_position))
-            .flatten();
-        let (cell_width, cell_height) = self.layout.grid();
-        for (index, item) in self
-            .layout
-            .items()
-            .iter()
-            .filter(|item| item.output == self.active_output)
-            .enumerate()
-        {
-            let mut x = item.position.x - origin.x;
-            let mut y = item.position.y - origin.y;
-            let selected = self.layout.selected().contains(&item.id);
-            if selected
-                && self.pointer_dragged
-                && let Some((_, pressed)) = self.pointer_down
-            {
-                x += self.pointer_position.x - pressed.x;
-                y += self.pointer_position.y - pressed.y;
-            }
-            if x + cell_width < 0.0
-                || y + cell_height < 0.0
-                || x > width as f32
-                || y > height as f32
-            {
-                continue;
-            }
-            let focused = self.layout.active() == Some(item.id);
-            let active = hovered == Some(item.id) || focused;
-            let interaction_surface = if selected {
-                Some(self.palette.accent_soft)
-            } else if active {
-                Some(self.palette.surface_hover)
-            } else {
-                None
-            };
-            let foreground = desktop_label_foreground(
-                self.wallpaper.as_deref(),
-                Size {
-                    width: width as f32,
-                    height: height as f32,
-                },
-                Rect::new(
-                    x + 3.0,
-                    y + 62.0,
-                    (cell_width - 6.0).max(1.0),
-                    (cell_height - 74.0).max(1.0),
-                ),
-                self.palette.background,
-                interaction_surface,
-            );
-            let asset = format!("desktop-icon-{index}");
-            if let Some(icon) = self.icon_cache.get(&item.entry.path) {
-                images.insert(
-                    asset.clone(),
-                    (
-                        0x8000_u16.saturating_add(u16::try_from(tiles.len()).unwrap_or(u16::MAX)),
-                        Arc::clone(icon),
-                    ),
-                );
-            }
-            tiles.push(serde_json::json!({
-                "id": format!("{}:{}", item.id.0.0, item.id.0.1),
-                "asset": asset,
-                "label": item.entry.display_name(),
-                "x": x.clamp(-8192.0, 8192.0),
-                "y": y.clamp(-8192.0, 8192.0),
-                "width": cell_width,
-                "height": cell_height - 4.0,
-                "selected": selected,
-                "hovered": active,
-                "dragging": self.pointer_dragged && selected,
-                "color": foreground,
-                "outline": if foreground == 0x111111 { 0xccffffff_u32 } else { 0xcc111111_u32 },
-                "hoverBackground": self.palette.surface_hover,
-                "selectedBackground": self.palette.accent_soft,
-                "accent": self.palette.accent,
-                "complement": self.palette.complement,
-            }));
-        }
-        (tiles, images)
-    }
 }
 
 type DesktopEntryFingerprint = (bool, Option<u64>, Option<std::time::SystemTime>);
@@ -1379,12 +1154,7 @@ impl nickel_ui::Application for DesktopApplication {
                     DesktopMessage::OpenTerminal(_) => DesktopContextAction::OpenTerminal,
                     _ => unreachable!(),
                 };
-                if self.plugin_background {
-                    self.pending_plugin_file_action = Some((id, action));
-                    self.dismiss_context_menu(DesktopMenuDismissReason::Action);
-                } else {
-                    self.execute_context_action(id, action);
-                }
+                self.execute_context_action(id, action);
             }
             DesktopMessage::BackgroundContext => {
                 // The UI host emits this from the same secondary press that updated
@@ -1414,9 +1184,6 @@ impl nickel_ui::Application for DesktopApplication {
                 width: 1.0,
             }
         });
-        if self.plugin_background {
-            return selection_marquee.into_iter().collect();
-        }
         let Some(context) = &self.context_menu else {
             return selection_marquee.into_iter().collect();
         };
@@ -1801,202 +1568,153 @@ impl nickel_ui::Application for DesktopApplication {
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
-        if self.plugin_background {
-            let mut layer = Layer::new().width(width).height(height);
-            if self.plugin_background {
-                let (cell_width, cell_height) = self.layout.grid();
-                for item in
-                    self.layout.items().iter().filter(|item| {
-                        self.layout.icons_visible() && item.output == self.active_output
-                    })
-                {
-                    let origin = self.projection_origin();
-                    let mut position = Point {
-                        x: item.position.x - origin.x,
-                        y: item.position.y - origin.y,
-                    };
-                    let selected = self.layout.selected().contains(&item.id);
-                    if selected && self.pointer_dragged {
-                        if let Some((_, pressed)) = self.pointer_down {
-                            position.x += self.pointer_position.x - pressed.x;
-                            position.y += self.pointer_position.y - pressed.y;
-                        }
-                    }
-                    // Rust retains stable hit and menu-anchor IDs. JSX paints the tile.
-                    layer = layer.child(
-                        Container::new()
-                            .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
-                            .position(position)
-                            .width(cell_width)
-                            .height(cell_height - 4.0)
-                            .message(DesktopMessage::Activate(item.id))
-                            .context_message(DesktopMessage::Context(item.id))
-                            .semantic_role(SemanticRole::GridCell)
-                            .accessibility_label(item.entry.display_name()),
-                    );
-                }
-            }
-            let root = Container::new()
-                .id("desktop")
-                .semantic_role(SemanticRole::ApplicationPresentation)
-                .accessibility_label("Desktop")
-                .width(width)
-                .height(height);
-            let root = if self.plugin_background {
-                root.context_message(DesktopMessage::BackgroundContext)
-            } else {
-                root
-            };
-            root.child(layer)
-        } else {
-            let mut layer = Layer::new().width(width).height(height).child(
-                Container::new()
-                    .width(width)
-                    .height(height)
-                    .background(self.palette.background),
-            );
-            if let Some(wallpaper) = &self.wallpaper {
-                layer = layer.child(
-                    // Wallpaper changes have an owned generation; dragging an icon
-                    // must not fingerprint every wallpaper byte during view rebuild.
-                    Image::new_with_generation(1, Arc::clone(wallpaper), self.wallpaper_generation)
-                        .width(width)
-                        .height(height)
-                        .fit(ImageFit::Stretch)
-                        .decorative(),
-                );
-            }
-            let hovered = self
-                .pointer_seen
-                .then(|| self.hit(self.pointer_position))
-                .flatten();
-            let (cell_width, cell_height) = self.layout.grid();
-            for (index, item) in self
-                .layout
-                .items()
-                .iter()
-                .filter(|item| self.layout.icons_visible() && item.output == self.active_output)
-                .enumerate()
-            {
-                let origin = self.projection_origin();
-                let mut position = Point {
-                    x: item.position.x - origin.x,
-                    y: item.position.y - origin.y,
-                };
-                let selected = self.layout.selected().contains(&item.id);
-                if selected
-                    && self.pointer_dragged
-                    && let Some((_, pressed)) = self.pointer_down
-                {
-                    position.x += self.pointer_position.x - pressed.x;
-                    position.y += self.pointer_position.y - pressed.y;
-                }
-                let focused = self.layout.active() == Some(item.id);
-                let icon = self
-                    .icon_cache
-                    .get(&item.entry.path)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        Arc::new(image::RgbaImage::from_pixel(
-                            1,
-                            1,
-                            image::Rgba([0, 0, 0, 0]),
-                        ))
-                    });
-                let label_height = (cell_height - 74.0).max(1.0);
-                let label_rect = Rect::new(
-                    position.x + 3.0,
-                    position.y + 62.0,
-                    (cell_width - 6.0).max(1.0),
-                    label_height,
-                );
-                let interaction_surface = if selected {
-                    Some(self.palette.accent_soft)
-                } else if hovered == Some(item.id) || focused {
-                    Some(self.palette.surface_hover)
-                } else {
-                    None
-                };
-                let label_foreground = desktop_label_foreground(
-                    self.wallpaper.as_deref(),
-                    Size { width, height },
-                    label_rect,
-                    self.palette.background,
-                    interaction_surface,
-                );
-                let label_outline = if label_foreground == 0x111111 {
-                    0xccffffff
-                } else {
-                    0xcc111111
-                };
-                let mut tile = FilePlaneItem::new_with_generation(
-                    DesktopMessage::Activate(item.id),
-                    item.entry.display_name(),
-                    10_000_u16.saturating_add(index as u16),
-                    icon,
-                    self.directory_generation,
-                )
-                .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
-                .position(position)
-                .width(cell_width)
-                .height(cell_height - 4.0)
-                .padding(Insets {
-                    top: 6.0,
-                    right: 3.0,
-                    bottom: 8.0,
-                    left: 3.0,
-                })
-                .radius(8.0)
-                .context_message(DesktopMessage::Context(item.id))
-                .semantic_role(SemanticRole::GridCell)
-                .accessibility_label(item.entry.display_name())
-                .interaction_backgrounds(self.palette.surface_hover, self.palette.accent_soft)
-                .selected_background(selected, self.palette.accent_soft)
-                .hovered_background(
-                    !selected && (hovered == Some(item.id) || focused),
-                    self.palette.surface_hover,
-                )
-                .focus_background_tint(self.palette.accent)
-                .controller_focus_background_tint(self.palette.complement)
-                .icon_size(48.0)
-                .label_height(label_height)
-                .label_scale(0.85)
-                .foreground(label_foreground)
-                .label_outline(label_outline, 1.0)
-                .gap(8.0);
-                if self.pointer_dragged && selected {
-                    tile = tile.border(self.palette.accent, 2.0);
-                }
-                layer = layer.child(tile);
-            }
-            if let Some(error) = &self.error {
-                layer = layer.child(
-                    Container::new()
-                        .position(Point { x: 20.0, y: 20.0 })
-                        .width(500.0)
-                        .height(42.0)
-                        .padding(Insets::symmetric(12.0, 5.0))
-                        .background(self.palette.surface)
-                        .radius(8.0)
-                        .child(
-                            Text::new(error.clone())
-                                .width(476.0)
-                                .height(32.0)
-                                .scale(0.9)
-                                .color(self.palette.text),
-                        ),
-                );
-            }
+        let mut layer = Layer::new().width(width).height(height).child(
             Container::new()
-                .id("desktop")
-                .semantic_role(SemanticRole::ApplicationPresentation)
-                .accessibility_label("Desktop")
-                .context_message(DesktopMessage::BackgroundContext)
-                .background(self.palette.background)
                 .width(width)
                 .height(height)
-                .child(layer)
+                .background(self.palette.background),
+        );
+        if let Some(wallpaper) = &self.wallpaper {
+            layer = layer.child(
+                // Wallpaper changes have an owned generation; dragging an icon
+                // must not fingerprint every wallpaper byte during view rebuild.
+                Image::new_with_generation(1, Arc::clone(wallpaper), self.wallpaper_generation)
+                    .width(width)
+                    .height(height)
+                    .fit(ImageFit::Stretch)
+                    .decorative(),
+            );
         }
+        let hovered = self
+            .pointer_seen
+            .then(|| self.hit(self.pointer_position))
+            .flatten();
+        let (cell_width, cell_height) = self.layout.grid();
+        for (index, item) in self
+            .layout
+            .items()
+            .iter()
+            .filter(|item| self.layout.icons_visible() && item.output == self.active_output)
+            .enumerate()
+        {
+            let origin = self.projection_origin();
+            let mut position = Point {
+                x: item.position.x - origin.x,
+                y: item.position.y - origin.y,
+            };
+            let selected = self.layout.selected().contains(&item.id);
+            if selected
+                && self.pointer_dragged
+                && let Some((_, pressed)) = self.pointer_down
+            {
+                position.x += self.pointer_position.x - pressed.x;
+                position.y += self.pointer_position.y - pressed.y;
+            }
+            let focused = self.layout.active() == Some(item.id);
+            let icon = self
+                .icon_cache
+                .get(&item.entry.path)
+                .cloned()
+                .unwrap_or_else(|| {
+                    Arc::new(image::RgbaImage::from_pixel(
+                        1,
+                        1,
+                        image::Rgba([0, 0, 0, 0]),
+                    ))
+                });
+            let label_height = (cell_height - 74.0).max(1.0);
+            let label_rect = Rect::new(
+                position.x + 3.0,
+                position.y + 62.0,
+                (cell_width - 6.0).max(1.0),
+                label_height,
+            );
+            let interaction_surface = if selected {
+                Some(self.palette.accent_soft)
+            } else if hovered == Some(item.id) || focused {
+                Some(self.palette.surface_hover)
+            } else {
+                None
+            };
+            let label_foreground = desktop_label_foreground(
+                self.wallpaper.as_deref(),
+                Size { width, height },
+                label_rect,
+                self.palette.background,
+                interaction_surface,
+            );
+            let label_outline = if label_foreground == 0x111111 {
+                0xccffffff
+            } else {
+                0xcc111111
+            };
+            let mut tile = FilePlaneItem::new_with_generation(
+                DesktopMessage::Activate(item.id),
+                item.entry.display_name(),
+                10_000_u16.saturating_add(index as u16),
+                icon,
+                self.directory_generation,
+            )
+            .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
+            .position(position)
+            .width(cell_width)
+            .height(cell_height - 4.0)
+            .padding(Insets {
+                top: 6.0,
+                right: 3.0,
+                bottom: 8.0,
+                left: 3.0,
+            })
+            .radius(8.0)
+            .context_message(DesktopMessage::Context(item.id))
+            .semantic_role(SemanticRole::GridCell)
+            .accessibility_label(item.entry.display_name())
+            .interaction_backgrounds(self.palette.surface_hover, self.palette.accent_soft)
+            .selected_background(selected, self.palette.accent_soft)
+            .hovered_background(
+                !selected && (hovered == Some(item.id) || focused),
+                self.palette.surface_hover,
+            )
+            .focus_background_tint(self.palette.accent)
+            .controller_focus_background_tint(self.palette.complement)
+            .icon_size(48.0)
+            .label_height(label_height)
+            .label_scale(0.85)
+            .foreground(label_foreground)
+            .label_outline(label_outline, 1.0)
+            .gap(8.0);
+            if self.pointer_dragged && selected {
+                tile = tile.border(self.palette.accent, 2.0);
+            }
+            layer = layer.child(tile);
+        }
+        if let Some(error) = &self.error {
+            layer = layer.child(
+                Container::new()
+                    .position(Point { x: 20.0, y: 20.0 })
+                    .width(500.0)
+                    .height(42.0)
+                    .padding(Insets::symmetric(12.0, 5.0))
+                    .background(self.palette.surface)
+                    .radius(8.0)
+                    .child(
+                        Text::new(error.clone())
+                            .width(476.0)
+                            .height(32.0)
+                            .scale(0.9)
+                            .color(self.palette.text),
+                    ),
+            );
+        }
+        Container::new()
+            .id("desktop")
+            .semantic_role(SemanticRole::ApplicationPresentation)
+            .accessibility_label("Desktop")
+            .context_message(DesktopMessage::BackgroundContext)
+            .background(self.palette.background)
+            .width(width)
+            .height(height)
+            .child(layer)
     }
 
     fn title(&self) -> &str {
@@ -2049,7 +1767,6 @@ impl DesktopApplication {
         let (operation_tx, operation_rx) = std::sync::mpsc::channel();
         Self {
             wallpaper,
-            plugin_background: false,
             wallpaper_generation: 0,
             palette,
             file_window_host: crate::file_window_host::default_file_window_host(),
@@ -2077,10 +1794,6 @@ impl DesktopApplication {
             pointer_seen: false,
             pointer_dragged: false,
             last_click: None,
-            pending_plugin_open: None,
-            pending_plugin_select: None,
-            pending_plugin_move: None,
-            pending_plugin_file_action: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
             last_menu_dismissal: None,

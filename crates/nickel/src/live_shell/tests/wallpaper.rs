@@ -71,7 +71,7 @@
         );
 
         let production = include_str!("../../live_shell/desktop.rs");
-        assert!(production.contains("\"color\": foreground"));
+        assert!(production.contains(".foreground(label_foreground)"));
     }
 
     #[test]
@@ -106,98 +106,16 @@
     }
 
     #[test]
-    fn desktop_background_plugin_reports_memory_and_retires_wallpaper_when_disabled() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("plugin-wallpaper.png");
-        RgbaImage::from_pixel(8, 8, Rgba([44, 55, 66, 255]))
-            .save(&path)
-            .unwrap();
-        let mut shell = LiveShell::new().unwrap();
-        assert!(shell.refresh_configured_wallpaper(Some(path)));
-        let key = crate::plugin_panel::desktop_surface_key();
-        let plugin_scene = shell
-            .plugin_surface_scene_for_output(&key, Some("primary"), 320, 200)
-            .expect("active desktop plugin surface");
-        assert!(shell.plugin_surface_change_token(&key).is_some());
-        let wallpaper_index = plugin_scene
-            .iter()
-            .position(|command| matches!(
-                command,
-                nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. }
-            ))
-            .expect("JSX desktop wallpaper image");
-        if let nickel_ui::backend::PaintCommand::Image { image, .. } = &plugin_scene[wallpaper_index]
-        {
-            assert!(Arc::ptr_eq(image, shell.wallpaper.as_ref().unwrap()));
-        }
-        assert!(!plugin_scene[wallpaper_index + 1..].iter().any(|command| matches!(
-            command,
-            nickel_ui::backend::PaintCommand::Fill { rect, color }
-                if rect.size.width >= 320.0 && rect.size.height >= 200.0 && *color >> 24 != 0
-        )));
-        assert!(shell.desktop_host.application().plugin_background);
-        assert!(shell.surface_visible(SurfaceRole::Desktop));
-        let plugin_host = shell.plugin_desktop_host.as_mut().unwrap();
-        let image_bytes = plugin_host.application().retained_image_bytes();
-        assert!(image_bytes > 0);
-        let frame_bytes = plugin_host
-            .step(HostBatch::default())
-            .telemetry
-            .retained_frame_bytes as u64;
-        let id = &crate::plugin_panel::desktop_manifest().id;
-        let status = shell.plugin_registry().get(id).unwrap();
-        assert_eq!(
-            status.memory.native_ui_bytes,
-            Some(frame_bytes.saturating_add(image_bytes))
-        );
-
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        let retired_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        assert!(retired_scene.iter().any(|command| matches!(
-            command,
-            nickel_ui::backend::PaintCommand::Image { .. }
-        )));
-        assert!(!shell.desktop_host.application().plugin_background);
-        assert!(shell.surface_visible(SurfaceRole::Desktop));
-        assert!(shell.plugin_surface_scene_for_output(&key, Some("primary"), 320, 200).is_none());
-        assert!(shell.plugin_surface_change_token(&key).is_none());
-        assert_eq!(
-            shell.plugin_registry().get(id).unwrap().memory,
-            nickel_core::plugins::PluginMemory::default()
-        );
-
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        let resumed_scene = shell
-            .plugin_surface_scene_for_output(&key, Some("primary"), 320, 200)
-            .expect("reactivated desktop plugin surface");
-        assert!(shell.plugin_surface_change_token(&key).is_some());
-        assert!(resumed_scene.iter().any(|command| matches!(
-            command,
-            nickel_ui::backend::PaintCommand::Image { id: 0x6000, .. }
-        )));
-        assert!(shell.desktop_host.application().plugin_background);
-        assert!(shell.surface_visible(SurfaceRole::Desktop));
-        assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.unwrap() > 0);
-    }
-
-    #[test]
-    fn desktop_error_banner_survives_plugin_retirement_in_native_view() {
+    fn desktop_error_banner_appears_once_in_native_view() {
         let mut shell = LiveShell::new().unwrap();
         shell.desktop_host.application_mut().error = Some("Desktop files unavailable".into());
-        let plugin_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        let banner_count = |commands: &[nickel_ui::backend::PaintCommand]| {
-            commands.iter().filter(|command| matches!(
-                command,
-                nickel_ui::backend::PaintCommand::Text { text, .. }
-                    if text == "Desktop files unavailable"
-            )).count()
-        };
-        assert_eq!(banner_count(&plugin_scene), 1);
-        assert!(shell.desktop_host.application().plugin_background);
-
-        shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
-        let retired_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        assert_eq!(banner_count(&retired_scene), 1);
+        let scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        let banner_count = scene.iter().filter(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Text { text, .. }
+                if text == "Desktop files unavailable"
+        )).count();
+        assert_eq!(banner_count, 1);
     }
 
     #[test]

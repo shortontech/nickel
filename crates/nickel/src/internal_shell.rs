@@ -2575,9 +2575,8 @@ mod tests {
     }
 
     #[test]
-    fn native_desktop_surface_survives_fixture_retirement() {
+    fn native_desktop_surface_is_stable_across_output_reconciliation() {
         let mut coordinator = coordinator();
-        let plugin_id = crate::plugin_panel::desktop_manifest().id.clone();
         let output = InternalOutput {
             x: 0,
             y: 0,
@@ -2594,7 +2593,6 @@ mod tests {
         assert_eq!(desktop.plugin, None);
         assert!(coordinator.visible(id));
 
-        coordinator.set_plugin_enabled(&plugin_id, false).unwrap();
         coordinator.set_outputs(&[output.clone()]);
         let retained = coordinator
             .surface(SurfaceRole::Desktop, Some("nested"))

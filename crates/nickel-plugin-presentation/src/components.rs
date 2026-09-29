@@ -8,9 +8,9 @@ use std::{
 use nickel_core::plugins::{PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, DragGesture, Dropdown, FilePlaneItem, Grid,
-    Image, ImageFit, Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Shortcut,
-    Slider, Spacer, Text, TextField as UiTextField, VerticalScroll,
+    AnyView, Column, ComponentBuilderExt, Container, DragGesture, Dropdown, Grid, Image, ImageFit,
+    Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Slider, Spacer,
+    Text, TextField as UiTextField, VerticalScroll,
 };
 use serde_json::Value;
 
@@ -44,8 +44,6 @@ pub struct ControlPluginSection {
 pub enum PluginMessage {
     Click(usize),
     Button { click: usize, drag: usize },
-    TileMove(usize, f32, f32),
-    FileAction(usize, String),
     Context(usize),
     Drag(usize, DragGesture),
     Text(usize, String),
@@ -232,28 +230,6 @@ pub enum PanelNode {
         label: String,
         value: String,
         action: usize,
-    },
-    FileTile {
-        id: String,
-        action: Option<usize>,
-        select_action: Option<usize>,
-        move_action: Option<usize>,
-        file_action: Option<usize>,
-        asset: String,
-        label: String,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        selected: bool,
-        hovered: bool,
-        dragging: bool,
-        foreground: u32,
-        outline: u32,
-        hover_background: u32,
-        selected_background: u32,
-        accent: u32,
-        complement: u32,
     },
     Box {
         children: Vec<Self>,
@@ -629,86 +605,6 @@ impl PanelNode {
         }
     }
 
-    pub fn file_tile_action(&self, id: &str) -> Option<usize> {
-        match self {
-            Self::FileTile {
-                id: tile_id,
-                action,
-                ..
-            } if tile_id == id => *action,
-            Self::Box { children, .. }
-            | Self::Div { children, .. }
-            | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
-            | Self::Row { children, .. }
-            | Self::Column { children, .. }
-            | Self::ScrollView { children, .. } => {
-                children.iter().find_map(|child| child.file_tile_action(id))
-            }
-            _ => None,
-        }
-    }
-
-    pub fn file_tile_select_action(&self, id: &str) -> Option<usize> {
-        match self {
-            Self::FileTile {
-                id: tile_id,
-                select_action,
-                ..
-            } if tile_id == id => *select_action,
-            Self::Box { children, .. }
-            | Self::Div { children, .. }
-            | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
-            | Self::Row { children, .. }
-            | Self::Column { children, .. }
-            | Self::ScrollView { children, .. } => children
-                .iter()
-                .find_map(|child| child.file_tile_select_action(id)),
-            _ => None,
-        }
-    }
-
-    pub fn file_tile_move_action(&self, id: &str) -> Option<usize> {
-        match self {
-            Self::FileTile {
-                id: tile_id,
-                move_action,
-                ..
-            } if tile_id == id => *move_action,
-            Self::Box { children, .. }
-            | Self::Div { children, .. }
-            | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
-            | Self::Row { children, .. }
-            | Self::Column { children, .. }
-            | Self::ScrollView { children, .. } => children
-                .iter()
-                .find_map(|child| child.file_tile_move_action(id)),
-            _ => None,
-        }
-    }
-
-    pub fn file_tile_file_action(&self, id: &str) -> Option<usize> {
-        match self {
-            Self::FileTile {
-                id: tile_id,
-                file_action,
-                ..
-            } if tile_id == id => *file_action,
-            Self::Box { children, .. }
-            | Self::Div { children, .. }
-            | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
-            | Self::Row { children, .. }
-            | Self::Column { children, .. }
-            | Self::ScrollView { children, .. } => children
-                .iter()
-                .find_map(|child| child.file_tile_file_action(id)),
-            _ => None,
-        }
-    }
-
     fn parse(value: &Value) -> Result<Self, String> {
         let kind = value
             .get("kind")
@@ -885,85 +781,6 @@ impl PanelNode {
                         .and_then(Value::as_u64)
                         .filter(|color| *color <= u32::MAX as u64)
                         .map_or(0xffc9354c, |color| color as u32),
-                })
-            }
-            "file-tile" => {
-                if !children.is_empty() {
-                    return Err("file tile cannot have children".into());
-                }
-                let number = |name: &str, min: f64, max: f64| {
-                    value
-                        .get(name)
-                        .and_then(Value::as_f64)
-                        .filter(|number| number.is_finite() && (min..=max).contains(number))
-                        .map(|number| number as f32)
-                        .ok_or_else(|| format!("file tile {name} must be {min} to {max}"))
-                };
-                let color = |name: &str| {
-                    value
-                        .get(name)
-                        .and_then(Value::as_u64)
-                        .filter(|color| *color <= u32::MAX as u64)
-                        .map(|color| color as u32)
-                        .ok_or_else(|| format!("file tile {name} needs a color"))
-                };
-                Ok(Self::FileTile {
-                    id: value
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.is_empty() && id.len() <= 64)
-                        .ok_or("file tile needs an ID")?
-                        .to_owned(),
-                    action: value
-                        .get("action")
-                        .and_then(Value::as_u64)
-                        .and_then(|action| usize::try_from(action).ok()),
-                    select_action: value
-                        .get("selectAction")
-                        .and_then(Value::as_u64)
-                        .and_then(|action| usize::try_from(action).ok()),
-                    move_action: value
-                        .get("moveAction")
-                        .and_then(Value::as_u64)
-                        .and_then(|action| usize::try_from(action).ok()),
-                    file_action: value
-                        .get("fileAction")
-                        .and_then(Value::as_u64)
-                        .and_then(|action| usize::try_from(action).ok()),
-                    asset: value
-                        .get("asset")
-                        .and_then(Value::as_str)
-                        .filter(|asset| !asset.is_empty() && asset.len() <= 128)
-                        .ok_or("file tile needs an asset")?
-                        .to_owned(),
-                    label: value
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .filter(|label| !label.is_empty() && label.len() <= 1024)
-                        .ok_or("file tile needs a label")?
-                        .to_owned(),
-                    x: number("x", -8192.0, 8192.0)?,
-                    y: number("y", -8192.0, 8192.0)?,
-                    width: number("width", 1.0, 8192.0)?,
-                    height: number("height", 1.0, 8192.0)?,
-                    selected: value
-                        .get("selected")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    hovered: value
-                        .get("hovered")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    dragging: value
-                        .get("dragging")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    foreground: color("color")?,
-                    outline: color("outline")?,
-                    hover_background: color("hoverBackground")?,
-                    selected_background: color("selectedBackground")?,
-                    accent: color("accent")?,
-                    complement: color("complement")?,
                 })
             }
             "div" => {
@@ -1905,71 +1722,6 @@ impl PanelNode {
             ),
             Self::Widget { .. } => AnyView::new(Spacer::fixed(0.0)),
             Self::Action { .. } | Self::Section { .. } => AnyView::new(Spacer::fixed(0.0)),
-            Self::FileTile {
-                id,
-                action,
-                select_action: _,
-                move_action: _,
-                file_action: _,
-                asset,
-                label,
-                x,
-                y,
-                width,
-                height,
-                selected,
-                hovered,
-                dragging,
-                foreground,
-                outline,
-                hover_background,
-                selected_background,
-                accent,
-                complement,
-            } => {
-                let icon = images.get(asset).map_or_else(
-                    || Arc::new(image::RgbaImage::new(1, 1)),
-                    |(_, icon)| Arc::clone(icon),
-                );
-                let icon_id = images.get(asset).map_or(0, |(id, _)| *id);
-                let mut tile = FilePlaneItem::new(
-                    Message::from_plugin_scoped(
-                        PluginMessage::Click(action.unwrap_or(usize::MAX)),
-                        scope,
-                    ),
-                    label.clone(),
-                    icon_id,
-                    icon,
-                )
-                .id(id.clone())
-                .position(Point { x: *x, y: *y })
-                .width(*width)
-                .height(*height)
-                .padding(Insets {
-                    top: 6.0,
-                    right: 3.0,
-                    bottom: 8.0,
-                    left: 3.0,
-                })
-                .radius(8.0)
-                .semantic_role(SemanticRole::GridCell)
-                .accessibility_label(label.clone())
-                .interaction_backgrounds(*hover_background, *selected_background)
-                .selected_background(*selected, *selected_background)
-                .hovered_background(!*selected && *hovered, *hover_background)
-                .focus_background_tint(*accent)
-                .controller_focus_background_tint(*complement)
-                .icon_size(48.0)
-                .label_height((*height - 70.0).max(1.0))
-                .label_scale(0.85)
-                .foreground(*foreground)
-                .label_outline(*outline, 1.0)
-                .gap(8.0);
-                if *dragging {
-                    tile = tile.border(*accent, 2.0);
-                }
-                AnyView::new(tile)
-            }
             Self::Div {
                 id,
                 class_name,

@@ -17,17 +17,8 @@ fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurface
         && (identity.role != ShellRole::PluginSurface || identity.plugin_surface.is_some())
         && (matches!(
             identity.role,
-            ShellRole::Desktop
-                | ShellRole::PluginSurface
-                | ShellRole::Panel
-                | ShellRole::VolumeOsd
-                | ShellRole::Preview
+            ShellRole::PluginSurface | ShellRole::Panel | ShellRole::VolumeOsd | ShellRole::Preview
         ) || identity.plugin_surface.is_none())
-        && (identity.role != ShellRole::Desktop
-            || identity.plugin_surface.as_ref().is_none_or(|surface| {
-                surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Desktop
-                    && surface.bottom_offset == 0
-            }))
         && (identity.role != ShellRole::VolumeOsd
             || identity.plugin_surface.as_ref().is_none_or(|surface| {
                 surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Overlay
@@ -138,33 +129,26 @@ mod shell_surface_identity_tests {
     }
 
     #[test]
-    fn desktop_accepts_only_desktop_plugin_placement() {
-        let key = crate::plugin_panel::desktop_surface_key();
-        let surface = crate::plugin_panel::desktop_surface();
+    fn desktop_accepts_only_native_placement() {
         let mut identity = ShellSurfaceIdentity {
             application_id: "io.nickel.shell.surface.42.10".into(),
             role: ShellRole::Desktop,
             output: Some("DP-1".into()),
-            plugin_surface: Some(PluginSurfacePlacement {
-                plugin_id: key.plugin_id,
-                surface_id: key.surface_id,
-                kind: PluginSurfacePlacementKind::Desktop,
-                width: surface.width,
-                height: surface.height,
-                bottom_offset: 0,
-                anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
-                offset_x: 0,
-                offset_y: 0,
-                passive: false,
-            }),
+            plugin_surface: None,
         };
         assert!(shell_surface_identity_valid(&identity));
-
-        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Overlay;
-        assert!(!shell_surface_identity_valid(&identity));
-        let placement = identity.plugin_surface.as_mut().unwrap();
-        placement.kind = PluginSurfacePlacementKind::Desktop;
-        placement.bottom_offset = 24;
+        identity.plugin_surface = Some(PluginSurfacePlacement {
+            plugin_id: "org.example.desktop".into(),
+            surface_id: "main".into(),
+            kind: PluginSurfacePlacementKind::Desktop,
+            width: 800,
+            height: 600,
+            bottom_offset: 0,
+            anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
+            offset_x: 0,
+            offset_y: 0,
+            passive: false,
+        });
         assert!(!shell_surface_identity_valid(&identity));
     }
 

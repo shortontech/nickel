@@ -2731,9 +2731,7 @@ impl WinitShell {
         let panel = plugin
             .map(|(_, surface)| surface.clone())
             .unwrap_or_else(|| {
-                if role == SurfaceRole::Desktop {
-                    crate::plugin_panel::desktop_surface().clone()
-                } else if role == SurfaceRole::VolumeOsd {
+                if role == SurfaceRole::VolumeOsd {
                     crate::plugin_panel::volume_osd_surface().clone()
                 } else if role == SurfaceRole::WindowPreview {
                     crate::plugin_panel::window_preview_surface().clone()

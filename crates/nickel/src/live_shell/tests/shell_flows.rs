@@ -119,49 +119,6 @@
     }
 
     #[test]
-    fn desktop_projection_failure_retires_its_plugin_host() {
-        let mut shell = LiveShell::new().unwrap();
-        let application = crate::plugin_panel::PluginPanelApplication::desktop_with_test_source(
-            "function App() { if (nickel.data.width > 1) throw Error('desktop projection exploded'); return h(Panel, {}, h(Text, {}, 'Desktop ready')); }",
-            &serde_json::json!({"width": 1}),
-        )
-        .unwrap();
-        shell.plugin_desktop_host = Some(nickel_ui::UiHost::new(application, 1, 1));
-        shell.desktop_scene(800, 600);
-        let id = &crate::plugin_panel::desktop_manifest().id;
-        let entry = shell.plugin_registry().get(id).unwrap();
-        assert!(entry.desired_enabled);
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("desktop projection exploded")));
-        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
-        assert!(shell.plugin_desktop_host.is_none());
-        assert!(!shell.desktop_host.application().plugin_background);
-        assert!(!shell.plugin_surface_matches(&crate::plugin_panel::desktop_surface_key()));
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_desktop_host.is_some());
-    }
-
-    #[test]
-    fn desktop_callback_failure_does_not_fall_through_to_native_open() {
-        let mut shell = LiveShell::new().unwrap();
-        let application = crate::plugin_panel::PluginPanelApplication::desktop_with_test_source(
-            "function App() { return h(Panel, {}, h(FileTile, {id:'7:9', asset:'file', label:'Example', x:0, y:0, width:90, height:110, color:0xffffffff, outline:0xff101820, hoverBackground:0xff202830, selectedBackground:0xff304050, accent:0xff507090, complement:0xff90a0b0, onClick: () => { throw Error('desktop callback exploded'); }})); }",
-            &serde_json::json!({}),
-        )
-        .unwrap();
-        shell.plugin_desktop_host = Some(nickel_ui::UiHost::new(application, 800, 600));
-        shell.desktop_host.application_mut().pending_plugin_open = Some(
-            nickel_file::desktop::DesktopEntryId(nickel_file::FileIdentity(7, 9)),
-        );
-        assert!(!shell.dispatch_desktop_plugin_open());
-        let id = &crate::plugin_panel::desktop_manifest().id;
-        let entry = shell.plugin_registry().get(id).unwrap();
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("desktop callback exploded")));
-        assert!(shell.plugin_desktop_host.is_none());
-        assert!(shell.desktop_host.application().pending_plugin_open.is_none());
-    }
-
-    #[test]
     fn settings_activation_is_registered_without_an_in_process_window() {
         let mut shell = LiveShell::new().unwrap();
         let id = crate::settings_plugin_report::ID;

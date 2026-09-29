@@ -1,294 +1,4 @@
     #[test]
-    fn desktop_file_tiles_fall_back_to_native_when_plugin_retires() {
-        use std::{ffi::OsString, path::PathBuf};
-
-        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
-        let mut desktop = super::DesktopApplication::fixture(None, palette);
-        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
-            id: "primary".into(),
-            primary: true,
-            work_area: nickel_file::desktop::Rect {
-                x: 0.0, y: 0.0, width: 400.0, height: 300.0,
-            },
-            scale: 1.0,
-        }]);
-        let path = PathBuf::from("/desktop/plugin-tile.txt");
-        desktop.layout.reconcile(vec![(
-            nickel_file::FileIdentity(1, 1),
-            nickel_file::FileEntry {
-                display_name_override: None,
-                name: OsString::from("plugin-tile.txt"),
-                path: path.clone(),
-                is_directory: false,
-                size: None,
-                modified: None,
-            },
-        )]);
-        let item = &desktop.layout.items()[0];
-        let hit = nickel_file::desktop::Point {
-            x: item.position.x + 4.0,
-            y: item.position.y + 4.0,
-        };
-        desktop.icon_cache.insert(
-            path,
-            Arc::new(RgbaImage::from_pixel(4, 4, Rgba([17, 61, 119, 255]))),
-        );
-        let mut shell = LiveShell::new().unwrap();
-        shell.desktop_host = UiHost::new(desktop, 400, 300);
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().commands().iter().any(|command| matches!(
-            command, nickel_ui::backend::PaintCommand::Image { id: 0x8000, .. }
-        )));
-        assert!(!shell.desktop_host.commands().iter().any(|command| matches!(
-            command, nickel_ui::backend::PaintCommand::Image { id: 10_000, .. }
-        )));
-        assert!(shell.desktop_host.accessibility_nodes().iter().any(|node|
-            node.semantic_role == Some(SemanticRole::GridCell)
-                && node.label.as_deref() == Some("plugin-tile.txt")
-        ));
-        assert!(shell.desktop_host.application_mut().pointer_press(hit, false, Default::default()));
-        assert!(!shell.desktop_host.application().layout.selected().is_empty());
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        let plugin_commands = shell.plugin_desktop_host.as_ref().unwrap().commands();
-        let painted_colors = plugin_commands.iter().filter_map(|command| match command {
-            nickel_ui::backend::PaintCommand::RoundedFill { color, .. }
-            | nickel_ui::backend::PaintCommand::TopRoundedFill { color, .. }
-            | nickel_ui::backend::PaintCommand::Fill { color, .. } => Some(*color),
-            _ => None,
-        }).collect::<Vec<_>>();
-        assert!(painted_colors.contains(&shell.palette.accent_soft),
-            "selected color {:x} absent from {painted_colors:x?}", shell.palette.accent_soft);
-
-        shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(shell.desktop_host.commands().iter().any(|command| matches!(
-            command, nickel_ui::backend::PaintCommand::Image { id: 10_000, .. }
-        )));
-        assert!(shell.desktop_host.accessibility_nodes().iter().any(|node|
-            node.semantic_role == Some(SemanticRole::GridCell)
-        ));
-        assert!(!shell.desktop_file_drop(std::path::Path::new("/desktop/ignored")));
-    }
-
-    #[test]
-    fn desktop_plugin_opens_only_the_current_projected_tile() {
-        use std::{ffi::OsString, path::PathBuf, time::Instant};
-
-        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
-        let mut desktop = super::DesktopApplication::fixture(None, palette);
-        let (file_host, requests) = crate::file_window_host::internal_file_window_channel();
-        desktop.file_window_host = file_host;
-        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
-            id: "primary".into(),
-            primary: true,
-            work_area: nickel_file::desktop::Rect {
-                x: 0.0, y: 0.0, width: 400.0, height: 300.0,
-            },
-            scale: 1.0,
-        }]);
-        let path = PathBuf::from("/desktop/projected-folder");
-        let entry = nickel_file::FileEntry {
-            display_name_override: None,
-            name: OsString::from("projected-folder"),
-            path: path.clone(),
-            is_directory: true,
-            size: None,
-            modified: None,
-        };
-        desktop.layout.reconcile(vec![(
-            nickel_file::FileIdentity(7, 9),
-            entry.clone(),
-        )]);
-        let item = &desktop.layout.items()[0];
-        let point = nickel_file::desktop::Point {
-            x: item.position.x + 4.0,
-            y: item.position.y + 4.0,
-        };
-        let mut shell = LiveShell::new().unwrap();
-        shell.desktop_host = UiHost::new(desktop, 400, 300);
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(shell.desktop_host.application().plugin_background);
-
-        let entry_id = nickel_file::desktop::DesktopEntryId(nickel_file::FileIdentity(7, 9));
-        shell
-            .desktop_host
-            .application_mut()
-            .update(super::desktop::DesktopMessage::Context(entry_id));
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(shell
-            .desktop_host
-            .accessibility_nodes()
-            .iter()
-            .all(|node| node.label.as_deref() != Some("Rename")));
-        let menu_host = shell.plugin_desktop_host.as_ref().unwrap();
-        assert!(menu_host.inspect().open_overlay.is_some());
-        let rename = menu_host
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.label.as_deref() == Some("Rename"))
-            .expect("JSX desktop menu shows Rename")
-            .rect;
-        let menu_point = nickel_input::Point {
-            x: f64::from(rename.origin.x + rename.size.width / 2.0),
-            y: f64::from(rename.origin.y + rename.size.height / 2.0),
-        };
-        for (order, edge) in [
-            (1, nickel_input::KeyEdge::Pressed),
-            (2, nickel_input::KeyEdge::Released),
-        ] {
-            shell.desktop_input(nickel_input::InputEvent::Pointer(
-                nickel_input::PointerEvent::Button {
-                    device: nickel_input::DeviceId(1),
-                    order: nickel_input::EventOrder(order),
-                    button: nickel_input::PointerButton::Primary,
-                    edge,
-                    position: Some(menu_point),
-                },
-            ));
-        }
-        assert_eq!(
-            requests.try_recv().unwrap(),
-            nickel_file::FileWindowRequest::Open(nickel_file::FileLaunch::Rename(path.clone()))
-        );
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        shell
-            .desktop_host
-            .application_mut()
-            .update(super::desktop::DesktopMessage::Context(entry_id));
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_some());
-        for (order, edge) in [
-            (3, nickel_input::KeyEdge::Pressed),
-            (4, nickel_input::KeyEdge::Released),
-        ] {
-            shell.desktop_input(nickel_input::InputEvent::Pointer(
-                nickel_input::PointerEvent::Button {
-                    device: nickel_input::DeviceId(1),
-                    order: nickel_input::EventOrder(order),
-                    button: nickel_input::PointerButton::Primary,
-                    edge,
-                    position: Some(nickel_input::Point { x: 390.0, y: 290.0 }),
-                },
-            ));
-        }
-        assert!(shell.desktop_host.application().context_menu.is_none());
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_none());
-
-        let now = Instant::now();
-        for click in 0..2 {
-            assert!(shell.desktop_host.application_mut().pointer_press(point, false, Default::default()));
-            assert!(shell.desktop_host.application_mut().pointer_release(
-                point,
-                now + std::time::Duration::from_millis(click * 100),
-            ));
-        }
-        assert!(requests.try_recv().is_err());
-        assert!(shell.dispatch_desktop_plugin_open());
-        assert_eq!(
-            requests.try_recv().unwrap(),
-            nickel_file::FileWindowRequest::OpenOrFocus(
-                nickel_file::FileLaunch::Browse(path.clone()),
-            )
-        );
-        assert!(requests.try_recv().is_err());
-
-        assert!(shell.desktop_controller(ControllerAction::Confirm));
-        assert_eq!(
-            requests.try_recv().unwrap(),
-            nickel_file::FileWindowRequest::OpenOrFocus(
-                nickel_file::FileLaunch::Browse(path.clone()),
-            )
-        );
-        assert!(shell.desktop_input(nickel_input::InputEvent::Key(nickel_input::KeyEvent {
-            device: nickel_input::DeviceId(1),
-            order: nickel_input::EventOrder(90),
-            physical: nickel_input::PhysicalKey::Code(KeyCode::Enter),
-            logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::Enter),
-            location: nickel_input::KeyLocation::Standard,
-            edge: nickel_input::KeyEdge::Pressed,
-            repeat: false,
-            modifiers: nickel_input::ModifierState::default(),
-        })));
-        assert_eq!(
-            requests.try_recv().unwrap(),
-            nickel_file::FileWindowRequest::OpenOrFocus(
-                nickel_file::FileLaunch::Browse(path.clone()),
-            )
-        );
-        let accessible = shell.desktop_host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-            role: SemanticRole::GridCell,
-            name: "projected-folder".into(),
-        }).unwrap();
-        shell.desktop_host.handle_event(UiEvent::AccessibilityActivate(accessible.id));
-        assert!(shell.dispatch_desktop_plugin_open());
-        assert_eq!(
-            requests.try_recv().unwrap(),
-            nickel_file::FileWindowRequest::OpenOrFocus(
-                nickel_file::FileLaunch::Browse(path.clone()),
-            )
-        );
-        assert!(requests.try_recv().is_err());
-
-        shell.desktop_host.application_mut().update(super::desktop::DesktopMessage::Rename(
-            nickel_file::desktop::DesktopEntryId(nickel_file::FileIdentity(7, 9)),
-        ));
-        assert!(requests.try_recv().is_err());
-        assert!(shell.dispatch_desktop_plugin_file_action());
-        assert_eq!(
-            requests.try_recv().unwrap(),
-            nickel_file::FileWindowRequest::Open(nickel_file::FileLaunch::Rename(path.clone()))
-        );
-        shell.desktop_host.application_mut().layout.reconcile(Vec::new());
-        assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::DesktopOpen { id: "7:9".into() },
-        ]));
-        assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::DesktopSelect { id: "7:9".into() },
-        ]));
-        assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::DesktopMove {
-                id: "7:9".into(), dx: 96.0, dy: 0.0,
-            },
-        ]));
-        assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::DesktopFileAction {
-                id: "7:9".into(),
-                action: nickel_file::desktop::DesktopContextAction::Rename,
-            },
-        ]));
-        assert!(requests.try_recv().is_err());
-
-        shell.desktop_host.application_mut().layout.reconcile(vec![(
-            nickel_file::FileIdentity(7, 9), entry,
-        )]);
-        shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
-        shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::DesktopOpen { id: "7:9".into() },
-        ]));
-        assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::DesktopSelect { id: "7:9".into() },
-        ]));
-        assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::DesktopMove {
-                id: "7:9".into(), dx: 96.0, dy: 0.0,
-            },
-        ]));
-        assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::DesktopFileAction {
-                id: "7:9".into(),
-                action: nickel_file::desktop::DesktopContextAction::Rename,
-            },
-        ]));
-        assert!(requests.try_recv().is_err());
-        assert!(shell.desktop_host.application().pending_plugin_open.is_none());
-        assert!(!shell.desktop_controller(ControllerAction::Confirm));
-        assert!(requests.try_recv().is_err());
-        assert!(shell.desktop_host.application().pending_plugin_open.is_none());
-    }
-
-    #[test]
     fn desktop_overflow_plane_is_scrollable_hittable_and_focus_revealable() {
         use std::{ffi::OsString, path::PathBuf};
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
@@ -378,7 +88,6 @@
             nickel_file::desktop::Point { x: -400.0, y: 0.0 },
             1.0,
         );
-        desktop.plugin_background = true;
         let _ = desktop.prepare_icons();
         let mut host = UiHost::new(desktop, 400, 600);
         let entry = host
@@ -758,7 +467,7 @@
         assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 1)));
         shell.scene(SurfaceRole::Desktop, 800, 600);
         assert!(shell.desktop_host.application().context_menu.is_some());
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_some());
+        assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
         let _ = shell.desktop_input(button(nickel_input::KeyEdge::Released, 2));
         let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
@@ -772,7 +481,7 @@
 
         assert!(shell.desktop_host.application().layout.icons_visible());
         assert!(shell.desktop_host.application().context_menu.is_some());
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_some());
+        assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
         let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Button {
@@ -783,16 +492,16 @@
                 position: Some(nickel_input::Point { x: 750.0, y: 550.0 }),
             },
         ));
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_none());
+        assert!(shell.desktop_host.inspect().open_overlay.is_none());
         assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 5)));
         shell.scene(SurfaceRole::Desktop, 800, 600);
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_some());
+        assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
         assert!(shell.desktop_input(nickel_input::InputEvent::FocusLost {
             order: nickel_input::EventOrder(6),
         }));
         assert!(shell.desktop_host.application().context_menu.is_none());
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().open_overlay.is_none());
+        assert!(shell.desktop_host.inspect().open_overlay.is_none());
     }
 
     #[test]
@@ -912,13 +621,9 @@
             ))
             .iter()
             .any(|overlay| matches!(overlay, FrameOverlay::Menu(_)));
-        let plugin_menu_visible = shell
-            .plugin_desktop_host
-            .as_ref()
-            .is_some_and(|host| host.inspect().open_overlay.is_some());
         assert!(
-            native_menu_visible || plugin_menu_visible,
-            "the owner output must restore its native background or plugin file menu"
+            native_menu_visible,
+            "the owner output must restore its native desktop menu"
         );
         let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Motion {
@@ -1158,13 +863,11 @@
         shell.scene(SurfaceRole::Desktop, 800, 600);
 
         let rename = shell
-            .plugin_desktop_host
-            .as_ref()
-            .unwrap()
+            .desktop_host
             .accessibility_nodes()
             .iter()
             .find(|node| node.label.as_deref() == Some("Rename"))
-            .expect("the JSX desktop host exposes the rendered Rename row")
+            .expect("the native desktop host exposes the rendered Rename row")
             .rect;
         let point = nickel_input::Point {
             x: (rename.origin.x + rename.size.width / 2.0) as f64,
@@ -1189,7 +892,7 @@
             3,
             point,
         )));
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().pointer_capture.is_some());
+        assert!(shell.desktop_host.inspect().pointer_capture.is_some());
         assert!(shell.desktop_host.application().pointer_down.is_none());
         assert_eq!(
             shell.desktop_host.application().layout.active(),
@@ -1203,7 +906,7 @@
             point,
         )));
         assert!(shell.desktop_host.application().context_menu.is_none());
-        assert!(shell.plugin_desktop_host.as_ref().unwrap().inspect().pointer_capture.is_none());
+        assert!(shell.desktop_host.inspect().pointer_capture.is_none());
         assert!(shell.desktop_host.application().pointer_down.is_none());
         assert_eq!(
             shell.desktop_host.application().layout.active(),
@@ -1269,7 +972,6 @@
         use std::{ffi::OsString, path::PathBuf};
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
         let mut desktop = super::DesktopApplication::fixture(None, palette);
-        desktop.plugin_background = true;
         desktop.layout.reconcile(vec![(
             nickel_file::FileIdentity(12, 3),
             nickel_file::FileEntry {
@@ -1335,7 +1037,7 @@
     }
 
     #[test]
-    fn desktop_live_drag_commits_through_the_plugin_move_request() {
+    fn desktop_live_drag_commits_through_native_input() {
         use std::{ffi::OsString, path::PathBuf};
 
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
@@ -1364,7 +1066,6 @@
         let mut shell = LiveShell::new().unwrap();
         shell.desktop_host = UiHost::new(desktop, 400, 300);
         shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(shell.desktop_host.application().plugin_background);
 
         let x = f64::from(start.x + 4.0);
         let y = f64::from(start.y + 4.0);
@@ -1392,123 +1093,18 @@
             shell.desktop_host.application().layout.items()[0].position.x,
             start.x + cell_width * 2.0,
         );
-        assert!(shell.desktop_host.application().pending_plugin_move.is_none());
     }
 
     #[test]
-    fn desktop_background_menu_uses_jsx_for_controller_input() {
+    fn desktop_background_menu_uses_native_overlay_for_controller_input() {
         let mut shell = LiveShell::new().unwrap();
         shell.scene(SurfaceRole::Desktop, 800, 600);
         assert!(shell.desktop_controller(ControllerAction::ContextMenu));
         shell.scene(SurfaceRole::Desktop, 800, 600);
-        let host = shell.plugin_desktop_host.as_ref().unwrap();
-        assert!(host.inspect().open_overlay.is_some());
-        assert!(host.accessibility_nodes().iter().any(|node| node.label.as_deref() == Some("View")));
         assert!(shell.desktop_host.application().context_menu.is_some());
         assert!(shell.desktop_host.application().frame_overlays(ViewContext::new(
             Rect::new(0.0, 0.0, 800.0, 600.0), InputModality::Controller,
-        )).iter().all(|overlay| !matches!(overlay, FrameOverlay::Menu(_))));
-    }
-
-    #[test]
-    fn desktop_background_menu_uses_jsx_submenu_and_typed_visibility_action() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.desktop_host.application_mut().persist_layout = false;
-        shell
-            .desktop_host
-            .application_mut()
-            .layout
-            .set_icons_visible(true);
-        shell.set_file_clipboard_available(false);
-        shell.set_desktop_output("primary".into(), 0.0, 0.0, 1.0);
-        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
-        shell
-            .desktop_host
-            .application_mut()
-            .open_background_context(Some(nickel_file::desktop::Point { x: 500.0, y: 160.0 }));
-        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
-        let menu_host = shell.plugin_desktop_host.as_ref().unwrap();
-        assert!(menu_host.inspect().open_overlay.is_some());
-        assert!(!menu_host
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.label.as_deref() == Some("Paste"))
-            .expect("JSX background menu exposes Paste")
-            .enabled);
-        assert!(shell
-            .desktop_host
-            .application()
-            .frame_overlays(ViewContext::new(
-                Rect::new(0.0, 0.0, 800.0, 600.0),
-                InputModality::Pointer,
-            ))
-            .iter()
-            .all(|overlay| !matches!(overlay, FrameOverlay::Menu(_))));
-        let view = menu_host
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.label.as_deref() == Some("View"))
-            .expect("JSX background menu exposes View")
-            .rect;
-        assert!(view.origin.x >= 450.0, "menu should follow the context point");
-        let view_point = nickel_input::Point {
-            x: f64::from(view.origin.x + view.size.width / 2.0),
-            y: f64::from(view.origin.y + view.size.height / 2.0),
-        };
-        let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Motion {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(1),
-                position: view_point,
-                delta: None,
-            },
-        ));
-        let hide = shell
-            .plugin_desktop_host
-            .as_ref()
-            .unwrap()
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.label.as_deref() == Some("Hide desktop icons"))
-            .expect("View submenu exposes JSX visibility action")
-            .rect;
-        let point = nickel_input::Point {
-            x: f64::from(hide.origin.x + hide.size.width / 2.0),
-            y: f64::from(hide.origin.y + hide.size.height / 2.0),
-        };
-        for (order, edge) in [nickel_input::KeyEdge::Pressed, nickel_input::KeyEdge::Released]
-            .into_iter()
-            .enumerate()
-        {
-            let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
-                nickel_input::PointerEvent::Button {
-                    device: nickel_input::DeviceId(1),
-                    order: nickel_input::EventOrder(order as u64 + 2),
-                    button: nickel_input::PointerButton::Primary,
-                    edge,
-                    position: Some(point),
-                },
-            ));
-        }
-        assert!(!shell.desktop_host.application().layout.icons_visible());
-        assert!(shell.desktop_host.application().context_menu.is_none());
-    }
-
-    #[test]
-    fn desktop_plugin_background_action_rejects_unavailable_and_stale_commands() {
-        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
-        let mut desktop = super::DesktopApplication::fixture(None, palette);
-        desktop.open_background_context(None);
-        assert!(!desktop.apply_background_plugin_action(
-            crate::plugin_panel::DesktopBackgroundAction::Paste
-        ));
-        assert!(desktop.context_menu.is_some());
-        desktop.topology_generation = desktop.topology_generation.wrapping_add(1);
-        assert!(desktop.apply_background_plugin_action(
-            crate::plugin_panel::DesktopBackgroundAction::ToggleIcons
-        ));
-        assert!(desktop.layout.icons_visible());
-        assert!(desktop.context_menu.is_none());
+        )).iter().any(|overlay| matches!(overlay, FrameOverlay::Menu(_))));
     }
 
     #[test]
