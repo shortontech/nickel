@@ -3304,6 +3304,27 @@ impl PluginPanelApplication {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn on_screen_keyboard_with_test_source(
+        source: &str,
+        data: &Value,
+    ) -> Result<Self, String> {
+        Self::new_with_manifest(
+            source,
+            on_screen_keyboard_manifest(),
+            Some(data.to_string()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn codex_projects_with_test_source(
+        source: &str,
+        projection: &ProjectMenuProjection,
+    ) -> Result<Self, String> {
+        let data = serde_json::to_string(projection).map_err(|error| error.to_string())?;
+        Self::new_with_manifest(source, codex_projects_manifest(), Some(data))
+    }
+
     pub fn sync_screenshot_data(&mut self, data: &Value) -> Result<bool, String> {
         if self.manifest.id != screenshot_manifest().id {
             return Err("this plugin is not the screenshot tool".into());

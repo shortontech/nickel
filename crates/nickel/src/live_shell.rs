@@ -1226,19 +1226,24 @@ impl LiveShell {
         {
             Ok(changed) => changed,
             Err(error) => {
-                tracing::warn!(%error, "Codex project plugin projection failed");
+                self.fail_extra_panel_plugin_runtime(&key.plugin_id, error);
                 return false;
             }
         };
         if !changed {
             return false;
         }
-        host.step(HostBatch {
+        let outcome = host.step(HostBatch {
             application_changed: true,
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
-        })
-        .changed
+        });
+        let failure = host.application_mut().take_runtime_failure();
+        if let Some(error) = failure {
+            self.fail_extra_panel_plugin_runtime(&key.plugin_id, error);
+            return false;
+        }
+        outcome.changed
     }
 
     pub(crate) fn take_codex_menu_requests(&mut self) -> Vec<CodexMenuRequest> {
@@ -3988,56 +3993,62 @@ impl LiveShell {
             .then(|| self.keyboard_plugin_data());
         let screenshot = (*key == crate::plugin_panel::screenshot_surface_key())
             .then(|| self.screenshot.plugin_presentation(width, height));
-        let (_, host) = self.plugin_panel_extra_hosts.get_mut(key)?;
-        let keyboard_changed = keyboard_data.is_some_and(|data| {
-            host.application_mut()
-                .sync_on_screen_keyboard_data(&data)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "keyboard plugin projection failed");
+        let result = (|| {
+            let (_, host) = self.plugin_panel_extra_hosts.get_mut(key)?;
+            let projected = (|| -> Result<bool, String> {
+                let keyboard_changed = keyboard_data
+                    .as_ref()
+                    .map(|data| host.application_mut().sync_on_screen_keyboard_data(data))
+                    .transpose()?
+                    .unwrap_or(false);
+                let screenshot_changed = if let Some(presentation) = screenshot {
+                    let data_changed = host
+                        .application_mut()
+                        .sync_screenshot_data(&presentation.data)?;
+                    let mut images = crate::plugin_panel::PluginImages::new();
+                    if let Some(image) = presentation.image {
+                        images.insert("capture".into(), (65_000, image));
+                    }
+                    data_changed | host.application_mut().sync_images(images)
+                } else {
                     false
-                })
-        });
-        let screenshot_changed = screenshot.is_some_and(|presentation| {
-            let data_changed = host
-                .application_mut()
-                .sync_screenshot_data(&presentation.data)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "screenshot plugin projection failed");
-                    false
-                });
-            let mut images = crate::plugin_panel::PluginImages::new();
-            if let Some(image) = presentation.image {
-                images.insert("capture".into(), (65_000, image));
+                };
+                let slots_changed = slots
+                    .as_ref()
+                    .map(|slots| host.application_mut().sync_external_slots(slots))
+                    .transpose()?
+                    .unwrap_or(false);
+                Ok(keyboard_changed || screenshot_changed || slots_changed)
+            })();
+            let projected = match projected {
+                Ok(changed) => changed,
+                Err(error) => return Some(Err(error)),
+            };
+            let outcome = host.step(HostBatch {
+                application_changed: projected,
+                surface_size: Some((width, height)),
+                ..HostBatch::default()
+            });
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                return Some(Err(error));
             }
-            data_changed | host.application_mut().sync_images(images)
-        });
-        let slots_changed = slots
-            .as_ref()
-            .map(|slots| host.application_mut().sync_external_slots(slots))
-            .unwrap_or(Ok(false));
-        let slots_changed = match slots_changed {
-            Ok(changed) => changed,
+            let commands = host.commands().to_vec();
+            let image_bytes = host.application_mut().retained_image_bytes();
+            Some(Ok((
+                commands,
+                (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
+            )))
+        })()?;
+        match result {
+            Ok((commands, bytes)) => {
+                self.record_plugin_panel_memory(key, bytes);
+                Some(commands)
+            }
             Err(error) => {
-                if self.fail_installed_plugin_runtime(&key.plugin_id, error.clone()) {
-                    return None;
-                }
-                tracing::warn!(plugin = key.plugin_id, %error, "plugin slot projection failed");
-                false
+                self.fail_extra_panel_plugin_runtime(&key.plugin_id, error);
+                None
             }
-        };
-        let (_, host) = self.plugin_panel_extra_hosts.get_mut(key)?;
-        let outcome = host.step(HostBatch {
-            application_changed: slots_changed || keyboard_changed || screenshot_changed,
-            surface_size: Some((width, height)),
-            ..HostBatch::default()
-        });
-        let commands = host.commands().to_vec();
-        let image_bytes = host.application_mut().retained_image_bytes();
-        self.record_plugin_panel_memory(
-            key,
-            (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
-        );
-        Some(commands)
+        }
     }
 
     pub(crate) fn plugin_panel_scene_for_output(
@@ -4750,6 +4761,56 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
+    fn retire_extra_panel_plugin_state(&mut self, id: &str) {
+        self.plugin_panel_extra_hosts
+            .retain(|key, _| key.plugin_id != id);
+        self.plugin_panel_memory
+            .retain(|key, _| key.plugin_id != id);
+        if id == crate::plugin_panel::codex_projects_manifest().id {
+            self.codex_project_menu_visible = false;
+            self.codex_menu_requests.clear();
+        } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
+            self.keyboard_gesture_leases.clear();
+        } else if id == crate::plugin_panel::screenshot_manifest().id {
+            self.screenshot.hide();
+            self.screenshot_capture_pending = false;
+            self.screenshot_output = None;
+            #[cfg(target_os = "linux")]
+            {
+                self.active_window_capture = None;
+            }
+            self.set_screenshot_focus(false);
+        }
+    }
+
+    fn retire_codex_projects_plugin_state(&mut self) {
+        self.retire_extra_panel_plugin_state(&crate::plugin_panel::codex_projects_manifest().id);
+    }
+
+    fn retire_keyboard_plugin_state(&mut self) {
+        self.retire_extra_panel_plugin_state(
+            &crate::plugin_panel::on_screen_keyboard_manifest().id,
+        );
+    }
+
+    fn retire_screenshot_plugin_state(&mut self) {
+        self.retire_extra_panel_plugin_state(&crate::plugin_panel::screenshot_manifest().id);
+    }
+
+    fn fail_extra_panel_plugin_runtime(&mut self, id: &str, error: String) -> bool {
+        let retire = if id == crate::plugin_panel::codex_projects_manifest().id {
+            Self::retire_codex_projects_plugin_state as fn(&mut Self)
+        } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
+            Self::retire_keyboard_plugin_state
+        } else if id == crate::plugin_panel::screenshot_manifest().id {
+            Self::retire_screenshot_plugin_state
+        } else {
+            return self.fail_installed_plugin_runtime(id, error);
+        };
+        self.fail_bundled_plugin_runtime(id, error, retire);
+        true
+    }
+
     fn retire_launcher_plugin_state(&mut self) {
         self.plugin_launcher_host = None;
         self.launcher_plugin_result_page = 0;
@@ -4999,19 +5060,11 @@ impl LiveShell {
             } else if id == crate::plugin_panel::control_center_manifest().id {
                 self.retire_control_plugin_state();
             } else if id == crate::plugin_panel::codex_projects_manifest().id {
-                self.codex_project_menu_visible = false;
-                self.codex_menu_requests.clear();
+                self.retire_codex_projects_plugin_state();
             } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
-                self.keyboard_gesture_leases.clear();
+                self.retire_keyboard_plugin_state();
             } else if id == crate::plugin_panel::screenshot_manifest().id {
-                self.screenshot.hide();
-                self.screenshot_capture_pending = false;
-                self.screenshot_output = None;
-                #[cfg(target_os = "linux")]
-                {
-                    self.active_window_capture = None;
-                }
-                self.set_screenshot_focus(false);
+                self.retire_screenshot_plugin_state();
             } else if id == crate::plugin_panel::window_preview_manifest().id {
                 self.retire_preview_plugin_state();
             } else if id == crate::plugin_panel::desktop_manifest().id {
@@ -6053,7 +6106,7 @@ impl LiveShell {
             )
         };
         if let Some(error) = failure
-            && self.fail_installed_plugin_runtime(&key.plugin_id, error)
+            && self.fail_extra_panel_plugin_runtime(&key.plugin_id, error)
         {
             return true;
         }
@@ -6129,7 +6182,7 @@ impl LiveShell {
             )
         };
         if let Some(error) = failure
-            && self.fail_installed_plugin_runtime(&key.plugin_id, error)
+            && self.fail_extra_panel_plugin_runtime(&key.plugin_id, error)
         {
             return true;
         }
@@ -6191,7 +6244,7 @@ impl LiveShell {
             )
         };
         if let Some(error) = failure
-            && self.fail_installed_plugin_runtime(&key.plugin_id, error)
+            && self.fail_extra_panel_plugin_runtime(&key.plugin_id, error)
         {
             return true;
         }

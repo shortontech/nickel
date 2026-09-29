@@ -825,6 +825,92 @@
     }
 
     #[test]
+    fn codex_menu_projection_failure_retires_its_plugin_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let key = crate::plugin_panel::codex_projects_surface_key();
+        let initial = nickel_codex_ui::ProjectMenuProjection::from_state(
+            &nickel_codex_ui::ChatState::default(),
+        );
+        let application = crate::plugin_panel::PluginPanelApplication::codex_projects_with_test_source(
+            "let renders = 0; function App() { if (++renders > 1) throw Error('Codex projection exploded'); return h(Panel, {}, h(Text, {}, 'Ready')); }",
+            &initial,
+        )
+        .unwrap();
+        let surface = crate::plugin_panel::codex_projects_manifest().surfaces[0].clone();
+        shell.plugin_panel_extra_hosts.insert(
+            key.clone(),
+            (surface.clone(), nickel_ui::UiHost::new(application, surface.width, surface.height)),
+        );
+        let mut state = nickel_codex_ui::ChatState::default();
+        state.status = nickel_codex_ui::ConnectionStatus::Ready;
+        let projection = nickel_codex_ui::ProjectMenuProjection::from_state(&state);
+        assert!(!shell.apply_codex_menu_projection(&projection));
+        let entry = shell.plugin_registry().get(&key.plugin_id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("Codex projection exploded")));
+        assert!(!shell.plugin_surface_matches(&key));
+        assert!(!shell.plugin_panel_extra_hosts.contains_key(&key));
+    }
+
+    #[test]
+    fn codex_menu_callback_failure_retires_its_plugin_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let key = crate::plugin_panel::codex_projects_surface_key();
+        let initial = nickel_codex_ui::ProjectMenuProjection::from_state(
+            &nickel_codex_ui::ChatState::default(),
+        );
+        let application = crate::plugin_panel::PluginPanelApplication::codex_projects_with_test_source(
+            "function App() { return h(Panel, {}, h(Button, {id:'explode', onClick: () => { throw Error('Codex callback exploded'); }}, 'Open project')); }",
+            &initial,
+        )
+        .unwrap();
+        let surface = crate::plugin_panel::codex_projects_manifest().surfaces[0].clone();
+        let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+        let target = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open project".into(),
+            })
+            .unwrap();
+        shell.plugin_panel_extra_hosts.insert(key.clone(), (surface.clone(), host));
+        assert!(shell.plugin_panel_host_ui_for(
+            &key,
+            UiEvent::AccessibilityActivate(target.id),
+            surface.width,
+            surface.height,
+        ));
+        let entry = shell.plugin_registry().get(&key.plugin_id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("Codex callback exploded")));
+        assert!(!shell.plugin_panel_extra_hosts.contains_key(&key));
+        assert!(!shell.plugin_surface_matches(&key));
+    }
+
+    #[test]
+    fn keyboard_projection_failure_retires_its_plugin_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let key = crate::plugin_panel::on_screen_keyboard_surface_key();
+        let data = shell.keyboard_plugin_data();
+        let application = crate::plugin_panel::PluginPanelApplication::on_screen_keyboard_with_test_source(
+            "let renders = 0; function App() { if (++renders > 1) throw Error('keyboard projection exploded'); return h(Panel, {}, h(Text, {}, 'Ready')); }",
+            &data,
+        )
+        .unwrap();
+        let surface = crate::plugin_panel::on_screen_keyboard_manifest().surfaces[0].clone();
+        shell.plugin_panel_extra_hosts.insert(
+            key.clone(),
+            (surface.clone(), nickel_ui::UiHost::new(application, surface.width, surface.height)),
+        );
+        shell.keyboard_visible = !shell.keyboard_visible;
+        assert!(shell.plugin_panel_scene(&key, surface.width, surface.height).is_none());
+        let entry = shell.plugin_registry().get(&key.plugin_id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("keyboard projection exploded")));
+        assert!(!shell.plugin_surface_matches(&key));
+        assert!(!shell.plugin_panel_extra_hosts.contains_key(&key));
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn keyboard_plugin_owns_ordinary_presentation_and_retires_to_host_fallback() {
         let mut shell = LiveShell::new().unwrap();
