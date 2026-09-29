@@ -54,6 +54,13 @@ struct Selector {
     kind: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
+    state: Option<InteractionState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractionState {
+    Hover,
+    Active,
 }
 
 impl Selector {
@@ -63,6 +70,7 @@ impl Selector {
             kind: None,
             id: None,
             classes: Vec::new(),
+            state: None,
         };
         while let Ok(token) = parser.next() {
             match token {
@@ -78,6 +86,13 @@ impl Selector {
                         .map_err(|_| "class selector needs an identifier")?;
                     selector.classes.push(name.to_string());
                 }
+                cssparser::Token::Colon if selector.state.is_none() => {
+                    selector.state = Some(match parser.expect_ident() {
+                        Ok(name) if name.eq_ignore_ascii_case("hover") => InteractionState::Hover,
+                        Ok(name) if name.eq_ignore_ascii_case("active") => InteractionState::Active,
+                        _ => return Err("unsupported plugin CSS pseudo-class".into()),
+                    });
+                }
                 _ => return Err("unsupported plugin CSS selector".into()),
             }
         }
@@ -87,8 +102,15 @@ impl Selector {
         Ok(selector)
     }
 
-    fn matches(&self, kind: &str, id: Option<&str>, class_name: Option<&str>) -> bool {
-        self.kind.as_deref().is_none_or(|selector| selector == kind)
+    fn matches(
+        &self,
+        kind: &str,
+        id: Option<&str>,
+        class_name: Option<&str>,
+        state: Option<InteractionState>,
+    ) -> bool {
+        self.state == state
+            && self.kind.as_deref().is_none_or(|selector| selector == kind)
             && self
                 .id
                 .as_deref()
@@ -500,6 +522,28 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                 return Err(ParseError::custom("too many declarations"));
             }
         }
+        if selectors.iter().any(|selector| selector.state.is_some()) {
+            if !selectors.iter().all(|selector| selector.state.is_some()) {
+                return Err(ParseError::custom(
+                    "state selectors cannot share a rule with ordinary selectors",
+                ));
+            }
+            if selectors
+                .iter()
+                .any(|selector| selector.kind.as_deref() != Some("button"))
+            {
+                return Err(ParseError::custom(
+                    "plugin CSS state selectors currently require button",
+                ));
+            }
+            if declarations.iter().any(
+                |declaration| !matches!(declaration, Declaration::Background(color) if *color != 0),
+            ) {
+                return Err(ParseError::custom(
+                    "plugin CSS :hover and :active currently require a nontransparent background",
+                ));
+            }
+        }
         Ok(Rule {
             selectors,
             declarations,
@@ -575,7 +619,7 @@ impl StyleSheet {
             if rule
                 .selectors
                 .iter()
-                .any(|selector| selector.matches(kind, id, class_name))
+                .any(|selector| selector.matches(kind, id, class_name, None))
             {
                 for declaration in &rule.declarations {
                     declaration.apply(&mut style);
@@ -583,6 +627,30 @@ impl StyleSheet {
             }
         }
         style
+    }
+
+    pub fn resolve_interaction_background(
+        &self,
+        kind: &str,
+        id: Option<&str>,
+        class_name: Option<&str>,
+        state: InteractionState,
+    ) -> Option<u32> {
+        let mut background = None;
+        for rule in &self.rules {
+            if rule
+                .selectors
+                .iter()
+                .any(|selector| selector.matches(kind, id, class_name, Some(state)))
+            {
+                for declaration in &rule.declarations {
+                    if let Declaration::Background(color) = declaration {
+                        background = Some(*color);
+                    }
+                }
+            }
+        }
+        background
     }
 
     pub fn estimated_retained_bytes(&self) -> u64 {
@@ -625,9 +693,52 @@ mod tests {
             "button { padding: 10000px }",
             "@import 'remote.css';",
             "button:hover { color: #fff }",
+            "button:focus { background: #fff }",
+            "button:hover { background: transparent }",
+            "div:hover { background: #fff }",
         ] {
             assert!(StyleSheet::compile(source).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn interaction_backgrounds_are_separate_from_base_styles() {
+        let css = StyleSheet::compile(
+            "button { background: #111; } button.primary:hover { background: #222; } \
+             button.primary:active { background: #333; }",
+        )
+        .unwrap();
+        assert_eq!(
+            css.resolve("button", None, Some("primary")).background,
+            Some(0xff111111)
+        );
+        assert_eq!(
+            css.resolve_interaction_background(
+                "button",
+                None,
+                Some("primary"),
+                InteractionState::Hover
+            ),
+            Some(0xff222222)
+        );
+        assert_eq!(
+            css.resolve_interaction_background(
+                "button",
+                None,
+                Some("primary"),
+                InteractionState::Active
+            ),
+            Some(0xff333333)
+        );
+        assert_eq!(
+            css.resolve_interaction_background(
+                "button",
+                None,
+                Some("other"),
+                InteractionState::Hover
+            ),
+            None
+        );
     }
 
     #[test]

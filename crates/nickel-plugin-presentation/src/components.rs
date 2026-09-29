@@ -14,7 +14,7 @@ use nickel_ui::{
 };
 use serde_json::Value;
 
-use crate::css::{ControlStyle, Display, FlexDirection, StyleSheet};
+use crate::css::{ControlStyle, Display, FlexDirection, InteractionState, StyleSheet};
 
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 
@@ -2674,6 +2674,22 @@ impl PanelNode {
                         ),
                         Message::drag,
                     ));
+                }
+                if let Some(background) = stylesheet.resolve_interaction_background(
+                    "button",
+                    Some(id),
+                    class_name.as_deref(),
+                    InteractionState::Hover,
+                ) {
+                    container = container.hover_background(background);
+                }
+                if let Some(background) = stylesheet.resolve_interaction_background(
+                    "button",
+                    Some(id),
+                    class_name.as_deref(),
+                    InteractionState::Active,
+                ) {
+                    container = container.pressed_background(background);
                 }
                 with_margin(
                     AnyView::new(apply_container_style(container.child(visual), &style)),

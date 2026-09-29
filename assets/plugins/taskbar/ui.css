@@ -29,6 +29,18 @@ button.task-button.is-active {
     border-color: #ffffff2e;
 }
 
+button.task-button:hover, button.launcher-button:hover,
+button.utility-button:hover, button.tray-button:hover,
+button.clock-button:hover {
+    background: #ffffff36;
+}
+
+button.task-button:active, button.launcher-button:active,
+button.utility-button:active, button.tray-button:active,
+button.clock-button:active {
+    background: #ffffff52;
+}
+
 button.clock-button {
     min-width: 120px;
 }
@@ -45,4 +57,12 @@ button.taskbar-menu-button {
     background: transparent;
     color: #f3f5f8;
     font-size: 14px;
+}
+
+button.taskbar-menu-button:hover {
+    background: #ffffff26;
+}
+
+button.taskbar-menu-button:active {
+    background: #ffffff40;
 }
