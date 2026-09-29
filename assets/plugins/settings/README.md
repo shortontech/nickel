@@ -18,9 +18,10 @@ retained Rust component trees and cached page projections, and the separate
 process publishes that lower bound to the shell while running. Boa heap, textures,
 the shared native Settings frame, and process RSS remain unattributed.
 
-`settings-pages.jsx` starts the bundled Settings process view migration. It
-currently renders the Keyboard Shortcuts and About cards through the shared
-runtime and a Settings-specific native adapter. Regenerate its shipped JS with:
+`settings-pages.jsx` renders the Keyboard Shortcuts and About cards through the
+same bounded component tree and native renderer as shell plugins. Their CSS is
+in `settings-pages.css`; Settings fills its theme color and spacing tokens when
+the appearance changes. Regenerate its shipped JS with:
 
 ```sh
 tsc --allowJs --checkJs false --noCheck --jsx react --jsxFactory h \

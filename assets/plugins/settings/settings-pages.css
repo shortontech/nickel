@@ -1,0 +1,41 @@
+div.settings-card {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: @content@px;
+    padding: @content@px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+}
+
+div.settings-row {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-height: 52px;
+    gap: @compact@px;
+    padding: @control@px;
+}
+
+text.settings-title {
+    height: auto;
+    color: @primary@;
+    font-size: 19px;
+    line-height: 24px;
+}
+
+text.settings-description,
+text.settings-value {
+    height: auto;
+    color: @secondary@;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+text.settings-label {
+    height: auto;
+    color: @primary@;
+    font-size: 14px;
+    line-height: 20px;
+}

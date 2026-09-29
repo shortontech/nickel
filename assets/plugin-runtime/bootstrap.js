@@ -153,6 +153,7 @@ function h(kind, props, ...children) {
         accessibilityLabel: props?.accessibilityLabel, state: props?.state, icon: props?.icon,
         showLabel: props?.showLabel, contextAction, dragAction, selectAction, moveAction, fileAction, closeAction,
         value: props?.value, placeholder: props?.placeholder, secure: props?.secure,
+        wrap: props?.wrap,
         maxLines: props?.maxLines,
         percent: props?.percent,
         children: children.flat(Infinity).filter(child => child !== null && child !== false)};

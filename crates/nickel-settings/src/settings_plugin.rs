@@ -1,99 +1,61 @@
 //! Ordinary Settings pages rendered by the shared JavaScript component runtime.
 
 use nickel_i18n::Localizer;
+use nickel_plugin_presentation::{
+    components::{PanelNode, PluginImages, render_panel},
+    css::StyleSheet,
+};
 use nickel_plugin_runtime::JsxRuntime;
-use nickel_ui::{AnyView, SemanticTheme, SettingsCard, SettingsRow};
+use nickel_ui::{AnyView, Component, SemanticTheme};
 use serde_json::{Value, json};
 
 use crate::SettingsMessage;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Page {
-    title: String,
-    description: String,
-    rows: Vec<Row>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Row {
-    label: String,
-    value: String,
-}
-
-impl Page {
-    fn parse(value: &Value) -> Result<Self, String> {
-        if value.get("kind").and_then(Value::as_str) != Some("settings-card") {
-            return Err("Settings page root must be a settings-card".into());
-        }
-        let title = required_text(value, "label")?;
-        let description = required_text(value, "value")?;
-        let children = value
-            .get("children")
-            .and_then(Value::as_array)
-            .ok_or("Settings card must contain rows")?;
-        if children.len() > 32 {
-            return Err("Settings card has too many rows".into());
-        }
-        let rows = children
-            .iter()
-            .map(|child| {
-                if child.get("kind").and_then(Value::as_str) != Some("settings-row") {
-                    return Err("Settings card child must be a settings-row".into());
-                }
-                Ok(Row {
-                    label: required_text(child, "label")?,
-                    value: required_text(child, "value")?,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok(Self {
-            title,
-            description,
-            rows,
-        })
+fn stylesheet(theme: SemanticTheme) -> Result<StyleSheet, String> {
+    let mut source = include_str!("../../../assets/plugins/settings/settings-pages.css").to_owned();
+    for (token, value) in [
+        ("@content@", format!("{}", theme.spacing.content)),
+        ("@compact@", format!("{}", theme.spacing.compact)),
+        ("@control@", format!("{}", theme.spacing.control)),
+        ("@radius@", format!("{}", theme.radii.card)),
+        (
+            "@card@",
+            format!("#{:06x}", theme.surfaces.card & 0x00ff_ffff),
+        ),
+        (
+            "@border@",
+            format!("#{:06x}", theme.surfaces.raised & 0x00ff_ffff),
+        ),
+        (
+            "@primary@",
+            format!("#{:06x}", theme.text.primary & 0x00ff_ffff),
+        ),
+        (
+            "@secondary@",
+            format!("#{:06x}", theme.text.secondary & 0x00ff_ffff),
+        ),
+    ] {
+        source = source.replace(token, &value);
     }
-
-    fn view(&self, theme: SemanticTheme) -> AnyView<SettingsMessage> {
-        let rows = self
-            .rows
-            .iter()
-            .map(|row| SettingsRow::new(theme, &row.label, &row.value))
-            .collect::<Vec<_>>();
-        AnyView::new(SettingsCard::titled(theme, &self.title, &self.description).children(rows))
-    }
-}
-
-fn required_text(value: &Value, key: &str) -> Result<String, String> {
-    let text = value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("Settings component is missing {key}"))?;
-    if text.chars().count() > 256 {
-        return Err(format!("Settings component {key} is too long"));
-    }
-    Ok(text.to_owned())
+    StyleSheet::compile(&source)
 }
 
 pub(super) struct OrdinaryPages {
     runtime: JsxRuntime,
     last_data: Option<String>,
-    page: Option<Page>,
+    node: Option<PanelNode>,
+    last_theme: Option<SemanticTheme>,
+    stylesheet: StyleSheet,
 }
 
 impl OrdinaryPages {
     pub(super) fn retained_bytes(&self) -> usize {
         self.last_data.as_ref().map_or(0, String::capacity)
-            + self.page.as_ref().map_or(0, |page| {
-                std::mem::size_of::<Page>()
-                    + page.title.capacity()
-                    + page.description.capacity()
-                    + page.rows.capacity() * std::mem::size_of::<Row>()
-                    + page
-                        .rows
-                        .iter()
-                        .map(|row| row.label.capacity() + row.value.capacity())
-                        .sum::<usize>()
-            })
+            + self
+                .node
+                .as_ref()
+                .map_or(0, |node| node.contribution_bytes() as usize)
+            + self.stylesheet.estimated_retained_bytes() as usize
     }
 
     pub(super) fn new() -> Result<Self, String> {
@@ -103,7 +65,9 @@ impl OrdinaryPages {
                 None,
             )?,
             last_data: None,
-            page: None,
+            node: None,
+            last_theme: None,
+            stylesheet: StyleSheet::default(),
         })
     }
 
@@ -115,15 +79,24 @@ impl OrdinaryPages {
         let data = serde_json::to_string(&data).map_err(|error| error.to_string())?;
         if self.last_data.as_deref() != Some(&data) {
             self.runtime.set_data(&data)?;
-            let page = self.runtime.render("__nickelRender()", Page::parse)?;
-            self.page = Some(page);
+            self.node = Some(render_panel(
+                &mut self.runtime,
+                crate::settings_package::manifest()?,
+                None,
+                "__nickelRender()",
+            )?);
             self.last_data = Some(data);
         }
-        Ok(self
-            .page
-            .as_ref()
-            .ok_or("Settings page is unavailable")?
-            .view(theme))
+        if self.last_theme != Some(theme) {
+            self.stylesheet = stylesheet(theme)?;
+            self.last_theme = Some(theme);
+        }
+        let node = self.node.as_ref().ok_or("Settings page is unavailable")?;
+        Ok(AnyView::new(
+            node.view(&PluginImages::new(), &self.stylesheet)
+                .into_element()
+                .map_message(|_| SettingsMessage::IgnoredPluginPresentation),
+        ))
     }
 
     pub(super) fn render_keyboard(
@@ -175,21 +148,106 @@ impl OrdinaryPages {
 mod tests {
     use super::*;
 
+    struct PageHost(AnyView<SettingsMessage>);
+
+    impl nickel_ui::Application for PageHost {
+        type Message = SettingsMessage;
+
+        fn update(&mut self, _message: Self::Message) {}
+
+        fn view(&self, _context: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
+            self.0.clone()
+        }
+    }
+
     #[test]
-    fn bundled_settings_pages_render_as_native_cards() {
+    fn bundled_settings_pages_render_through_shared_native_components() {
         let mut pages = OrdinaryPages::new().unwrap();
         let theme = crate::semantic_theme(nickel_core::theme::ThemePalette::from_appearance(
             nickel_core::theme::Appearance::default(),
         ));
         let localizer = Localizer::system();
         let keyboard = pages.render_keyboard(&localizer, theme).unwrap();
+        let host = nickel_ui::UiHost::new(PageHost(keyboard.clone()), 700, 500);
+        let title = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Text,
+                name: localizer.text("settings-keyboard-card-title"),
+            })
+            .unwrap();
+        let launcher = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Text,
+                name: localizer.text("settings-keyboard-open-launcher"),
+            })
+            .unwrap();
+        assert!(title.bounds.size.height >= 20.0);
+        assert!(launcher.bounds.origin.y > title.bounds.origin.y);
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(700, 500, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(700, 500, |x, y| {
+            let pixel = renderer.pixels()[(y * 700 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/settings-keyboard-shared.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
         let about = pages.render_about(&localizer, theme).unwrap();
         let _ = (keyboard, about);
-        assert_eq!(pages.page.as_ref().unwrap().rows.len(), 2);
+        assert!(matches!(
+            pages.node.as_ref(),
+            Some(PanelNode::Div { children, .. }) if children.len() == 4
+        ));
+        assert_eq!(
+            pages
+                .stylesheet
+                .resolve("div", None, Some("settings-card"))
+                .background,
+            Some(0xff00_0000 | theme.surfaces.card & 0x00ff_ffff)
+        );
+        let light = crate::semantic_theme(nickel_core::theme::ThemePalette::from_appearance(
+            nickel_core::theme::Appearance {
+                mode: nickel_core::theme::ThemeMode::Light,
+                ..nickel_core::theme::Appearance::default()
+            },
+        ));
+        let light_page = pages.render_keyboard(&localizer, light).unwrap();
+        assert_eq!(
+            pages
+                .stylesheet
+                .resolve("div", None, Some("settings-card"))
+                .background,
+            Some(0xff00_0000 | light.surfaces.card & 0x00ff_ffff)
+        );
+        let light_host = nickel_ui::UiHost::new(PageHost(light_page), 700, 500);
+        let mut light_renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(700, 500, 1.0);
+        light_host.render_software(&mut light_renderer);
+        let light_image =
+            image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(700, 500, |x, y| {
+                let pixel = light_renderer.pixels()[(y * 700 + x) as usize];
+                image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+            });
+        let light_output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/settings-keyboard-shared-light.png");
+        light_image.save(light_output).unwrap();
     }
 
     #[test]
-    fn invalid_settings_component_is_rejected() {
-        assert!(Page::parse(&json!({"kind":"settings-card","label":"A","value":"B","children":[{"kind":"button","label":"Apply"}]})).is_err());
+    fn old_settings_only_component_is_rejected_by_shared_renderer() {
+        let mut runtime = JsxRuntime::new(
+            "function App() { return h('settings-card', {label: 'Old'}); }",
+            None,
+        )
+        .unwrap();
+        assert!(
+            render_panel(
+                &mut runtime,
+                crate::settings_package::manifest().unwrap(),
+                None,
+                "__nickelRender()",
+            )
+            .is_err()
+        );
     }
 }

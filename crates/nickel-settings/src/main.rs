@@ -499,6 +499,7 @@ struct DefaultAppsDiscovery {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
+    IgnoredPluginPresentation,
     Navigate(SettingsPage),
     NavigateTarget(SettingsPage, String),
     ShowNavigation,
@@ -1554,6 +1555,7 @@ impl SettingsApp {
 
     fn handle_settings_message(&mut self, message: SettingsMessage) {
         match message {
+            SettingsMessage::IgnoredPluginPresentation => {}
             SettingsMessage::Navigate(page) => {
                 self.page = page;
                 self.retire_inactive_jsx(page);
