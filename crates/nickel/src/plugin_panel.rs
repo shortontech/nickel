@@ -2495,7 +2495,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-set-page")
-                            && self.manifest.id == launcher_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2549,7 +2548,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-launch-dashboard")
-                            && self.manifest.id == launcher_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2571,7 +2569,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-set-view")
-                            && self.manifest.id == launcher_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2590,7 +2587,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-toggle-pin")
-                            && self.manifest.id == launcher_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2617,7 +2613,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-open-project")
-                            && self.manifest.id == launcher_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2635,7 +2630,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-see-all-projects")
-                            && self.manifest.id == launcher_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2645,7 +2639,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-request-logout")
-                            && self.manifest.id == launcher_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -4953,6 +4946,82 @@ mod tests {
             granted.take_effects(),
             vec![PluginEffect::RetryApplicationPinSave]
         );
+    }
+
+    #[test]
+    fn external_plugins_use_launcher_actions_by_capability() {
+        for (name, action, capability, expected) in [
+            (
+                "page",
+                "{type: 'launcher-set-page', view: 'dashboard', page: 1}",
+                PluginCapability::ApplicationsRead,
+                PluginEffect::SetLauncherPage {
+                    dashboard: true,
+                    page: 1,
+                },
+            ),
+            (
+                "launch",
+                "{type: 'launcher-launch-dashboard', id: 'org.example.app'}",
+                PluginCapability::ApplicationsLaunch,
+                PluginEffect::LaunchDashboardApplication {
+                    id: "org.example.app".into(),
+                },
+            ),
+            (
+                "view",
+                "{type: 'launcher-set-view', view: 'applications'}",
+                PluginCapability::ApplicationsRead,
+                PluginEffect::SetLauncherView(LauncherView::Applications),
+            ),
+            (
+                "pin",
+                "{type: 'launcher-toggle-pin', id: 'org.example.app'}",
+                PluginCapability::ApplicationsPin,
+                PluginEffect::ToggleLauncherPin {
+                    id: "org.example.app".into(),
+                },
+            ),
+            (
+                "project",
+                "{type: 'launcher-open-project', id: 'project'}",
+                PluginCapability::ProjectsOpen,
+                PluginEffect::LauncherOpenProject {
+                    id: "project".into(),
+                },
+            ),
+            (
+                "projects",
+                "{type: 'launcher-see-all-projects'}",
+                PluginCapability::ProjectsRead,
+                PluginEffect::LauncherSeeAllProjects,
+            ),
+            (
+                "logout",
+                "{type: 'launcher-request-logout'}",
+                PluginCapability::SessionLogoutRequest,
+                PluginEffect::LauncherRequestLogout,
+            ),
+        ] {
+            let mut external_manifest = manifest().clone();
+            external_manifest.id = format!("org.example.launcher-action-{name}");
+            external_manifest.capabilities.clear();
+            let mut package = PluginPackage {
+                manifest: external_manifest,
+                images: Default::default(),
+                stylesheet: String::new(),
+                source: format!(
+                    "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%', onEscape: () => nickel.request({action})}}); }}"
+                ),
+            };
+            let mut denied = PluginPanelApplication::from_package(&package).unwrap();
+            denied.shortcut_outcome(Shortcut::Escape);
+            assert!(denied.take_effects().is_empty(), "{name}");
+            package.manifest.capabilities.push(capability);
+            let mut granted = PluginPanelApplication::from_package(&package).unwrap();
+            granted.shortcut_outcome(Shortcut::Escape);
+            assert_eq!(granted.take_effects(), vec![expected], "{name}");
+        }
     }
 
     #[test]

@@ -1843,6 +1843,30 @@
         assert_eq!(shell.launcher_persistence_attempts, 2);
     }
 
+    #[test]
+    fn granted_plugin_can_pin_catalog_app_outside_launcher_page() {
+        let directory = tempfile::tempdir().expect("temporary preferences directory");
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::default();
+        shell.launcher.set_query("no-such-application");
+        preferences_fixture(&mut shell, directory.path().join("launcher-preferences"));
+        assert!(shell.current_plugin_launcher_projection().results.is_empty());
+
+        assert!(shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::ToggleLauncherPin {
+                id: "firefox".into(),
+            }
+        ]));
+        assert!(shell.launcher.is_pinned("firefox"));
+        assert_eq!(shell.launcher_persistence_attempts, 1);
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::ToggleLauncherPin {
+                id: "org.example.missing".into(),
+            }
+        ]));
+        assert_eq!(shell.launcher_persistence_attempts, 1);
+    }
+
     fn launcher_scenario(
         launcher: &crate::launcher::Launcher,
         palette: nickel_core::theme::ThemePalette,

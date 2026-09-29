@@ -6451,17 +6451,11 @@ impl LiveShell {
                     }
                 }
                 crate::plugin_panel::PluginEffect::ToggleLauncherPin { id } => {
-                    let projection = self.current_plugin_launcher_projection();
-                    let visible = if projection.dashboard_visible {
-                        projection
-                            .dashboard
-                            .iter()
-                            .chain(projection.places.iter())
-                            .any(|item| item.id == id)
-                    } else {
-                        projection.results.iter().any(|item| item.id == id)
-                    };
-                    if visible {
+                    if self
+                        .launcher
+                        .applications()
+                        .any(|application| application.id() == id)
+                    {
                         self.apply_launcher_action(LauncherAction::TogglePin(id));
                         changed = true;
                     }
