@@ -86,6 +86,10 @@ div.settings-detail {
     background: @window@;
 }
 
+div.settings-detail.pairing {
+    padding: 20px;
+}
+
 row.settings-heading {
     display: flex;
     align-items: center;

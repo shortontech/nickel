@@ -18,8 +18,9 @@ retained Rust component trees and cached page projections, and the separate
 process publishes that lower bound to the shell while running. Boa heap, textures,
 the shared native Settings frame, and process RSS remain unattributed.
 
-`settings-shell.jsx` owns the ordinary Settings `<Window>`, sidebar, search,
-page header, and responsive navigation. Its `<Slot id="settings-content" />`
+`settings-shell.jsx` owns the Settings `<Window>`, sidebar, search,
+page header, and responsive navigation. The Bluetooth pairing window uses the
+same root with its sidebar hidden. Its `<Slot id="settings-content" />`
 places the active page's native component tree inside the JSX layout. The
 controller path still uses native `ResponsiveNavigation` while controller
 presentation is a separate follow-up. Build its shipped JavaScript with the

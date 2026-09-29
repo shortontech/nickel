@@ -32,16 +32,18 @@ impl SettingsApp {
         let selected = destinations
             .iter()
             .find(|destination| destination.page == self.page);
+        let pairing = self.page == SettingsPage::BluetoothPair;
         let query = self.sidebar_query.trim().to_lowercase();
         let results = search_settings(&query, &entries);
         let data = serde_json::json!({
             "width": width, "height": height,
+            "pairing": pairing,
             "active": active.is_some(),
             "query": self.sidebar_query,
             "searchPlaceholder": self.localizer.text("settings-search-placeholder"),
             "noResults": self.localizer.text("settings-search-no-results"),
-            "title": selected.map_or("Settings", |destination| destination.title.as_str()),
-            "subtitle": selected.map_or("", |destination| destination.subtitle.as_str()),
+            "title": if pairing { self.localizer.text("settings-bluetooth-pair-title") } else { selected.map_or("Settings", |destination| destination.title.as_str()).to_owned() },
+            "subtitle": if pairing { self.localizer.text("settings-bluetooth-pair-subtitle") } else { selected.map_or("", |destination| destination.subtitle.as_str()).to_owned() },
             "destinations": destinations.iter().filter(|destination| destination.page != SettingsPage::BluetoothPair)
                 .map(|destination| serde_json::json!({
                     "id": destination.page.to_string(),
@@ -85,7 +87,6 @@ impl SettingsApp {
         modality: InputModality,
     ) -> AnyView<SettingsMessage> {
         if self.settings_jsx_enabled
-            && self.page != SettingsPage::BluetoothPair
             && modality != InputModality::Controller
             && let Ok(view) = self.settings_view_jsx(width, height)
         {

@@ -5267,13 +5267,31 @@ mod tests {
 
         let mut pairing = SettingsApp::with_initial_page(SettingsPage::BluetoothPair);
         pairing.bluetooth = settings.bluetooth;
-        let pairing_tree = pairing.build_ui(850.0, 900.0);
+        let pairing_tree = pairing.build_ui(620.0, 520.0);
+        assert!(
+            pairing.settings_shell.borrow().is_some(),
+            "pairing window must use the shared JSX Window root"
+        );
         let action = pairing_tree
             .accessibility_nodes()
             .iter()
             .find(|node| node.id.as_str().ends_with("bluetooth-device-0-action"))
             .expect("pair action");
         assert_eq!(action.label.as_deref(), Some("Pair"));
+        assert!(action.rect.origin.x >= 0.0);
+        assert!(action.rect.origin.x + action.rect.size.width <= 620.0);
+        assert!(action.rect.origin.y >= 0.0);
+        assert!(action.rect.origin.y + action.rect.size.height <= 520.0);
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(620, 520, 1.0);
+        renderer.render(pairing_tree.commands());
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(620, 520, |x, y| {
+            let pixel = renderer.pixels()[(y * 620 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/settings-bluetooth-pairing.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
         let pair_action = pairing
             .bluetooth_page
             .borrow()

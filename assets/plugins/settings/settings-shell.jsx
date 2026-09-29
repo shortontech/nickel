@@ -49,12 +49,13 @@ function SettingsNavigation() {
 function App() {
     const data = nickel.data || {};
     const wide = (data.width || 1100) >= 720;
-    const showNavigation = wide || !data.active;
-    const showContent = wide || data.active;
+    const pairing = !!data.pairing;
+    const showNavigation = !pairing && (wide || !data.active);
+    const showContent = pairing || wide || data.active;
     const request = (type, fields) => nickel.request(Object.assign({type}, fields || {}));
-    return <Window id="main" title="Nickel Settings" width="100%" height="100%"
+    return <Window id="main" title={pairing ? "Pair Bluetooth devices" : "Nickel Settings"} width="100%" height="100%"
         className="settings-window">
-        <div className={wide ? "settings-shell wide" : "settings-shell narrow"}>
+        <div className={pairing ? "settings-shell pairing" : wide ? "settings-shell wide" : "settings-shell narrow"}>
             {showNavigation ? <div className={wide ? "settings-sidebar" : "settings-sidebar narrow"}>
                 <TextField id="settings-sidebar-search" className="settings-search"
                     value={data.query || ""} placeholder={data.searchPlaceholder || "Search Settings"}
@@ -81,9 +82,9 @@ function App() {
                     </Column>
                 </ScrollView>
             </div> : null}
-            {showContent ? <div className="settings-detail">
+            {showContent ? <div className={pairing ? "settings-detail pairing" : "settings-detail"}>
                 <Row className="settings-heading">
-                    {!wide ? <Button id="settings-show-navigation" className="settings-back"
+                    {!wide && !pairing ? <Button id="settings-show-navigation" className="settings-back"
                         onClick={() => request("show-navigation")}>‹</Button> : null}
                     <Column>
                         <Text className="settings-title">{data.title || "Settings"}</Text>

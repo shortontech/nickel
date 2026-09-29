@@ -65,6 +65,8 @@ switch.bluetooth-switch.disabled-on {
 }
 
 button.bluetooth-action {
+    min-width: 72px;
+    flex-shrink: 0;
     height: 40px;
     padding: 8px 12px;
     background: @card@;
