@@ -1171,12 +1171,7 @@ fn pixel(color: Color) -> Pixel {
 }
 
 fn text_size(scale: f32) -> f32 {
-    match scale.round() as i32 {
-        0 | 1 => 12.0,
-        2 => 16.0,
-        3 => 22.0,
-        _ => 30.0,
-    }
+    crate::ui::text_font_size(scale)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1331,6 +1326,12 @@ mod tests {
     use nickel_core::resource_owner::{DependencyOwnerKind, dependency_owner_diagnostics};
 
     use super::{PaintCommand, Pixel, Rect, SoftwareRenderer, TextAlign, command_intersects_clip};
+
+    #[test]
+    fn exact_text_pixels_match_layout_font_size() {
+        assert_eq!(super::text_size(-14.0), 14.0);
+        assert_eq!(super::text_size(2.0), 16.0);
+    }
 
     fn label(styled: bool, scale: f32) -> PaintCommand {
         if styled {

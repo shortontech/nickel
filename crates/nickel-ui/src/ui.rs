@@ -1861,7 +1861,7 @@ fn measure_styled_text(
     })
 }
 
-fn text_font_size(scale: f32) -> f32 {
+pub(crate) fn text_font_size(scale: f32) -> f32 {
     if scale < 0.0 {
         return -scale;
     }

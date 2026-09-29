@@ -682,4 +682,10 @@ mod tests {
             assert!(StyleSheet::compile(css).is_err(), "{css}");
         }
     }
+
+    #[test]
+    fn bundled_taskbar_stylesheet_compiles() {
+        let source = include_str!("../../../assets/plugins/taskbar/ui.css");
+        StyleSheet::compile(source).unwrap();
+    }
 }

@@ -1685,6 +1685,16 @@ impl<Message> Container<Message> {
         self
     }
 
+    pub fn clear_background(mut self) -> Self {
+        self.0.style.background = None;
+        self
+    }
+
+    pub fn clear_border(mut self) -> Self {
+        self.0.style.border = None;
+        self
+    }
+
     pub fn interaction_backgrounds(
         mut self,
         hover: impl Into<Background>,

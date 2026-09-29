@@ -326,6 +326,26 @@ fn read_bundled_source(
         .map_err(|_| format!("development source {} is not UTF-8", path.display()))
 }
 
+fn bundled_stylesheet(
+    manifest: &PluginManifest,
+    fallback: &'static str,
+) -> Result<StyleSheet, String> {
+    let source = if let Some(root) = std::env::var_os("NICKEL_DEV_BUNDLED_PLUGIN_ROOT") {
+        let root = std::path::Path::new(&root);
+        if root.join(&manifest.id).exists() {
+            Cow::Owned(PluginPackage::load_stylesheet(
+                &root.join(&manifest.id),
+                manifest,
+            )?)
+        } else {
+            Cow::Borrowed(fallback)
+        }
+    } else {
+        Cow::Borrowed(fallback)
+    };
+    StyleSheet::compile(&source)
+}
+
 pub fn run_enabled() -> bool {
     true
 }
@@ -663,16 +683,26 @@ fn apply_container_style(
         container = container.padding(padding);
     }
     if let Some(background) = style.background {
-        container = container.background(background);
+        // A transparent CSS background means no paint command. Color 0 would
+        // otherwise be interpreted as legacy opaque RGB black by nickel-ui.
+        container = if background == 0 {
+            container.clear_background()
+        } else {
+            container.background(background)
+        };
     }
     if let Some(radius) = style.radius {
         container = container.radius(radius);
     }
     if style.border_width.is_some() || style.border_color.is_some() {
-        container = container.border(
-            style.border_color.unwrap_or(0xff000000),
-            style.border_width.unwrap_or(1.0),
-        );
+        container = if style.border_color == Some(0) {
+            container.clear_border()
+        } else {
+            container.border(
+                style.border_color.unwrap_or(0xff000000),
+                style.border_width.unwrap_or(1.0),
+            )
+        };
     }
     if let Some(grow) = style.grow {
         container = container.grow(grow);
@@ -3790,11 +3820,16 @@ impl PluginPanelApplication {
             "main.js",
             include_str!("../../../assets/plugins/taskbar/main.js"),
         )?;
-        Self::new_with_manifest(
+        let mut application = Self::new_with_manifest(
             source.as_ref(),
             taskbar_manifest(),
             Some(projection.to_json()),
-        )
+        )?;
+        application.stylesheet = bundled_stylesheet(
+            taskbar_manifest(),
+            include_str!("../../../assets/plugins/taskbar/ui.css"),
+        )?;
+        Ok(application)
     }
 
     #[cfg(test)]
@@ -6018,6 +6053,19 @@ mod tests {
             codex_available: false,
         };
         let app = PluginPanelApplication::taskbar_with_projection(&projection).unwrap();
+        assert!(matches!(
+            &app.node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            app.stylesheet
+                .resolve("window", Some("main"), Some("taskbar"))
+                .background,
+            Some(0xf2222730)
+        );
         let mut host = nickel_ui::UiHost::new(app, 600, 56);
         let bounds = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
@@ -6707,6 +6755,23 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    #[test]
+    fn transparent_css_button_does_not_paint_opaque_black() {
+        let source = "function App() { return h(Panel, {background: 0xff112233}, h(Button, {id: 'go', className: 'clear', onClick: () => {}}, 'Go')); }";
+        let mut application = PluginPanelApplication::new(source).unwrap();
+        application.stylesheet = StyleSheet::compile(
+            "button.clear { background: transparent; border: 1px solid transparent; }",
+        )
+        .unwrap();
+        let host = nickel_ui::UiHost::new(application, 320, 80);
+        assert!(!host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Fill { color: 0, .. }
+                | nickel_ui::backend::PaintCommand::RoundedFill { color: 0, .. }
+                | nickel_ui::backend::PaintCommand::Stroke { color: 0, .. }
+        )));
     }
 
     #[test]

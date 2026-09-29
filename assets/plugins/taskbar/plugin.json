@@ -5,6 +5,7 @@
   "author": "Nickel",
   "version": "0.1.0",
   "entry": "main.js",
+  "stylesheet": "ui.css",
   "surfaces": [
     {"id": "main", "kind": "panel", "width": 1920, "height": 56, "output": "all", "reserve_work_area": true}
   ],

@@ -28,6 +28,7 @@ function Task(props) {
         }
     };
     return <Button id={"taskbar-item-" + item.index}
+        className={item.active ? "task-button is-active" : "task-button"}
         accessibilityLabel={item.name}
         icon={item.icon ? "task:" + item.index : null}
         onDrag={onDrag}
@@ -45,7 +46,7 @@ function Task(props) {
 
 function TrayItem(props) {
     const item = props.item;
-    return <Button id={"taskbar-tray-" + item.id} accessibilityLabel={item.title}
+    return <Button id={"taskbar-tray-" + item.id} className="tray-button" accessibilityLabel={item.title}
         icon={item.icon ? "tray:" + item.id : null}
         onContextMenu={() => nickel.request({type: "taskbar-context-tray", id: item.id})}
         onClick={() => nickel.request({type: "taskbar-activate-tray", id: item.id})}>
@@ -57,9 +58,10 @@ function App() {
     const data = nickel.data;
     const items = data.items || [];
     const tray = data.tray || [];
-    return <Panel height={56} background={0xf1222730}>
-        <Row>
-            <Button id="taskbar-launcher" icon="logo" accessibilityLabel="Open Nickel Start"
+    return <FixedWindow width="100%" height={56} output="all" edge="bottom"
+        reserveWorkArea={true} className="taskbar">
+        <div className="taskbar-content">
+            <Button id="taskbar-launcher" className="launcher-button" icon="logo" accessibilityLabel="Open Nickel Start"
                 onClick={() => nickel.request({type: "taskbar-toggle-launcher"})}>Nickel</Button>
             {items.flatMap(item => [
                 <Task key={item.id} item={item} />,
@@ -67,14 +69,14 @@ function App() {
                     <Badge key={item.id + ":badge:" + index}
                         label={badge.label} count={badge.count} color={badge.color} />)
             ])}
-            <Spacer />
-            {data.keyboardEnabled ? <Button id="taskbar-keyboard" accessibilityLabel="On-screen keyboard"
+            <Spacer className="taskbar-spacer" />
+            {data.keyboardEnabled ? <Button id="taskbar-keyboard" className="utility-button" accessibilityLabel="On-screen keyboard"
                 onClick={() => nickel.request({type: "taskbar-toggle-keyboard"})}>⌨</Button> : null}
-            {data.codexAvailable ? <Button id="taskbar-codex" icon="codex" accessibilityLabel="Codex projects"
+            {data.codexAvailable ? <Button id="taskbar-codex" className="utility-button" icon="codex" accessibilityLabel="Codex projects"
                 onClick={() => nickel.request({type: "taskbar-toggle-codex"})}>Codex</Button> : null}
             {tray.map(item => <TrayItem key={item.id} item={item} />)}
-            <Button id="taskbar-control"
+            <Button id="taskbar-control" className="clock-button"
                 onClick={() => nickel.request({type: "taskbar-toggle-control"})}>{data.clock || ""}</Button>
-        </Row>
-    </Panel>;
+        </div>
+    </FixedWindow>;
 }
