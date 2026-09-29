@@ -2420,7 +2420,11 @@ impl PanelNode {
     }
 }
 
-fn parse_panel_for_manifest(value: &Value, manifest: &PluginManifest) -> Result<PanelNode, String> {
+fn parse_panel_for_manifest(
+    value: &Value,
+    manifest: &PluginManifest,
+    expected_surface_id: Option<&str>,
+) -> Result<PanelNode, String> {
     let node = PanelNode::parse(value)?;
     fn collect_windows<'a>(
         node: &'a PanelNode,
@@ -2472,6 +2476,12 @@ fn parse_panel_for_manifest(value: &Value, manifest: &PluginManifest) -> Result<
             return Err("Window must be the single top-level surface root".into());
         }
         let (request, width, height) = windows[0];
+        if expected_surface_id.is_some_and(|id| request.id != id) {
+            return Err(format!(
+                "window {:?} does not match its host surface",
+                request.id
+            ));
+        }
         request.validate(manifest, width, height)?;
     }
     Ok(node)
@@ -2480,10 +2490,11 @@ fn parse_panel_for_manifest(value: &Value, manifest: &PluginManifest) -> Result<
 fn render_panel(
     runtime: &mut JsxRuntime,
     manifest: &PluginManifest,
+    expected_surface_id: Option<&str>,
     expression: &str,
 ) -> Result<PanelNode, String> {
     runtime.render(expression, |value| {
-        parse_panel_for_manifest(value, manifest)
+        parse_panel_for_manifest(value, manifest, expected_surface_id)
     })
 }
 
@@ -2507,6 +2518,7 @@ pub struct PluginPanelApplication {
     last_error: Option<String>,
     runtime_failure: Option<String>,
     manifest: PluginManifest,
+    expected_surface_id: Option<String>,
     projection_data: Option<String>,
     launcher_shortcuts: Option<LauncherShortcutState>,
     notification_shortcuts: Option<(Option<u32>, bool)>,
@@ -3531,8 +3543,12 @@ impl PluginPanelApplication {
             },
         })
         .to_string();
-        let mut application =
-            Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
+        let mut application = Self::new_with_manifest_for_surface(
+            &package.source,
+            &package.manifest,
+            Some(data),
+            Some(&surface.id),
+        )?;
         application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
         application.sync_images(images);
         Ok(application)
@@ -3574,8 +3590,13 @@ impl PluginPanelApplication {
                                 .clone(),
                         );
                 }
-                Self::new_with_manifest(&package.source, &package.manifest, Some(data.to_string()))
-                    .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
+                Self::new_with_manifest_for_surface(
+                    &package.source,
+                    &package.manifest,
+                    Some(data.to_string()),
+                    Some(&surface.id),
+                )
+                .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
             }
         }
         Ok(())
@@ -3924,7 +3945,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -3938,7 +3964,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -3955,7 +3986,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -4023,7 +4059,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -4033,8 +4074,22 @@ impl PluginPanelApplication {
         manifest: &PluginManifest,
         data: Option<String>,
     ) -> Result<Self, String> {
+        Self::new_with_manifest_for_surface(source, manifest, data, None)
+    }
+
+    fn new_with_manifest_for_surface(
+        source: &str,
+        manifest: &PluginManifest,
+        data: Option<String>,
+        expected_surface_id: Option<&str>,
+    ) -> Result<Self, String> {
         let mut runtime = JsxRuntime::new(source, data.as_deref())?;
-        let node = render_panel(&mut runtime, manifest, "__nickelRender()")?;
+        let node = render_panel(
+            &mut runtime,
+            manifest,
+            expected_surface_id,
+            "__nickelRender()",
+        )?;
         Ok(Self {
             runtime,
             node,
@@ -4043,6 +4098,7 @@ impl PluginPanelApplication {
             last_error: None,
             runtime_failure: None,
             manifest: manifest.clone(),
+            expected_surface_id: expected_surface_id.map(str::to_owned),
             projection_data: data,
             launcher_shortcuts: None,
             notification_shortcuts: None,
@@ -4093,7 +4149,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -4119,7 +4180,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(data);
         self.launcher_shortcuts = Some(projection.into());
         Ok(true)
@@ -4137,7 +4203,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -4174,7 +4245,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -4195,7 +4271,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(data);
         self.notification_shortcuts = Some((
             projection.notification.as_ref().map(|item| item.id),
@@ -4216,7 +4297,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -4230,7 +4316,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -4244,7 +4335,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -4258,7 +4354,12 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
+        self.node = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            "__nickelRender()",
+        )?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -4455,7 +4556,12 @@ impl nickel_ui::Application for PluginPanelApplication {
             }
             PluginMessage::Scroll => unreachable!(),
         };
-        let rendered = render_panel(&mut self.runtime, &self.manifest, &expression);
+        let rendered = render_panel(
+            &mut self.runtime,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            &expression,
+        );
         let effects = self.runtime.take_effects();
         (|| match (rendered, effects) {
             (Ok(node), Ok(effects)) => {
@@ -6498,6 +6604,13 @@ mod tests {
         package.manifest.surfaces[0].reserve_work_area = false;
         package.source = "function App() { return h(Window, {id: 'main', width: 520, height: 340}, h(Button, {id: 'save', onClick: () => {}}, 'Save')); }".into();
         assert!(PluginPanelApplication::from_package(&package).is_ok());
+        let mut sibling = package.manifest.surfaces[0].clone();
+        sibling.id = "sibling".into();
+        package.manifest.surfaces.push(sibling.clone());
+        assert!(
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &sibling,)
+                .is_err()
+        );
         package.source = "function App() { return h(Panel, {}, h(Window, {id: 'main', width: 520, height: 340})); }".into();
         assert!(PluginPanelApplication::from_package(&package).is_err());
     }
