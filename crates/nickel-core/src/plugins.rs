@@ -550,6 +550,8 @@ pub struct PluginManifest {
     #[serde(default)]
     pub surfaces: Vec<PluginSurface>,
     #[serde(default)]
+    pub validation_data: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
     pub capabilities: Vec<PluginCapability>,
     #[serde(default)]
     pub provides_slots: Vec<PluginProvidedSlot>,
@@ -1036,6 +1038,21 @@ impl PluginManifest {
                 return Err(format!(
                     "surface {:?} can reserve work area only as an edge panel",
                     surface.id
+                ));
+            }
+        }
+        for (surface_id, data) in &self.validation_data {
+            if !ids.contains(surface_id) || !data.is_object() {
+                return Err(format!(
+                    "validation data for {surface_id:?} must name a declared surface and contain an object"
+                ));
+            }
+            if ["settings", "slots", "surface"]
+                .iter()
+                .any(|reserved| data.get(reserved).is_some())
+            {
+                return Err(format!(
+                    "validation data for {surface_id:?} cannot replace host-owned fields"
                 ));
             }
         }
@@ -1609,6 +1626,50 @@ mod tests {
         "surfaces": [{"id":"main","kind":"panel","width":360,"height":64,"bottom_offset":24,"output":"all"}],
         "capabilities": []
     }"#;
+
+    #[test]
+    fn validation_data_requires_a_declared_surface_and_cannot_shadow_host_data() {
+        let mut manifest = PluginManifest::from_json(VALID).unwrap();
+        manifest
+            .validation_data
+            .insert("main".into(), serde_json::json!({"title": "Sample"}));
+        manifest.validate().unwrap();
+
+        manifest
+            .validation_data
+            .insert("missing".into(), serde_json::json!({}));
+        assert!(
+            manifest
+                .validate()
+                .unwrap_err()
+                .contains("declared surface")
+        );
+        manifest.validation_data.remove("missing");
+
+        manifest
+            .validation_data
+            .insert("main".into(), serde_json::json!("Sample"));
+        assert!(
+            manifest
+                .validate()
+                .unwrap_err()
+                .contains("contain an object")
+        );
+
+        for reserved in ["settings", "slots", "surface"] {
+            let mut sample = serde_json::Map::new();
+            sample.insert(reserved.into(), serde_json::json!({}));
+            manifest
+                .validation_data
+                .insert("main".into(), serde_json::Value::Object(sample));
+            assert!(
+                manifest
+                    .validate()
+                    .unwrap_err()
+                    .contains("host-owned fields")
+            );
+        }
+    }
 
     #[test]
     fn anchored_overlay_manifest_is_bounded_and_placed_inside_output() {

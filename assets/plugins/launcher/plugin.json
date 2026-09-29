@@ -9,5 +9,14 @@
   "surfaces": [
     {"id": "main", "kind": "window", "width": 920, "height": 680}
   ],
+  "validation_data": {
+    "main": {
+      "query": "", "status": null, "dashboardVisible": false,
+      "view": "favorites", "resultPage": 0, "resultPageCount": 1,
+      "dashboardPage": 0, "dashboardPageCount": 1,
+      "results": [], "dashboard": [], "places": [], "projects": [],
+      "codexAvailable": false, "accountName": "User", "logoutAvailable": false
+    }
+  },
   "capabilities": ["applications-read", "applications-launch", "applications-pin", "launcher-show", "settings-show", "control-center-show", "projects-read", "projects-open", "session-logout-request"]
 }

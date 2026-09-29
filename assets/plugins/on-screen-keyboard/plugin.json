@@ -7,5 +7,12 @@
   "entry": "main.js",
   "stylesheet": "ui.css",
   "surfaces": [{"id":"main","kind":"overlay","width":1056,"height":368,"anchor":"bottom-left","passive":true}],
+  "validation_data": {
+    "main": {
+      "generation": 1, "height": 368, "dockTop": false,
+      "recipientAvailable": false,
+      "rows": [[{"id": "key-a", "label": "A", "quarters": 4, "enabled": true}]]
+    }
+  },
   "capabilities": ["on-screen-keyboard-input"]
 }

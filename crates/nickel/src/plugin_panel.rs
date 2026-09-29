@@ -1080,68 +1080,12 @@ fn launcher_plugin_result(
     })
 }
 
-/// Minimal host-owned data for validating a surface without a running shell.
-/// These fixtures exercise the same component parser as the live projection;
-/// they contain no user windows, files, or device state.
+/// A package may supply synthetic data for each surface's initial validation tree.
 fn validation_surface_projection(
     package: &PluginPackage,
     surface: &PluginSurface,
 ) -> Option<Value> {
-    let id = package.manifest.id.as_str();
-    if id == launcher_manifest().id {
-        return Some(serde_json::json!({
-            "query": "",
-            "status": null,
-            "dashboardVisible": false,
-            "view": "favorites",
-            "resultPage": 0,
-            "resultPageCount": 1,
-            "dashboardPage": 0,
-            "dashboardPageCount": 1,
-            "results": [],
-            "dashboard": [],
-            "places": [],
-            "projects": [],
-            "codexAvailable": false,
-            "accountName": "User",
-            "logoutAvailable": false,
-        }));
-    }
-    if id == control_center_manifest().id {
-        return Some(serde_json::json!({
-            "height": surface.height,
-            "scrollHeight": surface.height.saturating_sub(48).max(1),
-            "network": {"available": false, "enabled": false, "networks": []},
-            "bluetooth": {"available": false, "powered": false, "discovering": false, "devices": []},
-            "audio": {"muted": false, "percent": 50, "devices": []},
-            "workspaces": [],
-            "activeWorkspace": 0,
-            "sections": [],
-            "pendingProjection": false,
-            "projectionModes": [],
-        }));
-    }
-    if id == on_screen_keyboard_manifest().id {
-        return Some(serde_json::json!({
-            "generation": 1,
-            "height": surface.height,
-            "dockTop": false,
-            "recipientAvailable": false,
-            "rows": nickel_core::on_screen_keyboard::keyboard_display_rows(
-                nickel_core::on_screen_keyboard::KeyboardPanel::Letters,
-                nickel_core::on_screen_keyboard::VirtualModifiers::default(),
-                true,
-                false,
-            ),
-        }));
-    }
-    if id == window_preview_manifest().id {
-        return Some(serde_json::json!({ "windows": [] }));
-    }
-    if id == volume_osd_manifest().id {
-        return Some(serde_json::json!({ "label": "Volume", "percent": 50 }));
-    }
-    None
+    package.manifest.validation_data.get(&surface.id).cloned()
 }
 
 impl PluginPanelApplication {
@@ -3044,7 +2988,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_plugin_packages_validate_with_surface_projection_fixtures() {
+    fn bundled_plugin_packages_validate_with_manifest_sample_data() {
         for name in [
             "hello-panel",
             "taskbar",
@@ -3060,6 +3004,26 @@ mod tests {
             PluginPanelApplication::validate_package(&package)
                 .unwrap_or_else(|error| panic!("{name} validation failed: {error}"));
         }
+    }
+
+    #[test]
+    fn external_surface_validation_uses_manifest_sample_data() {
+        let mut package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap();
+        package.source = package.source.replace(
+            "h(Text, null, \"Window plugin\")",
+            "h(Text, null, nickel.data.sampleTitle.toUpperCase())",
+        );
+        assert!(PluginPanelApplication::validate_package(&package).is_err());
+
+        package.manifest.validation_data.insert(
+            "main".into(),
+            serde_json::json!({"sampleTitle": "Window plugin"}),
+        );
+        PluginPanelApplication::validate_package(&package).unwrap();
     }
 
     #[test]

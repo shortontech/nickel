@@ -7,5 +7,6 @@
   "entry": "main.js",
   "stylesheet": "ui.css",
   "surfaces": [{"id":"main","kind":"overlay","width":300,"height":214}],
+  "validation_data": {"main": {"windows": []}},
   "capabilities": ["windows-read", "windows-focus", "windows-context"]
 }

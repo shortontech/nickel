@@ -103,10 +103,12 @@ one surface-free taskbar badge, taskbar action, Control
 Center section, or installed-plugin widget/action contribution;
 `nickel-plugin validate <directory>` runs the same
 source compilation and checks without launching a shell.
-For bundled launcher, desktop, Control Center, preview, and volume surfaces,
-validation supplies bounded synthetic host data so their initial JSX tree can
-render without a live session. It checks the initial tree and manifest; use
-`dev` to exercise input, requested actions, and live state changes.
+If a surface needs data to render its initial JSX tree, add a
+`"validation_data"` object in `plugin.json` keyed by surface ID. Each value
+must be an object of synthetic sample values. Validation combines it with
+host-owned `settings`, `slots`, and `surface` data for that surface; sample
+data cannot replace those fields. This checks the initial tree and manifest;
+use `dev` to exercise input, requested actions, and live state changes.
 The bundled Run dialog is wholly rendered by its JS plugin. Disabling that
 plugin closes an open Run dialog; its shortcut stays inactive until the plugin
 is enabled again in Settings.
