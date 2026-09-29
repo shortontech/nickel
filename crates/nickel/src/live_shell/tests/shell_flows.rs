@@ -35,6 +35,53 @@
     }
 
     #[test]
+    fn installed_provider_projection_failure_retires_primary_panel() {
+        use nickel_core::plugins::{PluginPackage, PluginPackageDescriptor};
+
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-widget-host"
+        );
+        let package = PluginPackage::load(directory).unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .set_plugin_enabled(&crate::plugin_panel::manifest().id, false)
+            .unwrap();
+        shell.plugin_registry.register(package.manifest.clone()).unwrap();
+        shell.external_plugin_packages.insert(
+            package.manifest.id.clone(),
+            PluginPackageDescriptor {
+                directory: directory.into(),
+                manifest: package.manifest.clone(),
+                source_digest: package.source_digest(),
+            },
+        );
+        shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
+        assert_eq!(shell.plugin_panel_owner, package.manifest.id);
+
+        let mut failing = package.clone();
+        failing.source = "function App() { if (nickel.data.slots.metrics) throw Error('provider projection exploded'); return h(Panel, {}, h(Text, {}, 'Ready')); }".into();
+        let surface = &failing.manifest.surfaces[0];
+        let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(
+            &failing,
+            &Default::default(),
+            surface,
+        )
+        .unwrap();
+        shell.plugin_panel_host = Some(nickel_ui::UiHost::new(
+            application,
+            surface.width,
+            surface.height,
+        ));
+        assert!(shell.scene(SurfaceRole::Panel, surface.width, surface.height).is_empty());
+        let entry = shell.plugin_registry().get(&package.manifest.id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("provider projection exploded")));
+        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+        assert!(shell.plugin_panel_host.is_none());
+    }
+
+    #[test]
     fn desktop_projection_failure_retires_its_plugin_host() {
         let mut shell = LiveShell::new().unwrap();
         let application = crate::plugin_panel::PluginPanelApplication::desktop_with_test_source(

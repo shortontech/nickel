@@ -1226,7 +1226,7 @@ impl LiveShell {
         {
             Ok(changed) => changed,
             Err(error) => {
-                self.fail_extra_panel_plugin_runtime(&key.plugin_id, error);
+                self.fail_plugin_panel_runtime(&key.plugin_id, error);
                 return false;
             }
         };
@@ -1240,7 +1240,7 @@ impl LiveShell {
         });
         let failure = host.application_mut().take_runtime_failure();
         if let Some(error) = failure {
-            self.fail_extra_panel_plugin_runtime(&key.plugin_id, error);
+            self.fail_plugin_panel_runtime(&key.plugin_id, error);
             return false;
         }
         outcome.changed
@@ -2699,11 +2699,8 @@ impl LiveShell {
                 let slots_changed = match slots_changed {
                     Ok(changed) => changed,
                     Err(error) => {
-                        if self.fail_installed_plugin_runtime(&owner, error.clone()) {
-                            return Vec::new();
-                        }
-                        tracing::warn!(plugin = owner, %error, "plugin slot projection failed");
-                        false
+                        self.fail_plugin_panel_runtime(&owner, error);
+                        return Vec::new();
                     }
                 };
                 let host = self
@@ -2715,6 +2712,10 @@ impl LiveShell {
                     surface_size: Some((width, height)),
                     ..HostBatch::default()
                 });
+                if let Some(error) = host.application_mut().take_runtime_failure() {
+                    self.fail_plugin_panel_runtime(&owner, error);
+                    return Vec::new();
+                }
                 let commands = host.commands().to_vec();
                 let image_bytes = host.application_mut().retained_image_bytes();
                 let key = nickel_core::plugins::PluginSurfaceKey {
@@ -3951,11 +3952,8 @@ impl LiveShell {
             let changed = match host.application_mut().sync_external_slots(&slots) {
                 Ok(changed) => changed,
                 Err(error) => {
-                    if self.fail_installed_plugin_runtime(&key.plugin_id, error.clone()) {
-                        break;
-                    }
-                    tracing::warn!(plugin = key.plugin_id, %error, "plugin slot projection failed");
-                    continue;
+                    self.fail_plugin_panel_runtime(&key.plugin_id, error);
+                    break;
                 }
             };
             if !changed {
@@ -3965,6 +3963,10 @@ impl LiveShell {
                 application_changed: true,
                 ..HostBatch::default()
             });
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_plugin_panel_runtime(&key.plugin_id, error);
+                break;
+            }
             let image_bytes = host.application_mut().retained_image_bytes();
             self.record_plugin_panel_memory(
                 &key,
@@ -4045,7 +4047,7 @@ impl LiveShell {
                 Some(commands)
             }
             Err(error) => {
-                self.fail_extra_panel_plugin_runtime(&key.plugin_id, error);
+                self.fail_plugin_panel_runtime(&key.plugin_id, error);
                 None
             }
         }
@@ -4797,8 +4799,21 @@ impl LiveShell {
         self.retire_extra_panel_plugin_state(&crate::plugin_panel::screenshot_manifest().id);
     }
 
-    fn fail_extra_panel_plugin_runtime(&mut self, id: &str, error: String) -> bool {
-        let retire = if id == crate::plugin_panel::codex_projects_manifest().id {
+    fn retire_development_panel_plugin_state(&mut self) {
+        let id = &crate::plugin_panel::manifest().id;
+        if self.plugin_panel_owner == *id {
+            self.plugin_panel_host = None;
+        }
+        self.plugin_panel_extra_hosts
+            .retain(|key, _| key.plugin_id != *id);
+        self.plugin_panel_memory
+            .retain(|key, _| key.plugin_id != *id);
+    }
+
+    fn fail_plugin_panel_runtime(&mut self, id: &str, error: String) -> bool {
+        let retire = if id == crate::plugin_panel::manifest().id {
+            Self::retire_development_panel_plugin_state as fn(&mut Self)
+        } else if id == crate::plugin_panel::codex_projects_manifest().id {
             Self::retire_codex_projects_plugin_state as fn(&mut Self)
         } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
             Self::retire_keyboard_plugin_state
@@ -6106,7 +6121,7 @@ impl LiveShell {
             )
         };
         if let Some(error) = failure
-            && self.fail_extra_panel_plugin_runtime(&key.plugin_id, error)
+            && self.fail_plugin_panel_runtime(&key.plugin_id, error)
         {
             return true;
         }
@@ -6182,7 +6197,7 @@ impl LiveShell {
             )
         };
         if let Some(error) = failure
-            && self.fail_extra_panel_plugin_runtime(&key.plugin_id, error)
+            && self.fail_plugin_panel_runtime(&key.plugin_id, error)
         {
             return true;
         }
@@ -6244,7 +6259,7 @@ impl LiveShell {
             )
         };
         if let Some(error) = failure
-            && self.fail_extra_panel_plugin_runtime(&key.plugin_id, error)
+            && self.fail_plugin_panel_runtime(&key.plugin_id, error)
         {
             return true;
         }
