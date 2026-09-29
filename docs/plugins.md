@@ -296,16 +296,8 @@ disabled state and submenu hierarchy.
 Nickel does not embed
 React, a browser DOM, or the TypeScript compiler. The host checks declared
 capabilities and current shell state before executing a requested effect.
-The bundled desktop's `FileTile` registers `onFileAction({ action })` for Cut,
-Copy, Rename, Properties, and Open in Terminal. It requests
-`{ type: "desktop-file-action", id, action }` with the tile's projected ID and
-declares `desktop-files-manage`. Nickel checks the grant, rendered tile, current
-file identity, and output before carrying out the request. The bundled JSX
-desktop presents the file context menu; native menus remain available when the
-plugin is disabled, and file windows retain their own presentation. The bundled
-desktop background menu is also JSX; its View and Sort By submenus request
-typed `desktop-background-action` effects under `desktop-control`, while the
-host checks the current menu context before changing desktop state.
+The desktop, lock screen, screenshot tool, file manager, and Codex use Rust UI.
+Ordinary plugins can still declare their own windows and composition slots.
 
 Manifests may declare typed composition relationships. A target declares a
 `provides_slots` entry with an ID, a `badge`, `widget`, `action`, or `section`
@@ -320,13 +312,8 @@ places the badge beside the matching task. Additive badge plugins compose in
 priority and plugin ID order, with a limit of three visible badges per task.
 A `replace` contribution replaces the slot's base badges; if several are
 enabled, the highest priority wins, with plugin ID breaking ties. Additive
-contributions then follow the winner. The desktop also provides a
-`desktop-widget` slot. A surface-free plugin can contribute a `widget` using
-`h(Widget, { label: "Unread mail", value: "12 messages", percent: 60 })`.
-The [example desktop widget](../assets/plugins/example-desktop-widget/) is a
-working package. Widgets appear in a bounded stack on the desktop; at most
-three are visible. Replacement selection and additive ordering follow the
-same rules as badges.
+contributions then follow the winner.
+
 Installed plugins can also provide their own `widget` slots. The provider's
 JSX reads `nickel.data.slots[slotId]`, an array of bounded objects with
 `pluginId`, `label`, `value`, `percent`, and `color`. Nickel refreshes this data

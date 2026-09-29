@@ -6,6 +6,5 @@
   "version": "0.1.0",
   "entry": "main.js",
   "surfaces": [{"id":"main","kind":"desktop","width":1920,"height":1080}],
-  "capabilities": ["desktop-read", "desktop-control", "desktop-arrange", "desktop-files-open", "desktop-files-manage"],
-  "provides_slots": [{"id":"desktop-widget","contract":"widget","replaceable":true}]
+  "capabilities": ["desktop-read", "desktop-control", "desktop-arrange", "desktop-files-open", "desktop-files-manage"]
 }

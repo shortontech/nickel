@@ -205,7 +205,6 @@ mod platform {
                 if matches!((contribution.target_plugin.as_str(), contribution.target_slot.as_str(), contribution.contract),
                     ("org.nickel.taskbar", "task-badge", PluginSlotContract::Badge)
                     | ("org.nickel.taskbar", "task-action", PluginSlotContract::Action)
-                    | ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget)
                     | ("org.nickel.control-center", "control-section", PluginSlotContract::Section)
                     | (_, _, PluginSlotContract::Widget)
                     | (_, _, PluginSlotContract::Action))
@@ -645,7 +644,6 @@ mod platform {
             for name in [
                 "example-task-badge",
                 "example-task-action",
-                "example-desktop-widget",
                 "example-control-section",
             ] {
                 let package = load_dev_package(&root.join(name)).unwrap();

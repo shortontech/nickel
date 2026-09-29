@@ -3914,28 +3914,6 @@ mod tests {
     }
 
     #[test]
-    fn desktop_widget_contribution_validates_and_bounds_its_values() {
-        let package = PluginPackage::load(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/plugins/example-desktop-widget"
-        ))
-        .unwrap();
-        PluginPanelApplication::validate_package(&package).unwrap();
-        let widgets = PluginPanelApplication::from_package(&package)
-            .unwrap()
-            .desktop_widgets()
-            .unwrap();
-        assert_eq!(widgets.len(), 1);
-        assert_eq!(widgets[0].label, "Unread mail");
-        assert_eq!(widgets[0].percent, 60);
-
-        let mut invalid = package.clone();
-        invalid.source = invalid.source.replace("Math.min(100, unread * 5)", "101");
-        assert_ne!(invalid.source, package.source);
-        assert!(PluginPanelApplication::validate_package(&invalid).is_err());
-    }
-
-    #[test]
     fn taskbar_action_contribution_dispatches_its_own_granted_callback() {
         let package = PluginPackage::load(concat!(
             env!("CARGO_MANIFEST_DIR"),

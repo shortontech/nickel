@@ -546,14 +546,6 @@ pub struct LiveShell {
             crate::plugin_panel::PluginPanelApplication,
         ),
     >,
-    plugin_desktop_widget_hosts: std::collections::BTreeMap<
-        String,
-        (
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
     plugin_widget_slot_hosts: std::collections::BTreeMap<
         String,
         (
@@ -836,7 +828,6 @@ fn taskbar_plugin_data(
 enum ExecutableExtensionKind {
     TaskbarBadge,
     TaskbarAction,
-    DesktopWidget,
     ControlSection,
     PluginWidget,
     PluginAction,
@@ -871,9 +862,6 @@ fn executable_extension_priority(
         }
         ("org.nickel.taskbar", "task-action", PluginSlotContract::Action) => {
             ExecutableExtensionKind::TaskbarAction
-        }
-        ("org.nickel.desktop", "desktop-widget", PluginSlotContract::Widget) => {
-            ExecutableExtensionKind::DesktopWidget
         }
         ("org.nickel.control-center", "control-section", PluginSlotContract::Section) => {
             ExecutableExtensionKind::ControlSection
@@ -1074,39 +1062,6 @@ fn append_control_sections(
             });
         }
     }
-}
-
-fn compose_desktop_widgets(
-    extensions: &std::collections::BTreeMap<
-        String,
-        (
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
-) -> Vec<crate::plugin_panel::DesktopPluginWidget> {
-    use nickel_core::plugins::PluginContributionMode;
-    let mut ordered = extensions.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
-    let mut widgets = Vec::new();
-    if let Some((_, (_, _, application))) = ordered
-        .iter()
-        .rev()
-        .find(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
-        && let Ok(replacement) = application.desktop_widgets()
-    {
-        widgets.extend(replacement);
-    }
-    for (_, (_, mode, application)) in ordered {
-        if *mode == PluginContributionMode::Add
-            && let Ok(addition) = application.desktop_widgets()
-        {
-            widgets.extend(addition);
-        }
-    }
-    widgets.truncate(3);
-    widgets
 }
 
 fn taskbar_plugin_control_bounds(
@@ -1785,7 +1740,6 @@ impl LiveShell {
             plugin_taskbar_badge_hosts: std::collections::BTreeMap::new(),
             plugin_taskbar_action_hosts: std::collections::BTreeMap::new(),
             plugin_control_section_hosts: std::collections::BTreeMap::new(),
-            plugin_desktop_widget_hosts: std::collections::BTreeMap::new(),
             plugin_widget_slot_hosts: std::collections::BTreeMap::new(),
             plugin_action_slot_hosts: std::collections::BTreeMap::new(),
             plugin_notification_host,
@@ -4426,12 +4380,6 @@ impl LiveShell {
             .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
             .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
             .map(|(id, _)| id.as_str());
-        let widget_replacement = self
-            .plugin_desktop_widget_hosts
-            .iter()
-            .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
-            .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
-            .map(|(id, _)| id.as_str());
 
         PluginStatusSnapshot {
             activation_generation: self.plugin_activation_generation,
@@ -4516,12 +4464,6 @@ impl LiveShell {
                                                 == crate::plugin_panel::taskbar_manifest().id
                                                 && contribution.target_slot == "task-action"
                                                 && action_replacement.is_some_and(|winner| {
-                                                    winner != entry.manifest.id
-                                                }))
-                                            || (contribution.target_plugin
-                                                == crate::plugin_panel::desktop_manifest().id
-                                                && contribution.target_slot == "desktop-widget"
-                                                && widget_replacement.is_some_and(|winner| {
                                                     winner != entry.manifest.id
                                                 }))
                                             || (contribution.target_plugin
@@ -4737,9 +4679,6 @@ impl LiveShell {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
                     self.application_menu_plugin_host = None;
-                } else if let Some((_, _, current)) = self.plugin_desktop_widget_hosts.get_mut(id) {
-                    extension_bytes = Some(application.retained_contribution_bytes());
-                    *current = application;
                 } else if let Some((_, _, _, _, current)) =
                     self.plugin_widget_slot_hosts.get_mut(id)
                 {
@@ -4821,7 +4760,6 @@ impl LiveShell {
         if self.plugin_taskbar_action_hosts.remove(id).is_some() {
             self.application_menu_plugin_host = None;
         }
-        self.plugin_desktop_widget_hosts.remove(id);
         self.plugin_widget_slot_hosts.remove(id);
         self.plugin_action_slot_hosts.remove(id);
         self.plugin_control_section_hosts.remove(id);
@@ -5174,7 +5112,6 @@ impl LiveShell {
             if self.plugin_taskbar_action_hosts.remove(id).is_some() {
                 self.application_menu_plugin_host = None;
             }
-            self.plugin_desktop_widget_hosts.remove(id);
             self.plugin_widget_slot_hosts.remove(id);
             self.plugin_action_slot_hosts.remove(id);
             self.plugin_control_section_hosts.remove(id);
@@ -5228,10 +5165,6 @@ impl LiveShell {
                     self.plugin_taskbar_action_hosts
                         .insert(id.to_owned(), (priority, mode, application));
                     self.application_menu_plugin_host = None;
-                }
-                ExecutableExtensionKind::DesktopWidget => {
-                    self.plugin_desktop_widget_hosts
-                        .insert(id.to_owned(), (priority, mode, application));
                 }
                 ExecutableExtensionKind::ControlSection => {
                     self.plugin_control_section_hosts
@@ -9966,7 +9899,6 @@ impl LiveShell {
                     nickel_file::DirectoryWatch::start(&nickel_file::desktop_directory()).ok();
             }
         }
-        let widgets = compose_desktop_widgets(&self.plugin_desktop_widget_hosts);
         let application = self.desktop_host.application_mut();
         let wallpaper_changed = match (&application.wallpaper, &self.wallpaper) {
             (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
@@ -10049,12 +9981,6 @@ impl LiveShell {
                 "error": self.desktop_host.application().error,
                 "tiles": tiles,
                 "context": context,
-                "widgets": widgets.iter().map(|widget| serde_json::json!({
-                    "label": widget.label,
-                    "value": widget.value,
-                    "percent": widget.percent,
-                    "color": widget.color,
-                })).collect::<Vec<_>>(),
             });
             match host.application_mut().sync_data(&data) {
                 Ok(data_changed) => 'render: {

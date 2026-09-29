@@ -11,8 +11,8 @@ cargo run -p nickel --no-default-features --features backend-winit \
   --bin nickel-plugin -- validate /path/to/plugin
 ```
 
-The validator supplies bounded synthetic data for Nickel's bundled shell
-surfaces, including launcher and desktop, so their initial trees can be checked
+The validator supplies bounded synthetic data for Nickel's bundled plugin
+surfaces, including the launcher, so their initial trees can be checked
 without starting the shell. Live interactions still need `nickel-plugin dev`.
 
 The [first-party Settings package](settings/) uses the same manifest format
@@ -31,20 +31,18 @@ cargo run -p nickel --no-default-features --features backend-winit \
 Each immediate child directory must match its manifest ID. Discovery reports
 invalid packages without hiding valid siblings. Settings can enable installed
 packages with up to 16 panel, dock, window, dialog, or overlay surfaces, plus surface-free taskbar badge,
-taskbar action, desktop widget, and Control Center section extensions. Use
+taskbar action, widget slot, and Control Center section extensions. Use
 `nickel --safe-mode` to start with installed
 packages inactive while keeping bundled shell plugins available.
 
 The component vocabulary includes `Panel`, `Row`, `Column`, `Text`, `Image`,
-`ImageButton`, `Button`, `Badge`, `Action`, `Widget`, `Section`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. A
-full-viewport `Surface` component is used by the bundled desktop background
-plugin. The host owns image bytes and exposes them by asset name to JSX.
+`ImageButton`, `Button`, `Badge`, `Action`, `Widget`, `Section`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. The
+host owns image bytes and exposes them by asset name to JSX. The desktop,
+lock screen, screenshot tool, file manager, and Codex remain Rust UI.
 Use `secure={true}` on a `TextField` for passwords or other private input. The
 host masks its paint and blocks remote semantic inspection of that surface.
 The [task badge example](example-task-badge/) shows a surface-free extension
 that contributes UI to the bundled taskbar's declared slot.
-The [desktop widget example](example-desktop-widget/) contributes a bounded
-value and progress display to the bundled desktop plugin.
 The [widget host](example-widget-host/) declares a slot that another installed
 plugin can fill. Run it with the [widget contributor](example-widget-contributor/)
 using `nickel-plugin dev assets/plugins/example-widget-host assets/plugins/example-widget-contributor`.
