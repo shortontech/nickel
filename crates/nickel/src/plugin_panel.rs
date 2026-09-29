@@ -5884,9 +5884,7 @@ impl nickel_ui::Application for PluginPanelApplication {
         if matches!(
             &self.node,
             PanelNode::Viewport { .. } | PanelNode::Surface { .. }
-        ) || self.manifest.id == taskbar_manifest().id
-            || self.manifest.id == desktop_manifest().id
-        {
+        ) {
             AnyView::new(self.node.view(&self.images, &self.stylesheet))
         } else {
             AnyView::new(
