@@ -309,9 +309,7 @@ impl InternalShellCoordinator {
                     continue;
                 }
                 let size = role_size(role, output.width, output.height, self.panel_edge);
-                let plugin = (role == SurfaceRole::Desktop && self.shell.desktop_plugin_active())
-                    .then(crate::plugin_panel::desktop_surface_key);
-                desired.push((role, plugin, Some(output.name.clone()), size));
+                desired.push((role, None, Some(output.name.clone()), size));
             }
             for (key, surface) in &panel_surfaces {
                 let taskbar = taskbar_key.as_ref() == Some(key);
@@ -2577,10 +2575,9 @@ mod tests {
     }
 
     #[test]
-    fn native_desktop_surface_remains_visible_without_desktop_plugin() {
+    fn native_desktop_surface_survives_fixture_retirement() {
         let mut coordinator = coordinator();
         let plugin_id = crate::plugin_panel::desktop_manifest().id.clone();
-        coordinator.set_plugin_enabled(&plugin_id, false).unwrap();
         let output = InternalOutput {
             x: 0,
             y: 0,
@@ -2597,6 +2594,7 @@ mod tests {
         assert_eq!(desktop.plugin, None);
         assert!(coordinator.visible(id));
 
+        coordinator.set_plugin_enabled(&plugin_id, false).unwrap();
         coordinator.set_outputs(&[output.clone()]);
         let retained = coordinator
             .surface(SurfaceRole::Desktop, Some("nested"))

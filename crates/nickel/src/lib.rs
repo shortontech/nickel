@@ -1811,7 +1811,7 @@ fn handle_shell_input(
     }
     if shell
         .surface(surface)
-        .is_some_and(|entry| entry.is_desktop_plugin())
+        .is_some_and(|entry| entry.is_desktop_surface())
     {
         let coalesce_motion = matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
         if !select_desktop_surface_for_input(shell, state, surface) {
@@ -2099,13 +2099,7 @@ fn select_desktop_surface_for_input(
 ) -> bool {
     let Some(entry) = shell
         .surface(surface)
-        .filter(|entry| entry.is_desktop_plugin())
-    else {
-        return false;
-    };
-    let Some(key) = entry
-        .plugin_key()
-        .filter(|key| state.plugin_surface_matches(key))
+        .filter(|entry| entry.is_desktop_surface())
     else {
         return false;
     };
@@ -2122,9 +2116,8 @@ fn select_desktop_surface_for_input(
     );
     // Another output may have left the shared host with a different tree.
     // Rebuild the invoking surface before hit testing or dispatching a menu.
-    state
-        .plugin_surface_scene_for_output(key, Some(output), width, height)
-        .is_some()
+    let _ = state.scene(SurfaceRole::Desktop, width, height);
+    true
 }
 
 fn log_unroutable_launcher_input(
@@ -2260,7 +2253,7 @@ fn handle_controller_action(
     }
     let (width, height) = entry.window().size();
     let taskbar = entry.is_taskbar_plugin();
-    if entry.is_desktop_plugin() {
+    if entry.is_desktop_surface() {
         if select_desktop_surface_for_input(shell, state, surface)
             && state.desktop_controller(action)
         {

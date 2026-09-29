@@ -219,7 +219,6 @@ fn desired_plugin_surfaces(
 
 fn fixed_plugin_surface_key(role: SurfaceRole) -> Option<nickel_core::plugins::PluginSurfaceKey> {
     match role {
-        SurfaceRole::Desktop => Some(crate::plugin_panel::desktop_surface_key()),
         SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
         SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),
         _ => None,
@@ -513,9 +512,8 @@ impl ShellSurface {
             && self.plugin.as_ref() == Some(&crate::plugin_panel::taskbar_surface_key())
     }
 
-    pub fn is_desktop_plugin(&self) -> bool {
+    pub fn is_desktop_surface(&self) -> bool {
         self.role == SurfaceRole::Desktop
-            && self.plugin.as_ref() == Some(&crate::plugin_panel::desktop_surface_key())
     }
 
     fn diagnostic_role(&self) -> SurfaceRole {
@@ -663,7 +661,6 @@ impl WinitShell {
             primary_output_name: None,
             active_output_name: None,
             active_fixed_plugins: [
-                crate::plugin_panel::desktop_surface_key(),
                 crate::plugin_panel::launcher_surface_key(),
                 crate::plugin_panel::run_surface_key(),
                 crate::plugin_panel::volume_osd_surface_key(),
@@ -772,11 +769,8 @@ impl WinitShell {
         self.output_creation_retry = OutputCreationRetry::default();
         let displays = require_displays(self.display_geometries()?)?;
         let output_names = self.display_names()?;
-        let create_desktops = self
-            .active_fixed_plugins
-            .contains(&crate::plugin_panel::desktop_surface_key())
-            && self.options.create_desktop_surfaces
-            && crate::platform::renders_desktop_background();
+        let create_desktops =
+            self.options.create_desktop_surfaces && crate::platform::renders_desktop_background();
         let desired = desired_output_surfaces(
             &output_names,
             create_desktops,
@@ -907,11 +901,8 @@ impl WinitShell {
             tracing::info!("winit shell is dormant while no displays are available");
             return Ok(());
         }
-        let create_desktops = self
-            .active_fixed_plugins
-            .contains(&crate::plugin_panel::desktop_surface_key())
-            && self.options.create_desktop_surfaces
-            && crate::platform::renders_desktop_background();
+        let create_desktops =
+            self.options.create_desktop_surfaces && crate::platform::renders_desktop_background();
         let desired = desired_output_surfaces(
             &output_names,
             create_desktops,
@@ -965,7 +956,8 @@ impl WinitShell {
             SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
             SurfaceRole::Screenshot => true,
             SurfaceRole::WindowContextMenu => self.taskbar_panel_enabled,
-            SurfaceRole::Desktop | SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
+            SurfaceRole::Desktop => desired.contains(&(surface.output_name.clone(), surface.role)),
+            SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
                 fixed_plugin_surface_key(surface.role)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key))
             }
@@ -2750,7 +2742,6 @@ impl WinitShell {
                 }
             });
         let plugin_key = match role {
-            SurfaceRole::Desktop => Some(crate::plugin_panel::desktop_surface_key()),
             SurfaceRole::Taskbar => Some(crate::plugin_panel::taskbar_surface_key()),
             SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
             SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),

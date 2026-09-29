@@ -3578,10 +3578,6 @@ impl LiveShell {
         &self.plugin_registry
     }
 
-    pub(crate) fn desktop_plugin_active(&self) -> bool {
-        self.plugin_desktop_host.is_some()
-    }
-
     pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
         &self.plugin_panel_surface
     }
@@ -3686,7 +3682,6 @@ impl LiveShell {
         &self,
     ) -> HashSet<nickel_core::plugins::PluginSurfaceKey> {
         [
-            crate::plugin_panel::desktop_surface_key(),
             crate::plugin_panel::launcher_surface_key(),
             crate::plugin_panel::run_surface_key(),
             crate::plugin_panel::volume_osd_surface_key(),
