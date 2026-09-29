@@ -535,13 +535,14 @@ impl InternalShellCoordinator {
         if self.is_screenshot_surface_id(id) {
             return self.shell.bounded_plugin_screenshot_semantics();
         }
-        let semantics_role = if self.is_taskbar_surface(entry) {
-            SurfaceRole::Taskbar
-        } else {
-            entry.role
-        };
+        if self.is_taskbar_surface(entry) {
+            return self.shell.bounded_plugin_panel_semantics(
+                entry.plugin.as_ref().expect("taskbar has a plugin key"),
+                entry.output.as_deref(),
+            );
+        }
         self.shell
-            .bounded_shell_semantics(semantics_role, entry.output.as_deref())
+            .bounded_shell_semantics(entry.role, entry.output.as_deref())
     }
 
     pub(crate) fn perform_bounded_shell_action(
@@ -563,19 +564,25 @@ impl InternalShellCoordinator {
         {
             return Err("shell surface is hidden or retired".into());
         }
-        let semantics_role = if self.is_taskbar_surface(entry) {
-            SurfaceRole::Taskbar
+        let outcome = if self.is_taskbar_surface(entry) {
+            self.shell.perform_bounded_plugin_panel_action(
+                entry.plugin.as_ref().expect("taskbar has a plugin key"),
+                entry.output.as_deref(),
+                generation,
+                node,
+                action,
+                clipboard_limit,
+            )?
         } else {
-            entry.role
+            self.shell.perform_bounded_shell_action(
+                entry.role,
+                entry.output.as_deref(),
+                generation,
+                node,
+                action,
+                clipboard_limit,
+            )?
         };
-        let outcome = self.shell.perform_bounded_shell_action(
-            semantics_role,
-            entry.output.as_deref(),
-            generation,
-            node,
-            action,
-            clipboard_limit,
-        )?;
         Ok(outcome)
     }
 

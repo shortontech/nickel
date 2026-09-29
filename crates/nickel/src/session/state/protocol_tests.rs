@@ -7550,6 +7550,44 @@ fn focused_controller_host_retries_after_unrelated_internal_handoff() {
 }
 
 #[test]
+fn keyed_taskbar_remote_semantics_dispatch_the_bundled_plugin_action() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+            let (_event_loop, mut session) = internal_shell_test_session();
+            let shell = session.internal_shell.as_mut().unwrap();
+            let key = crate::plugin_panel::taskbar_surface_key();
+            let id = shell.plugin_surface(&key, "file-test").unwrap().id;
+            shell.scene(id).expect("keyed taskbar scene");
+            let (generation, nodes) = shell.bounded_shell_semantics(id).unwrap();
+            let launcher = nodes
+                .iter()
+                .position(|node| node.id.as_str().ends_with("/taskbar-launcher"))
+                .expect("bundled launcher control");
+            let outcome = shell
+                .perform_bounded_shell_action(
+                    id,
+                    generation,
+                    launcher,
+                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    2048,
+                )
+                .unwrap();
+            assert!(matches!(
+                outcome.effects.as_slice(),
+                [crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
+                    crate::live_shell::TaskbarAction::Launcher,
+                    Some(output)
+                )] if output == "file-test"
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
     use nickel_remote_control::diagnostics::ShellDiagnosticRole;
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();

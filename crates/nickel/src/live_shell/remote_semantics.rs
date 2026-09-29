@@ -112,6 +112,29 @@ fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
 }
 
 impl LiveShell {
+    pub(crate) fn bounded_plugin_panel_semantics(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+    ) -> Result<Projection, String> {
+        if self.taskbar_surface_key().as_ref() != Some(key) {
+            return Err("plugin surface has no remote semantic contract".into());
+        }
+        if self.locked || self.surface_remote_access_protected(SurfaceRole::Taskbar) {
+            return Err("shell surface is hidden or protected".into());
+        }
+        let host = if output == self.panel_output.as_deref() {
+            self.plugin_taskbar_host.as_ref()
+        } else {
+            self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
+        }
+        .ok_or("panel plugin viewport is unavailable")?;
+        plugin_projection(host, |leaf, action| {
+            matches!(action, nickel_ui::ActionKind::Activate)
+                && matches!(leaf, "taskbar-launcher" | "taskbar-control")
+        })
+    }
+
     pub(crate) fn bounded_plugin_screenshot_semantics(&self) -> Result<Projection, String> {
         let key = crate::plugin_panel::screenshot_surface_key();
         let (_, host) = self
@@ -147,18 +170,10 @@ impl LiveShell {
                         .map_err(|_| "shell semantics are protected or exceed budget".into())
                 }
             }
-            SurfaceRole::Taskbar => {
-                let host = if output == self.panel_output.as_deref() {
-                    self.plugin_taskbar_host.as_ref()
-                } else {
-                    self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
-                }
-                .ok_or("panel plugin viewport is unavailable")?;
-                plugin_projection(host, |leaf, action| {
-                    matches!(action, nickel_ui::ActionKind::Activate)
-                        && matches!(leaf, "taskbar-launcher" | "taskbar-control")
-                })
-            }
+            SurfaceRole::Taskbar => self.bounded_plugin_panel_semantics(
+                &crate::plugin_panel::taskbar_surface_key(),
+                output,
+            ),
             SurfaceRole::Launcher if self.run_visible => {
                 if let Some(host) = self.plugin_run_host.as_ref() {
                     plugin_projection(host, |leaf, action| {
@@ -287,6 +302,62 @@ fn mutate<A: UiApplication>(
 }
 
 impl LiveShell {
+    pub(crate) fn perform_bounded_plugin_panel_action(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+        generation: u64,
+        node: usize,
+        action: nickel_ui::SemanticAction,
+        clipboard_limit: usize,
+    ) -> Result<RemoteShellOutcome, String> {
+        let (current_generation, nodes) = self.bounded_plugin_panel_semantics(key, output)?;
+        if current_generation != generation {
+            return Err("stale semantic tree".into());
+        }
+        let kind = match &action {
+            nickel_ui::SemanticAction::Invoke(kind) => *kind,
+            nickel_ui::SemanticAction::SetValue(_) => nickel_ui::ActionKind::SetValue,
+        };
+        if nodes
+            .get(node)
+            .is_none_or(|target| !target.actions.contains(&kind))
+        {
+            return Err("semantic action has no guarded production disposition".into());
+        }
+        if self.pointer_interaction_active() {
+            return Err("local surface input is held".into());
+        }
+        let previous = self.panel_output.clone();
+        let token = self.panel_change_token;
+        self.switch_panel_output(output.map(str::to_owned));
+        let result: Result<_, String> = (|| {
+            let plugin = self
+                .plugin_taskbar_host
+                .as_mut()
+                .ok_or("panel plugin viewport is unavailable")?;
+            let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
+            let requested = plugin.application_mut().take_effects();
+            let panel_action = match requested.as_slice() {
+                [crate::plugin_panel::PluginEffect::ToggleLauncher] => TaskbarAction::Launcher,
+                [crate::plugin_panel::PluginEffect::ToggleControlCenter] => TaskbarAction::Control,
+                _ => return Err("taskbar plugin requested an unguarded effect".into()),
+            };
+            Ok((outcome, panel_action))
+        })();
+        self.switch_panel_output(previous);
+        self.panel_change_token = token;
+        let (host, panel_action) = result?;
+        self.host_runtime_samples.record(host.telemetry);
+        Ok(RemoteShellOutcome {
+            host,
+            effects: vec![RemoteShellEffect::Panel(
+                panel_action,
+                output.map(str::to_owned),
+            )],
+        })
+    }
+
     pub(crate) fn perform_bounded_shell_action(
         &mut self,
         role: SurfaceRole,
@@ -296,6 +367,16 @@ impl LiveShell {
         action: nickel_ui::SemanticAction,
         clipboard_limit: usize,
     ) -> Result<RemoteShellOutcome, String> {
+        if role == SurfaceRole::Taskbar {
+            return self.perform_bounded_plugin_panel_action(
+                &crate::plugin_panel::taskbar_surface_key(),
+                output,
+                generation,
+                node,
+                action,
+                clipboard_limit,
+            );
+        }
         if self.bounded_shell_semantics(role, output)?.0 != generation {
             return Err("stale semantic tree".into());
         }
@@ -375,37 +456,7 @@ impl LiveShell {
                 );
                 outcome
             }
-            SurfaceRole::Taskbar => {
-                let previous = self.panel_output.clone();
-                let token = self.panel_change_token;
-                self.switch_panel_output(output.map(str::to_owned));
-                let result: Result<_, String> = (|| {
-                    let plugin = self
-                        .plugin_taskbar_host
-                        .as_mut()
-                        .ok_or("panel plugin viewport is unavailable")?;
-                    let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
-                    let requested = plugin.application_mut().take_effects();
-                    let panel_action = match requested.as_slice() {
-                        [crate::plugin_panel::PluginEffect::ToggleLauncher] => {
-                            TaskbarAction::Launcher
-                        }
-                        [crate::plugin_panel::PluginEffect::ToggleControlCenter] => {
-                            TaskbarAction::Control
-                        }
-                        _ => return Err("taskbar plugin requested an unguarded effect".into()),
-                    };
-                    Ok((outcome, panel_action))
-                })();
-                self.switch_panel_output(previous);
-                self.panel_change_token = token;
-                let (outcome, panel_action) = result?;
-                effects.push(RemoteShellEffect::Panel(
-                    panel_action,
-                    output.map(str::to_owned),
-                ));
-                outcome
-            }
+            SurfaceRole::Taskbar => unreachable!("taskbar actions use the plugin surface key"),
             SurfaceRole::VolumeOsd => {
                 return Err("volume overlay has no remote actions".into());
             }
@@ -505,8 +556,9 @@ mod tests {
     fn bundled_taskbar_remote_controls_use_the_jsx_tree_and_guarded_effects() {
         let mut shell = LiveShell::new().expect("live shell");
         let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
+        let key = crate::plugin_panel::taskbar_surface_key();
         let (generation, nodes) = shell
-            .bounded_shell_semantics(SurfaceRole::Taskbar, None)
+            .bounded_plugin_panel_semantics(&key, None)
             .expect("active taskbar semantics");
         let launcher = nodes
             .iter()
@@ -523,9 +575,14 @@ mod tests {
         assert!(nodes.iter().all(|node| {
             !node.id.as_str().contains("/taskbar-item-") || node.actions.is_empty()
         }));
+        assert!(
+            shell
+                .bounded_plugin_panel_semantics(&crate::plugin_panel::launcher_surface_key(), None)
+                .is_err()
+        );
         let outcome = shell
-            .perform_bounded_shell_action(
-                SurfaceRole::Taskbar,
+            .perform_bounded_plugin_panel_action(
+                &key,
                 None,
                 generation,
                 launcher,
@@ -539,11 +596,7 @@ mod tests {
         ));
         let id = &crate::plugin_panel::taskbar_manifest().id;
         shell.set_plugin_enabled(id, false).unwrap();
-        assert!(
-            shell
-                .bounded_shell_semantics(SurfaceRole::Taskbar, None)
-                .is_err()
-        );
+        assert!(shell.bounded_plugin_panel_semantics(&key, None).is_err());
     }
 
     #[test]
