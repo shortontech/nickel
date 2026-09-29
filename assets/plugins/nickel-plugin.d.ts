@@ -36,7 +36,7 @@ interface NickelSurfaceProps extends NickelProps {
     background?: NickelColor;
 }
 interface NickelWindowProps extends NickelProps {
-    id: string;
+    id?: string;
     width: number | "100%";
     height: number | "100%";
     placement?: "managed" | "fixed";
@@ -73,7 +73,7 @@ interface NickelButtonProps extends NickelProps {
     onDrag?: (gesture: NickelDragGesture) => void;
 }
 interface NickelTextFieldProps extends NickelProps {
-    id: string;
+    id?: string;
     value?: string;
     placeholder?: string;
     /** Mask the displayed value and protect the surface from remote inspection. */
@@ -87,7 +87,7 @@ interface NickelImageProps extends NickelProps {
     fit?: "contain" | "cover" | "stretch";
 }
 interface NickelImageButtonProps extends NickelImageProps {
-    id: string;
+    id?: string;
     accessibilityLabel: string;
     onClick: NickelClick;
     onContextMenu?: NickelClick;

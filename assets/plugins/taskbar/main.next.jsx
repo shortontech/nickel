@@ -66,7 +66,7 @@ function App() {
     const data = nickel.data;
     const items = data.items || [];
     const tray = data.tray || [];
-    return <FixedWindow id="main" className="taskbar" output="all"
+    return <FixedWindow className="taskbar" output="all"
         edge="bottom" width="100%" height={56} reserveWorkArea={true}>
         <Row className="taskbar-content">
             <Button id="taskbar-launcher" className="launcher-button" icon="logo" accessibilityLabel="Open Nickel Start"

@@ -36,6 +36,7 @@ let __currentComponent = null;
 let __hookIndex = 0;
 let __handlers = [];
 let __effects = [];
+let __listKeyErrors = [];
 let __pendingRender = null;
 let __pendingEvent = null;
 let __nickelData = Object.freeze({query: '', results: []});
@@ -99,10 +100,25 @@ function h(kind, props, ...children) {
         try {
             const node = kind({...props, children});
             if (__hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
-            return node;
+            return props?.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node)
+                ? node : {...node, key: props.key};
         } finally {
             __currentComponent = previous;
             __hookIndex = previousIndex;
+        }
+    }
+    for (const child of children) {
+        if (!Array.isArray(child)) continue;
+        const seen = new Set();
+        for (const item of child.flat(Infinity).filter(item => item !== null && item !== false)) {
+            if (typeof item !== 'object') continue;
+            if (item?.key === undefined) {
+                __listKeyErrors.push('items rendered from an array need a stable key');
+                continue;
+            }
+            const key = String(item.key);
+            if (seen.has(key)) __listKeyErrors.push(`duplicate list key ${key}`);
+            seen.add(key);
         }
     }
     const handler = typeof props?.onClick === 'function' ? props.onClick : props?.onChange;
@@ -119,7 +135,7 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onFileAction) - 1 : null;
     const closeAction = typeof props?.onClose === 'function'
         ? __handlers.push(props.onClose) - 1 : null;
-    return {kind, action, id: props?.id, className: props?.className, open: props?.open, anchor: props?.anchor,
+    return {kind, key: props?.key, action, id: props?.id, className: props?.className, open: props?.open, anchor: props?.anchor,
         placement: props?.placement, output: props?.output, edge: props?.edge,
         reserveWorkArea: props?.reserveWorkArea, bottomOffset: props?.bottomOffset,
         x: props?.x, y: props?.y, width: props?.width, height: props?.height, grow: props?.grow,
@@ -190,12 +206,14 @@ function __nickelRender() {
     __pendingRender = {handlers: previousHandlers, hooks: previousHooks,
         values: previousValues, effectsLength: __effects.length};
     __handlers = [];
+    __listKeyErrors = [];
     __visitedComponents = new Set();
     __componentChildren = new Map();
     __currentComponent = null;
     __hookIndex = 0;
     try {
         const node = h(App, {});
+        if (node?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
         for (const path of __componentHooks.keys()) {
             if (!__visitedComponents.has(path)) __componentHooks.delete(path);
         }

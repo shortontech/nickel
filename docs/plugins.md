@@ -197,7 +197,7 @@ their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
 props remain available. Row, Column, and specialized widgets still have some
 legacy sizing behavior while the generic layout path expands.
 
-`<Window id="main" width={520} height={340}>...</Window>` is the single JSX
+`<Window width={520} height={340}>...</Window>` is the JSX
 surface root. `<FixedWindow>` is a JavaScript helper that returns a `Window`
 with fixed placement; it does not create a second renderer. In the current
 manifest version, numeric root dimensions must match the declared surface;
@@ -205,7 +205,15 @@ manifest version, numeric root dimensions must match the declared surface;
 reservation, and bottom offset are checked against the manifest before the
 render is accepted. The manifest still determines native placement until the
 surface authority envelope replaces its duplicated geometry. A plugin cannot
-create an undeclared native window by changing JSX.
+create an undeclared native window by changing JSX. `id` is optional: the host
+supplies its surface identity. An explicit ID must match that identity.
+One plugin may declare several surfaces. Nickel renders the plugin for each
+surface with `nickel.data.surface.id` set to that host's ID, so the JSX can
+return the matching `Window` root. Each render currently has its own runtime;
+sharing one runtime across sibling windows is a later host change.
+Controls do not need explicit IDs for ordinary rendering or event handling.
+Nickel derives stable control IDs from the tree path; list items rendered from
+arrays inside a `Window` must use unique `key` values, such as `key={item.id}`.
 
 `Viewport` fills its host window and accepts an ARGB `background` and `padding`
 from 0 to 256 logical pixels. Use it as the root for a full-window layout such

@@ -2425,7 +2425,46 @@ fn parse_panel_for_manifest(
     manifest: &PluginManifest,
     expected_surface_id: Option<&str>,
 ) -> Result<PanelNode, String> {
-    let node = PanelNode::parse(value)?;
+    let mut root = value.clone();
+    if root.get("kind").and_then(Value::as_str) == Some("window") && root.get("id").is_none() {
+        let id = expected_surface_id
+            .or_else(|| (manifest.surfaces.len() == 1).then(|| manifest.surfaces[0].id.as_str()))
+            .ok_or("window needs a host surface or an explicit id")?;
+        root.as_object_mut()
+            .expect("window render is an object")
+            .insert("id".into(), Value::String(id.to_owned()));
+    }
+    fn assign_control_ids(value: &mut Value, path: &str) {
+        let Some(node) = value.as_object_mut() else {
+            return;
+        };
+        let kind = node.get("kind").and_then(Value::as_str).unwrap_or("");
+        if matches!(kind, "text-field" | "image-button") && !node.contains_key("id") {
+            let mut hash = 0xcbf29ce484222325_u64;
+            for byte in path.bytes().chain(kind.bytes()) {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+            node.insert(
+                "id".into(),
+                Value::String(format!("auto-{kind}-{hash:016x}")),
+            );
+        }
+        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+            for (index, child) in children.iter_mut().enumerate() {
+                let identity = child
+                    .get("key")
+                    .and_then(|key| {
+                        key.as_str()
+                            .map(str::to_owned)
+                            .or_else(|| key.as_i64().map(|key| key.to_string()))
+                    })
+                    .unwrap_or_else(|| format!("#{index}"));
+                assign_control_ids(child, &format!("{path}/{identity}"));
+            }
+        }
+    }
+    assign_control_ids(&mut root, "root");
+    let node = PanelNode::parse(&root)?;
     fn collect_windows<'a>(
         node: &'a PanelNode,
         found: &mut Vec<(&'a WindowRequest, Length, Length)>,
@@ -6586,6 +6625,8 @@ mod tests {
             })
             .is_ok()
         );
+        package.source = source.replace("id: 'main', ", "");
+        assert!(PluginPanelApplication::from_package(&package).is_ok());
 
         for invalid in [
             source.replace("id: 'main'", "id: 'other'"),
@@ -6607,6 +6648,39 @@ mod tests {
         let mut sibling = package.manifest.surfaces[0].clone();
         sibling.id = "sibling".into();
         package.manifest.surfaces.push(sibling.clone());
+        assert!(
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &sibling,)
+                .is_err()
+        );
+        package.source = "function App() { const id = nickel.data.surface.id; return h(Window, {width: 520, height: 340}, h(Text, {}, id)); }".into();
+        for surface in &package.manifest.surfaces {
+            assert!(
+                PluginPanelApplication::from_package_surface(
+                    &package,
+                    &Default::default(),
+                    surface,
+                )
+                .is_ok()
+            );
+        }
+        package.source = "function App() { return h(Window, {width: 520, height: 340}, h(TextField, {onChange: () => {}})); }".into();
+        assert!(
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &sibling,)
+                .is_ok()
+        );
+        package.source = "function App() { return h(Window, {width: 520, height: 340}, h(Row, {}, ['a', 'b'].map(label => h(Button, {key: label, onClick: () => {}}, label)))); }".into();
+        assert!(
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &sibling,)
+                .is_ok()
+        );
+        let duplicate = package.source.replace("['a', 'b']", "['a', 'a']");
+        package.source = duplicate;
+        assert!(
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &sibling,)
+                .is_err()
+        );
+        package.source = package.source.replace("['a', 'a']", "['a', 'b']");
+        package.source = package.source.replace("key: label, ", "");
         assert!(
             PluginPanelApplication::from_package_surface(&package, &Default::default(), &sibling,)
                 .is_err()

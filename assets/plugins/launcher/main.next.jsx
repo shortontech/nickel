@@ -8,7 +8,7 @@ function App() {
         setMenuTarget({id: item.id, index: item.index, pinned: item.pinned, kind, anchor});
         nickel.openMenu("launcher-app-actions");
     };
-    return <FixedWindow id="main" className="launcher-window" output="active"
+    return <FixedWindow className="launcher-window" output="active"
         anchor="bottom-start" avoid="taskbar" width={920} height={680}
         maxWidth="output" maxHeight="work-area">
         <Column className="launcher-layout">
