@@ -1184,7 +1184,9 @@ impl PanelNode {
                             Some(label.clone())
                         }
                         _ => {
-                            return Err("window accessible label must contain 1 to 256 bytes".into());
+                            return Err(
+                                "window accessible label must contain 1 to 256 bytes".into()
+                            );
                         }
                     },
                     escape_action: value

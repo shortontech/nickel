@@ -16,11 +16,10 @@ use crate::{
     launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
     live_shell::{DesktopApplication, LockApplication},
     notification::{DesktopNotification, NotificationAction},
-    notification_view::NotificationApp,
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
     plugin_panel::{
-        PluginImages, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
-        TaskbarPluginTrayItem,
+        NotificationPluginProjection, PluginImages, PluginPanelApplication, TaskbarPluginItem,
+        TaskbarPluginProjection, TaskbarPluginTrayItem,
     },
     screenshot::ScreenshotApp,
 };
@@ -284,9 +283,15 @@ metadata!(
     NOTIFICATION_METADATA,
     "shell.notification",
     "Notification",
-    "Production notification application",
+    "Bundled JSX notification presentation",
     NOTIFICATION_VARIANTS,
-    &["shell", "notification", "dialog", "variant-interactive"]
+    &[
+        "shell",
+        "notification",
+        "dialog",
+        "jsx",
+        "variant-interactive"
+    ]
 );
 metadata!(
     LOCK_METADATA,
@@ -515,7 +520,7 @@ impl Fixture for PanelFixture {
 }
 
 impl Fixture for NotificationFixture {
-    type App = NotificationApp;
+    type App = PluginPanelApplication;
     fn metadata() -> &'static FixtureMetadata {
         &NOTIFICATION_METADATA
     }
@@ -538,9 +543,9 @@ impl Fixture for NotificationFixture {
         };
         let notification =
             DesktopNotification::fixture(1, "Nickel", "Workbench notification", body, actions);
-        let mut app = NotificationApp::new(palette());
-        app.sync(Some(&notification), palette());
-        app
+        let projection = NotificationPluginProjection::from_feed(Some(&notification), &[], false);
+        PluginPanelApplication::notification_with_projection(&projection)
+            .expect("bundled notification fixture must compile")
     }
     fn surface_size() -> (u32, u32) {
         (420, 180)

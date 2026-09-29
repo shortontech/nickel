@@ -2,7 +2,7 @@
 
 use nickel_shell::ShellFixtureProvider;
 use nickel_ui::{SemanticRole, Size};
-use nickel_ui_testkit::{FixtureProvider, FixtureRegistry};
+use nickel_ui_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
 
 #[test]
 fn registers_every_shell_surface_fixture() {
@@ -180,6 +180,30 @@ fn desktop_variants_expose_named_jsx_presentation() {
         rasters[0], rasters[1],
         "wallpaper must alter desktop pixels"
     );
+}
+
+#[test]
+fn notification_variants_dispatch_jsx_dismiss() {
+    let mut registry = FixtureRegistry::new();
+    ShellFixtureProvider.register(&mut registry).unwrap();
+    let entry = registry
+        .finish()
+        .into_iter()
+        .find(|entry| entry.metadata.id == "shell.notification")
+        .expect("notification fixture");
+
+    for variant in entry.metadata.variants {
+        let mut session = entry.open_configuration(*variant);
+        session
+            .activate(ActivationVia::Semantic)
+            .unwrap_or_else(|error| panic!("{}: {error}", variant.id));
+        if variant.id != "no-actions" {
+            assert!(session.semantic_nodes().iter().any(|node| {
+                node.name.as_deref() == Some("Open")
+                    && node.actions.contains(&nickel_ui::ActionKind::Activate)
+            }));
+        }
+    }
 }
 
 #[test]
