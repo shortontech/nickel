@@ -542,8 +542,6 @@ enum SettingsMessage {
         key: String,
         value: serde_json::Value,
     },
-    PluginJsxAction(usize),
-    PluginJsxInput(usize, String),
     EditPluginTextSetting {
         id: String,
         key: String,
@@ -1663,12 +1661,6 @@ impl SettingsApp {
             SettingsMessage::SetPluginSetting { id, key, value } => {
                 self.request_plugin_setting(id, key, value);
             }
-            SettingsMessage::PluginJsxAction(index) => {
-                self.handle_plugin_jsx_action(index, serde_json::Value::Null);
-            }
-            SettingsMessage::PluginJsxInput(index, value) => {
-                self.handle_plugin_jsx_action(index, serde_json::Value::String(value));
-            }
             SettingsMessage::EditPluginTextSetting { id, key } => {
                 let Some(value) = self.plugin_status.as_ref().and_then(|snapshot| {
                     snapshot
@@ -1926,6 +1918,7 @@ impl SettingsApp {
                         {
                             self.handle_bluetooth_jsx_action(index);
                         }
+                        SettingsPage::Plugins => self.handle_plugin_jsx_action(index, value),
                         _ => {}
                     }
                 }
@@ -3463,8 +3456,11 @@ mod tests {
             .action_for_id("plugin-enable-org.nickel.launcher")
             .expect("JSX launcher enable action");
         assert_eq!(
-            host.semantic_targets_for_message(&SettingsMessage::PluginJsxAction(enable_action))
-                .len(),
+            host.semantic_targets_for_message(&SettingsMessage::JsxAction(
+                enable_action,
+                "null".into()
+            ))
+            .len(),
             1
         );
         let labels = host
@@ -3499,7 +3495,10 @@ mod tests {
             .expect("JSX launcher disable action");
         assert_eq!(
             enabled_host
-                .semantic_targets_for_message(&SettingsMessage::PluginJsxAction(disable_action))
+                .semantic_targets_for_message(&SettingsMessage::JsxAction(
+                    disable_action,
+                    "null".into()
+                ))
                 .len(),
             1
         );
@@ -3514,12 +3513,15 @@ mod tests {
             .action_for_id("plugin-setting-org.nickel.launcher-show-count")
             .expect("JSX boolean setting action");
         assert_eq!(
-            host.semantic_targets_for_message(&SettingsMessage::PluginJsxAction(setting_action))
-                .len(),
+            host.semantic_targets_for_message(&SettingsMessage::JsxAction(
+                setting_action,
+                "null".into()
+            ))
+            .len(),
             1
         );
         host.application_mut()
-            .handle_settings_message(SettingsMessage::PluginJsxAction(enable_action));
+            .handle_settings_message(SettingsMessage::JsxAction(enable_action, "null".into()));
         assert_eq!(
             host.application().plugin_enable_review,
             Some(("org.nickel.launcher".into(), 4))
@@ -3696,7 +3698,7 @@ mod tests {
             .and_then(|list| list.as_ref().ok())
             .and_then(|list| list.action_for_id("plugin-enable-org.nickel.settings"))
             .expect("Settings plugin has a JSX disable action");
-        app.handle_settings_message(SettingsMessage::PluginJsxAction(action));
+        app.handle_settings_message(SettingsMessage::JsxAction(action, "null".into()));
         assert!(!app.settings_jsx_enabled);
         assert!(app.navigation_plugin.borrow().is_none());
         assert!(app.plugin_list.borrow().is_none());

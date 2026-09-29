@@ -1,6 +1,7 @@
 //! JSX-owned ordinary plugin list. Permission approval remains a native overlay.
 
 use nickel_i18n::Localizer;
+use nickel_plugin_presentation::{components::PluginImages, css::StyleSheet, page::JsxPage};
 use nickel_session_protocol::{
     PluginMemorySnapshot, PluginRuntimeHealth, PluginSettingKind, PluginStatusSnapshot,
 };
@@ -9,8 +10,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{SettingsApp, SettingsMessage};
-
-use crate::settings_components::{Node, SettingsJsxContext};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
@@ -44,22 +43,25 @@ pub(super) enum PluginRequest {
 }
 
 pub(super) struct PluginList {
-    context: SettingsJsxContext,
+    page: JsxPage,
+    stylesheet: StyleSheet,
+    last_theme: Option<SemanticTheme>,
 }
 
 impl PluginList {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.context.retained_bytes()
+        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
     }
 
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            context: SettingsJsxContext::new(
+            page: JsxPage::new(
                 crate::settings_package::source(crate::settings_package::Script::Plugins)?,
-                Node::parse,
-                "Plugin status changed; refresh the page",
-                "Plugin action must request exactly one operation",
+                crate::settings_package::manifest()?.clone(),
+                None,
             )?,
+            stylesheet: StyleSheet::default(),
+            last_theme: None,
         })
     }
 
@@ -67,13 +69,20 @@ impl PluginList {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-        input_placeholder: &str,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        Ok(self.context.render(data)?.view(
-            theme,
-            input_placeholder,
-            SettingsMessage::PluginJsxAction,
-        ))
+        self.page.render(data)?;
+        if self.last_theme != Some(theme) {
+            self.stylesheet = crate::settings_plugin::stylesheet_template(
+                include_str!("../../../assets/plugins/settings/settings-plugins.css"),
+                theme,
+            )?;
+            self.last_theme = Some(theme);
+        }
+        Ok(self
+            .page
+            .node()
+            .ok_or("Plugin list is unavailable")?
+            .view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet))
     }
 
     pub(super) fn dispatch(
@@ -83,17 +92,16 @@ impl PluginList {
         current_data: &Value,
         validate: impl FnOnce(&PluginRequest) -> Result<SettingsMessage, String>,
     ) -> Result<SettingsMessage, String> {
-        self.context
-            .dispatch(index, &value, current_data, |effect| {
-                let request: PluginRequest =
-                    serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
-                validate(&request)
-            })
+        self.page.dispatch(index, &value, current_data, |effect| {
+            let request: PluginRequest =
+                serde_json::from_value(effect).map_err(|error| error.to_string())?;
+            validate(&request)
+        })
     }
 
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.context.action_for_id(id)
+        self.page.node()?.button_action(id)
     }
 }
 
@@ -185,6 +193,7 @@ pub(super) fn projection(
         "generation":snapshot.map(|snapshot| snapshot.activation_generation),
         "notice":notice,
         "plugins":plugins,
+        "inputPlaceholder":localizer.text("settings-plugin-input-placeholder"),
         "labels":{
             "change":localizer.text("settings-plugin-change"),
             "edit":localizer.text("settings-plugin-edit"),
@@ -465,7 +474,7 @@ mod tests {
         let theme = crate::semantic_theme(nickel_core::theme::ThemePalette::from_appearance(
             nickel_core::theme::Appearance::default(),
         ));
-        list.render(&data, theme, "Value").unwrap();
+        list.render(&data, theme).unwrap();
         let action = list.action_for_id("plugin-enable-example.plugin").unwrap();
         let message = list
             .dispatch(action, Value::Null, &data, |request| {
@@ -524,6 +533,5 @@ mod tests {
                 value: Value::Bool(false),
             }
         );
-        assert!(Node::parse(&json!({"kind":"host-command","children":[]})).is_err());
     }
 }

@@ -168,4 +168,20 @@ mod tests {
             Ok(PanelNode::Switch { action: None, .. })
         ));
     }
+
+    #[test]
+    fn disabled_button_needs_no_handler_and_cannot_be_dispatched() {
+        let manifest =
+            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
+                .unwrap();
+        let mut page = JsxPage::new(
+            "function App() { return h(Button, {id: 'pending', disabled: true}, 'Pending'); }",
+            manifest,
+            None,
+        )
+        .unwrap();
+        let node = page.render(&json!({})).unwrap();
+        assert_eq!(node.button_action("pending"), None);
+        assert!(matches!(node, PanelNode::Button { disabled: true, .. }));
+    }
 }

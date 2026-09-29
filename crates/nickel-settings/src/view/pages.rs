@@ -155,13 +155,7 @@ impl SettingsApp {
                 .get_or_insert_with(crate::plugin_list::PluginList::new)
                 .as_mut()
                 .map_err(|error| error.clone())
-                .and_then(|list| {
-                    list.render(
-                        &projection,
-                        theme,
-                        &self.localizer.text("settings-plugin-input-placeholder"),
-                    )
-                })
+                .and_then(|list| list.render(&projection, theme))
         } else {
             Err("Settings plugin is disabled".into())
         };

@@ -1,0 +1,117 @@
+div.plugins-page {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 16px;
+    padding: 0 12px 24px 0;
+}
+
+div.plugin-card {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 10px;
+    padding: 18px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+}
+
+div.plugin-detail {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 16px;
+}
+
+div.plugin-setting-label,
+div.plugin-setting {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+div.plugin-actions,
+div.plugin-edit {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+text.plugin-title {
+    height: auto;
+    color: @primary@;
+    font-size: 17px;
+    line-height: 23px;
+}
+
+text.plugin-id,
+text.plugin-detail-value {
+    height: auto;
+    color: @secondary@;
+    font-size: 13px;
+    line-height: 18px;
+}
+
+text.plugin-detail-label {
+    height: auto;
+    color: @primary@;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+text.plugin-detail-label.detail-label {
+    width: 38%;
+}
+
+text.plugin-detail-value.detail-value {
+    width: 58%;
+}
+
+switch.plugin-switch {
+    background: @border@;
+    border: 1px solid @border@;
+    border-radius: 12px;
+    color: @primary@;
+}
+
+switch.plugin-switch.on,
+switch.plugin-switch.mixed,
+switch.plugin-switch.disabled-on {
+    background: @accent-soft@;
+    border: 1px solid @accent@;
+}
+
+button.plugin-action {
+    height: 40px;
+    padding: 8px 12px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 13px;
+}
+
+button.plugin-action.primary {
+    background: @accent-soft@;
+    border: 1px solid @accent@;
+}
+
+button.plugin-action.disabled {
+    color: @secondary@;
+}
+
+text-field.plugin-text-field {
+    width: 100%;
+    height: 44px;
+    padding: 9px 12px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 14px;
+    line-height: 20px;
+}

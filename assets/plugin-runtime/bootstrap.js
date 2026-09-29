@@ -151,7 +151,7 @@ function h(kind, props, ...children) {
         complement: props?.complement,
         item: props?.item, count: props?.count, hue: props?.hue, custom: props?.custom,
         asset: props?.asset, fit: props?.fit,
-        accessibilityLabel: props?.accessibilityLabel, state: props?.state, icon: props?.icon,
+        accessibilityLabel: props?.accessibilityLabel, state: props?.state, disabled: props?.disabled, icon: props?.icon,
         showLabel: props?.showLabel, contextAction, dragAction, selectAction, moveAction, fileAction, closeAction,
         value: props?.value, placeholder: props?.placeholder, secure: props?.secure,
         wrap: props?.wrap,

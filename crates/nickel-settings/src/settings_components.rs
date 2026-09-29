@@ -387,12 +387,9 @@ impl Node {
         input_placeholder: &str,
         action_message: fn(usize) -> SettingsMessage,
     ) -> AnyView<SettingsMessage> {
-        self.view_with_input(
-            theme,
-            input_placeholder,
-            action_message,
-            SettingsMessage::PluginJsxInput,
-        )
+        self.view_with_input(theme, input_placeholder, action_message, |_, _| {
+            SettingsMessage::IgnoredPluginPresentation
+        })
     }
 
     pub(super) fn slider_view(

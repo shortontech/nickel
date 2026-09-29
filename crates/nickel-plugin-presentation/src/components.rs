@@ -346,6 +346,7 @@ pub enum PanelNode {
         label: String,
         accessibility_label: String,
         accessibility_state: Option<String>,
+        disabled: bool,
         width: Option<u32>,
         height: Option<u32>,
         icon: Option<String>,
@@ -1240,6 +1241,10 @@ impl PanelNode {
             }),
             "button" => {
                 let label = child_text(children)?;
+                let disabled = value
+                    .get("disabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let dimension = |name: &str| -> Result<Option<u32>, String> {
                     match value.get(name) {
                         None => Ok(None),
@@ -1273,6 +1278,7 @@ impl PanelNode {
                         .and_then(Value::as_str)
                         .filter(|state| state.len() <= 128)
                         .map(str::to_owned),
+                    disabled,
                     width: dimension("width")?,
                     height: dimension("height")?,
                     icon: value
@@ -1285,11 +1291,12 @@ impl PanelNode {
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
                     label,
-                    action: value
-                        .get("action")
-                        .and_then(Value::as_u64)
-                        .ok_or("button needs an onClick handler")?
-                        as usize,
+                    action: match value.get("action").and_then(Value::as_u64) {
+                        Some(action) => usize::try_from(action)
+                            .map_err(|_| "button action index is too large")?,
+                        None if disabled => 0,
+                        None => return Err("button needs an onClick handler".into()),
+                    },
                     context_action: value
                         .get("contextAction")
                         .and_then(Value::as_u64)
@@ -2125,6 +2132,7 @@ impl PanelNode {
                 label,
                 accessibility_label,
                 accessibility_state,
+                disabled,
                 width,
                 height,
                 icon,
@@ -2157,23 +2165,29 @@ impl PanelNode {
                     .id(id.clone())
                     .accessibility_label(accessibility_label)
                     .semantic_role(SemanticRole::Button)
-                    .message(Message::from_plugin(PluginMessage::Click(*action)))
                     .height(height.unwrap_or(42) as f32);
+                if !disabled {
+                    container =
+                        container.message(Message::from_plugin(PluginMessage::Click(*action)));
+                }
                 if let Some(state) = accessibility_state {
                     container = container.accessibility_state(state);
+                }
+                if *disabled {
+                    container = container.accessibility_state("disabled");
                 }
                 if let Some(width) = width {
                     container = container.width(*width as f32);
                 }
-                if let Some(action) = context_action {
+                if let Some(action) = context_action.filter(|_| !*disabled) {
                     container = container
-                        .context_message(Message::from_plugin(PluginMessage::Context(*action)));
+                        .context_message(Message::from_plugin(PluginMessage::Context(action)));
                 }
-                if let Some(drag) = drag_action {
+                if let Some(drag) = drag_action.filter(|_| !*disabled) {
                     container = container.on_drag((
                         Message::from_plugin(PluginMessage::Button {
                             click: *action,
-                            drag: *drag,
+                            drag,
                         }),
                         Message::drag,
                     ));
@@ -2244,7 +2258,12 @@ impl PanelNode {
 
     pub fn button_action(&self, requested_id: &str) -> Option<usize> {
         match self {
-            Self::Button { id, action, .. } if id == requested_id => Some(*action),
+            Self::Button {
+                id,
+                action,
+                disabled: false,
+                ..
+            } if id == requested_id => Some(*action),
             Self::Switch {
                 id,
                 action: Some(action),
