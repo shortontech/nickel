@@ -258,7 +258,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, screenshot plugin input and lifecycle, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked live component layouts, typed surface hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, native screenshot input and lifecycle, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked live component layouts, typed surface hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
     );
     Ok(())
 }
@@ -332,11 +332,8 @@ fn exercise(
     }) {
         return Err(format!("taskbar plugin surface is missing: {surfaces:?}"));
     }
-    if !surfaces.lines().any(|line| {
-        line.starts_with("Desktop\twinit\t")
-            && line.ends_with("org.nickel.desktop/main")
-    }) {
-        return Err(format!("desktop plugin surface is missing: {surfaces:?}"));
+    if native_surface_geometry(&surfaces, "Desktop").is_none() {
+        return Err(format!("native desktop surface is missing: {surfaces:?}"));
     }
     if !surfaces.lines().any(|line| {
         line.starts_with("Preview\tunmapped\t")
@@ -345,7 +342,7 @@ fn exercise(
         return Err(format!("preview plugin surface is missing: {surfaces:?}"));
     }
     verify_layout_snapshot(test_input, &environment, "org.nickel.taskbar/main")?;
-    verify_layout_snapshot(test_input, &environment, "org.nickel.desktop/main")?;
+    verify_native_layout_snapshot(test_input, &environment, "Desktop")?;
     let plugin_output = checked(test_input, &environment, &["plugins"])?;
     let plugins: nickel_session_protocol::PluginStatusSnapshot =
         serde_json::from_str(&plugin_output).map_err(|error| error.to_string())?;
@@ -359,8 +356,6 @@ fn exercise(
         "org.nickel.codex-projects",
         "org.nickel.on-screen-keyboard",
         "org.nickel.window-preview",
-        "org.nickel.desktop",
-        "org.nickel.screenshot",
     ] {
         let plugin = plugins
             .plugins
@@ -371,6 +366,11 @@ fn exercise(
             || plugin.health != nickel_session_protocol::PluginRuntimeHealth::Running
         {
             return Err(format!("bundled plugin {id} is not running: {:?}", plugin.health));
+        }
+    }
+    for id in ["org.nickel.desktop", "org.nickel.screenshot"] {
+        if plugins.plugins.iter().any(|plugin| plugin.id == id) {
+            return Err(format!("native surface {id} is still registered as a plugin"));
         }
     }
     assert_no_shell_child(compositor.id())?;
@@ -435,7 +435,7 @@ fn exercise(
     checked(test_input, &environment, &["key", "meta", "released"])?;
     wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
     verify_taskbar_plugin_retires(test_input, &environment)?;
-    verify_desktop_plugin_retires(test_input, &environment)?;
+    wait_for_desktop_presence(test_input, &environment, true, Duration::from_secs(2))?;
     verify_bundled_overlay_surface_retires(test_input, &environment, "org.nickel.volume-osd", "VolumeOsd")?;
     verify_bundled_overlay_surface_retires(test_input, &environment, "org.nickel.window-preview", "Preview")?;
     verify_control_plugin_retires(test_input, &environment)?;
@@ -567,7 +567,7 @@ fn exercise(
         ));
     }
     verify_settings_memory_report(settings, test_input, &environment)?;
-    verify_screenshot_plugin_lifecycle(test_input, &environment)?;
+    verify_native_screenshot_lifecycle(test_input, &environment)?;
     Ok(())
 }
 
@@ -660,6 +660,18 @@ fn surface_geometry(surfaces: &str, role: &str, key: &str) -> Option<(i32, i32, 
     Some((x.parse().ok()?, y.parse().ok()?, width.parse().ok()?, height.parse().ok()?))
 }
 
+fn native_surface_geometry(surfaces: &str, role: &str) -> Option<(i32, i32, u32, u32)> {
+    let geometry = surfaces
+        .lines()
+        .find(|line| line.starts_with(&format!("{role}\t")) && line.split('\t').count() == 3)?
+        .split('\t')
+        .nth(2)?;
+    let (origin, size) = geometry.split_once(' ')?;
+    let (x, y) = origin.split_once(',')?;
+    let (width, height) = size.split_once('x')?;
+    Some((x.parse().ok()?, y.parse().ok()?, width.parse().ok()?, height.parse().ok()?))
+}
+
 fn verify_reserved_panel_stacks_and_reflows(
     test_input: &Path,
     environment: &[(String, String)],
@@ -705,27 +717,6 @@ fn verify_reserved_panel_stacks_and_reflows(
         }
         thread::sleep(POLL);
     }
-}
-
-fn verify_desktop_plugin_retires(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let id = "org.nickel.desktop";
-    wait_for_desktop_presence(test_input, environment, true, Duration::from_secs(2))?;
-    wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(2))?;
-    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let plugin = disabled.plugins.iter().find(|plugin| plugin.id == id).ok_or("desktop missing")?;
-    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
-        return Err("disabled desktop retained native UI memory".into());
-    }
-    wait_for_desktop_presence(test_input, environment, false, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    wait_for_desktop_presence(test_input, environment, true, Duration::from_secs(2))?;
-    wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(2))?;
-    Ok(())
 }
 
 fn wait_for_desktop_presence(
@@ -1034,8 +1025,8 @@ fn wait_for_screenshot_visibility(
     loop {
         let surfaces = checked(test_input, environment, &["surfaces"])?;
         let visible = surfaces.lines().any(|line| {
-            line.starts_with("PluginSurface\t")
-                && line.ends_with("org.nickel.screenshot/main")
+            line.starts_with("Screenshot\t")
+                && line.split('\t').count() == 3
                 && line.split('\t').nth(2) != Some("hidden")
         });
         if visible == expected {
@@ -1048,7 +1039,7 @@ fn wait_for_screenshot_visibility(
     }
 }
 
-fn verify_screenshot_plugin_lifecycle(
+fn verify_native_screenshot_lifecycle(
     test_input: &Path,
     environment: &[(String, String)],
 ) -> Result<(), String> {
@@ -1059,22 +1050,10 @@ fn verify_screenshot_plugin_lifecycle(
     };
     press_print_screen()?;
     wait_for_screenshot_visibility(test_input, environment, true, Duration::from_secs(5))?;
-    if wait_for_plugin_native_memory(
-        test_input,
-        environment,
-        "org.nickel.screenshot",
-        Duration::from_secs(2),
-    )? == 0
-    {
-        return Err("rendered screenshot plugin reported zero native UI memory".into());
-    }
+    verify_native_layout_snapshot(test_input, environment, "Screenshot")?;
     let surfaces = checked(test_input, environment, &["surfaces"])?;
-    let (x, y, width, height) = surface_geometry(
-        &surfaces,
-        "PluginSurface",
-        "org.nickel.screenshot/main",
-    )
-    .ok_or_else(|| format!("screenshot plugin geometry is missing: {surfaces}"))?;
+    let (x, y, width, height) = native_surface_geometry(&surfaces, "Screenshot")
+        .ok_or_else(|| format!("native screenshot geometry is missing: {surfaces}"))?;
     let start = (x + width as i32 / 4, y + height as i32 / 4);
     let end = (x + width as i32 * 3 / 4, y + height as i32 * 3 / 4);
     checked(test_input, environment, &["move", &start.0.to_string(), &start.1.to_string()])?;
@@ -1088,18 +1067,6 @@ fn verify_screenshot_plugin_lifecycle(
     checked(test_input, environment, &["key", "escape", "released"])?;
     wait_for_screenshot_visibility(test_input, environment, false, Duration::from_secs(2))?;
 
-    checked(
-        test_input,
-        environment,
-        &["plugin-set", "org.nickel.screenshot", "disabled"],
-    )?;
-    press_print_screen()?;
-    wait_for_screenshot_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    checked(
-        test_input,
-        environment,
-        &["plugin-set", "org.nickel.screenshot", "enabled"],
-    )?;
     press_print_screen()?;
     wait_for_screenshot_visibility(test_input, environment, true, Duration::from_secs(5))?;
     checked(test_input, environment, &["key", "escape", "pressed"])?;
@@ -1894,7 +1861,7 @@ fn verify_separate_plugin_overlay(
     };
     let surfaces = checked(test_input, environment, &["surfaces"])?;
     let (output_x, output_y, output_width, _) =
-        surface_geometry(&surfaces, "Desktop", "org.nickel.desktop/main")
+        native_surface_geometry(&surfaces, "Desktop")
             .ok_or("nested desktop output geometry is unavailable")?;
     let expected = (output_x + output_width as i32 - 300 - 18, output_y + 24);
     if (overlay_x, overlay_y) != expected {
@@ -2204,6 +2171,64 @@ fn verify_layout_snapshot(
         return Err(format!(
             "{plugin_surface} has no computed component layout: {layout}"
         ));
+    }
+    Ok(())
+}
+
+fn verify_native_layout_snapshot(
+    test_input: &Path,
+    environment: &[(String, String)],
+    role: &str,
+) -> Result<(), String> {
+    let layouts = checked(test_input, environment, &["layouts"])?;
+    let surface = layouts
+        .lines()
+        .find(|line| line.split('\t').nth(1) == Some(role) && line.split('\t').count() == 5)
+        .and_then(|line| line.split('\t').next())
+        .ok_or_else(|| format!("native {role} is absent from layout inventory: {layouts}"))?;
+    let mut offset = 0;
+    let mut total = None;
+    loop {
+        let layout = checked(test_input, environment, &["layout", surface, &offset.to_string()])?;
+        let header = layout.lines().next().ok_or("layout page has no header")?;
+        let fields = header.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 5 || fields[0] != "#" || fields[1] != "layout" {
+            return Err(format!("native {role} layout page has an invalid header: {header}"));
+        }
+        let page_offset = fields[2]
+            .strip_prefix("offset=")
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or("layout page has no valid offset")?;
+        let page_total = fields[3]
+            .strip_prefix("total=")
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or("layout page has no valid node count")?;
+        if page_offset != offset || total.is_some_and(|total| total != page_total) {
+            return Err(format!("native {role} layout pages changed during inspection"));
+        }
+        total = Some(page_total);
+        let nodes = layout.lines().skip(1).collect::<Vec<_>>();
+        if nodes.is_empty()
+            || nodes.iter().any(|line| {
+                !line.contains(" source=")
+                    || !line.contains(" allocated=")
+                    || !line.contains(" children=")
+            })
+        {
+            return Err(format!("native {role} has no computed component layout: {layout}"));
+        }
+        let next = fields[4].strip_prefix("next=").ok_or("layout page has no next offset")?;
+        if next == "end" {
+            if offset + nodes.len() != page_total {
+                return Err(format!("native {role} layout ends before all nodes were returned"));
+            }
+            break;
+        }
+        let next = next.parse::<usize>().map_err(|_| "invalid next layout offset")?;
+        if next != offset + nodes.len() || next > page_total {
+            return Err(format!("native {role} layout page skipped nodes"));
+        }
+        offset = next;
     }
     Ok(())
 }

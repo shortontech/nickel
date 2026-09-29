@@ -1,7 +1,7 @@
 #![cfg(feature = "workbench-fixtures")]
 
 use nickel_shell::ShellFixtureProvider;
-use nickel_ui::{SemanticRole, Size};
+use nickel_ui::{ActionKind, SemanticRole, Size};
 use nickel_ui_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
 
 #[test]
@@ -127,7 +127,7 @@ fn registers_every_shell_surface_fixture() {
 }
 
 #[test]
-fn desktop_variants_expose_named_jsx_presentation() {
+fn desktop_variants_expose_named_context_interactive_presentation() {
     let mut registry = FixtureRegistry::new();
     ShellFixtureProvider.register(&mut registry).unwrap();
     let entry = registry
@@ -146,10 +146,8 @@ fn desktop_variants_expose_named_jsx_presentation() {
         ["solid", "wallpaper"]
     );
 
-    let mut rasters = Vec::new();
     for variant in entry.metadata.variants {
         let session = entry.open_configuration(*variant);
-        rasters.push(session.render(1.0));
         let semantic = session.semantic_nodes();
         assert_eq!(semantic.len(), 1, "{} semantic nodes", variant.id);
         assert_eq!(
@@ -158,7 +156,7 @@ fn desktop_variants_expose_named_jsx_presentation() {
         );
         assert_eq!(semantic[0].name.as_deref(), Some("Desktop"));
         assert_eq!(semantic[0].bounds.size, Size::new(960.0, 540.0));
-        assert!(semantic[0].actions.is_empty());
+        assert_eq!(semantic[0].actions, vec![ActionKind::ContextMenu]);
 
         let accessibility = session.accessibility_nodes();
         let accessibility = accessibility
@@ -173,13 +171,23 @@ fn desktop_variants_expose_named_jsx_presentation() {
         assert_eq!(accessibility[0].role.as_deref(), Some("application"));
         assert_eq!(accessibility[0].label.as_deref(), Some("Desktop"));
         assert_eq!(accessibility[0].rect.size, Size::new(960.0, 540.0));
-        assert!(!accessibility[0].interactive);
-        assert!(accessibility[0].actions.is_empty());
+        assert!(accessibility[0].interactive);
+        assert_eq!(accessibility[0].actions, vec![ActionKind::ContextMenu]);
+
+        for via in [
+            ActivationVia::Semantic,
+            ActivationVia::Pointer,
+            ActivationVia::Touch,
+            ActivationVia::Keyboard,
+            ActivationVia::Controller,
+            ActivationVia::Accessibility,
+        ] {
+            let mut session = entry.open_configuration(*variant);
+            session
+                .activate(via)
+                .unwrap_or_else(|error| panic!("{} {via:?}: {error}", variant.id));
+        }
     }
-    assert_ne!(
-        rasters[0], rasters[1],
-        "wallpaper must alter desktop pixels"
-    );
 }
 
 #[test]

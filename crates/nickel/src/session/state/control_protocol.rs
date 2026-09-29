@@ -1022,8 +1022,8 @@ impl NickelSession {
             Query::UiLayouts if self.test_control_enabled => {
                 ServerMessage::UiLayouts(self.protocol_ui_layouts())
             }
-            Query::UiLayout { surface } if self.test_control_enabled => {
-                match self.protocol_ui_layout(&surface) {
+            Query::UiLayout { surface, offset } if self.test_control_enabled => {
+                match self.protocol_ui_layout(&surface, offset) {
                     Ok(snapshot) => ServerMessage::UiLayout(snapshot),
                     Err(message) => protocol_error(ErrorCode::InvalidRequest, &message),
                 }
@@ -2537,6 +2537,10 @@ impl NickelSession {
                         plugin_id: key.plugin_id,
                         surface_id: key.surface_id,
                     });
+                let role = shell_entry
+                    .filter(|_| plugin.is_none())
+                    .map(|(_, surface)| format!("{:?}", surface.role))
+                    .unwrap_or_else(|| format!("{:?}", placement.role));
                 let node_count = shell_entry
                     .and_then(|(shell, surface)| shell.layout_snapshot(surface.id))
                     .map_or_else(
@@ -2546,7 +2550,7 @@ impl NickelSession {
                 Some(nickel_session_protocol::UiLayoutSurfaceSnapshot {
                     id: format!("internal:{}", id.snapshot_token()),
                     title: self.internal_ui.title(id)?.chars().take(128).collect(),
-                    role: format!("{:?}", placement.role),
+                    role,
                     visible: self.internal_ui.is_visible(id),
                     geometry: ProtocolGeometry {
                         x,
@@ -2564,6 +2568,7 @@ impl NickelSession {
     fn protocol_ui_layout(
         &self,
         surface: &str,
+        offset: usize,
     ) -> Result<nickel_session_protocol::UiLayoutSnapshot, String> {
         let summary = self
             .protocol_ui_layouts()
@@ -2591,12 +2596,27 @@ impl NickelSession {
             })
             .or_else(|| self.internal_ui.layout_snapshot(id))
             .ok_or("computed layout is unavailable")?;
-        if layout.len() > 150_000 {
-            return Err("computed layout exceeds the test socket response limit".into());
+        const PAGE_NODES: usize = 128;
+        let total_nodes = layout.lines().count();
+        if offset > total_nodes {
+            return Err("computed layout offset exceeds node count".into());
+        }
+        let mut page = String::new();
+        let mut count = 0;
+        for line in layout.lines().skip(offset).take(PAGE_NODES) {
+            page.push_str(line);
+            page.push('\n');
+            count += 1;
+        }
+        if page.len() > 150_000 {
+            return Err("computed layout page exceeds the test socket response limit".into());
         }
         Ok(nickel_session_protocol::UiLayoutSnapshot {
             surface: summary,
-            layout,
+            layout: page,
+            offset,
+            total_nodes,
+            next_offset: (offset + count < total_nodes).then_some(offset + count),
         })
     }
 

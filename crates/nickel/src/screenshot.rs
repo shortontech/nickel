@@ -358,6 +358,10 @@ pub(crate) struct ScreenshotPluginPresentation {
 }
 
 impl ScreenshotTool {
+    pub(crate) fn layout_snapshot(&self) -> String {
+        self.host.layout_snapshot()
+    }
+
     pub(crate) fn pointer_interaction_active(&self) -> bool {
         self.host.pointer_interaction_active() || self.host.application().drag_start.is_some()
     }

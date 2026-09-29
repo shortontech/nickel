@@ -14,7 +14,11 @@ use nickel_file::{
     },
 };
 use nickel_input::KeyCode;
-use nickel_ui::{Container, FrameOverlay, Layer, Point, Rect, SemanticRole, Size, ViewContext};
+use nickel_ui::{
+    Container, FilePlaneItem, FrameOverlay, Image, ImageFit, Insets, Layer, OverlayAnchor,
+    OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Rect, SemanticRole, Size, Text, UiId,
+    ViewContext,
+};
 
 use super::desktop_label_foreground;
 use crate::file_window_host::FileWindowHost;
@@ -205,7 +209,7 @@ impl DesktopApplication {
             wallpaper_generation: 0,
             palette,
             browser,
-            watch: None,
+            watch: DirectoryWatch::start(&path).ok(),
             layout,
             active_output: "primary".into(),
             output_origin: DesktopPoint::default(),
@@ -1392,40 +1396,487 @@ impl nickel_ui::Application for DesktopApplication {
         }
     }
 
-    fn frame_overlays(&self, _view_context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
-        if !self.plugin_background {
-            return Vec::new();
+    fn frame_overlays(&self, view_context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let selection_marquee = self.selection_start.map(|start| {
+            let current = self.pointer_position;
+            FrameOverlay::SelectionMarquee {
+                rect: Rect::new(
+                    start.x.min(current.x),
+                    start.y.min(current.y),
+                    (current.x - start.x).abs(),
+                    (current.y - start.y).abs(),
+                ),
+                // A marquee is an overlay over the desktop artwork, not an
+                // opaque content tile. Preserve the wallpaper and icons below
+                // it while keeping the boundary fully legible.
+                fill: Some((0x38_u32 << 24) | (self.palette.accent_soft & 0x00ff_ffff)),
+                stroke: self.palette.accent,
+                width: 1.0,
+            }
+        });
+        if self.plugin_background {
+            return selection_marquee.into_iter().collect();
         }
-        self.selection_start
-            .map(|start| {
-                let current = self.pointer_position;
-                FrameOverlay::SelectionMarquee {
-                    rect: Rect::new(
-                        start.x.min(current.x),
-                        start.y.min(current.y),
-                        (current.x - start.x).abs(),
-                        (current.y - start.y).abs(),
-                    ),
-                    fill: Some((0x38_u32 << 24) | (self.palette.accent_soft & 0x00ff_ffff)),
-                    stroke: self.palette.accent,
-                    width: 1.0,
+        let Some(context) = &self.context_menu else {
+            return selection_marquee.into_iter().collect();
+        };
+        if context.output != self.active_output {
+            return selection_marquee.into_iter().collect();
+        }
+        if context.entry.is_none() {
+            let anchor = context.anchor.map_or_else(
+                || OverlayAnchor::InvocationTargetCenter(UiId::new("desktop")),
+                |point| OverlayAnchor::Point {
+                    invocation_target: UiId::new("desktop"),
+                    point: Point {
+                        x: point.x,
+                        y: point.y,
+                    },
+                },
+            );
+            let visible = self.layout.icons_visible();
+            let grid = self.layout.grid();
+            let arrangement = self.layout.arrangement();
+            let grouping = self.layout.folder_grouping();
+            let checked = |selected: bool, label: &str| {
+                if selected {
+                    format!("✓ {label}")
+                } else {
+                    label.to_owned()
                 }
+            };
+            let paste = if self.paste_in_progress {
+                OverlayMenuItem::disabled_with_reason(
+                    "paste",
+                    "Paste",
+                    "A desktop paste is already in progress",
+                )
+                .shortcut("Ctrl+V")
+            } else if context.paste_available {
+                OverlayMenuItem::action(
+                    "paste",
+                    "Paste",
+                    DesktopMessage::Command(DesktopCommand::Paste),
+                )
+                .shortcut("Ctrl+V")
+            } else {
+                OverlayMenuItem::disabled_with_reason("paste", "Paste", "File clipboard is empty")
+                    .shortcut("Ctrl+V")
+            };
+            let new_folder = if context.desktop_writable {
+                OverlayMenuItem::action(
+                    "new-folder",
+                    "New Folder",
+                    DesktopMessage::Command(DesktopCommand::NewFolder),
+                )
+                .separator_before(true)
+            } else {
+                OverlayMenuItem::disabled_with_reason(
+                    "new-folder",
+                    "New Folder",
+                    "Desktop location is not writable",
+                )
+                .separator_before(true)
+            };
+            let mut menu = OverlayMenu::new("desktop-background-context", anchor)
+                .semantic_style(OverlayStyle {
+                    background: self.palette.surface,
+                    foreground: self.palette.text,
+                    border: self.palette.accent,
+                    selected: self.palette.accent_soft,
+                    radius: 7,
+                })
+                .item(
+                    OverlayMenuItem::action(
+                        "show-icons",
+                        if visible {
+                            "Hide desktop icons"
+                        } else {
+                            "Show desktop icons"
+                        },
+                        DesktopMessage::Command(DesktopCommand::IconsVisible(!visible)),
+                    )
+                    .shortcut("Ctrl+Shift+D"),
+                )
+                .item(OverlayMenuItem::action(
+                    "small-icons",
+                    if grid.0 <= 72.0 {
+                        "✓ Small icons"
+                    } else {
+                        "Small icons"
+                    },
+                    DesktopMessage::Command(DesktopCommand::IconSize(72.0, 88.0)),
+                ))
+                .item(OverlayMenuItem::action(
+                    "medium-icons",
+                    if grid.0 > 72.0 && grid.0 < 128.0 {
+                        "✓ Medium icons"
+                    } else {
+                        "Medium icons"
+                    },
+                    DesktopMessage::Command(DesktopCommand::IconSize(96.0, 112.0)),
+                ))
+                .item(OverlayMenuItem::action(
+                    "large-icons",
+                    if grid.0 >= 128.0 {
+                        "✓ Large icons"
+                    } else {
+                        "Large icons"
+                    },
+                    DesktopMessage::Command(DesktopCommand::IconSize(128.0, 144.0)),
+                ))
+                .item(
+                    OverlayMenuItem::action(
+                        "sort-name",
+                        checked(
+                            arrangement
+                                == DesktopArrangement::Sorted {
+                                    key: DesktopSortKey::Name,
+                                    direction: DesktopSortDirection::Ascending,
+                                },
+                            "Name (ascending)",
+                        ),
+                        DesktopMessage::Command(DesktopCommand::Sort(
+                            DesktopSortKey::Name,
+                            DesktopSortDirection::Ascending,
+                        )),
+                    )
+                    .separator_before(true),
+                )
+                .item(OverlayMenuItem::action(
+                    "sort-name-descending",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Name,
+                                direction: DesktopSortDirection::Descending,
+                            },
+                        "Name (descending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Name,
+                        DesktopSortDirection::Descending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-kind",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Kind,
+                                direction: DesktopSortDirection::Ascending,
+                            },
+                        "Type (ascending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Kind,
+                        DesktopSortDirection::Ascending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-kind-descending",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Kind,
+                                direction: DesktopSortDirection::Descending,
+                            },
+                        "Type (descending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Kind,
+                        DesktopSortDirection::Descending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-size",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Size,
+                                direction: DesktopSortDirection::Ascending,
+                            },
+                        "Size (ascending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Size,
+                        DesktopSortDirection::Ascending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-size-descending",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Size,
+                                direction: DesktopSortDirection::Descending,
+                            },
+                        "Size (descending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Size,
+                        DesktopSortDirection::Descending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-modified",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Modified,
+                                direction: DesktopSortDirection::Descending,
+                            },
+                        "Modified (newest first)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Modified,
+                        DesktopSortDirection::Descending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-modified-ascending",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Modified,
+                                direction: DesktopSortDirection::Ascending,
+                            },
+                        "Modified (oldest first)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Modified,
+                        DesktopSortDirection::Ascending,
+                    )),
+                ))
+                .item(
+                    OverlayMenuItem::action(
+                        "manual",
+                        checked(
+                            arrangement == DesktopArrangement::Manual,
+                            "Manual arrangement",
+                        ),
+                        DesktopMessage::Command(DesktopCommand::Manual),
+                    )
+                    .separator_before(true),
+                )
+                .item(OverlayMenuItem::action(
+                    "align",
+                    "Align to Grid",
+                    DesktopMessage::Command(DesktopCommand::AlignGrid),
+                ))
+                .item(OverlayMenuItem::action(
+                    "auto-arrange",
+                    "Auto Arrange",
+                    DesktopMessage::Command(DesktopCommand::AutoArrange),
+                ))
+                .item(
+                    OverlayMenuItem::action(
+                        "folders-first",
+                        checked(grouping == FolderGrouping::FoldersFirst, "Folders first"),
+                        DesktopMessage::Command(DesktopCommand::FolderGrouping(
+                            FolderGrouping::FoldersFirst,
+                        )),
+                    )
+                    .separator_before(true),
+                )
+                .item(OverlayMenuItem::action(
+                    "folders-mixed",
+                    checked(grouping == FolderGrouping::Mixed, "Mix folders and files"),
+                    DesktopMessage::Command(DesktopCommand::FolderGrouping(FolderGrouping::Mixed)),
+                ))
+                .item(
+                    OverlayMenuItem::action(
+                        "refresh",
+                        "Refresh",
+                        DesktopMessage::Command(DesktopCommand::Refresh),
+                    )
+                    .shortcut("F5")
+                    .separator_before(true),
+                )
+                .item(paste)
+                .item(new_folder)
+                .item(
+                    OverlayMenuItem::action(
+                        "display-settings",
+                        "Display Settings",
+                        DesktopMessage::Command(DesktopCommand::DisplaySettings),
+                    )
+                    .separator_before(true),
+                )
+                .item(OverlayMenuItem::action(
+                    "personalize",
+                    "Personalize",
+                    DesktopMessage::Command(DesktopCommand::Personalize),
+                ));
+            let mut view_items = Vec::new();
+            let mut sort_items = Vec::new();
+            let mut root_items = Vec::new();
+            for item in std::mem::take(&mut menu.items) {
+                match item.id.as_str() {
+                    "show-icons" | "small-icons" | "medium-icons" | "large-icons" | "align"
+                    | "auto-arrange" | "folders-first" | "folders-mixed" => view_items.push(item),
+                    "sort-name"
+                    | "sort-name-descending"
+                    | "sort-kind"
+                    | "sort-kind-descending"
+                    | "sort-size"
+                    | "sort-size-descending"
+                    | "sort-modified"
+                    | "sort-modified-ascending"
+                    | "manual" => sort_items.push(item),
+                    _ => root_items.push(item),
+                }
+            }
+            menu.items = vec![
+                OverlayMenuItem::submenu("view", "View", view_items),
+                OverlayMenuItem::submenu("sort-by", "Sort By", sort_items),
+            ];
+            menu.items.extend(root_items);
+            menu.background = self.palette.surface;
+            menu.border = self.palette.muted;
+            menu.foreground = self.palette.text;
+            menu.item_hover = Some(self.palette.surface_hover);
+            menu.item_selected = Some(self.palette.accent_soft);
+            menu.row_height = ((view_context.viewport.size.height - 8.0) / menu.items.len() as f32)
+                .clamp(18.0, menu.row_height);
+            let mut overlays: Vec<_> = selection_marquee.into_iter().collect();
+            overlays.push(FrameOverlay::Menu(menu));
+            return overlays;
+        }
+        let id = context.entry.unwrap();
+        let anchor = UiId::new(format!("desktop-entry-{}-{}", id.0.0, id.0.1));
+        let mut overlays: Vec<_> = selection_marquee.into_iter().collect();
+        overlays.push(FrameOverlay::Menu(
+            OverlayMenu::new(
+                format!("desktop-entry-{}-{}-context", id.0.0, id.0.1),
+                OverlayAnchor::InvocationTarget(anchor),
+            )
+            .semantic_style(OverlayStyle {
+                background: self.palette.surface,
+                foreground: self.palette.text,
+                border: self.palette.accent,
+                selected: self.palette.accent_soft,
+                radius: 7,
             })
-            .into_iter()
-            .collect()
+            .item(
+                OverlayMenuItem::action("open", "Open", DesktopMessage::Activate(id))
+                    .shortcut("Enter"),
+            )
+            .item(
+                OverlayMenuItem::action("cut", "Cut", DesktopMessage::Cut(id))
+                    .shortcut("Ctrl+X")
+                    .separator_before(true),
+            )
+            .item(
+                OverlayMenuItem::action("copy", "Copy", DesktopMessage::Copy(id))
+                    .shortcut("Ctrl+C"),
+            )
+            .item(
+                OverlayMenuItem::action("rename", "Rename", DesktopMessage::Rename(id))
+                    .shortcut("F2")
+                    .separator_before(true),
+            )
+            .item(OverlayMenuItem::disabled_with_reason(
+                "trash",
+                "Move to Trash",
+                "Trash integration is not implemented yet",
+            ))
+            .item(
+                OverlayMenuItem::action(
+                    "open-terminal",
+                    "Open in Terminal",
+                    DesktopMessage::OpenTerminal(id),
+                )
+                .separator_before(true),
+            )
+            .item(OverlayMenuItem::action(
+                "properties",
+                "Properties",
+                DesktopMessage::Properties(id),
+            )),
+        ));
+        overlays
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
-        let mut layer = Layer::new().width(width).height(height);
         if self.plugin_background {
+            let mut layer = Layer::new().width(width).height(height);
+            if self.plugin_background {
+                let (cell_width, cell_height) = self.layout.grid();
+                for item in
+                    self.layout.items().iter().filter(|item| {
+                        self.layout.icons_visible() && item.output == self.active_output
+                    })
+                {
+                    let origin = self.projection_origin();
+                    let mut position = Point {
+                        x: item.position.x - origin.x,
+                        y: item.position.y - origin.y,
+                    };
+                    let selected = self.layout.selected().contains(&item.id);
+                    if selected && self.pointer_dragged {
+                        if let Some((_, pressed)) = self.pointer_down {
+                            position.x += self.pointer_position.x - pressed.x;
+                            position.y += self.pointer_position.y - pressed.y;
+                        }
+                    }
+                    // Rust retains stable hit and menu-anchor IDs. JSX paints the tile.
+                    layer = layer.child(
+                        Container::new()
+                            .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
+                            .position(position)
+                            .width(cell_width)
+                            .height(cell_height - 4.0)
+                            .message(DesktopMessage::Activate(item.id))
+                            .context_message(DesktopMessage::Context(item.id))
+                            .semantic_role(SemanticRole::GridCell)
+                            .accessibility_label(item.entry.display_name()),
+                    );
+                }
+            }
+            let root = Container::new()
+                .id("desktop")
+                .semantic_role(SemanticRole::ApplicationPresentation)
+                .accessibility_label("Desktop")
+                .width(width)
+                .height(height);
+            let root = if self.plugin_background {
+                root.context_message(DesktopMessage::BackgroundContext)
+            } else {
+                root
+            };
+            root.child(layer)
+        } else {
+            let mut layer = Layer::new().width(width).height(height).child(
+                Container::new()
+                    .width(width)
+                    .height(height)
+                    .background(self.palette.background),
+            );
+            if let Some(wallpaper) = &self.wallpaper {
+                layer = layer.child(
+                    // Wallpaper changes have an owned generation; dragging an icon
+                    // must not fingerprint every wallpaper byte during view rebuild.
+                    Image::new_with_generation(1, Arc::clone(wallpaper), self.wallpaper_generation)
+                        .width(width)
+                        .height(height)
+                        .fit(ImageFit::Stretch)
+                        .decorative(),
+                );
+            }
+            let hovered = self
+                .pointer_seen
+                .then(|| self.hit(self.pointer_position))
+                .flatten();
             let (cell_width, cell_height) = self.layout.grid();
-            for item in self
+            for (index, item) in self
                 .layout
                 .items()
                 .iter()
                 .filter(|item| self.layout.icons_visible() && item.output == self.active_output)
+                .enumerate()
             {
                 let origin = self.projection_origin();
                 let mut position = Point {
@@ -1433,38 +1884,119 @@ impl nickel_ui::Application for DesktopApplication {
                     y: item.position.y - origin.y,
                 };
                 let selected = self.layout.selected().contains(&item.id);
-                if selected && self.pointer_dragged {
-                    if let Some((_, pressed)) = self.pointer_down {
-                        position.x += self.pointer_position.x - pressed.x;
-                        position.y += self.pointer_position.y - pressed.y;
-                    }
+                if selected
+                    && self.pointer_dragged
+                    && let Some((_, pressed)) = self.pointer_down
+                {
+                    position.x += self.pointer_position.x - pressed.x;
+                    position.y += self.pointer_position.y - pressed.y;
                 }
-                // Rust retains stable hit and menu-anchor IDs. JSX paints the tile.
+                let focused = self.layout.active() == Some(item.id);
+                let icon = self
+                    .icon_cache
+                    .get(&item.entry.path)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Arc::new(image::RgbaImage::from_pixel(
+                            1,
+                            1,
+                            image::Rgba([0, 0, 0, 0]),
+                        ))
+                    });
+                let label_height = (cell_height - 74.0).max(1.0);
+                let label_rect = Rect::new(
+                    position.x + 3.0,
+                    position.y + 62.0,
+                    (cell_width - 6.0).max(1.0),
+                    label_height,
+                );
+                let interaction_surface = if selected {
+                    Some(self.palette.accent_soft)
+                } else if hovered == Some(item.id) || focused {
+                    Some(self.palette.surface_hover)
+                } else {
+                    None
+                };
+                let label_foreground = desktop_label_foreground(
+                    self.wallpaper.as_deref(),
+                    Size { width, height },
+                    label_rect,
+                    self.palette.background,
+                    interaction_surface,
+                );
+                let label_outline = if label_foreground == 0x111111 {
+                    0xccffffff
+                } else {
+                    0xcc111111
+                };
+                let mut tile = FilePlaneItem::new_with_generation(
+                    DesktopMessage::Activate(item.id),
+                    item.entry.display_name(),
+                    10_000_u16.saturating_add(index as u16),
+                    icon,
+                    self.directory_generation,
+                )
+                .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
+                .position(position)
+                .width(cell_width)
+                .height(cell_height - 4.0)
+                .padding(Insets {
+                    top: 6.0,
+                    right: 3.0,
+                    bottom: 8.0,
+                    left: 3.0,
+                })
+                .radius(8.0)
+                .context_message(DesktopMessage::Context(item.id))
+                .semantic_role(SemanticRole::GridCell)
+                .accessibility_label(item.entry.display_name())
+                .interaction_backgrounds(self.palette.surface_hover, self.palette.accent_soft)
+                .selected_background(selected, self.palette.accent_soft)
+                .hovered_background(
+                    !selected && (hovered == Some(item.id) || focused),
+                    self.palette.surface_hover,
+                )
+                .focus_background_tint(self.palette.accent)
+                .controller_focus_background_tint(self.palette.complement)
+                .icon_size(48.0)
+                .label_height(label_height)
+                .label_scale(0.85)
+                .foreground(label_foreground)
+                .label_outline(label_outline, 1.0)
+                .gap(8.0);
+                if self.pointer_dragged && selected {
+                    tile = tile.border(self.palette.accent, 2.0);
+                }
+                layer = layer.child(tile);
+            }
+            if let Some(error) = &self.error {
                 layer = layer.child(
                     Container::new()
-                        .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
-                        .position(position)
-                        .width(cell_width)
-                        .height(cell_height - 4.0)
-                        .message(DesktopMessage::Activate(item.id))
-                        .context_message(DesktopMessage::Context(item.id))
-                        .semantic_role(SemanticRole::GridCell)
-                        .accessibility_label(item.entry.display_name()),
+                        .position(Point { x: 20.0, y: 20.0 })
+                        .width(500.0)
+                        .height(42.0)
+                        .padding(Insets::symmetric(12.0, 5.0))
+                        .background(self.palette.surface)
+                        .radius(8.0)
+                        .child(
+                            Text::new(error.clone())
+                                .width(476.0)
+                                .height(32.0)
+                                .scale(0.9)
+                                .color(self.palette.text),
+                        ),
                 );
             }
+            Container::new()
+                .id("desktop")
+                .semantic_role(SemanticRole::ApplicationPresentation)
+                .accessibility_label("Desktop")
+                .context_message(DesktopMessage::BackgroundContext)
+                .background(self.palette.background)
+                .width(width)
+                .height(height)
+                .child(layer)
         }
-        let root = Container::new()
-            .id("desktop")
-            .semantic_role(SemanticRole::ApplicationPresentation)
-            .accessibility_label("Desktop")
-            .width(width)
-            .height(height);
-        let root = if self.plugin_background {
-            root.context_message(DesktopMessage::BackgroundContext)
-        } else {
-            root
-        };
-        root.child(layer)
     }
 
     fn title(&self) -> &str {
@@ -1472,9 +2004,6 @@ impl nickel_ui::Application for DesktopApplication {
     }
 
     fn poll(&mut self) -> bool {
-        if !self.plugin_background {
-            return false;
-        }
         let mut changed = self.refresh_directory(false);
         #[cfg(target_os = "linux")]
         {
@@ -1486,14 +2015,12 @@ impl nickel_ui::Application for DesktopApplication {
             self.refresh_directory(true);
             changed = true;
         }
-        if self.plugin_background {
-            changed |= self.prepare_icons();
-        }
+        changed |= self.prepare_icons();
         changed
     }
 
     fn poll_interval(&self) -> Option<Duration> {
-        self.plugin_background.then_some(Duration::from_millis(250))
+        Some(Duration::from_millis(250))
     }
 }
 impl DesktopApplication {

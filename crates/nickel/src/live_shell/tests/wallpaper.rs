@@ -153,12 +153,12 @@
 
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         let retired_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        assert!(!retired_scene.iter().any(|command| matches!(
+        assert!(retired_scene.iter().any(|command| matches!(
             command,
             nickel_ui::backend::PaintCommand::Image { .. }
         )));
         assert!(!shell.desktop_host.application().plugin_background);
-        assert!(!shell.surface_visible(SurfaceRole::Desktop));
+        assert!(shell.surface_visible(SurfaceRole::Desktop));
         assert!(shell.plugin_surface_scene_for_output(&key, Some("primary"), 320, 200).is_none());
         assert!(shell.plugin_surface_change_token(&key).is_none());
         assert_eq!(
@@ -181,7 +181,7 @@
     }
 
     #[test]
-    fn desktop_error_banner_retires_with_its_plugin() {
+    fn desktop_error_banner_survives_plugin_retirement_in_native_view() {
         let mut shell = LiveShell::new().unwrap();
         shell.desktop_host.application_mut().error = Some("Desktop files unavailable".into());
         let plugin_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
@@ -197,7 +197,7 @@
 
         shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
         let retired_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        assert_eq!(banner_count(&retired_scene), 0);
+        assert_eq!(banner_count(&retired_scene), 1);
     }
 
     #[test]

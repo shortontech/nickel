@@ -21,7 +21,7 @@ Usage:
   nickel-test-input output-set NAME enabled|disabled
   nickel-test-input surfaces
   nickel-test-input layouts
-  nickel-test-input layout INTERNAL_SURFACE_ID
+  nickel-test-input layout INTERNAL_SURFACE_ID [NODE_OFFSET]
   nickel-test-input plugins
   nickel-test-input plugin-set ID enabled|disabled
   nickel-test-input plugin-setting ID KEY JSON_VALUE
@@ -80,7 +80,7 @@ enum Parsed {
     },
     Surfaces,
     Layouts,
-    Layout(String),
+    Layout(String, usize),
     Plugins,
     PluginSet {
         id: String,
@@ -152,7 +152,13 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         }),
         [command] if command == "surfaces" => Ok(Parsed::Surfaces),
         [command] if command == "layouts" => Ok(Parsed::Layouts),
-        [command, surface] if command == "layout" => Ok(Parsed::Layout(surface.clone())),
+        [command, surface] if command == "layout" => Ok(Parsed::Layout(surface.clone(), 0)),
+        [command, surface, offset] if command == "layout" => Ok(Parsed::Layout(
+            surface.clone(),
+            offset
+                .parse()
+                .map_err(|_| format!("invalid layout offset {offset:?}"))?,
+        )),
         [command] if command == "plugins" => Ok(Parsed::Plugins),
         [command, id, state] if command == "plugin-set" => Ok(Parsed::PluginSet {
             id: id.clone(),
@@ -834,9 +840,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(Request::Query(nickel_session_protocol::Query::UiLayouts)),
             None,
         ),
-        Parsed::Layout(surface) => (
+        Parsed::Layout(surface, offset) => (
             Some(Request::Query(nickel_session_protocol::Query::UiLayout {
                 surface,
+                offset,
             })),
             None,
         ),
@@ -1302,6 +1309,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         ServerMessage::UiLayout(snapshot) => {
+            println!(
+                "# layout offset={} total={} next={}",
+                snapshot.offset,
+                snapshot.total_nodes,
+                snapshot
+                    .next_offset
+                    .map_or_else(|| "end".into(), |offset| offset.to_string())
+            );
             match std::io::stdout()
                 .lock()
                 .write_all(snapshot.layout.as_bytes())
@@ -1350,7 +1365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::OutputSet { .. }
         | Parsed::Surfaces
         | Parsed::Layouts
-        | Parsed::Layout(_)
+        | Parsed::Layout(_, _)
         | Parsed::Plugins
         | Parsed::PluginSet { .. }
         | Parsed::PluginSetting { .. }
@@ -1428,7 +1443,11 @@ mod tests {
         assert!(matches!(parse(["layouts".into()]), Ok(Parsed::Layouts)));
         assert!(matches!(
             parse(["layout".into(), "internal:12".into()]),
-            Ok(Parsed::Layout(surface)) if surface == "internal:12"
+            Ok(Parsed::Layout(surface, 0)) if surface == "internal:12"
+        ));
+        assert!(matches!(
+            parse(["layout".into(), "internal:12".into(), "128".into()]),
+            Ok(Parsed::Layout(surface, 128)) if surface == "internal:12"
         ));
         assert!(matches!(
             parse([

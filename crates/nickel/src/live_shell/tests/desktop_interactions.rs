@@ -1,5 +1,5 @@
     #[test]
-    fn desktop_file_tiles_render_in_jsx_and_retire_with_the_plugin() {
+    fn desktop_file_tiles_fall_back_to_native_when_plugin_retires() {
         use std::{ffi::OsString, path::PathBuf};
 
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
@@ -61,13 +61,12 @@
 
         shell.set_plugin_enabled(&crate::plugin_panel::desktop_manifest().id, false).unwrap();
         shell.scene(SurfaceRole::Desktop, 400, 300);
-        assert!(!shell.desktop_host.commands().iter().any(|command| matches!(
-            command, nickel_ui::backend::PaintCommand::Image { .. }
+        assert!(shell.desktop_host.commands().iter().any(|command| matches!(
+            command, nickel_ui::backend::PaintCommand::Image { id: 10_000, .. }
         )));
-        assert!(!shell.desktop_host.accessibility_nodes().iter().any(|node|
+        assert!(shell.desktop_host.accessibility_nodes().iter().any(|node|
             node.semantic_role == Some(SemanticRole::GridCell)
         ));
-        assert!(!shell.desktop_controller(ControllerAction::Confirm));
         assert!(!shell.desktop_file_drop(std::path::Path::new("/desktop/ignored")));
     }
 
@@ -1281,13 +1280,13 @@
     }
 
     #[test]
-    fn desktop_uses_plugin_tiles_with_host_owned_hit_targets() {
+    fn desktop_native_tiles_share_the_file_plane_component() {
         let file = include_str!("../../../../nickel-file/src/components.rs");
         let launcher = include_str!("../../launcher_view.rs");
         let desktop_production = include_str!("../../live_shell/desktop.rs");
         assert!(file.contains("FileGridItem::new_with_generation"));
         assert!(launcher.matches("FilePlaneItem::new").count() >= 2);
-        assert!(!desktop_production.contains("FilePlaneItem::new_with_generation"));
+        assert!(desktop_production.contains("FilePlaneItem::new_with_generation"));
         assert!(desktop_production.contains(".semantic_role(SemanticRole::GridCell)"));
         let shared = include_str!("../../../../nickel-ui/src/ui/components.rs");
         assert!(shared.contains("pub struct FilePlaneItem"));

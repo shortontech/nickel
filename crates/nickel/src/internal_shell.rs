@@ -309,8 +309,8 @@ impl InternalShellCoordinator {
                     continue;
                 }
                 let size = role_size(role, output.width, output.height, self.panel_edge);
-                let plugin =
-                    (role == SurfaceRole::Desktop).then(crate::plugin_panel::desktop_surface_key);
+                let plugin = (role == SurfaceRole::Desktop && self.shell.desktop_plugin_active())
+                    .then(crate::plugin_panel::desktop_surface_key);
                 desired.push((role, plugin, Some(output.name.clone()), size));
             }
             for (key, surface) in &panel_surfaces {
@@ -374,8 +374,7 @@ impl InternalShellCoordinator {
                 if role == SurfaceRole::Screenshot
                     && (self
                         .shell
-                        .plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key())
-                        || !cfg!(test))
+                        .plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key()))
                 {
                     continue;
                 }
@@ -723,9 +722,6 @@ impl InternalShellCoordinator {
     fn select_desktop_viewport(&mut self, id: InternalSurfaceId) -> Option<()> {
         let entry = self.entries.iter().find(|surface| surface.id == id)?;
         if entry.role == SurfaceRole::Desktop {
-            if entry.plugin.as_ref() != Some(&crate::plugin_panel::desktop_surface_key()) {
-                return None;
-            }
             let output = entry.output.as_deref()?;
             let (origin, scale) = self.shell.desktop_output_projection(output)?;
             // Layout reports the usable area's origin, but this surface covers
@@ -1015,8 +1011,7 @@ impl InternalShellCoordinator {
             return Vec::new();
         };
         let taskbar_surface = self.is_taskbar_surface(entry);
-        let desktop_surface = entry.role == SurfaceRole::Desktop
-            && entry.plugin.as_ref() == Some(&crate::plugin_panel::desktop_surface_key());
+        let desktop_surface = entry.role == SurfaceRole::Desktop;
         if entry
             .plugin
             .as_ref()
@@ -2612,8 +2607,10 @@ mod tests {
     }
 
     #[test]
-    fn bundled_desktop_surface_retires_and_returns_with_its_plugin() {
+    fn native_desktop_surface_remains_visible_without_desktop_plugin() {
         let mut coordinator = coordinator();
+        let plugin_id = crate::plugin_panel::desktop_manifest().id.clone();
+        coordinator.set_plugin_enabled(&plugin_id, false).unwrap();
         let output = InternalOutput {
             x: 0,
             y: 0,
@@ -2627,39 +2624,17 @@ mod tests {
             .surface(SurfaceRole::Desktop, Some("nested"))
             .unwrap();
         let id = desktop.id;
-        assert_eq!(
-            desktop.plugin,
-            Some(crate::plugin_panel::desktop_surface_key())
-        );
+        assert_eq!(desktop.plugin, None);
         assert!(coordinator.visible(id));
 
-        let plugin_id = crate::plugin_panel::desktop_manifest().id.clone();
-        coordinator
-            .shell_mut()
-            .set_plugin_enabled(&plugin_id, false)
-            .unwrap();
         coordinator.set_outputs(&[output.clone()]);
-        assert!(
-            coordinator
-                .surface(SurfaceRole::Desktop, Some("nested"))
-                .is_none()
-        );
-
-        coordinator
-            .shell_mut()
-            .set_plugin_enabled(&plugin_id, true)
-            .unwrap();
-        coordinator.set_outputs(&[output]);
-        let restored = coordinator
+        let retained = coordinator
             .surface(SurfaceRole::Desktop, Some("nested"))
             .unwrap();
-        assert_ne!(restored.id, id);
-        assert_eq!(
-            restored.plugin,
-            Some(crate::plugin_panel::desktop_surface_key())
-        );
-        assert!(coordinator.visible(restored.id));
-        assert!(coordinator.scene(restored.id).is_some());
+        assert_eq!(retained.id, id);
+        assert_eq!(retained.plugin, None);
+        assert!(coordinator.visible(retained.id));
+        assert!(coordinator.scene(retained.id).is_some());
     }
 
     #[test]
@@ -3544,7 +3519,6 @@ mod tests {
     fn opened_screenshot() -> (InternalShellCoordinator, InternalSurfaceId) {
         let mut coordinator = coordinator();
         coordinator
-            .shell
             .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
             .unwrap();
         coordinator.set_outputs(&[InternalOutput {
@@ -3698,83 +3672,7 @@ mod tests {
     }
 
     #[test]
-    fn jsx_screenshot_selects_and_cancels_through_normalized_pointer_input() {
-        use nickel_input::{
-            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
-        };
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        assert!(coordinator.surface(SurfaceRole::Screenshot, None).is_none());
-        coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool);
-        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
-        let id = coordinator
-            .plugin_surface(&crate::plugin_panel::screenshot_surface_key(), "nested")
-            .unwrap()
-            .id;
-        let scene = coordinator.scene(id).unwrap();
-        let image = scene
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Image { bounds, .. } => Some(*bounds),
-                _ => None,
-            })
-            .expect("host capture is rendered by JSX");
-        let point = |fraction: f32| nickel_input::Point {
-            x: f64::from(image.origin.x + image.size.width * fraction),
-            y: f64::from(image.origin.y + image.size.height * fraction),
-        };
-        let send = |coordinator: &mut InternalShellCoordinator, position, edge, order| {
-            coordinator.step_slot_changes(
-                id,
-                HostBatch {
-                    events: vec![nickel_ui::HostEvent::Normalized {
-                        input: InputEvent::Pointer(PointerEvent::Button {
-                            device: DeviceId(1),
-                            order: EventOrder(order),
-                            position: Some(position),
-                            button: PointerButton::Primary,
-                            edge,
-                        }),
-                        clipboard_text: None,
-                    }],
-                    ..Default::default()
-                },
-            );
-        };
-        send(&mut coordinator, point(0.25), KeyEdge::Pressed, 1);
-        send(&mut coordinator, point(0.75), KeyEdge::Released, 2);
-        for order in [3, 5] {
-            send(&mut coordinator, point(0.5), KeyEdge::Pressed, order);
-            send(&mut coordinator, point(0.5), KeyEdge::Released, order + 1);
-        }
-        let scene = coordinator.scene(id).unwrap();
-        assert!(scene.iter().any(|command| matches!(command,
-            PaintCommand::Text { text, .. } if text == "SELECTION CONFIRMED")));
-        let cancel = scene
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { text, bounds, .. } if text == "Cancel" => Some(*bounds),
-                _ => None,
-            })
-            .expect("JSX toolbar exposes Cancel");
-        let cancel = nickel_input::Point {
-            x: f64::from(cancel.origin.x + cancel.size.width / 2.0),
-            y: f64::from(cancel.origin.y + cancel.size.height / 2.0),
-        };
-        send(&mut coordinator, cancel, KeyEdge::Pressed, 7);
-        send(&mut coordinator, cancel, KeyEdge::Released, 8);
-        assert!(!coordinator.visible(id));
-    }
-
-    #[test]
-    fn jsx_screenshot_copy_uses_the_host_clipboard_authority() {
+    fn native_screenshot_copy_uses_the_host_clipboard_authority() {
         use nickel_input::{
             DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
         };
@@ -3805,6 +3703,9 @@ mod tests {
         let mut coordinator =
             InternalShellCoordinator::new(Arc::new(CopyHost(copies.clone())), PanelEdge::Bottom)
                 .unwrap();
+        coordinator
+            .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
+            .unwrap();
         coordinator.set_outputs(&[InternalOutput {
             x: 0,
             y: 0,
@@ -3816,7 +3717,7 @@ mod tests {
         coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool);
         coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
         let id = coordinator
-            .plugin_surface(&crate::plugin_panel::screenshot_surface_key(), "nested")
+            .surface(SurfaceRole::Screenshot, None)
             .unwrap()
             .id;
         let scene = coordinator.scene(id).unwrap();
@@ -3826,7 +3727,7 @@ mod tests {
                 PaintCommand::Image { bounds, .. } => Some(*bounds),
                 _ => None,
             })
-            .expect("JSX renders the captured host image");
+            .expect("native screenshot renders the captured host image");
         let point = |fraction: f32| nickel_input::Point {
             x: f64::from(image.origin.x + image.size.width * fraction),
             y: f64::from(image.origin.y + image.size.height * fraction),
@@ -3862,7 +3763,7 @@ mod tests {
                 PaintCommand::Text { text, bounds, .. } if text == "Copy" => Some(*bounds),
                 _ => None,
             })
-            .expect("confirmed JSX selection exposes Copy");
+            .expect("confirmed native selection exposes Copy");
         let copy = nickel_input::Point {
             x: f64::from(copy.origin.x + copy.size.width / 2.0),
             y: f64::from(copy.origin.y + copy.size.height / 2.0),
@@ -3874,80 +3775,11 @@ mod tests {
     }
 
     #[test]
-    fn disabling_screenshot_plugin_retires_capture_and_shortcut_until_reenabled() {
+    fn native_screenshot_capture_is_available_without_plugin() {
         let mut coordinator = coordinator();
-        let output = InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        };
-        let key = crate::plugin_panel::screenshot_surface_key();
-        coordinator.set_outputs(&[output.clone()]);
-        let original = coordinator.plugin_surface(&key, "nested").unwrap().id;
-        assert!(
-            coordinator
-                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
-        );
-        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
-        assert!(coordinator.visible(original));
-
         coordinator
-            .set_plugin_enabled(&key.plugin_id, false)
+            .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
             .unwrap();
-        coordinator.set_outputs(&[output.clone()]);
-        assert!(coordinator.plugin_surface(&key, "nested").is_none());
-        assert!(!coordinator.visible(original));
-        assert!(
-            !coordinator
-                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
-        );
-
-        coordinator
-            .set_plugin_enabled(&key.plugin_id, true)
-            .unwrap();
-        coordinator.set_outputs(&[output]);
-        let restored = coordinator.plugin_surface(&key, "nested").unwrap().id;
-        assert_ne!(original, restored);
-        assert!(
-            coordinator
-                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
-        );
-        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
-        assert!(coordinator.visible(restored));
-    }
-
-    #[test]
-    fn disabling_screenshot_plugin_cancels_pending_capture() {
-        let mut coordinator = coordinator();
-        let output = InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        };
-        let key = crate::plugin_panel::screenshot_surface_key();
-        coordinator.set_outputs(&[output.clone()]);
-        assert!(
-            coordinator
-                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
-        );
-        coordinator
-            .set_plugin_enabled(&key.plugin_id, false)
-            .unwrap();
-        coordinator.set_outputs(&[output]);
-        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
-        assert!(coordinator.plugin_surface(&key, "nested").is_none());
-        assert!(!coordinator.shell.surface_visible(SurfaceRole::Screenshot));
-    }
-
-    #[test]
-    fn production_print_screen_reducer_requests_internal_capture_surface() {
-        let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
             x: 0,
             y: 0,
@@ -3956,11 +3788,42 @@ mod tests {
             height: 600,
             scale: 1.0,
         }]);
-        assert!(coordinator.surface(SurfaceRole::Screenshot, None).is_none());
-        let screenshot = coordinator
-            .plugin_surface(&crate::plugin_panel::screenshot_surface_key(), "nested")
+        let id = coordinator
+            .surface(SurfaceRole::Screenshot, None)
             .unwrap()
             .id;
+        assert!(
+            coordinator
+                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+        );
+        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+        assert!(coordinator.visible(id));
+        assert!(coordinator.scene(id).is_some());
+    }
+
+    #[test]
+    fn production_print_screen_reducer_requests_internal_capture_surface() {
+        let mut coordinator = coordinator();
+        coordinator
+            .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
+            .unwrap();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        let screenshot = coordinator
+            .surface(SurfaceRole::Screenshot, None)
+            .unwrap()
+            .id;
+        assert!(
+            coordinator
+                .plugin_surface(&crate::plugin_panel::screenshot_surface_key(), "nested")
+                .is_none()
+        );
         let mut hotkeys = CompositorShortcutAdapter::default();
 
         assert_eq!(

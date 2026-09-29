@@ -61,9 +61,11 @@ pub enum Query {
     ShellSurfaces,
     /// Test-only inventory of compositor-hosted Nickel UI trees.
     UiLayouts,
-    /// Test-only computed layout for one `internal:<id>` from UiLayouts.
+    /// Test-only computed layout page for one `internal:<id>` from UiLayouts.
     UiLayout {
         surface: String,
+        #[serde(default)]
+        offset: usize,
     },
     ShellReadiness,
     LauncherVisibility,
@@ -1809,6 +1811,9 @@ pub struct UiLayoutSurfaceSnapshot {
 pub struct UiLayoutSnapshot {
     pub surface: UiLayoutSurfaceSnapshot,
     pub layout: String,
+    pub offset: usize,
+    pub total_nodes: usize,
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3151,6 +3156,7 @@ mod tests {
         };
         let request = Query::UiLayout {
             surface: surface.id.clone(),
+            offset: 128,
         };
         assert_eq!(
             decode::<Query>(&encode(&request).unwrap()).unwrap(),
@@ -3159,6 +3165,9 @@ mod tests {
         let response = ServerMessage::UiLayout(UiLayoutSnapshot {
             surface,
             layout: "Column root allocated=0,0,920,680\n".into(),
+            offset: 128,
+            total_nodes: 129,
+            next_offset: None,
         });
         assert_eq!(
             decode::<ServerMessage>(&encode(&response).unwrap()).unwrap(),

@@ -1469,8 +1469,10 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::control_center_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::codex_projects_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::on_screen_keyboard_manifest().clone())?;
+        #[cfg(test)]
         plugin_registry.register(crate::plugin_panel::screenshot_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::window_preview_manifest().clone())?;
+        #[cfg(test)]
         plugin_registry.register(crate::plugin_panel::desktop_manifest().clone())?;
         plugin_registry.register(crate::settings_plugin_report::manifest().clone())?;
         #[cfg(test)]
@@ -1943,6 +1945,7 @@ impl LiveShell {
                 }
             }
         }
+        #[cfg(test)]
         if plugin_activation.desired_enabled(&crate::plugin_panel::screenshot_manifest().id, true) {
             let id = &crate::plugin_panel::screenshot_manifest().id;
             shell.plugin_registry.set_enabled(id, true)?;
@@ -1987,6 +1990,7 @@ impl LiveShell {
                 }
             }
         }
+        #[cfg(test)]
         if plugin_activation.desired_enabled(&crate::plugin_panel::desktop_manifest().id, true) {
             let id = &crate::plugin_panel::desktop_manifest().id;
             shell.plugin_registry.set_enabled(id, true)?;
@@ -2763,7 +2767,8 @@ impl LiveShell {
                 }),
             SurfaceRole::Screenshot => plugin
                 .and_then(|key| self.plugin_panel_extra_hosts.get(key))
-                .map(|(_, host)| host.layout_snapshot()),
+                .map(|(_, host)| host.layout_snapshot())
+                .or_else(|| Some(self.screenshot.layout_snapshot())),
             SurfaceRole::OnScreenKeyboard => Some(self.keyboard_host.layout_snapshot()),
             _ => None,
         };
@@ -2981,9 +2986,6 @@ impl LiveShell {
         ingress: HostEvent,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> bool {
-        if self.plugin_desktop_host.is_none() {
-            return false;
-        }
         let event = normalized_input(&ingress)
             .expect("desktop host event must be normalized")
             .clone();
@@ -3526,7 +3528,7 @@ impl LiveShell {
 
     pub fn surface_visible(&self, role: SurfaceRole) -> bool {
         match role {
-            SurfaceRole::Desktop => self.plugin_desktop_host.is_some(),
+            SurfaceRole::Desktop => true,
             SurfaceRole::Taskbar => self.plugin_taskbar_host.is_some(),
             SurfaceRole::Panel => {
                 self.plugin_taskbar_host.is_some()
@@ -3655,6 +3657,10 @@ impl LiveShell {
 
     pub fn plugin_registry(&self) -> &nickel_core::plugins::PluginRegistry {
         &self.plugin_registry
+    }
+
+    pub(crate) fn desktop_plugin_active(&self) -> bool {
+        self.plugin_desktop_host.is_some()
     }
 
     pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
@@ -8941,9 +8947,6 @@ impl LiveShell {
                 cfg!(target_os = "linux")
             }
             platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::InteractiveRegion) => {
-                if !self.plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key()) {
-                    return false;
-                }
                 #[cfg(target_os = "linux")]
                 {
                     self.active_window_capture = None;
@@ -8958,9 +8961,6 @@ impl LiveShell {
             platform::GlobalShortcut::Screenshot(
                 platform::ScreenshotAction::InteractiveRegionToFile,
             ) => {
-                if !self.plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key()) {
-                    return false;
-                }
                 #[cfg(target_os = "linux")]
                 {
                     self.active_window_capture = None;
@@ -9936,7 +9936,7 @@ impl LiveShell {
         self.wallpaper_loaded_source_fingerprint = None;
         let desktop = self.desktop_host.application_mut();
         desktop.plugin_background = false;
-        desktop.watch = None;
+        desktop.watch = nickel_file::DirectoryWatch::start(&nickel_file::desktop_directory()).ok();
         desktop.wallpaper = None;
         desktop.icon_cache.clear();
         desktop.dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
@@ -9958,8 +9958,8 @@ impl LiveShell {
     }
 
     fn desktop_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        self.load_wallpaper_for(width, height);
         if self.plugin_desktop_host.is_some() {
-            self.load_wallpaper_for(width, height);
             let desktop = self.desktop_host.application_mut();
             if !desktop.plugin_background {
                 desktop.watch =
@@ -10114,9 +10114,6 @@ impl LiveShell {
         let application = self.desktop_host.application_mut();
         let background_changed = application.plugin_background != plugin_commands.is_some();
         application.plugin_background = plugin_commands.is_some();
-        if !application.plugin_background {
-            application.watch = None;
-        }
         let application_changed = self.desktop_application_dirty
             || background_changed
             || wallpaper_changed

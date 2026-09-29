@@ -593,7 +593,7 @@ fn disabling_screenshot_cancels_in_flight_host_capture() {
     shell.set_plugin_enabled(&id, false).unwrap();
     assert!(!shell.screenshot_capture_pending);
     assert!(shell.screenshot_output.is_none());
-    assert!(!shell.global_shortcut(GlobalShortcut::Screenshot(
+    assert!(shell.global_shortcut(GlobalShortcut::Screenshot(
         super::platform::ScreenshotAction::InteractiveRegion,
     )));
 }
@@ -929,6 +929,11 @@ fn closing_dialog_owner_retires_its_dialog_but_preserves_sibling_window() {
     std::fs::write(
         directory.path().join("main.js"),
         include_str!("../../../../assets/plugins/example-surface-dialog/main.js"),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("ui.css"),
+        include_str!("../../../../assets/plugins/example-surface-dialog/ui.css"),
     )
     .unwrap();
     let package = nickel_core::plugins::PluginPackage::load(directory.path()).unwrap();
