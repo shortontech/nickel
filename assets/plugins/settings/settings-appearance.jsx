@@ -18,11 +18,14 @@ function App() {
                     role="radio" aria-label={mode.label} aria-checked={data.selected === mode.id}
                     onClick={() => request('mode', {value: mode.id})}>
                     <div className={`appearance-mode-preview ${mode.id}`}>
-                        <div className="appearance-preview-sidebar" />
-                        <div className="appearance-preview-content">
-                            <div className="appearance-preview-line" />
-                            <div className="appearance-preview-line short" />
-                        </div>
+                        <div className={`appearance-preview-sidebar ${mode.id}`} />
+                        {mode.id === 'system' ? [
+                            <div key="light-half" className="appearance-preview-half light" />,
+                            <div key="dark-half" className="appearance-preview-half dark" />
+                        ] : <div className={`appearance-preview-content ${mode.id}`}>
+                            <div className={`appearance-preview-line ${mode.id}`} />
+                            <div className={`appearance-preview-line short ${mode.id}`} />
+                        </div>}
                     </div>
                     <Text className="appearance-mode-label">{mode.label}</Text>
                 </div>)}
@@ -78,14 +81,19 @@ function App() {
                     </div>
                 </div>
             </div>
-            <Text>{data.wallpaperFitTitle}</Text>
-            <Select id="appearance-wallpaper-position" accessibilityLabel={data.wallpaperFitTitle}
-                value={data.wallpaperPositionValue} open={data.wallpaperPositionExpanded}
-                onClick={() => request('toggle-wallpaper-position')}>
-                {data.wallpaperPositions.map(option => <Option key={option.id}
-                    id={`appearance-wallpaper-position-${option.id}`}
-                    onClick={() => request('wallpaper-position', {value: option.id})}>{option.label}</Option>)}
-            </Select>
+            <div className="appearance-control-row">
+                <div className="appearance-control-label">
+                    <Text>{data.wallpaperFitTitle}</Text>
+                    <Text className="appearance-detail" wrap={true}>{data.wallpaperFitDescription}</Text>
+                </div>
+                <Select id="appearance-wallpaper-position" accessibilityLabel={data.wallpaperFitTitle}
+                    value={data.wallpaperPositionValue} open={data.wallpaperPositionExpanded}
+                    onClick={() => request('toggle-wallpaper-position')}>
+                    {data.wallpaperPositions.map(option => <Option key={option.id}
+                        id={`appearance-wallpaper-position-${option.id}`}
+                        onClick={() => request('wallpaper-position', {value: option.id})}>{option.label}</Option>)}
+                </Select>
+            </div>
         </div>
         <div id="appearance-interface-card" className="appearance-card" role="group" aria-label={data.interfaceTitle}>
             <Text className="appearance-heading">{data.interfaceTitle}</Text>

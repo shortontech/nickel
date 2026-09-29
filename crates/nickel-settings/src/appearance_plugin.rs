@@ -413,6 +413,7 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         "wallpaperChoose":app.localizer.text("settings-wallpaper-choose"),
         "wallpaperRemove":app.localizer.text("settings-wallpaper-remove"),
         "wallpaperFitTitle":app.localizer.text("settings-wallpaper-fit-label"),
+        "wallpaperFitDescription":app.localizer.text("settings-wallpaper-fit-description"),
         "wallpaperPositionValue":app.localizer.text(match app.wallpaper_settings.position {
             WallpaperPosition::Fill => "settings-wallpaper-fill",
             WallpaperPosition::Fit => "settings-wallpaper-fit",
@@ -541,5 +542,41 @@ impl SettingsApp {
             .focus_return("appearance-accent-custom")
             .into(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod visual_tests {
+    use super::*;
+
+    fn save(host: &nickel_ui::UiHost<SettingsApp>, name: &str) {
+        const WIDTH: u32 = 1000;
+        const HEIGHT: u32 = 900;
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(WIDTH, HEIGHT, 1.0);
+        host.render_software(&mut renderer);
+        let image =
+            image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(WIDTH, HEIGHT, |x, y| {
+                let pixel = renderer.pixels()[(y * WIDTH + x) as usize];
+                image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+            });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots")
+            .join(name);
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
+    }
+
+    #[test]
+    fn jsx_appearance_and_native_reference_render() {
+        let jsx = nickel_ui::UiHost::new(
+            SettingsApp::with_initial_page(SettingsPage::Appearance),
+            1000,
+            900,
+        );
+        save(&jsx, "settings-appearance-shared.png");
+        let mut native = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        native.settings_jsx_enabled = false;
+        let native = nickel_ui::UiHost::new(native, 1000, 900);
+        save(&native, "settings-appearance-native.png");
     }
 }

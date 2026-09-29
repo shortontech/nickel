@@ -84,6 +84,10 @@ pub(super) fn stylesheet_template(
             format!("#{:06x}", theme.accent.ordinary & 0x00ff_ffff),
         ),
         (
+            "@on-accent@",
+            format!("#{:06x}", theme.accent.on_accent & 0x00ff_ffff),
+        ),
+        (
             "@accent-soft@",
             format!("#{:06x}", theme.accent.soft & 0x00ff_ffff),
         ),

@@ -27,7 +27,7 @@ div.appearance-mode {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    min-height: 142px;
+    min-height: 152px;
     padding: 10px;
     border: 1px solid @border@;
     border-radius: @radius@px;
@@ -44,22 +44,28 @@ div.appearance-mode-preview {
     height: 82px;
     padding: 8px;
     border-radius: 6px;
-    background: #e9e9f1;
+    background: #352729;
 }
 
 div.appearance-mode-preview.dark {
-    background: #24212d;
+    background: #302426;
 }
 
 div.appearance-mode-preview.system {
-    background: #777485;
+    display: grid;
+    grid-template-columns: 24px 1fr 1fr;
+    background: #332527;
 }
 
 div.appearance-preview-sidebar {
     width: 24px;
     height: 58px;
     border-radius: 3px;
-    background: #a59fb7;
+    background: #d5adb2;
+}
+
+div.appearance-preview-sidebar.dark {
+    background: #24191b;
 }
 
 div.appearance-preview-content {
@@ -67,19 +73,40 @@ div.appearance-preview-content {
     flex-direction: column;
     gap: 8px;
     padding: 10px;
-    background: #f1eff7;
+    background: #f6d4d8;
     border-radius: 3px;
     flex-grow: 1;
 }
 
+div.appearance-preview-content.dark {
+    background: #100c0d;
+}
+
 div.appearance-preview-line {
     height: 8px;
-    background: #c7c4d1;
+    background: #d7afb5;
     border-radius: 3px;
+}
+
+div.appearance-preview-line.dark {
+    background: #392629;
 }
 
 div.appearance-preview-line.short {
     width: 60%;
+}
+
+div.appearance-preview-half {
+    height: 58px;
+    border-radius: 3px;
+}
+
+div.appearance-preview-half.light {
+    background: #f6d4d8;
+}
+
+div.appearance-preview-half.dark {
+    background: #100c0d;
 }
 
 div.appearance-swatches, div.appearance-button-row, div.appearance-dialog-actions,
@@ -129,8 +156,8 @@ text.appearance-heading {
 
 text.appearance-detail {
     color: @secondary@;
-    font-size: 12px;
-    line-height: 17px;
+    font-size: 14px;
+    line-height: 19px;
 }
 
 button, text-field.appearance-hue-input {
@@ -144,5 +171,7 @@ button, text-field.appearance-hue-input {
 }
 
 button.appearance-primary {
-    border: 2px solid @accent@;
+    background: @accent@;
+    border: 1px solid @accent@;
+    color: @on-accent@;
 }
