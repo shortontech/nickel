@@ -18,7 +18,7 @@ every `nickel.request` against the owning plugin's capabilities.
   Rust rendering or lifecycle path. `id` matches a manifest-authorized
   surface; JSX chooses its placement and children. The host applies one generic
   creation, input, rendering, and retirement path.
-- Taskbar needs `output="all"`, `anchor="bottom"`, `width="100%"`, `height={56}`,
+- Taskbar needs `output="all"`, `edge="bottom"`, `width="100%"`, `height={56}`,
   and `reserveWorkArea={true}`. For a dock, CSS background alpha must not imply
   that text, icons, or input become transparent.
 - Launcher needs `output="active"`, `anchor="bottom-start"`,

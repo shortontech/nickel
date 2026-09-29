@@ -13,9 +13,9 @@ use nickel_core::plugins::{
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, DragPhase, FilePlaneItem,
-    FrameOverlay, Grid, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayId, OverlayMenu,
-    OverlayMenuItem, OverlayStyle, Point, Row, SemanticRole, Shortcut, Size, Spacer, Text,
-    TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
+    FrameOverlay, Grid, Image, ImageFit, Insets, Layer, Length, OverlayAnchor, OverlayId,
+    OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Row, SemanticRole, Shortcut, Size, Spacer,
+    Text, TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
 };
 use serde_json::Value;
 
@@ -354,6 +354,120 @@ pub fn enabled() -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct WindowRequest {
+    id: String,
+    placement: String,
+    output: Option<String>,
+    edge: Option<String>,
+    anchor: Option<String>,
+    reserve_work_area: Option<bool>,
+    bottom_offset: Option<u32>,
+}
+
+impl WindowRequest {
+    fn validate(
+        &self,
+        manifest: &PluginManifest,
+        width: Length,
+        height: Length,
+    ) -> Result<(), String> {
+        let surface = manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == self.id)
+            .ok_or_else(|| format!("window {:?} is not declared by the plugin", self.id))?;
+        let valid_size = |requested: Length, granted: u32| {
+            matches!(requested, Length::Percent(1.0))
+                || matches!(requested, Length::Px(value) if value == granted as f32)
+        };
+        if !valid_size(width, surface.width) || !valid_size(height, surface.height) {
+            return Err(format!(
+                "window {:?} size must match its declared surface or use 100%",
+                self.id
+            ));
+        }
+        if self.placement == "managed"
+            && !matches!(
+                surface.kind,
+                PluginSurfaceKind::Window | PluginSurfaceKind::Dialog
+            )
+        {
+            return Err(format!("window {:?} needs fixed placement", self.id));
+        }
+        if let Some(output) = self.output.as_deref() {
+            let matches = match output {
+                "all" => surface.output == nickel_core::plugins::PluginOutputScope::All,
+                "primary" => surface.output == nickel_core::plugins::PluginOutputScope::Primary,
+                _ => false,
+            };
+            if !matches {
+                return Err(format!("window {:?} output exceeds its grant", self.id));
+            }
+        }
+        if self
+            .reserve_work_area
+            .is_some_and(|reserve| reserve != surface.reserve_work_area)
+        {
+            return Err(format!(
+                "window {:?} work-area reservation differs from its grant",
+                self.id
+            ));
+        }
+        if self
+            .bottom_offset
+            .is_some_and(|offset| offset != surface.bottom_offset)
+        {
+            return Err(format!(
+                "window {:?} bottom offset differs from its grant",
+                self.id
+            ));
+        }
+        if self
+            .anchor
+            .as_deref()
+            .is_some_and(|anchor| anchor != surface.anchor.as_str())
+        {
+            return Err(format!(
+                "window {:?} anchor differs from its grant",
+                self.id
+            ));
+        }
+        if let Some(edge) = self.edge.as_deref() {
+            let anchored = match edge {
+                "top" => matches!(
+                    surface.anchor,
+                    nickel_core::plugins::PluginSurfaceAnchor::TopLeft
+                        | nickel_core::plugins::PluginSurfaceAnchor::TopRight
+                ),
+                "bottom" => {
+                    surface.kind == PluginSurfaceKind::Panel
+                        || matches!(
+                            surface.anchor,
+                            nickel_core::plugins::PluginSurfaceAnchor::BottomLeft
+                                | nickel_core::plugins::PluginSurfaceAnchor::BottomRight
+                        )
+                }
+                "left" => matches!(
+                    surface.anchor,
+                    nickel_core::plugins::PluginSurfaceAnchor::TopLeft
+                        | nickel_core::plugins::PluginSurfaceAnchor::BottomLeft
+                ),
+                "right" => matches!(
+                    surface.anchor,
+                    nickel_core::plugins::PluginSurfaceAnchor::TopRight
+                        | nickel_core::plugins::PluginSurfaceAnchor::BottomRight
+                ),
+                _ => false,
+            };
+            if !anchored {
+                return Err(format!("window {:?} edge differs from its grant", self.id));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum PanelNode {
     Badge {
         item: Option<String>,
@@ -419,10 +533,11 @@ enum PanelNode {
     Surface {
         children: Vec<Self>,
         id: Option<String>,
+        window_request: Option<WindowRequest>,
         class_name: Option<String>,
         background: u32,
-        width: u32,
-        height: u32,
+        width: Length,
+        height: Length,
     },
     Viewport {
         children: Vec<Self>,
@@ -735,6 +850,7 @@ impl PanelNode {
                 "box"
                     | "div"
                     | "surface"
+                    | "window"
                     | "viewport"
                     | "panel"
                     | "row"
@@ -993,31 +1109,91 @@ impl PanelNode {
                         .unwrap_or(0) as u32,
                 })
             }
-            "surface" => {
-                let dimension = |name| {
-                    value
-                        .get(name)
-                        .and_then(Value::as_u64)
+            "surface" | "window" => {
+                let dimension = |name| match value.get(name) {
+                    Some(Value::Number(size)) => size
+                        .as_u64()
                         .filter(|size| (1..=8192).contains(size))
-                        .map(|size| size as u32)
-                        .ok_or_else(|| format!("surface {name} must be 1 to 8192"))
+                        .map(|size| Length::Px(size as f32))
+                        .ok_or_else(|| format!("{kind} {name} must be 1 to 8192")),
+                    Some(Value::String(percent)) if kind == "window" && percent == "100%" => {
+                        Ok(Length::Percent(1.0))
+                    }
+                    _ => Err(format!("{kind} {name} must be 1 to 8192 or 100%")),
+                };
+                let id = value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty() && id.len() <= 128)
+                    .map(str::to_owned);
+                let window_request = if kind == "window" {
+                    let id = id.as_ref().ok_or("window needs a bounded id")?.clone();
+                    let optional_token =
+                        |name, allowed: &[&str]| -> Result<Option<String>, String> {
+                            match value.get(name) {
+                                None | Some(Value::Null) => Ok(None),
+                                Some(Value::String(token)) if allowed.contains(&token.as_str()) => {
+                                    Ok(Some(token.clone()))
+                                }
+                                _ => Err(format!("window {name} is unsupported")),
+                            }
+                        };
+                    let placement = optional_token("placement", &["managed", "fixed"])?
+                        .unwrap_or_else(|| "managed".into());
+                    let output = optional_token("output", &["primary", "all"])?;
+                    let edge = optional_token("edge", &["top", "bottom", "left", "right"])?;
+                    let anchor = optional_token(
+                        "anchor",
+                        &[
+                            "center",
+                            "top-left",
+                            "top-right",
+                            "bottom-left",
+                            "bottom-right",
+                        ],
+                    )?;
+                    let reserve_work_area = match value.get("reserveWorkArea") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::Bool(value)) => Some(*value),
+                        _ => return Err("window reserveWorkArea must be a boolean".into()),
+                    };
+                    let bottom_offset = match value.get("bottomOffset") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::Number(value)) => value
+                            .as_u64()
+                            .filter(|value| *value <= 8192)
+                            .map(|value| value as u32)
+                            .ok_or("window bottomOffset must be 0 to 8192")
+                            .map(Some)?,
+                        _ => return Err("window bottomOffset must be 0 to 8192".into()),
+                    };
+                    Some(WindowRequest {
+                        id,
+                        placement,
+                        output,
+                        edge,
+                        anchor,
+                        reserve_work_area,
+                        bottom_offset,
+                    })
+                } else {
+                    None
                 };
                 Ok(Self::Surface {
                     class_name,
+                    window_request,
                     children: children
                         .iter()
                         .filter(|value| !value.is_null())
                         .map(Self::parse)
                         .collect::<Result<Vec<_>, _>>()?,
-                    id: value
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.is_empty() && id.len() <= 128)
-                        .map(str::to_owned),
+                    id,
                     background: value
                         .get("background")
                         .and_then(Value::as_u64)
-                        .map_or(0xff202124, |color| color as u32),
+                        .map_or(if kind == "window" { 0 } else { 0xff202124 }, |color| {
+                            color as u32
+                        }),
                     width: dimension("width")?,
                     height: dimension("height")?,
                 })
@@ -1668,21 +1844,30 @@ impl PanelNode {
             Self::Surface {
                 children,
                 id,
+                window_request,
                 class_name,
                 background,
                 width,
                 height,
             } => {
-                let style = stylesheet.resolve("surface", id.as_deref(), class_name.as_deref());
-                let mut layer = Layer::new().width(*width as f32).height(*height as f32);
+                let style = stylesheet.resolve(
+                    if window_request.is_some() {
+                        "window"
+                    } else {
+                        "surface"
+                    },
+                    id.as_deref(),
+                    class_name.as_deref(),
+                );
+                let mut layer = Layer::new().width_length(*width).height_length(*height);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
                         layer = layer.child(child.view(images, stylesheet));
                     }
                 }
                 let mut container = Container::new()
-                    .width(*width as f32)
-                    .height(*height as f32)
+                    .width_length(*width)
+                    .height_length(*height)
                     .background(*background)
                     .child(layer);
                 if let Some(id) = id {
@@ -2233,6 +2418,73 @@ impl PanelNode {
             ),
         }
     }
+}
+
+fn parse_panel_for_manifest(value: &Value, manifest: &PluginManifest) -> Result<PanelNode, String> {
+    let node = PanelNode::parse(value)?;
+    fn collect_windows<'a>(
+        node: &'a PanelNode,
+        found: &mut Vec<(&'a WindowRequest, Length, Length)>,
+    ) {
+        let children = match node {
+            PanelNode::Surface {
+                window_request,
+                width,
+                height,
+                children,
+                ..
+            } => {
+                if let Some(request) = window_request {
+                    found.push((request, *width, *height));
+                }
+                children
+            }
+            PanelNode::Box { children, .. }
+            | PanelNode::Div { children, .. }
+            | PanelNode::Viewport { children, .. }
+            | PanelNode::Panel { children, .. }
+            | PanelNode::Row { children, .. }
+            | PanelNode::Column { children, .. }
+            | PanelNode::ScrollView { children, .. }
+            | PanelNode::Dialog { children, .. }
+            | PanelNode::Menu {
+                items: children, ..
+            }
+            | PanelNode::MenuItem { children, .. } => children,
+            _ => return,
+        };
+        for child in children {
+            collect_windows(child, found);
+        }
+    }
+    let mut windows = Vec::new();
+    collect_windows(&node, &mut windows);
+    if !windows.is_empty() {
+        if windows.len() != 1
+            || !matches!(
+                &node,
+                PanelNode::Surface {
+                    window_request: Some(_),
+                    ..
+                }
+            )
+        {
+            return Err("Window must be the single top-level surface root".into());
+        }
+        let (request, width, height) = windows[0];
+        request.validate(manifest, width, height)?;
+    }
+    Ok(node)
+}
+
+fn render_panel(
+    runtime: &mut JsxRuntime,
+    manifest: &PluginManifest,
+    expression: &str,
+) -> Result<PanelNode, String> {
+    runtime.render(expression, |value| {
+        parse_panel_for_manifest(value, manifest)
+    })
 }
 
 fn child_text(children: &[Value]) -> Result<String, String> {
@@ -3672,7 +3924,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -3686,7 +3938,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -3703,7 +3955,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -3771,7 +4023,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -3782,7 +4034,7 @@ impl PluginPanelApplication {
         data: Option<String>,
     ) -> Result<Self, String> {
         let mut runtime = JsxRuntime::new(source, data.as_deref())?;
-        let node = runtime.render("__nickelRender()", PanelNode::parse)?;
+        let node = render_panel(&mut runtime, manifest, "__nickelRender()")?;
         Ok(Self {
             runtime,
             node,
@@ -3841,7 +4093,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -3867,7 +4119,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(data);
         self.launcher_shortcuts = Some(projection.into());
         Ok(true)
@@ -3885,7 +4137,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -3922,7 +4174,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -3943,7 +4195,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(data);
         self.notification_shortcuts = Some((
             projection.notification.as_ref().map(|item| item.id),
@@ -3964,7 +4216,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&data)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(data);
         Ok(true)
     }
@@ -3978,7 +4230,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -3992,7 +4244,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -4006,7 +4258,7 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         self.runtime.set_data(&serialized)?;
-        self.node = self.runtime.render("__nickelRender()", PanelNode::parse)?;
+        self.node = render_panel(&mut self.runtime, &self.manifest, "__nickelRender()")?;
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -4203,7 +4455,7 @@ impl nickel_ui::Application for PluginPanelApplication {
             }
             PluginMessage::Scroll => unreachable!(),
         };
-        let rendered = self.runtime.render(&expression, PanelNode::parse);
+        let rendered = render_panel(&mut self.runtime, &self.manifest, &expression);
         let effects = self.runtime.take_effects();
         (|| match (rendered, effects) {
             (Ok(node), Ok(effects)) => {
@@ -6198,6 +6450,56 @@ mod tests {
             .unwrap();
         assert!(right.bounds.origin.x >= left.bounds.origin.x + 100.0);
         assert_eq!(right.bounds.origin.y, left.bounds.origin.y);
+    }
+
+    #[test]
+    fn fixed_window_jsx_helper_uses_one_manifest_checked_window_root() {
+        let mut granted = taskbar_manifest().clone();
+        granted.id = "org.example.fixed-window".into();
+        let source = "function App() { return h(FixedWindow, {id: 'main', width: '100%', height: 56, output: 'all', edge: 'bottom', reserveWorkArea: true, className: 'bar'}, h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open')); }";
+        let mut package = PluginPackage {
+            manifest: granted,
+            images: Default::default(),
+            stylesheet: "window.bar { width: 100%; background: rgba(20, 30, 40, 0.8); }".into(),
+            source: source.into(),
+        };
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let app = PluginPanelApplication::from_package(&package).unwrap();
+        assert!(matches!(
+            app.node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
+        let host = nickel_ui::UiHost::new(app, 1366, 56);
+        assert!(
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .is_ok()
+        );
+
+        for invalid in [
+            source.replace("id: 'main'", "id: 'other'"),
+            source.replace("reserveWorkArea: true", "reserveWorkArea: false"),
+            source.replace("height: 56", "height: 64"),
+            source.replace("output: 'all'", "output: 'primary'"),
+        ] {
+            package.source = invalid;
+            assert!(PluginPanelApplication::from_package(&package).is_err());
+        }
+
+        package.manifest.surfaces[0].kind = PluginSurfaceKind::Window;
+        package.manifest.surfaces[0].width = 520;
+        package.manifest.surfaces[0].height = 340;
+        package.manifest.surfaces[0].output = nickel_core::plugins::PluginOutputScope::Primary;
+        package.manifest.surfaces[0].reserve_work_area = false;
+        package.source = "function App() { return h(Window, {id: 'main', width: 520, height: 340}, h(Button, {id: 'save', onClick: () => {}}, 'Save')); }".into();
+        assert!(PluginPanelApplication::from_package(&package).is_ok());
+        package.source = "function App() { return h(Panel, {}, h(Window, {id: 'main', width: 520, height: 340})); }".into();
+        assert!(PluginPanelApplication::from_package(&package).is_err());
     }
 
     #[test]

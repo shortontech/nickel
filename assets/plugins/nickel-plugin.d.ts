@@ -35,6 +35,18 @@ interface NickelSurfaceProps extends NickelProps {
     height: number;
     background?: NickelColor;
 }
+interface NickelWindowProps extends NickelProps {
+    id: string;
+    width: number | "100%";
+    height: number | "100%";
+    placement?: "managed" | "fixed";
+    output?: "primary" | "all";
+    edge?: "top" | "bottom" | "left" | "right";
+    anchor?: "center" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
+    reserveWorkArea?: boolean;
+    bottomOffset?: number;
+    background?: NickelColor;
+}
 interface NickelViewportProps extends NickelProps {
     background?: NickelColor;
     /** Inset from every edge, from 0 to 256 logical pixels. */
@@ -158,6 +170,9 @@ interface NickelFileTileProps extends NickelProps {
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
 declare function Panel(props: NickelPanelProps): JSX.Element;
 declare function Surface(props: NickelSurfaceProps): JSX.Element;
+declare function Window(props: NickelWindowProps): JSX.Element;
+/** Convenience JSX component that renders Window with fixed placement. */
+declare function FixedWindow(props: Omit<NickelWindowProps, "placement">): JSX.Element;
 declare function Viewport(props: NickelViewportProps): JSX.Element;
 declare function Box(props: NickelBoxProps): JSX.Element;
 /** Generic CSS layout box. Defaults to block layout. */

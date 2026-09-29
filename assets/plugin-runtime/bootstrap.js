@@ -1,6 +1,11 @@
 
 const Panel = 'panel';
 const Surface = 'surface';
+const Window = 'window';
+function FixedWindow(props) {
+    const {children, ...windowProps} = props;
+    return h(Window, {...windowProps, placement: 'fixed'}, ...children);
+}
 const Viewport = 'viewport';
 const Box = 'box';
 const Div = 'div';
@@ -115,6 +120,8 @@ function h(kind, props, ...children) {
     const closeAction = typeof props?.onClose === 'function'
         ? __handlers.push(props.onClose) - 1 : null;
     return {kind, action, id: props?.id, className: props?.className, open: props?.open, anchor: props?.anchor,
+        placement: props?.placement, output: props?.output, edge: props?.edge,
+        reserveWorkArea: props?.reserveWorkArea, bottomOffset: props?.bottomOffset,
         x: props?.x, y: props?.y, width: props?.width, height: props?.height, grow: props?.grow,
         background: props?.background, padding: props?.padding, radius: props?.radius, color: props?.color,
         label: props?.label, disabledReason: props?.disabledReason,

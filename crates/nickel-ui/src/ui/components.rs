@@ -27,8 +27,17 @@ impl<Message> Layer<Message> {
         self
     }
 
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0 = self.0.width_length(width);
+        self
+    }
+
     pub fn height(mut self, height: f32) -> Self {
         self.0 = self.0.height(height);
+        self
+    }
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.0 = self.0.height_length(height);
         self
     }
     pub fn id(mut self, id: impl Into<UiId>) -> Self {

@@ -171,7 +171,7 @@ The `dev` command transpiles with `--noCheck` so an editor type error does not
 prevent testing; `tsc -p` gives the stricter check before packaging.
 
 The runtime provides `h`, `Panel`, `Viewport`, `Div`, `Row`, `Column`, `Text`, `Button`,
-`Dialog`, `Image`, `ImageButton`, `useState`, `useRef`, and other small native
+`Window`, `FixedWindow`, `Dialog`, `Image`, `ImageButton`, `useState`, `useRef`, and other small native
 components.
 An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
 256 KiB. `className` accepts space-separated class names on `Surface`, `Panel`,
@@ -196,6 +196,16 @@ CSS error. Button and text-field behavior and accessibility remain native;
 their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
 props remain available. Row, Column, and specialized widgets still have some
 legacy sizing behavior while the generic layout path expands.
+
+`<Window id="main" width={520} height={340}>...</Window>` is the single JSX
+surface root. `<FixedWindow>` is a JavaScript helper that returns a `Window`
+with fixed placement; it does not create a second renderer. In the current
+manifest version, numeric root dimensions must match the declared surface;
+`"100%"` fills the host surface. Requested output, edge, anchor, work-area
+reservation, and bottom offset are checked against the manifest before the
+render is accepted. The manifest still determines native placement until the
+surface authority envelope replaces its duplicated geometry. A plugin cannot
+create an undeclared native window by changing JSX.
 
 `Viewport` fills its host window and accepts an ARGB `background` and `padding`
 from 0 to 256 logical pixels. Use it as the root for a full-window layout such
