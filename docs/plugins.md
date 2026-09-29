@@ -186,11 +186,11 @@ are available only when nested test control is enabled; protected surfaces are
 excluded.
 
 The runtime provides `h`, `Panel`, `Viewport`, `Div`, `Row`, `Column`, `Text`, `Button`,
-`Window`, `FixedWindow`, `Dialog`, `Image`, `ImageButton`, `Slider`, `useState`, `useRef`, and other small native
+`Window`, `FixedWindow`, `Slot`, `Dialog`, `Image`, `ImageButton`, `Slider`, `useState`, `useRef`, and other small native
 components.
 An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
 256 KiB. `className` accepts space-separated class names on `Surface`, `Window`, `Panel`,
-`Viewport`, `Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Text`, `Button`, and
+`Viewport`, `Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Slot`, `Text`, `Button`,
 `TextField`, and `Slider`. For example, `<Button className="primary" onClick={save}>Save</Button>`
 matches `button.primary { padding: 8px; background: #345678; }`. The supported
 selectors are element names, `.class`, and `#id`, combined without descendant
@@ -235,6 +235,11 @@ sharing one runtime across sibling windows is a later host change.
 Controls do not need explicit IDs for ordinary rendering or event handling.
 Nickel derives stable control IDs from the tree path; list items rendered from
 arrays inside a `Window` must use unique `key` values, such as `key={item.id}`.
+`<Slot id="content" />` marks a place where a host can insert its own component
+tree into the JSX layout. The ID names the insertion point; a slot with no
+host-provided content is empty. CSS can style the slot box with `slot#content`
+or a class name. The Settings window uses this to place its active page while
+its window and navigation are authored in JSX.
 
 `Viewport` is retained for older plugins. New full-window layouts use `<Window>`.
 Inside a `Viewport`, `<ScrollView id="items" grow={true}>` takes the remaining

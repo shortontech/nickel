@@ -18,6 +18,13 @@ retained Rust component trees and cached page projections, and the separate
 process publishes that lower bound to the shell while running. Boa heap, textures,
 the shared native Settings frame, and process RSS remain unattributed.
 
+`settings-shell.jsx` owns the ordinary Settings `<Window>`, sidebar, search,
+page header, and responsive navigation. Its `<Slot id="settings-content" />`
+places the active page's native component tree inside the JSX layout. The
+controller path still uses native `ResponsiveNavigation` while controller
+presentation is a separate follow-up. Build its shipped JavaScript with the
+same `tsc` command below, using `settings-shell.jsx` as the source.
+
 `settings-pages.jsx` renders the Keyboard Shortcuts and About cards through the
 same bounded component tree and native renderer as shell plugins. Their CSS is
 in `settings-pages.css`; Settings fills its theme color and spacing tokens when
@@ -42,10 +49,10 @@ it after navigation to another page. Building the navigation destinations for
 other pages does not allocate those contexts. The navigation context stays
 alive while Settings is open.
 
-`settings-navigation.jsx` declares destination order, grouping, labels,
+`settings-navigation.jsx` still declares destination order, grouping, labels,
 headers, and searchable controls. The host accepts only known focus targets.
-The native `ResponsiveNavigation` adapter owns focus, responsive
-layout, and the trusted page slots while the remaining page views migrate.
+The JSX shell uses those declarations for its sidebar while the native
+`ResponsiveNavigation` path remains for controller presentation.
 Rebuild it with the same `tsc` command and its source filename.
 
 `settings-bar.jsx` uses the shared `div`, `Text`, `Button`, and `Slider` components
