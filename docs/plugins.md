@@ -170,12 +170,12 @@ DOM library's `Text` and `Image` globals conflict with Nickel's components.
 The `dev` command transpiles with `--noCheck` so an editor type error does not
 prevent testing; `tsc -p` gives the stricter check before packaging.
 
-The runtime provides `h`, `Panel`, `Viewport`, `Row`, `Column`, `Text`, `Button`,
+The runtime provides `h`, `Panel`, `Viewport`, `Div`, `Row`, `Column`, `Text`, `Button`,
 `Dialog`, `Image`, `ImageButton`, `useState`, `useRef`, and other small native
 components.
 An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
 256 KiB. `className` accepts space-separated class names on `Surface`, `Panel`,
-`Viewport`, `Box`, `Row`, `Column`, `ScrollView`, `Spacer`, `Text`, `Button`, and
+`Viewport`, `Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Text`, `Button`, and
 `TextField`. For example, `<Button className="primary" onClick={save}>Save</Button>`
 matches `button.primary { padding: 8px; background: #345678; }`. The supported
 selectors are element names, `.class`, and `#id`, combined without descendant
@@ -183,11 +183,19 @@ selectors. Pseudo-classes such as `:focus` and plugin `onFocus`/`onBlur`
 callbacks are not exposed yet. Rules use source order. Supported declarations are `padding`,
 `margin`, `border` (solid only), `border-width`, `border-color`,
 `border-radius`, `font-size`, `line-height` (pixel lengths), `background` or
-`background-color`, `color`, `gap`, and `flex-grow`. Colors accept hex, `rgba()`,
+`background-color`, `color`, `gap`, `width`, `height`, `min-width`, `max-width`,
+`min-height`, `max-height`, `display`, `flex-direction`, `flex`, `flex-grow`,
+`flex-shrink`, `flex-basis`, `align-items`, `justify-content`, and
+`grid-template-columns`. Generic `<div>` defaults to a vertical block layout;
+`display: flex` defaults to a row and `display: grid` uses Nickel's native grid.
+Grid tracks support pixels, fractions, `auto`, bounded `repeat()`, and `minmax()`.
+Lengths support pixels, percentages, `auto`, `min-content`, and `max-content`
+where Nickel's layout context permits them. Colors accept hex, `rgba()`,
 and `transparent`. Unsupported selectors or declarations fail validation with a
 CSS error. Button and text-field behavior and accessibility remain native;
 their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
-props remain available while CSS sizing and grid declarations are developed.
+props remain available. Row, Column, and specialized widgets still have some
+legacy sizing behavior while the generic layout path expands.
 
 `Viewport` fills its host window and accepts an ARGB `background` and `padding`
 from 0 to 256 logical pixels. Use it as the root for a full-window layout such

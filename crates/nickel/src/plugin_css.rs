@@ -4,10 +4,38 @@ use cssparser::{
     AtRuleParser, CowRcStr, DeclarationParser, ParseError, Parser, ParserState,
     QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser,
 };
-use nickel_ui::Insets;
+use nickel_ui::{Align, Insets, Justify, Length, Track};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Display {
+    #[default]
+    Block,
+    Flex,
+    Grid,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum FlexDirection {
+    #[default]
+    Row,
+    Column,
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ControlStyle {
+    pub display: Option<Display>,
+    pub flex_direction: Option<FlexDirection>,
+    pub grid_columns: Option<Vec<Track>>,
+    pub width: Option<Length>,
+    pub height: Option<Length>,
+    pub min_width: Option<f32>,
+    pub max_width: Option<f32>,
+    pub min_height: Option<f32>,
+    pub max_height: Option<f32>,
+    pub align_items: Option<Align>,
+    pub justify_content: Option<Justify>,
+    pub shrink: Option<f32>,
+    pub basis: Option<Length>,
     pub padding: Option<Insets>,
     pub margin: Option<Insets>,
     pub border_width: Option<f32>,
@@ -80,6 +108,20 @@ struct Rule {
 
 #[derive(Clone, Debug)]
 enum Declaration {
+    Display(Display),
+    FlexDirection(FlexDirection),
+    GridColumns(Vec<Track>),
+    Width(Length),
+    Height(Length),
+    MinWidth(f32),
+    MaxWidth(f32),
+    MinHeight(f32),
+    MaxHeight(f32),
+    AlignItems(Align),
+    JustifyContent(Justify),
+    Shrink(f32),
+    Basis(Length),
+    Flex(f32),
     Padding(Insets),
     Margin(Insets),
     BorderWidth(f32),
@@ -97,6 +139,24 @@ enum Declaration {
 impl Declaration {
     fn apply(&self, style: &mut ControlStyle) {
         match self {
+            Self::Display(value) => style.display = Some(*value),
+            Self::FlexDirection(value) => style.flex_direction = Some(*value),
+            Self::GridColumns(value) => style.grid_columns = Some(value.clone()),
+            Self::Width(value) => style.width = Some(*value),
+            Self::Height(value) => style.height = Some(*value),
+            Self::MinWidth(value) => style.min_width = Some(*value),
+            Self::MaxWidth(value) => style.max_width = Some(*value),
+            Self::MinHeight(value) => style.min_height = Some(*value),
+            Self::MaxHeight(value) => style.max_height = Some(*value),
+            Self::AlignItems(value) => style.align_items = Some(*value),
+            Self::JustifyContent(value) => style.justify_content = Some(*value),
+            Self::Shrink(value) => style.shrink = Some(*value),
+            Self::Basis(value) => style.basis = Some(*value),
+            Self::Flex(value) => {
+                style.grow = Some(*value);
+                style.shrink = Some(1.0);
+                style.basis = Some(Length::Percent(0.0));
+            }
             Self::Padding(value) => style.padding = Some(*value),
             Self::Margin(value) => style.margin = Some(*value),
             Self::BorderWidth(value) => style.border_width = Some(*value),
@@ -126,6 +186,124 @@ fn px(source: &str, maximum: f32) -> Result<f32, String> {
         return Err("CSS length is outside the supported range".into());
     }
     Ok(value)
+}
+
+fn bounded_number(source: &str, maximum: f32, name: &str) -> Result<f32, String> {
+    let value: f32 = source.parse().map_err(|_| format!("invalid {name}"))?;
+    if !value.is_finite() || !(0.0..=maximum).contains(&value) {
+        return Err(format!("{name} is outside the supported range"));
+    }
+    Ok(value)
+}
+
+fn length(source: &str) -> Result<Length, String> {
+    let source = source.trim();
+    match source {
+        "auto" => Ok(Length::Auto),
+        "min-content" => Ok(Length::MinContent),
+        "max-content" => Ok(Length::MaxContent),
+        _ if source.ends_with('%') => {
+            let percent = bounded_number(&source[..source.len() - 1], 100.0, "percentage")?;
+            Ok(Length::Percent(percent / 100.0))
+        }
+        _ => Ok(Length::Px(px(source, 8192.0)?)),
+    }
+}
+
+fn top_level_parts(source: &str, delimiter: char) -> Result<Vec<&str>, String> {
+    let mut depth = 0_u8;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (index, character) in source.char_indices() {
+        match character {
+            '(' => {
+                depth = depth
+                    .checked_add(1)
+                    .filter(|depth| *depth <= 4)
+                    .ok_or("CSS function nesting is too deep")?
+            }
+            ')' => depth = depth.checked_sub(1).ok_or("unbalanced CSS function")?,
+            _ if depth == 0
+                && (character == delimiter
+                    || (delimiter == ' ' && character.is_ascii_whitespace())) =>
+            {
+                let part = source[start..index].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err("unbalanced CSS function".into());
+    }
+    let last = source[start..].trim();
+    if !last.is_empty() {
+        parts.push(last);
+    }
+    Ok(parts)
+}
+
+fn track(source: &str) -> Result<Track, String> {
+    let source = source.trim();
+    if source == "auto" {
+        return Ok(Track::Auto);
+    }
+    if let Some(number) = source.strip_suffix("fr") {
+        return Ok(Track::Fraction(bounded_number(
+            number,
+            100.0,
+            "grid fraction",
+        )?));
+    }
+    if let Some(arguments) = source
+        .strip_prefix("repeat(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        let parts = top_level_parts(arguments, ',')?;
+        if parts.len() != 2 {
+            return Err("repeat() needs a count and one track".into());
+        }
+        let count: usize = parts[0].parse().map_err(|_| "invalid repeat() count")?;
+        if !(1..=32).contains(&count) {
+            return Err("repeat() count must be 1 to 32".into());
+        }
+        return Ok(Track::repeat(count, track(parts[1])?));
+    }
+    if let Some(arguments) = source
+        .strip_prefix("minmax(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        let parts = top_level_parts(arguments, ',')?;
+        if parts.len() != 2 {
+            return Err("minmax() needs two tracks".into());
+        }
+        return Ok(Track::minmax(track(parts[0])?, track(parts[1])?));
+    }
+    Ok(Track::Px(px(source, 8192.0)?))
+}
+
+fn grid_columns(source: &str) -> Result<Vec<Track>, String> {
+    let parts = top_level_parts(source, ' ')?;
+    if parts.is_empty() || parts.len() > 32 {
+        return Err("grid needs 1 to 32 column tracks".into());
+    }
+    let tracks = parts
+        .into_iter()
+        .map(track)
+        .collect::<Result<Vec<_>, _>>()?;
+    fn expanded_count(track: &Track) -> usize {
+        match track {
+            Track::Repeat(count, nested) => count.saturating_mul(expanded_count(nested)),
+            _ => 1,
+        }
+    }
+    if tracks.iter().map(expanded_count).sum::<usize>() > 32 {
+        return Err("grid expands beyond 32 columns".into());
+    }
+    Ok(tracks)
 }
 
 fn insets(source: &str) -> Result<Insets, String> {
@@ -200,6 +378,44 @@ fn color(source: &str) -> Result<u32, String> {
 fn declaration(name: &str, value: &str) -> Result<Declaration, String> {
     let value = value.trim();
     Ok(match name.to_ascii_lowercase().as_str() {
+        "display" => Declaration::Display(match value {
+            "block" => Display::Block,
+            "flex" => Display::Flex,
+            "grid" => Display::Grid,
+            _ => return Err("display must be block, flex, or grid".into()),
+        }),
+        "flex-direction" => Declaration::FlexDirection(match value {
+            "row" => FlexDirection::Row,
+            "column" => FlexDirection::Column,
+            _ => return Err("flex-direction must be row or column".into()),
+        }),
+        "grid-template-columns" => Declaration::GridColumns(grid_columns(value)?),
+        "width" => Declaration::Width(length(value)?),
+        "height" => Declaration::Height(length(value)?),
+        "min-width" => Declaration::MinWidth(px(value, 8192.0)?),
+        "max-width" => Declaration::MaxWidth(px(value, 8192.0)?),
+        "min-height" => Declaration::MinHeight(px(value, 8192.0)?),
+        "max-height" => Declaration::MaxHeight(px(value, 8192.0)?),
+        "align-items" => Declaration::AlignItems(match value {
+            "flex-start" | "start" => Align::Start,
+            "center" => Align::Center,
+            "flex-end" | "end" => Align::End,
+            "stretch" => Align::Stretch,
+            "baseline" => Align::Baseline,
+            _ => return Err("unsupported align-items value".into()),
+        }),
+        "justify-content" => Declaration::JustifyContent(match value {
+            "flex-start" | "start" => Justify::Start,
+            "center" => Justify::Center,
+            "flex-end" | "end" => Justify::End,
+            "space-between" => Justify::SpaceBetween,
+            "space-around" => Justify::SpaceAround,
+            "space-evenly" => Justify::SpaceEvenly,
+            _ => return Err("unsupported justify-content value".into()),
+        }),
+        "flex-shrink" => Declaration::Shrink(bounded_number(value, 100.0, "flex-shrink")?),
+        "flex-basis" => Declaration::Basis(length(value)?),
+        "flex" => Declaration::Flex(bounded_number(value, 100.0, "flex")?),
         "padding" => Declaration::Padding(insets(value)?),
         "margin" => Declaration::Margin(insets(value)?),
         "border-width" => Declaration::BorderWidth(px(value, 64.0)?),
@@ -423,5 +639,47 @@ mod tests {
         assert_eq!(style.border_width, Some(2.0));
         assert_eq!(style.gap, Some(12.0));
         assert!(css.estimated_retained_bytes() > 0);
+    }
+
+    #[test]
+    fn familiar_flex_grid_and_size_declarations_map_to_nickel_layout() {
+        let css = StyleSheet::compile(
+            ".row { display: flex; flex-direction: row; width: 100%; gap: 8px; align-items: center; justify-content: space-between; } \
+             .item { flex: 1; min-width: 20px; max-width: 120px; } \
+             .grid { display: grid; grid-template-columns: repeat(2, minmax(40px, 1fr)); }",
+        )
+        .unwrap();
+        let row = css.resolve("div", None, Some("row"));
+        assert_eq!(row.display, Some(Display::Flex));
+        assert_eq!(row.flex_direction, Some(FlexDirection::Row));
+        assert_eq!(row.width, Some(Length::Percent(1.0)));
+        assert_eq!(row.align_items, Some(Align::Center));
+        assert_eq!(row.justify_content, Some(Justify::SpaceBetween));
+        let item = css.resolve("div", None, Some("item"));
+        assert_eq!(item.grow, Some(1.0));
+        assert_eq!(item.min_width, Some(20.0));
+        assert_eq!(item.max_width, Some(120.0));
+        let grid = css.resolve("div", None, Some("grid"));
+        assert_eq!(grid.display, Some(Display::Grid));
+        assert_eq!(
+            grid.grid_columns,
+            Some(vec![Track::repeat(
+                2,
+                Track::minmax(Track::Px(40.0), Track::Fraction(1.0))
+            )])
+        );
+    }
+
+    #[test]
+    fn invalid_layout_values_are_rejected() {
+        for css in [
+            ".x { width: 200%; }",
+            ".x { grid-template-columns: repeat(100, 1fr); }",
+            ".x { grid-template-columns: repeat(32, repeat(32, 1fr)); }",
+            ".x { flex-direction: diagonal; }",
+            ".x { grid-template-columns: minmax(1fr, 40px; }",
+        ] {
+            assert!(StyleSheet::compile(css).is_err(), "{css}");
+        }
     }
 }

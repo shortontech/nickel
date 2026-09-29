@@ -3,6 +3,7 @@ const Panel = 'panel';
 const Surface = 'surface';
 const Viewport = 'viewport';
 const Box = 'box';
+const Div = 'div';
 const FileTile = 'file-tile';
 const Badge = 'badge';
 const Widget = 'widget';

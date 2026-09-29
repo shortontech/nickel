@@ -13,7 +13,7 @@ use nickel_core::plugins::{
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, DragPhase, FilePlaneItem,
-    FrameOverlay, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayId, OverlayMenu,
+    FrameOverlay, Grid, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayId, OverlayMenu,
     OverlayMenuItem, OverlayStyle, Point, Row, SemanticRole, Shortcut, Size, Spacer, Text,
     TextField as UiTextField, TransientSurface, UiId, VerticalScroll, ViewContext,
 };
@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::control_view::ControlAction;
 use crate::platform::SessionAction;
-use crate::plugin_css::{ControlStyle, StyleSheet};
+use crate::plugin_css::{ControlStyle, Display, FlexDirection, StyleSheet};
 use nickel_codex_ui::{ProjectMenuProjection, ProjectMenuRevision};
 use nickel_core::display_projection::ProjectionMode;
 
@@ -411,6 +411,11 @@ enum PanelNode {
         background: u32,
         radius: u32,
     },
+    Div {
+        id: Option<String>,
+        class_name: Option<String>,
+        children: Vec<Self>,
+    },
     Surface {
         children: Vec<Self>,
         id: Option<String>,
@@ -521,6 +526,24 @@ fn apply_container_style(
     mut container: Container<PluginMessage>,
     style: &ControlStyle,
 ) -> Container<PluginMessage> {
+    if let Some(width) = style.width {
+        container = container.width_length(width);
+    }
+    if let Some(height) = style.height {
+        container = container.height_length(height);
+    }
+    if let Some(width) = style.min_width {
+        container = container.min_width(width);
+    }
+    if let Some(width) = style.max_width {
+        container = container.max_width(width);
+    }
+    if let Some(height) = style.min_height {
+        container = container.min_height(height);
+    }
+    if let Some(height) = style.max_height {
+        container = container.max_height(height);
+    }
     if let Some(padding) = style.padding {
         container = container.padding(padding);
     }
@@ -538,6 +561,12 @@ fn apply_container_style(
     }
     if let Some(grow) = style.grow {
         container = container.grow(grow);
+    }
+    if let Some(shrink) = style.shrink {
+        container = container.shrink(shrink);
+    }
+    if let Some(basis) = style.basis {
+        container = container.basis(basis);
     }
     container
 }
@@ -576,7 +605,8 @@ impl PanelNode {
             Self::Section {
                 id, label, value, ..
             } => capacity(id) + capacity(label) + capacity(value),
-            Self::Row { children, .. }
+            Self::Div { children, .. }
+            | Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::Viewport { children, .. } => {
                 let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
@@ -594,6 +624,7 @@ impl PanelNode {
                 ..
             } if tile_id == id => *action,
             Self::Box { children, .. }
+            | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
@@ -614,6 +645,7 @@ impl PanelNode {
                 ..
             } if tile_id == id => *select_action,
             Self::Box { children, .. }
+            | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
@@ -634,6 +666,7 @@ impl PanelNode {
                 ..
             } if tile_id == id => *move_action,
             Self::Box { children, .. }
+            | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
@@ -654,6 +687,7 @@ impl PanelNode {
                 ..
             } if tile_id == id => *file_action,
             Self::Box { children, .. }
+            | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
@@ -699,6 +733,7 @@ impl PanelNode {
             && !matches!(
                 kind,
                 "box"
+                    | "div"
                     | "surface"
                     | "viewport"
                     | "panel"
@@ -904,6 +939,21 @@ impl PanelNode {
                     complement: color("complement")?,
                 })
             }
+            "div" => Ok(Self::Div {
+                id: match value.get("id") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(id)) if !id.is_empty() && id.len() <= 128 => {
+                        Some(id.clone())
+                    }
+                    _ => return Err("div id must contain 1 to 128 bytes".into()),
+                },
+                class_name,
+                children: children
+                    .iter()
+                    .filter(|child| !child.is_null())
+                    .map(Self::parse)
+                    .collect::<Result<Vec<_>, _>>()?,
+            }),
             "box" => {
                 let coordinate = |name| {
                     value
@@ -1521,6 +1571,70 @@ impl PanelNode {
                 }
                 AnyView::new(tile)
             }
+            Self::Div {
+                id,
+                class_name,
+                children,
+            } => {
+                let style = stylesheet.resolve("div", id.as_deref(), class_name.as_deref());
+                let content: AnyView<PluginMessage> = match style.display.unwrap_or_default() {
+                    Display::Grid => {
+                        let mut grid = style
+                            .grid_columns
+                            .as_ref()
+                            .map_or_else(Grid::new, |tracks| Grid::tracks(tracks.iter().cloned()));
+                        if let Some(gap) = style.gap {
+                            grid = grid.gap(gap);
+                        }
+                        for child in children {
+                            grid = grid.child(child.view(images, stylesheet));
+                        }
+                        AnyView::new(grid)
+                    }
+                    Display::Flex
+                        if style.flex_direction.unwrap_or_default() == FlexDirection::Row =>
+                    {
+                        let mut row = Row::new();
+                        if let Some(gap) = style.gap {
+                            row = row.gap(gap);
+                        }
+                        if let Some(align) = style.align_items {
+                            row = row.align_items(align);
+                        }
+                        if let Some(justify) = style.justify_content {
+                            row = row.justify_content(justify);
+                        }
+                        for child in children {
+                            row = row.child(child.view(images, stylesheet));
+                        }
+                        AnyView::new(row)
+                    }
+                    Display::Block | Display::Flex => {
+                        let mut column = Column::new();
+                        if let Some(gap) = style.gap {
+                            column = column.gap(gap);
+                        }
+                        if let Some(align) = style.align_items {
+                            column = column.align_items(align);
+                        }
+                        if let Some(justify) = style.justify_content {
+                            column = column.justify_content(justify);
+                        }
+                        for child in children {
+                            column = column.child(child.view(images, stylesheet));
+                        }
+                        AnyView::new(column)
+                    }
+                };
+                let mut container = Container::new().child(content);
+                if let Some(id) = id {
+                    container = container.id(id.clone());
+                }
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
+                )
+            }
             Self::Box {
                 children,
                 class_name,
@@ -1922,6 +2036,7 @@ impl PanelNode {
         match self {
             Self::Dialog { id, .. } if id == requested_id => Some(self),
             Self::Box { children, .. }
+            | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
@@ -1938,6 +2053,7 @@ impl PanelNode {
         match self {
             Self::Menu { id, .. } if id == requested_id => Some(self),
             Self::Box { children, .. }
+            | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
@@ -1954,6 +2070,7 @@ impl PanelNode {
         match self {
             Self::Dialog { .. } | Self::Menu { .. } => output.push(self),
             Self::Box { children, .. }
+            | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
@@ -1977,6 +2094,7 @@ impl PanelNode {
                 ..
             } if id == requested_id => Some(*action),
             Self::Box { children, .. }
+            | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
@@ -6048,6 +6166,38 @@ mod tests {
             host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn generic_div_uses_css_grid_tracks_for_plugin_controls() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.css-grid".into();
+        let package = PluginPackage {
+            manifest: external_manifest,
+            images: Default::default(),
+            stylesheet: ".grid { display: grid; grid-template-columns: 100px 100px; gap: 10px; width: 210px; } button { width: 100px; }".into(),
+            source: "function App() { return h(Panel, {height: 120, background: 0}, h(Div, {className: 'grid'}, h(Button, {id: 'left', onClick: () => nickel.request('show-launcher')}, 'Left'), h(Button, {id: 'right', onClick: () => nickel.request('show-launcher')}, 'Right'))); }".into(),
+        };
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package(&package).unwrap(),
+            440,
+            120,
+        );
+        let left = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Left".into(),
+            })
+            .unwrap();
+        let right = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Right".into(),
+            })
+            .unwrap();
+        assert!(right.bounds.origin.x >= left.bounds.origin.x + 100.0);
+        assert_eq!(right.bounds.origin.y, left.bounds.origin.y);
     }
 
     #[test]

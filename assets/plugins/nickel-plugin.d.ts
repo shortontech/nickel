@@ -4,6 +4,9 @@
 declare namespace JSX {
     interface Element {}
     interface ElementChildrenAttribute { children: {} }
+    interface IntrinsicElements {
+        div: NickelProps & { id?: string };
+    }
 }
 
 type NickelChild = JSX.Element | string | number | null | false | NickelChild[];
@@ -157,6 +160,8 @@ declare function Panel(props: NickelPanelProps): JSX.Element;
 declare function Surface(props: NickelSurfaceProps): JSX.Element;
 declare function Viewport(props: NickelViewportProps): JSX.Element;
 declare function Box(props: NickelBoxProps): JSX.Element;
+/** Generic CSS layout box. Defaults to block layout. */
+declare function Div(props: NickelProps & { id?: string }): JSX.Element;
 declare function FileTile(props: NickelFileTileProps): JSX.Element;
 declare function Badge(props: NickelBadgeProps): JSX.Element;
 declare function Widget(props: NickelWidgetProps): JSX.Element;
