@@ -3567,8 +3567,11 @@ mod tests {
             hue.id,
             nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(0.75)),
         );
-        let PanelNode::Panel { children, .. } = &host.application_mut().node else {
-            panic!("plugin root changed");
+        let PanelNode::Surface { children, .. } = &host.application_mut().node else {
+            panic!("plugin root is not a Window");
+        };
+        let PanelNode::Row { children, .. } = &children[0] else {
+            panic!("legacy Panel children are not composed into a Row");
         };
         assert!(
             matches!(&children[0], PanelNode::Slider { value, .. } if (*value - 0.75).abs() < 0.001)
@@ -3580,8 +3583,11 @@ mod tests {
             intensity.id,
             nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(0.35)),
         );
-        let PanelNode::Panel { children, .. } = &host.application_mut().node else {
-            panic!("plugin root changed");
+        let PanelNode::Surface { children, .. } = &host.application_mut().node else {
+            panic!("plugin root is not a Window");
+        };
+        let PanelNode::Row { children, .. } = &children[0] else {
+            panic!("legacy Panel children are not composed into a Row");
         };
         assert!(
             matches!(&children[0], PanelNode::Slider { value, .. } if (*value - 0.75).abs() < 0.001)
@@ -3601,8 +3607,11 @@ mod tests {
         };
         host.handle_event(nickel_ui::UiEvent::PointerPressed(pointer));
         host.handle_event(nickel_ui::UiEvent::PointerReleased(pointer));
-        let PanelNode::Panel { children, .. } = &host.application_mut().node else {
-            panic!("plugin root changed");
+        let PanelNode::Surface { children, .. } = &host.application_mut().node else {
+            panic!("plugin root is not a Window");
+        };
+        let PanelNode::Row { children, .. } = &children[0] else {
+            panic!("legacy Panel children are not composed into a Row");
         };
         assert!(
             matches!(&children[0], PanelNode::Slider { value, .. } if (*value - 0.2).abs() < 0.02),
@@ -3754,7 +3763,7 @@ mod tests {
     }
 
     #[test]
-    fn packaged_panel_uses_declared_height_and_dispatches_dialog_action() {
+    fn packaged_panel_aligns_at_bottom_and_dispatches_dialog_action() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.tall-panel".into();
         external_manifest.surfaces[0].height = 400;
@@ -3772,7 +3781,12 @@ mod tests {
             "#
             .into(),
         };
-        let app = PluginPanelApplication::from_package(&package).unwrap();
+        let app = PluginPanelApplication::from_package_surface(
+            &package,
+            &Default::default(),
+            &package.manifest.surfaces[0],
+        )
+        .unwrap();
         let mut host = nickel_ui::UiHost::new(app, 440, 400);
         let open = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
@@ -3780,7 +3794,16 @@ mod tests {
                 name: "Open dialog".into(),
             })
             .unwrap();
+        assert!(matches!(
+            &host.application().node,
+            PanelNode::Surface {
+                width: Length::Percent(1.0),
+                height: Length::Percent(1.0),
+                ..
+            }
+        ));
         assert!(open.bounds.origin.y > 250.0);
+        assert!(open.bounds.origin.y + open.bounds.size.height <= 400.0);
         host.step(nickel_ui::HostBatch {
             events: vec![nickel_ui::HostEvent::Ui(
                 nickel_ui::UiEvent::AccessibilityActivate(open.id),

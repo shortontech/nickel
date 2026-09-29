@@ -187,6 +187,7 @@ interface NickelProgressProps extends NickelProps {
     height: number;
 }
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
+/** @deprecated Compatibility helper; use Window or FixedWindow for new surfaces. */
 declare function Panel(props: NickelPanelProps): JSX.Element;
 declare function Surface(props: NickelSurfaceProps): JSX.Element;
 declare function Window(props: NickelWindowProps): JSX.Element;

@@ -263,12 +263,6 @@ pub enum PanelNode {
         width: Length,
         height: Length,
     },
-    Panel {
-        children: Vec<Self>,
-        background: u32,
-        height: u32,
-        class_name: Option<String>,
-    },
     Row {
         children: Vec<Self>,
         class_name: Option<String>,
@@ -487,7 +481,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => children,
@@ -498,7 +491,6 @@ impl PanelNode {
                 Self::Box { class_name, .. }
                 | Self::Div { class_name, .. }
                 | Self::Surface { class_name, .. }
-                | Self::Panel { class_name, .. }
                 | Self::Row { class_name, .. }
                 | Self::Column { class_name, .. }
                 | Self::ScrollView { class_name, .. }
@@ -1028,29 +1020,13 @@ impl PanelNode {
                     height: dimension("height")?,
                 })
             }
-            "panel" | "row" | "column" | "scroll-view" => {
+            "row" | "column" | "scroll-view" => {
                 let children = children
                     .iter()
                     .filter(|value| !value.is_null())
                     .map(Self::parse)
                     .collect::<Result<Vec<_>, _>>()?;
-                if kind == "panel" {
-                    let background = value
-                        .get("background")
-                        .and_then(Value::as_u64)
-                        .map_or(0xc926_2b36, |value| value as u32);
-                    let height = value
-                        .get("height")
-                        .and_then(Value::as_u64)
-                        .filter(|height| (1..=8192).contains(height))
-                        .unwrap_or(64) as u32;
-                    Ok(Self::Panel {
-                        children,
-                        class_name,
-                        background,
-                        height,
-                    })
-                } else if kind == "row" {
+                if kind == "row" {
                     Ok(Self::Row {
                         children,
                         class_name,
@@ -1902,37 +1878,6 @@ impl PanelNode {
                     &style,
                 )
             }
-            Self::Panel {
-                children,
-                background,
-                height,
-                class_name,
-            } => {
-                let mut row = Row::new()
-                    .fill_width()
-                    .height((*height).saturating_sub(16) as f32);
-                for child in children {
-                    if !matches!(child, Self::Dialog { .. }) {
-                        row = row.child(child.view_as_scoped_with_slots::<Message>(
-                            images, stylesheet, scope, slots,
-                        ));
-                    }
-                }
-                if stylesheet.reading_direction() == nickel_ui::ReadingDirection::RightToLeft {
-                    row = row.reverse();
-                }
-                let style = stylesheet.resolve("panel", None, class_name.as_deref());
-                let container = Container::new()
-                    .height(*height as f32)
-                    .background(*background)
-                    .radius(style.radius.unwrap_or(16.0))
-                    .padding(style.padding.unwrap_or_else(|| Insets::all(8.0)))
-                    .child(row);
-                with_margin(
-                    AnyView::new(apply_container_style(container, &style)),
-                    &style,
-                )
-            }
             Self::Row {
                 children,
                 class_name,
@@ -2529,7 +2474,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => {
@@ -2565,7 +2509,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => {
@@ -2581,7 +2524,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => {
@@ -2636,7 +2578,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => children
@@ -2652,7 +2593,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => children
@@ -2668,7 +2608,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => children
@@ -2874,7 +2813,6 @@ fn parse_panel_for_manifest(
             }
             PanelNode::Box { children, .. }
             | PanelNode::Div { children, .. }
-            | PanelNode::Panel { children, .. }
             | PanelNode::Row { children, .. }
             | PanelNode::Column { children, .. }
             | PanelNode::ScrollView { children, .. }

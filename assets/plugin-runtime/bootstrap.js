@@ -1,9 +1,25 @@
 
-const Panel = 'panel';
 const Window = 'window';
 function FixedWindow(props) {
     const {children, ...windowProps} = props;
     return h(Window, {...windowProps, placement: 'fixed'}, ...children);
+}
+function Panel(props) {
+    const {children, height, ...surfaceProps} = props || {};
+    const panelHeight = Number.isInteger(height) && height >= 1 && height <= 8192 ? height : 64;
+    const surface = nickel.data.surface;
+    const background = surfaceProps.background ?? 0xc9262b36;
+    const content = surface && surface.width && surface.height
+        ? h(Box, {
+            x: 0, y: Math.max(0, surface.height - panelHeight),
+            width: surface.width, height: Math.min(panelHeight, surface.height),
+            background, radius: 16
+        }, h(Row, null, ...children))
+        : h(Row, null, ...children);
+    return h(FixedWindow,
+        {width: '100%', ...surfaceProps, height: '100%',
+            background: surface ? 0 : background},
+        content);
 }
 const Box = 'box';
 const Div = 'div';

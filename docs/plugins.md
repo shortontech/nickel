@@ -138,7 +138,7 @@ Super+N focuses the plugin overlay for keyboard navigation; passive arrivals
 leave the current application focused.
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
-`Panel` component's ARGB `background` can be translucent. Several installed
+`FixedWindow` root's ARGB `background` can be translucent. Several installed
 panel, dock, and window plugins can be enabled together. A `"window"` surface
 uses its declared size, is centered on its output, and has no bottom offset.
 A window, dialog, or overlay can declare an `anchor` and offsets, for example
@@ -187,11 +187,14 @@ and child indexes. IDs can change when a surface is recreated. These queries
 are available only when nested test control is enabled; protected surfaces are
 excluded.
 
-The runtime provides `h`, `Panel`, `Div`, `Row`, `Column`, `Text`, `Button`,
-`Window`, `FixedWindow`, `Slot`, `Dialog`, `Image`, `ImageButton`, `Slider`, `useState`, `useRef`, and other small native
+The runtime provides `h`, `Window`, `FixedWindow`, `Div`, `Row`, `Column`, `Text`, `Button`,
+`Slot`, `Dialog`, `Image`, `ImageButton`, `Slider`, `useState`, `useRef`, and other small native
 components.
+`Panel` remains as a compatibility helper for older plugins; it composes a
+`FixedWindow`, `Box`, and `Row` and has no separate native renderer. New plugins should
+use `Window` or `FixedWindow` as their surface root.
 An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
-256 KiB. `className` accepts space-separated class names on `Window`, `Panel`,
+256 KiB. `className` accepts space-separated class names on `Window`,
 `Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Slot`, `Text`, `Button`,
 `TextField`, and `Slider`. For example, `<Button className="primary" onClick={save}>Save</Button>`
 matches `button.primary { padding: 8px; background: #345678; }`. The supported

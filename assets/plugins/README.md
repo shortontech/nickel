@@ -35,7 +35,7 @@ taskbar action, widget slot, and Control Center section extensions. Use
 `nickel --safe-mode` to start with installed
 packages inactive while keeping bundled shell plugins available.
 
-The component vocabulary includes `Panel`, `Row`, `Column`, `Text`, `Image`,
+The component vocabulary includes `Window`, `FixedWindow`, `Row`, `Column`, `Text`, `Image`,
 `ImageButton`, `Button`, `Badge`, `Action`, `Widget`, `Section`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. The
 host owns image bytes and exposes them by asset name to JSX. The desktop,
 lock screen, screenshot tool, file manager, and Codex remain Rust UI.
