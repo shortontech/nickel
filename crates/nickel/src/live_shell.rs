@@ -4374,6 +4374,7 @@ impl LiveShell {
         let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(
             &package, &settings, &surface,
         )?;
+        let surface = application.resolved_surface(&surface);
         let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
         if self.plugin_panel_host.is_none() {
             self.plugin_panel_host = Some(host);
@@ -4693,14 +4694,21 @@ impl LiveShell {
                 .any(|(surface_id, _)| surface_id.is_some());
             for (surface_id, application) in replacements {
                 if let Some(surface_id) = surface_id {
+                    let grant = manifest
+                        .surfaces
+                        .iter()
+                        .find(|surface| surface.id == surface_id)
+                        .expect("replacement surface belongs to the validated manifest");
+                    let resolved = application.resolved_surface(grant);
                     if self.plugin_panel_owner == id
                         && self.plugin_panel_surface.id == surface_id
                         && self.plugin_panel_host.is_some()
                     {
+                        self.plugin_panel_surface = resolved.clone();
                         self.plugin_panel_host = Some(nickel_ui::UiHost::new(
                             application,
-                            self.plugin_panel_surface.width,
-                            self.plugin_panel_surface.height,
+                            resolved.width,
+                            resolved.height,
                         ));
                     } else {
                         let key = nickel_core::plugins::PluginSurfaceKey {
@@ -4708,8 +4716,12 @@ impl LiveShell {
                             surface_id,
                         };
                         if let Some((surface, host)) = self.plugin_panel_extra_hosts.get_mut(&key) {
-                            *host =
-                                nickel_ui::UiHost::new(application, surface.width, surface.height);
+                            *surface = resolved.clone();
+                            *host = nickel_ui::UiHost::new(
+                                application,
+                                resolved.width,
+                                resolved.height,
+                            );
                         }
                     }
                 } else if let Some((_, _, current)) = self.plugin_taskbar_badge_hosts.get_mut(id) {
@@ -5111,7 +5123,10 @@ impl LiveShell {
                                     crate::plugin_panel::PluginPanelApplication::from_package_surface_with_images(
                                         &package, &settings, surface, images.clone(),
                                     )
-                                    .map(|application| (application, surface.clone()))
+                                    .map(|application| {
+                                        let resolved = application.resolved_surface(surface);
+                                        (application, resolved)
+                                    })
                                 })
                                 .collect::<Result<Vec<_>, _>>()
                         })

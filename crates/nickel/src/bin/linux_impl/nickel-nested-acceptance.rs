@@ -114,7 +114,7 @@ fn run() -> Result<(), String> {
     fs::create_dir_all(&windows).map_err(|error| error.to_string())?;
     fs::write(
         windows.join("plugin.json"),
-        r#"{"api_version":1,"id":"org.example.acceptance-windows","name":"Acceptance Windows","entry":"main.js","surfaces":[{"id":"first","kind":"window","width":360,"height":220},{"id":"second","kind":"window","width":420,"height":240}]}"#,
+        r#"{"api_version":1,"id":"org.example.acceptance-windows","name":"Acceptance Windows","entry":"main.js","surfaces":[{"id":"first","kind":"window","width":400,"height":240},{"id":"second","kind":"window","width":450,"height":260}]}"#,
     )
     .map_err(|error| error.to_string())?;
     fs::write(

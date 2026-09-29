@@ -1365,6 +1365,16 @@ impl WinitShell {
         {
             return Ok(false);
         }
+        let mut previous_panels = self.extra_plugin_panels.clone();
+        if self.plugin_panel_enabled {
+            previous_panels.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: self.plugin_panel_owner.clone(),
+                    surface_id: self.plugin_panel_surface.id.clone(),
+                },
+                self.plugin_panel_surface.clone(),
+            );
+        }
         let mut active = extra.clone();
         if taskbar_panel_enabled {
             active.insert(taskbar_key, crate::plugin_panel::taskbar_surface().clone());
@@ -1388,6 +1398,40 @@ impl WinitShell {
                         .is_some_and(|surface| surface.passive == existing.passive_overlay)
                 })
         });
+        for existing in self
+            .surfaces
+            .iter_mut()
+            .filter(|existing| existing.role == SurfaceRole::Panel && existing.display_connected)
+        {
+            let key = existing.plugin.as_ref().expect("plugin surface has owner");
+            let Some((previous, current)) = previous_panels.get(key).zip(active.get(key)) else {
+                continue;
+            };
+            if (previous.width, previous.height) == (current.width, current.height) {
+                continue;
+            }
+            let Some((geometry, _)) = self.displays.get(existing.display_index) else {
+                continue;
+            };
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                SurfaceRole::Panel,
+                *geometry,
+                self.options.panel_edge,
+                current,
+            );
+            if !matches!(
+                current.kind,
+                nickel_core::plugins::PluginSurfaceKind::Window
+                    | nickel_core::plugins::PluginSurfaceKind::Dialog
+            ) {
+                existing
+                    .window
+                    .set_outer_position(LogicalPosition::new(x, y));
+            }
+            let _ = existing
+                .window
+                .request_inner_size(LogicalSize::new(width, height));
+        }
         self.rebuild_surface_indices();
         #[cfg(target_os = "linux")]
         for existing in self

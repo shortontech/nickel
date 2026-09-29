@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use nickel_core::plugins::{PluginManifest, PluginSurfaceKind};
+use nickel_core::plugins::{PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, Dropdown, FilePlaneItem, Grid,
@@ -108,13 +108,21 @@ impl WindowRequest {
             .iter()
             .find(|surface| surface.id == self.id)
             .ok_or_else(|| format!("window {:?} is not declared by the plugin", self.id))?;
+        let bounded_size = matches!(
+            surface.kind,
+            PluginSurfaceKind::Window
+                | PluginSurfaceKind::Dialog
+                | PluginSurfaceKind::Dock
+                | PluginSurfaceKind::Overlay
+        );
         let valid_size = |requested: Length, granted: u32| {
             matches!(requested, Length::Percent(1.0))
-                || matches!(requested, Length::Px(value) if value == granted as f32)
+                || matches!(requested, Length::Px(value) if value >= 1.0
+                    && (value == granted as f32 || (bounded_size && value < granted as f32)))
         };
         if !valid_size(width, surface.width) || !valid_size(height, surface.height) {
             return Err(format!(
-                "window {:?} size must match its declared surface or use 100%",
+                "window {:?} size is outside its declared surface bound",
                 self.id
             ));
         }
@@ -501,6 +509,30 @@ fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<M
 }
 
 impl PanelNode {
+    pub fn requested_window_size(&self, surface: &PluginSurface) -> Option<(u32, u32)> {
+        let Self::Surface {
+            window_request: Some(request),
+            width,
+            height,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if request.id != surface.id {
+            return None;
+        }
+        let dimension = |length, bound| match length {
+            Length::Px(value) => value as u32,
+            Length::Percent(1.0) => bound,
+            _ => bound,
+        };
+        Some((
+            dimension(*width, surface.width),
+            dimension(*height, surface.height),
+        ))
+    }
+
     pub fn contribution_bytes(&self) -> u64 {
         let own = std::mem::size_of::<Self>() as u64;
         let capacity = |value: &String| value.capacity() as u64;

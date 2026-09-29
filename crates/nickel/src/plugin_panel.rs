@@ -1296,6 +1296,15 @@ fn validation_surface_projection(
 }
 
 impl PluginPanelApplication {
+    pub fn resolved_surface(&self, grant: &PluginSurface) -> PluginSurface {
+        let mut surface = grant.clone();
+        if let Some((width, height)) = self.node.requested_window_size(grant) {
+            surface.width = width;
+            surface.height = height;
+        }
+        surface
+    }
+
     fn bundled_application(
         manifest: &PluginManifest,
         entry: &str,
@@ -4980,6 +4989,40 @@ mod tests {
                 plugin_id: package.manifest.id.clone(),
                 surface_id: "details".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn jsx_window_size_is_resolved_within_manifest_bounds() {
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-two-windows"
+        );
+        let mut package = PluginPackage::load(directory).unwrap();
+        let home = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "home")
+            .unwrap()
+            .clone();
+        package.source = package
+            .source
+            .replace("home ? 400 : 450", "home ? 360 : 450")
+            .replace("home ? 240 : 260", "home ? 220 : 260");
+        let application =
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &home)
+                .unwrap();
+        let resolved = application.resolved_surface(&home);
+        assert_eq!((resolved.width, resolved.height), (360, 220));
+        assert_eq!((home.width, home.height), (400, 240));
+
+        package.source = package
+            .source
+            .replace("home ? 360 : 450", "home ? 401 : 450");
+        assert!(
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &home)
+                .is_err()
         );
     }
 

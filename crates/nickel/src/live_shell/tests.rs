@@ -634,6 +634,41 @@ fn installed_component_window_activates_and_retires_with_its_plugin() {
 }
 
 #[test]
+fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("org.example.bounded-windows");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.bounded-windows","name":"Bounded windows","entry":"main.js","surfaces":[{"id":"first","kind":"window","width":400,"height":240},{"id":"second","kind":"window","width":450,"height":260}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { const first = nickel.data.surface.id === 'first'; return h(Window, {width: first ? 360 : 420, height: first ? 220 : 240}, h(Text, null, 'Bounded window')); }",
+    )
+    .unwrap();
+    let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let mut shell = LiveShell::new().unwrap();
+    shell.plugin_registry.register(package.manifest).unwrap();
+    shell
+        .external_plugin_packages
+        .insert("org.example.bounded-windows".into(), descriptor);
+    shell
+        .set_plugin_enabled("org.example.bounded-windows", true)
+        .unwrap();
+    let surfaces = shell.plugin_panels();
+    assert_eq!(surfaces.len(), 2);
+    assert_eq!((surfaces[0].1.width, surfaces[0].1.height), (360, 220));
+    assert_eq!((surfaces[1].1.width, surfaces[1].1.height), (420, 240));
+}
+
+#[test]
 fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
     let root = tempfile::tempdir().unwrap();
     let id = "org.example.two-windows";
