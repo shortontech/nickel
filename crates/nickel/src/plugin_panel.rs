@@ -4140,7 +4140,12 @@ impl PluginPanelApplication {
             include_str!("../../../assets/plugins/run/main.js"),
         )?;
         let data = serde_json::json!({ "status": status }).to_string();
-        Self::new_with_manifest(source.as_ref(), run_manifest(), Some(data))
+        let mut application = Self::new_with_manifest(source.as_ref(), run_manifest(), Some(data))?;
+        application.stylesheet = bundled_stylesheet(
+            run_manifest(),
+            include_str!("../../../assets/plugins/run/ui.css"),
+        )?;
+        Ok(application)
     }
 
     #[cfg(test)]
@@ -5875,7 +5880,6 @@ impl nickel_ui::Application for PluginPanelApplication {
             &self.node,
             PanelNode::Viewport { .. } | PanelNode::Surface { .. }
         ) || self.manifest.id == taskbar_manifest().id
-            || self.manifest.id == run_manifest().id
             || self.manifest.id == window_preview_manifest().id
             || self.manifest.id == desktop_manifest().id
         {
@@ -7347,6 +7351,13 @@ mod tests {
     #[test]
     fn run_plugin_submits_bounded_command_and_shows_host_error() {
         let mut panel = PluginPanelApplication::run_with_status(None).unwrap();
+        assert!(matches!(
+            &panel.node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
         panel.update(PluginMessage::Text(0, "  nickel-test  ".into()));
         let submit = panel.node.button_action("run-submit").unwrap();
         panel.update(PluginMessage::Click(submit));

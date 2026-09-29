@@ -5,6 +5,7 @@
   "author": "Nickel",
   "version": "0.1.0",
   "entry": "main.js",
+  "stylesheet": "ui.css",
   "surfaces": [
     {"id":"main","kind":"dialog","width":620,"height":180}
   ],
