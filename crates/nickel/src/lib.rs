@@ -3169,7 +3169,7 @@ pub fn run() -> Result<(), String> {
             );
             if captured {
                 #[cfg(target_os = "windows")]
-                shell.position_screenshot_plugin_on_active_output();
+                shell.position_screenshot_on_active_output();
                 sync_visibility(&mut shell, &state);
                 focus_visible_overlay(&mut shell, &state);
                 render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;

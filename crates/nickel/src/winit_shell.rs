@@ -965,7 +965,7 @@ impl WinitShell {
         self.surfaces.retain(|surface| match surface.role {
             SurfaceRole::Launcher => launcher_available,
             SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
-            SurfaceRole::Screenshot => !screenshot_plugin_active && cfg!(test),
+            SurfaceRole::Screenshot => !screenshot_plugin_active,
             SurfaceRole::WindowContextMenu => self.taskbar_panel_enabled,
             SurfaceRole::Desktop | SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
                 fixed_plugin_surface_key(surface.role)
@@ -1128,7 +1128,7 @@ impl WinitShell {
             if (role == SurfaceRole::Launcher && launcher_available
                 || role == SurfaceRole::WindowContextMenu && self.taskbar_panel_enabled
                 || role == SurfaceRole::OnScreenKeyboard && !keyboard_plugin_active
-                || role == SurfaceRole::Screenshot && !screenshot_plugin_active && cfg!(test)
+                || role == SurfaceRole::Screenshot && !screenshot_plugin_active
                 || fixed_plugin_surface_key(role)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
                 && !self.surfaces.iter().any(|surface| surface.role == role)
@@ -1571,18 +1571,21 @@ impl WinitShell {
     }
 
     #[cfg(target_os = "windows")]
-    pub fn position_screenshot_plugin_on_active_output(&mut self) {
+    pub fn position_screenshot_on_active_output(&mut self) {
         let Some(index) = self.active_output_index() else {
             return;
         };
         let Some((geometry, _)) = self.displays.get(index) else {
             return;
         };
-        let Some(surface) = self.surfaces.iter().find(|surface| {
-            surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
+        let Some(surface) = self.surfaces.iter_mut().find(|surface| {
+            surface.role == SurfaceRole::Screenshot
+                || surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
         }) else {
             return;
         };
+        surface.display_index = index;
+        surface.output_name = self.displays[index].1.clone();
         surface
             .window
             .set_outer_position(LogicalPosition::new(geometry.x, geometry.y));
