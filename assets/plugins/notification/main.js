@@ -27,6 +27,8 @@ function App() {
                 current.actions.map(action => h(Button, { key: action.key, id: "notification-action-" + action.key, onClick: () => nickel.request({ type: "notification-invoke", id: current.id, key: action.key }) }, action.label)),
                 h(Button, { id: "notification-dismiss", onClick: () => nickel.request({ type: "notification-dismiss", id: current.id }) }, "Dismiss")));
     }
-    return h(Window, { id: "main", placement: "fixed", anchor: "top-right", width: 420, height: 180, className: "notification-window" },
+    return h(Window, { id: "main", placement: "fixed", anchor: "top-right", width: 420, height: 180, className: "notification-window", onEscape: data.historyVisible
+            ? () => nickel.request({ type: "notification-close-history" })
+            : current ? () => nickel.request({ type: "notification-dismiss", id: current.id }) : undefined },
         h("div", { className: "notification-content" }, content));
 }

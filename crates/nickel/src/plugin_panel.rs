@@ -387,7 +387,6 @@ pub struct PluginPanelApplication {
     manifest: PluginManifest,
     expected_surface_id: Option<String>,
     projection_data: Option<String>,
-    notification_shortcuts: Option<(Option<u32>, bool)>,
     overlay_open: bool,
     images: PluginImages,
     stylesheet: StyleSheet,
@@ -1617,18 +1616,13 @@ impl PluginPanelApplication {
     pub fn notification_with_projection(
         projection: &NotificationPluginProjection,
     ) -> Result<Self, String> {
-        let mut application = Self::bundled_application(
+        Self::bundled_application(
             notification_manifest(),
             "main.js",
             include_str!("../../../assets/plugins/notification/main.js"),
             Some(include_str!("../../../assets/plugins/notification/ui.css")),
             projection.to_json(),
-        )?;
-        application.notification_shortcuts = Some((
-            projection.notification.as_ref().map(|item| item.id),
-            projection.history_visible,
-        ));
-        Ok(application)
+        )
     }
 
     #[cfg(test)]
@@ -1636,13 +1630,7 @@ impl PluginPanelApplication {
         source: &str,
         projection: &NotificationPluginProjection,
     ) -> Result<Self, String> {
-        let mut application =
-            Self::new_with_manifest(source, notification_manifest(), Some(projection.to_json()))?;
-        application.notification_shortcuts = Some((
-            projection.notification.as_ref().map(|item| item.id),
-            projection.history_visible,
-        ));
-        Ok(application)
+        Self::new_with_manifest(source, notification_manifest(), Some(projection.to_json()))
     }
 
     pub fn volume_osd_with_projection(
@@ -1868,7 +1856,6 @@ impl PluginPanelApplication {
             manifest: manifest.clone(),
             expected_surface_id: expected_surface_id.map(str::to_owned),
             projection_data: data,
-            notification_shortcuts: None,
             overlay_open: false,
             images: PluginImages::new(),
             stylesheet: StyleSheet::default(),
@@ -1984,12 +1971,7 @@ impl PluginPanelApplication {
             return Err("this plugin is not notifications".into());
         }
         let data = projection.to_json();
-        let changed = self.sync_serialized_data(data)?;
-        self.notification_shortcuts = Some((
-            projection.notification.as_ref().map(|item| item.id),
-            projection.history_visible,
-        ));
-        Ok(changed)
+        self.sync_serialized_data(data)
     }
 
     pub fn sync_volume_osd_projection(
@@ -2071,18 +2053,6 @@ impl nickel_ui::Application for PluginPanelApplication {
     type Message = PluginMessage;
 
     fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
-        if shortcut == Shortcut::Escape
-            && let Some((id, history_visible)) = self.notification_shortcuts
-        {
-            if history_visible {
-                self.effects.push(PluginEffect::CloseNotificationHistory);
-                return nickel_ui::ShortcutOutcome::handled(true);
-            }
-            if let Some(id) = id {
-                self.effects.push(PluginEffect::DismissNotification { id });
-                return nickel_ui::ShortcutOutcome::handled(true);
-            }
-        }
         if self.overlay_open && shortcut == Shortcut::Escape {
             return nickel_ui::ShortcutOutcome::from_changed(false);
         }

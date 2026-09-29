@@ -1235,4 +1235,9 @@ fn bundled_notification_invokes_current_actions_and_closes_history() {
         host.application_mut().take_effects(),
         vec![PluginEffect::CloseNotificationHistory]
     );
+    assert!(host.shortcut(Shortcut::Escape));
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::CloseNotificationHistory]
+    );
 }

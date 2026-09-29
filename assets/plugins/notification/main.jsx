@@ -33,7 +33,10 @@ function App() {
             </Row>
         </Column>;
     }
-    return <Window id="main" placement="fixed" anchor="top-right" width={420} height={180} className="notification-window">
+    return <Window id="main" placement="fixed" anchor="top-right" width={420} height={180} className="notification-window"
+        onEscape={data.historyVisible
+            ? () => nickel.request({type: "notification-close-history"})
+            : current ? () => nickel.request({type: "notification-dismiss", id: current.id}) : undefined}>
         <div className="notification-content">{content}</div>
     </Window>;
 }
