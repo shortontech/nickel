@@ -5,6 +5,7 @@
   "author": "Nickel",
   "version": "0.1.0",
   "entry": "main.js",
+  "stylesheet": "ui.css",
   "surfaces": [{"id":"main","kind":"overlay","width":420,"height":600,"anchor":"bottom-right","offset_x":-18,"offset_y":-72,"passive":true}],
   "capabilities": [
     "network-read", "network-control", "bluetooth-read", "bluetooth-control",

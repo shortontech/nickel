@@ -1701,11 +1701,16 @@ impl PluginPanelApplication {
             "main.js",
             include_str!("../../../assets/plugins/control-center/main.js"),
         )?;
-        Self::new_with_manifest(
+        let mut application = Self::new_with_manifest(
             source.as_ref(),
             control_center_manifest(),
             Some(data.to_string()),
-        )
+        )?;
+        application.stylesheet = bundled_stylesheet(
+            control_center_manifest(),
+            include_str!("../../../assets/plugins/control-center/ui.css"),
+        )?;
+        Ok(application)
     }
 
     #[cfg(test)]
@@ -3960,6 +3965,47 @@ mod tests {
         });
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/nickel-ui-snapshots/volume-osd-shared.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
+    }
+
+    #[test]
+    fn bundled_control_center_uses_shared_window_and_keeps_controls() {
+        let package = PluginPackage::load(format!(
+            "{}/../../assets/plugins/control-center",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let data = validation_surface_projection(&package, control_center_surface()).unwrap();
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::control_center_with_data(&data).unwrap(),
+            420,
+            600,
+        );
+        assert!(matches!(
+            host.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
+        for name in ["Mute", "Show desktop", "Lock", "Restart Nickel"] {
+            assert!(
+                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: name.into(),
+                })
+                .is_ok()
+            );
+        }
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(420, 600, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(420, 600, |x, y| {
+            let pixel = renderer.pixels()[(y * 420 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/control-center-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         image.save(output).unwrap();
     }

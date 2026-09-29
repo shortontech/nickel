@@ -1,0 +1,45 @@
+window.control-center {
+    background: #222730f1;
+    border: 1px solid #657188;
+    border-radius: 16px;
+    padding: 12px;
+}
+
+column.control-content, column.control-sections {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 8px;
+}
+
+row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+text {
+    color: #f3f5f8;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+text.control-title {
+    font-size: 18px;
+    line-height: 26px;
+}
+
+text.control-section-title {
+    font-size: 15px;
+    line-height: 22px;
+}
+
+button {
+    min-height: 34px;
+    padding: 6px 10px;
+    background: #353c4b;
+    border: 1px solid #596274;
+    border-radius: 8px;
+    color: #f3f5f8;
+    font-size: 14px;
+}
