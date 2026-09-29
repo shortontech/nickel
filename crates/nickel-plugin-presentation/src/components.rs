@@ -284,12 +284,6 @@ pub enum PanelNode {
         width: Length,
         height: Length,
     },
-    Viewport {
-        children: Vec<Self>,
-        background: u32,
-        padding: u32,
-        class_name: Option<String>,
-    },
     Panel {
         children: Vec<Self>,
         background: u32,
@@ -514,7 +508,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -526,7 +519,6 @@ impl PanelNode {
                 Self::Box { class_name, .. }
                 | Self::Div { class_name, .. }
                 | Self::Surface { class_name, .. }
-                | Self::Viewport { class_name, .. }
                 | Self::Panel { class_name, .. }
                 | Self::Row { class_name, .. }
                 | Self::Column { class_name, .. }
@@ -626,9 +618,7 @@ impl PanelNode {
                     + accessibility_state.as_ref().map_or(0, capacity)
                     + children.iter().map(Self::contribution_bytes).sum::<u64>()
             }
-            Self::Row { children, .. }
-            | Self::Column { children, .. }
-            | Self::Viewport { children, .. } => {
+            Self::Row { children, .. } | Self::Column { children, .. } => {
                 let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
                 spare as u64 + children.iter().map(Self::contribution_bytes).sum::<u64>()
             }
@@ -646,7 +636,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -667,7 +656,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -688,7 +676,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -709,7 +696,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -756,7 +742,6 @@ impl PanelNode {
                     | "div"
                     | "surface"
                     | "window"
-                    | "viewport"
                     | "panel"
                     | "row"
                     | "column"
@@ -1208,27 +1193,13 @@ impl PanelNode {
                     height: dimension("height")?,
                 })
             }
-            "viewport" | "panel" | "row" | "column" | "scroll-view" => {
+            "panel" | "row" | "column" | "scroll-view" => {
                 let children = children
                     .iter()
                     .filter(|value| !value.is_null())
                     .map(Self::parse)
                     .collect::<Result<Vec<_>, _>>()?;
-                if kind == "viewport" {
-                    let padding = value.get("padding").and_then(Value::as_u64).unwrap_or(0);
-                    if padding > 256 {
-                        return Err("viewport padding must be 0 to 256".into());
-                    }
-                    Ok(Self::Viewport {
-                        children,
-                        class_name,
-                        background: value
-                            .get("background")
-                            .and_then(Value::as_u64)
-                            .map_or(0, |color| color as u32),
-                        padding: padding as u32,
-                    })
-                } else if kind == "panel" {
+                if kind == "panel" {
                     let background = value
                         .get("background")
                         .and_then(Value::as_u64)
@@ -2157,35 +2128,6 @@ impl PanelNode {
                     &style,
                 )
             }
-            Self::Viewport {
-                children,
-                background,
-                padding,
-                class_name,
-            } => {
-                let mut column = Column::new().fill_width().fill_height();
-                for child in children {
-                    column = column
-                        .child(child.view_as_scoped_with_slots::<Message>(
-                            images, stylesheet, scope, slots,
-                        ));
-                }
-                let style = stylesheet.resolve("viewport", None, class_name.as_deref());
-                let container = Container::new()
-                    .fill_width()
-                    .fill_height()
-                    .padding(
-                        style
-                            .padding
-                            .unwrap_or_else(|| Insets::all(*padding as f32)),
-                    )
-                    .background(*background)
-                    .child(column);
-                with_margin(
-                    AnyView::new(apply_container_style(container, &style)),
-                    &style,
-                )
-            }
             Self::Panel {
                 children,
                 background,
@@ -2790,7 +2732,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -2827,7 +2768,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -2844,7 +2784,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -2900,7 +2839,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -2917,7 +2855,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -2934,7 +2871,6 @@ impl PanelNode {
             Self::Box { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
-            | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -3141,7 +3077,6 @@ fn parse_panel_for_manifest(
             }
             PanelNode::Box { children, .. }
             | PanelNode::Div { children, .. }
-            | PanelNode::Viewport { children, .. }
             | PanelNode::Panel { children, .. }
             | PanelNode::Row { children, .. }
             | PanelNode::Column { children, .. }

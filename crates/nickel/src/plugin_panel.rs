@@ -3438,10 +3438,7 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        if matches!(
-            &self.node,
-            PanelNode::Viewport { .. } | PanelNode::Surface { .. }
-        ) {
+        if matches!(&self.node, PanelNode::Surface { .. }) {
             AnyView::new(self.node.view(&self.images, &self.stylesheet))
         } else {
             AnyView::new(
@@ -4778,14 +4775,14 @@ mod tests {
     }
 
     #[test]
-    fn installed_viewport_tracks_window_resize_and_keeps_content_inset() {
+    fn shared_window_root_tracks_resize_and_keeps_css_content_inset() {
         let mut external_manifest = manifest().clone();
-        external_manifest.id = "org.example.viewport".into();
+        external_manifest.id = "org.example.window-resize".into();
         let package = PluginPackage {
             manifest: external_manifest,
             images: Default::default(),
-            stylesheet: String::new(),
-            source: "function App() { return h(Viewport, {background: 0xff112233, padding: 20}, h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open')); }".into(),
+            stylesheet: "window { background: #112233; } div.content { width: 100%; height: 100%; padding: 20px; }".into(),
+            source: "function App() { return h(Window, {id: 'main', placement: 'fixed', width: '100%', height: '100%'}, h('div', {className: 'content'}, h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open'))); }".into(),
         };
         let app = PluginPanelApplication::from_package(&package).unwrap();
         let mut host = nickel_ui::UiHost::new(app, 400, 200);
