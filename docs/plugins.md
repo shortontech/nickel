@@ -218,7 +218,8 @@ Color declarations may use Nickel palette tokens such as
 `var(--nickel-panel)`, `var(--nickel-surface)`, `var(--nickel-text)`,
 `var(--nickel-muted)`, and `var(--nickel-accent)`. The complete token set is
 `background`, `panel`, `surface`, `surface-hover`, `text`, `muted`, `accent`,
-`accent-soft`, and `complement`, each prefixed with `--nickel-`. Nickel resolves
+`accent-soft`, `complement`, `raised`, `control`, `border`, `soft-text`,
+`selected`, and `selected-border`, each prefixed with `--nickel-`. Nickel resolves
 these when compiling the stylesheet. A host can refresh the resolved colors
 when its appearance changes; the bundled launcher is wired to do so. Other
 CSS custom properties are not supported yet.

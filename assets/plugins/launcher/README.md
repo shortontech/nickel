@@ -22,10 +22,11 @@ projects, account, Settings, and a component logout dialog. The root
 `Window` binds to the manifest's `main` surface, while `ui.css` styles the
 window, flex layout, and a responsive dashboard grid. Search results remain
 full-width rows. The title and search field keep their height as the scroll
-view takes the remaining space, including on smaller outputs. Actions
-go through typed `nickel.request`
-calls. The host checks declared capabilities and current launcher state,
-including app and project IDs, before acting. Search ranking,
+view takes the remaining space, including on smaller outputs. The stylesheet
+uses Nickel palette color tokens, so light and dark appearances recolor the
+launcher without restarting its JavaScript runtime. Actions go through typed
+`nickel.request` calls. The host checks declared capabilities and current
+launcher state, including app and project IDs, before acting. Search ranking,
 favorite state, application execution, and session authority remain Rust
 services. View switching and pin buttons request those Rust state changes.
 Enter submits the leading host result while search is active. Escape clears a

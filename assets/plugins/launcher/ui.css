@@ -1,6 +1,6 @@
 window.launcher-window {
-    background: #2b303c;
-    border: 1px solid #596274;
+    background: var(--nickel-raised);
+    border: 1px solid var(--nickel-border);
     border-radius: 12px;
 }
 
@@ -15,7 +15,7 @@ div.launcher-content {
 
 text {
     height: 28px;
-    color: #f3f5f8;
+    color: var(--nickel-text);
     font-size: 14px;
 }
 
@@ -27,12 +27,12 @@ text.launcher-title {
 
 text.launcher-section {
     height: 24px;
-    color: #b9c4d7;
+    color: var(--nickel-soft-text);
     font-size: 14px;
 }
 
 text.launcher-status {
-    color: #ffd391;
+    color: var(--nickel-complement);
     font-size: 13px;
 }
 
@@ -40,10 +40,10 @@ text-field {
     height: 44px;
     flex-shrink: 0;
     padding: 8px 12px;
-    background: #353c4b;
-    border: 1px solid #596274;
+    background: var(--nickel-control);
+    border: 1px solid var(--nickel-border);
     border-radius: 8px;
-    color: #f3f5f8;
+    color: var(--nickel-text);
     font-size: 15px;
 }
 
@@ -71,8 +71,8 @@ div.launcher-app-card {
     gap: 4px;
     min-height: 130px;
     padding: 8px;
-    background: #303746;
-    border: 1px solid #414a5b;
+    background: var(--nickel-control);
+    border: 1px solid var(--nickel-border);
     border-radius: 10px;
 }
 
@@ -84,8 +84,8 @@ text.launcher-app-name {
 button.launcher-icon-button {
     width: 64px;
     height: 64px;
-    background: #414d62;
-    border: 1px solid #65738c;
+    background: var(--nickel-selected);
+    border: 1px solid var(--nickel-selected-border);
     border-radius: 12px;
     font-size: 22px;
 }
@@ -95,7 +95,7 @@ button.launcher-card-pin {
     height: 26px;
     background: transparent;
     border: 1px solid transparent;
-    color: #b9c4d7;
+    color: var(--nickel-soft-text);
     font-size: 12px;
 }
 
@@ -115,34 +115,34 @@ row {
 button {
     height: 42px;
     padding: 6px 10px;
-    background: #353c4b;
-    border: 1px solid #596274;
+    background: var(--nickel-control);
+    border: 1px solid var(--nickel-border);
     border-radius: 8px;
-    color: #f3f5f8;
+    color: var(--nickel-text);
     font-size: 14px;
 }
 
 button.launcher-app-button {
     flex-grow: 1;
     min-width: 180px;
-    background: #313847;
+    background: var(--nickel-raised);
     border: 1px solid transparent;
 }
 
 button.launcher-pin-button {
     width: 72px;
     flex-shrink: 0;
-    background: #313847;
+    background: var(--nickel-raised);
     border: 1px solid transparent;
 }
 
 button.launcher-tab {
-    background: #303746;
+    background: var(--nickel-raised);
 }
 
 button.launcher-tab.selected {
-    background: #485673;
-    border: 1px solid #738db9;
+    background: var(--nickel-selected);
+    border: 1px solid var(--nickel-selected-border);
 }
 
 button.launcher-footer-button {

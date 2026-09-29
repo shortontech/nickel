@@ -1,4 +1,4 @@
-//! Bounded CSS subset for plugin presentation. Rules are compiled once at activation.
+//! Bounded CSS subset for plugin presentation. Palette tokens may recompile on theme changes.
 
 use std::borrow::Cow;
 
@@ -590,6 +590,25 @@ impl<'i> RuleBodyItemParser<'i, Declaration, String> for CssDeclarationParser {
 
 fn expand_palette_colors(source: &str, palette: ThemePalette) -> String {
     let mut expanded = source.to_owned();
+    let blend = |base: u32, foreground: u32, foreground_percent: u32| -> u32 {
+        let channel = |shift: u32| {
+            let base = (base >> shift) & 0xff;
+            let foreground = (foreground >> shift) & 0xff;
+            (base * (100 - foreground_percent) + foreground * foreground_percent + 50) / 100
+        };
+        (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    };
+    let light = ((palette.text >> 16) & 0xff) < 0x80;
+    let raised = if light {
+        blend(palette.surface, 0x00ff_ffff, 35)
+    } else {
+        blend(palette.panel, palette.text, 10)
+    };
+    let control = if light {
+        blend(palette.surface, 0x00ff_ffff, 15)
+    } else {
+        blend(palette.panel, palette.text, 15)
+    };
     for (name, color) in [
         ("background", palette.background),
         ("panel", palette.panel),
@@ -600,6 +619,12 @@ fn expand_palette_colors(source: &str, palette: ThemePalette) -> String {
         ("accent", palette.accent),
         ("accent-soft", palette.accent_soft),
         ("complement", palette.complement),
+        ("raised", raised),
+        ("control", control),
+        ("border", blend(palette.panel, palette.text, 30)),
+        ("soft-text", blend(palette.muted, palette.text, 40)),
+        ("selected", blend(control, palette.accent, 25)),
+        ("selected-border", blend(palette.accent, palette.text, 35)),
     ] {
         expanded = expanded.replace(
             &format!("var(--nickel-{name})"),

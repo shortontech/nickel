@@ -3265,6 +3265,53 @@ mod tests {
     }
 
     #[test]
+    fn bundled_launcher_css_tracks_light_and_dark_palettes() {
+        let launcher = Launcher::default();
+        let mut app = PluginPanelApplication::bundled_with_data(
+            launcher_manifest(),
+            "main.js",
+            LauncherPluginProjection::from_launcher(&launcher).to_json(),
+        )
+        .unwrap();
+        let dark = nickel_core::theme::ThemePalette::from_appearance(
+            nickel_core::theme::Appearance::default(),
+        );
+        let light =
+            nickel_core::theme::ThemePalette::from_appearance(nickel_core::theme::Appearance {
+                mode: nickel_core::theme::ThemeMode::Light,
+                ..nickel_core::theme::Appearance::default()
+            });
+        let background = |app: &PluginPanelApplication| {
+            app.stylesheet
+                .resolve("window", None, Some("launcher-window"))
+                .background
+        };
+        let dark_background = background(&app).expect("dark window background");
+        assert_eq!(
+            app.stylesheet.resolve("text", None, None).color,
+            Some(0xff00_0000 | dark.text)
+        );
+        assert!(app.sync_theme_palette(light).unwrap());
+        let light_background = background(&app).expect("light window background");
+        assert_ne!(dark_background, light_background);
+        assert_eq!(
+            app.stylesheet.resolve("text", None, None).color,
+            Some(0xff00_0000 | light.text)
+        );
+        let host = nickel_ui::UiHost::new(app, 920, 680);
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(920, 680, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(920, 680, |x, y| {
+            let pixel = renderer.pixels()[(y * 920 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/launcher-light.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
+    }
+
+    #[test]
     fn bundled_launcher_grid_reflows_with_a_narrow_host() {
         let host = nickel_ui::UiHost::new(
             PluginPanelApplication::bundled_with_data(
