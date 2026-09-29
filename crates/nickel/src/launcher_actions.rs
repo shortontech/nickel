@@ -1,6 +1,6 @@
-//! Launcher commands shared by the JSX shell and legacy view fixtures.
+//! Launcher commands shared by the JSX shell and launcher model.
 
-use crate::launcher::{Launcher, LauncherView, SettingsDestination};
+use crate::launcher::{Launcher, LauncherView};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LauncherAction {
@@ -11,13 +11,8 @@ pub enum LauncherAction {
     LaunchApplication(String),
     OpenProject(String),
     SeeAllProjects,
-    OpenSettings(SettingsDestination),
-    OpenAccount,
     RequestLogout,
-    ShowNarrowPrimary,
     SetQuery(String),
-    SearchScroll,
-    DashboardScroll,
     Dismiss,
 }
 
@@ -29,8 +24,6 @@ pub enum LauncherShellEffect {
     LaunchApplication(String),
     OpenProject(String),
     SeeAllProjects,
-    OpenSettings(SettingsDestination),
-    OpenAccount,
     RequestLogout,
     Dismiss,
 }
@@ -53,18 +46,11 @@ pub fn reduce_launcher_action(
         LauncherAction::LaunchApplication(id) => Some(LauncherShellEffect::LaunchApplication(id)),
         LauncherAction::OpenProject(id) => Some(LauncherShellEffect::OpenProject(id)),
         LauncherAction::SeeAllProjects => Some(LauncherShellEffect::SeeAllProjects),
-        LauncherAction::OpenSettings(destination) => {
-            Some(LauncherShellEffect::OpenSettings(destination))
-        }
-        LauncherAction::OpenAccount => Some(LauncherShellEffect::OpenAccount),
         LauncherAction::RequestLogout => Some(LauncherShellEffect::RequestLogout),
         LauncherAction::SetQuery(query) => {
             launcher.set_query(&query);
             None
         }
-        LauncherAction::ShowNarrowPrimary
-        | LauncherAction::SearchScroll
-        | LauncherAction::DashboardScroll => None,
         LauncherAction::Dismiss => Some(LauncherShellEffect::Dismiss),
     }
 }

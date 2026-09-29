@@ -1,4 +1,4 @@
-//! Bounded icon cache shared by the JSX launcher and legacy visual fixtures.
+//! Bounded icon cache for the JSX launcher.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -184,48 +184,6 @@ impl LauncherIconCache {
             },
         );
         (id, image)
-    }
-
-    #[cfg(any(test, feature = "workbench-fixtures"))]
-    pub(crate) fn structural(
-        &mut self,
-        name: &str,
-        bytes: &[u8],
-        color: u32,
-    ) -> Option<(u16, Arc<RgbaImage>)> {
-        let key = format!("structural:{name}:{color:06x}");
-        let mut state = self.shared.state.lock().expect("launcher icon cache lock");
-        if let Some(cached) = state.icons.get(&key) {
-            return cached
-                .image
-                .as_ref()
-                .map(|image| (cached.id, Arc::clone(image)));
-        }
-        let image = icons::load_svg_bytes(bytes, 48).map(|mut image| {
-            let red = ((color >> 16) & 0xff) as u8;
-            let green = ((color >> 8) & 0xff) as u8;
-            let blue = (color & 0xff) as u8;
-            for pixel in image.pixels_mut() {
-                if pixel[3] != 0 {
-                    pixel[0] = red;
-                    pixel[1] = green;
-                    pixel[2] = blue;
-                }
-            }
-            Arc::new(image)
-        });
-        let id = state.next_id;
-        state.next_id = state.next_id.checked_add(1).unwrap_or(0x4000);
-        insert_launcher_icon(
-            &mut state,
-            key,
-            CachedIcon {
-                id,
-                image: image.clone(),
-                pending: false,
-            },
-        );
-        image.map(|image| (id, image))
     }
 }
 

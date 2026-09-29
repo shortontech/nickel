@@ -11411,20 +11411,6 @@ impl LiveShell {
                 self.codex_project_menu_visible =
                     self.plugin_surface_matches(&crate::plugin_panel::codex_projects_surface_key());
             }
-            LauncherShellEffect::OpenSettings(destination) => {
-                let screen = match destination {
-                    crate::launcher::SettingsDestination::Nickel => "appearance",
-                    crate::launcher::SettingsDestination::KeyboardShortcuts => "keyboard-shortcuts",
-                    crate::launcher::SettingsDestination::About => "about",
-                };
-                self.launch_settings(Some(screen));
-            }
-            LauncherShellEffect::OpenAccount => {
-                self.set_control_visible(true);
-                if self.control_visible {
-                    self.set_launcher_visible(false);
-                }
-            }
             LauncherShellEffect::RequestLogout => {
                 self.set_control_visible(true);
                 if self.control_visible {

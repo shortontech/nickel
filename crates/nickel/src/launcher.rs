@@ -132,24 +132,6 @@ pub struct DashboardAccount {
     pub supporting_text: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SettingsDestination {
-    Nickel,
-    KeyboardShortcuts,
-    About,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DashboardAction {
-    LaunchFavorite(String),
-    OpenProject(String),
-    SeeAllProjects,
-    OpenSettings(SettingsDestination),
-    OpenAccount,
-    RequestLogout,
-    FocusSearch,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DashboardSection<T> {
     Loading,
