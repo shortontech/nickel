@@ -2120,16 +2120,6 @@ impl nickel_ui::Application for PluginPanelApplication {
             self.update(PluginMessage::Click(action));
             return nickel_ui::ShortcutOutcome::handled(true);
         }
-        if self.manifest.id == on_screen_keyboard_manifest().id && shortcut == Shortcut::Escape {
-            if let Some(generation) = self.projection_data.as_deref().and_then(|data| {
-                serde_json::from_str::<Value>(data)
-                    .ok()
-                    .and_then(|data| data.get("generation").and_then(Value::as_u64))
-            }) {
-                self.effects.push(PluginEffect::KeyboardHide { generation });
-                return nickel_ui::ShortcutOutcome::handled(true);
-            }
-        }
         let Some(shortcuts) = &self.launcher_shortcuts else {
             return nickel_ui::ShortcutOutcome::from_changed(false);
         };
@@ -5723,6 +5713,14 @@ mod tests {
             }]
         );
         assert!(plugin.last_error().is_none());
+        assert_eq!(
+            plugin.shortcut_outcome(Shortcut::Escape).disposition,
+            nickel_ui::EventDisposition::Handled
+        );
+        assert_eq!(
+            plugin.take_effects(),
+            vec![PluginEffect::KeyboardHide { generation: 7 }]
+        );
         let disabled = serde_json::json!({
             "generation": 8,
             "height": 368,
@@ -5739,6 +5737,11 @@ mod tests {
         let message = plugin.button_message("osk-char-113").unwrap();
         plugin.update(message);
         assert!(plugin.take_effects().is_empty());
+        plugin.shortcut_outcome(Shortcut::Escape);
+        assert_eq!(
+            plugin.take_effects(),
+            vec![PluginEffect::KeyboardHide { generation: 8 }]
+        );
     }
 
     #[test]

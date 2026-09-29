@@ -7,7 +7,8 @@ function App() {
     const request = (type, fields) => nickel.request(Object.assign({type, generation}, fields || {}));
     const control = (id, label, type, fields) =>
         <Button id={id} onClick={() => request(type, fields)}>{label}</Button>;
-    return <FixedWindow width="100%" height="100%" className="keyboard-window">
+    return <FixedWindow width="100%" height="100%" className="keyboard-window"
+        onEscape={() => request("keyboard-hide")}>
         <Column className="keyboard-content">
             <Row className="keyboard-toolbar">
                 <Text>{data.recipientAvailable ? "English (US)" : "Select a text field"}</Text>

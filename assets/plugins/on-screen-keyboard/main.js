@@ -6,7 +6,7 @@ function App() {
     const generation = data.generation || 0;
     const request = (type, fields) => nickel.request(Object.assign({ type, generation }, fields || {}));
     const control = (id, label, type, fields) => h(Button, { id: id, onClick: () => request(type, fields) }, label);
-    return h(FixedWindow, { width: "100%", height: "100%", className: "keyboard-window" },
+    return h(FixedWindow, { width: "100%", height: "100%", className: "keyboard-window", onEscape: () => request("keyboard-hide") },
         h(Column, { className: "keyboard-content" },
             h(Row, { className: "keyboard-toolbar" },
                 h(Text, null, data.recipientAvailable ? "English (US)" : "Select a text field"),
