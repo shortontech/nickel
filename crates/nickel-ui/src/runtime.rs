@@ -1197,6 +1197,12 @@ pub trait Application: Sized {
         }
     }
 
+    /// Deliver a blur callback from the tree that preceded a rebuild. Applications
+    /// with render-scoped callback tables can resolve it against that generation.
+    fn update_removed_focus(&mut self, message: Self::Message) {
+        self.update(message);
+    }
+
     /// Whether current application state contains an authentication or other
     /// protected surface. Compositor adapters must reject remote observation
     /// and control of such a surface, regardless of an agent's lease scope.
@@ -3868,6 +3874,14 @@ impl<A: Application> UiHost<A> {
     }
 
     fn rebuild_timed(&mut self) -> (u64, u64, HostEventOutcome) {
+        let focused_before = self
+            .state
+            .window_focused()
+            .then(|| self.state.focused().cloned())
+            .flatten();
+        let removed_focus_message = focused_before
+            .as_ref()
+            .and_then(|id| self.tree.blur_message(id));
         let pending_long_press_was_bound = self
             .pending_long_press
             .as_ref()
@@ -3936,7 +3950,23 @@ impl<A: Application> UiHost<A> {
         } else {
             self.finalize_pending_long_press_attachment();
         }
-        (paint_list_us, elapsed_us(layout_started), cancellation)
+        let layout_us = elapsed_us(layout_started);
+        if focused_before
+            .as_ref()
+            .is_some_and(|id| self.tree.resolved_layout().find(id).is_none())
+            && let Some(message) = removed_focus_message
+        {
+            self.application.update_removed_focus(message);
+            let (next_paint_us, next_layout_us, next_outcome) = self.rebuild_timed();
+            let mut outcome = cancellation;
+            outcome.merge(next_outcome);
+            return (
+                paint_list_us.saturating_add(next_paint_us),
+                layout_us.saturating_add(next_layout_us),
+                outcome,
+            );
+        }
+        (paint_list_us, layout_us, cancellation)
     }
 
     pub fn shutdown(&mut self) {

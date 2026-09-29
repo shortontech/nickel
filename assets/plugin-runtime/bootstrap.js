@@ -54,6 +54,7 @@ let __componentChildren = new Map();
 let __currentComponent = null;
 let __hookIndex = 0;
 let __handlers = [];
+let __previousHandlers = [];
 let __effects = [];
 let __listKeyErrors = [];
 let __pendingRender = null;
@@ -192,8 +193,9 @@ function h(kind, props, ...children) {
 
 function __nickelRollbackRender() {
     if (__pendingRender !== null) {
-        const {handlers, hooks, values, effectsLength} = __pendingRender;
+        const {handlers, previousHandlers, hooks, values, effectsLength} = __pendingRender;
         __handlers = handlers;
+        __previousHandlers = previousHandlers;
         __nickelRestoreHooks(hooks, values, effectsLength);
         __pendingRender = null;
     }
@@ -215,8 +217,9 @@ function __nickelRestoreHooks(hooks, values, effectsLength) {
 
 function __nickelRollbackEvent() {
     if (__pendingEvent === null) return;
-    const {handlers, hooks, values, effectsLength, effects} = __pendingEvent;
+    const {handlers, previousHandlers, hooks, values, effectsLength, effects} = __pendingEvent;
     __handlers = handlers;
+    __previousHandlers = previousHandlers;
     __nickelRestoreHooks(hooks, values, effectsLength);
     __effects = effects;
     __pendingEvent = null;
@@ -233,12 +236,14 @@ function __nickelAcceptEvent() {
 function __nickelRender(component = App) {
     if (__pendingRender !== null) throw Error('previous render was not finalized');
     const previousHandlers = __handlers;
+    const olderHandlers = __previousHandlers;
     const previousHooks = new Map(Array.from(__componentHooks, ([path, hooks]) => [path, hooks.slice()]));
     const previousValues = Array.from(__componentHooks.values(), hooks => hooks.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
-    __pendingRender = {handlers: previousHandlers, hooks: previousHooks,
+    __pendingRender = {handlers: previousHandlers, previousHandlers: olderHandlers, hooks: previousHooks,
         values: previousValues, effectsLength: __effects.length};
     __handlers = [];
+    __previousHandlers = previousHandlers;
     __listKeyErrors = [];
     __visitedComponents = new Set();
     __componentChildren = new Map();
@@ -261,17 +266,21 @@ function __nickelDispatch(action, value) {
     return __nickelDispatchBatch([[action, value]]);
 }
 
-function __nickelDispatchBatch(events) {
+function __nickelDispatchRemovedFocus(action) {
+    return __nickelDispatchBatch([[action]], true);
+}
+
+function __nickelDispatchBatch(events, previous = false) {
     if (!events.length) return __nickelRender();
     const hooks = new Map(Array.from(__componentHooks, ([path, slots]) => [path, slots.slice()]));
     const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
     const effectsLength = __effects.length;
-    __pendingEvent = {handlers: __handlers, hooks, values,
+    __pendingEvent = {handlers: __handlers, previousHandlers: __previousHandlers, hooks, values,
         effectsLength, effects: __effects.slice()};
     try {
         for (const [action, value] of events) {
-            const handler = __handlers[action];
+            const handler = (previous ? __previousHandlers : __handlers)[action];
             if (handler) handler(value);
         }
         return __nickelRender();

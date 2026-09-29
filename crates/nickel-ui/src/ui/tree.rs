@@ -1957,6 +1957,13 @@ impl<Message: Clone> UiFrame<Message> {
         Ok(outcome)
     }
 
+    pub(crate) fn blur_message(&self, id: &UiId) -> Option<Message> {
+        self.focus_messages
+            .iter()
+            .find(|(candidate, ..)| candidate == id)
+            .and_then(|(_, _, message)| message.clone())
+    }
+
     fn revalidate_target_mode(&self, state: &mut UiStateStore) -> Invalidation {
         let mode = state
             .current_target()

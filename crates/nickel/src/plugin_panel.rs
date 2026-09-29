@@ -348,6 +348,7 @@ pub struct PluginPanelApplication {
     expected_surface_id: Option<String>,
     projection_data: Option<String>,
     overlay_open: bool,
+    dispatch_removed_focus: bool,
     images: PluginImages,
     stylesheet: StyleSheet,
 }
@@ -1532,6 +1533,7 @@ impl PluginPanelApplication {
             expected_surface_id: expected_surface_id.map(str::to_owned),
             projection_data: data,
             overlay_open: false,
+            dispatch_removed_focus: false,
             images: PluginImages::new(),
             stylesheet: StyleSheet::default(),
         })
@@ -1690,6 +1692,12 @@ impl nickel_ui::Application for PluginPanelApplication {
         self.update_messages(vec![message]);
     }
 
+    fn update_removed_focus(&mut self, message: Self::Message) {
+        self.dispatch_removed_focus = true;
+        self.update_messages(vec![message]);
+        self.dispatch_removed_focus = false;
+    }
+
     fn update_messages(&mut self, messages: Vec<Self::Message>) {
         let events = messages
             .into_iter()
@@ -1724,10 +1732,14 @@ impl nickel_ui::Application for PluginPanelApplication {
         if events.is_empty() {
             return;
         }
-        let expression = format!(
-            "__nickelDispatchBatch({})",
-            serde_json::Value::Array(events)
-        );
+        let expression = if self.dispatch_removed_focus {
+            format!("__nickelDispatchRemovedFocus({})", events[0][0])
+        } else {
+            format!(
+                "__nickelDispatchBatch({})",
+                serde_json::Value::Array(events)
+            )
+        };
         let rendered = render_panel(
             &mut self.runtime,
             &self.manifest,
@@ -4487,6 +4499,52 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::ToggleControlCenter]
         );
+    }
+
+    #[test]
+    fn jsx_removing_focused_field_dispatches_its_old_blur_handler_once() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities = vec![PluginCapability::ControlCenterShow];
+        let source = r#"
+            function App() {
+                const [show, setShow] = useState(true);
+                return h(Window, {width: 320, height: 180},
+                    show ? h(TextField, {id: 'field', placeholder: 'Field', value: '',
+                        onChange: () => {},
+                        onBlur: () => nickel.request({type: 'toggle-control-center'})}) : null,
+                    h(Button, {id: 'remove', onClick: () => setShow(false)}, 'Remove'));
+            }
+        "#;
+        let app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 320, 180);
+        let field = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::TextField,
+                name: "Field".into(),
+            })
+            .unwrap();
+        host.handle_event(nickel_ui::UiEvent::AccessibilityFocus(field.id));
+        assert!(host.application_mut().take_effects().is_empty());
+        let remove = host.application().button_message("remove").unwrap();
+        host.application_mut().update(remove);
+        host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ToggleControlCenter]
+        );
+        host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        assert!(host.application_mut().take_effects().is_empty());
     }
 
     #[test]
