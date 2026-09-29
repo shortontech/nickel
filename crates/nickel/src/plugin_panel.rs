@@ -1719,11 +1719,16 @@ impl PluginPanelApplication {
             "main.js",
             include_str!("../../../assets/plugins/codex-projects/main.js"),
         )?;
-        Self::new_with_manifest(
+        let mut application = Self::new_with_manifest(
             source.as_ref(),
             codex_projects_manifest(),
             Some(serde_json::to_string(projection).map_err(|error| error.to_string())?),
-        )
+        )?;
+        application.stylesheet = bundled_stylesheet(
+            codex_projects_manifest(),
+            include_str!("../../../assets/plugins/codex-projects/ui.css"),
+        )?;
+        Ok(application)
     }
 
     pub fn on_screen_keyboard_with_data(data: &Value) -> Result<Self, String> {
@@ -5458,6 +5463,13 @@ mod tests {
         };
         let mut panel =
             PluginPanelApplication::codex_projects_with_projection(&projection).unwrap();
+        assert!(matches!(
+            panel.node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
         let rendered = format!("{:?}", panel.node);
         assert!(rendered.contains("Example project"));
         assert!(!rendered.contains("/private/work"));
@@ -5473,6 +5485,16 @@ mod tests {
             520,
             680,
         );
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(520, 680, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(520, 680, |x, y| {
+            let pixel = renderer.pixels()[(y * 520 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/codex-projects-shared.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
         let open = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,

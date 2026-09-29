@@ -5,6 +5,7 @@
   "author": "Nickel",
   "version": "0.1.0",
   "entry": "main.js",
+  "stylesheet": "ui.css",
   "surfaces": [{"id":"main","kind":"overlay","width":520,"height":680}],
   "capabilities": ["projects-read", "projects-open"]
 }
