@@ -65,7 +65,7 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     fs::write(
         plugin.join("main.js"),
-        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-label'] ? 'On' : 'Off')); }",
+        "function App() { return h(FixedWindow, {width: 360, height: 96}, h(Text, {}, nickel.data.settings['show-label'] ? 'On' : 'Off')); }",
     )
     .map_err(|error| error.to_string())?;
     let reserved = runtime
@@ -114,7 +114,7 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     fs::write(
         windows.join("main.js"),
-        "function App() { return nickel.data.surface.id === 'first' ? h(Panel, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second')) : h(Panel, {}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
+        "function App() { return nickel.data.surface.id === 'first' ? h(Window, {width: 360, height: 220}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second')) : h(Window, {width: 420, height: 240}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
     )
     .map_err(|error| error.to_string())?;
     let dialog = runtime
@@ -1550,7 +1550,13 @@ fn verify_sibling_windows(
         .ok_or("surviving plugin window has invalid location")?;
     let x: i32 = x.parse().map_err(|_| "invalid plugin window x")?;
     let y: i32 = y.parse().map_err(|_| "invalid plugin window y")?;
-    click_at(test_input, environment, x + 180, y + 188)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.acceptance-windows/first",
+        "reopen",
+        (x, y),
+    )?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let windows = checked(test_input, environment, &["windows"])?;
@@ -1597,7 +1603,13 @@ fn verify_sibling_windows(
         .ok_or("reopened plugin window has invalid location")?;
     let x: i32 = x.parse().map_err(|_| "invalid reopened plugin window x")?;
     let y: i32 = y.parse().map_err(|_| "invalid reopened plugin window y")?;
-    click_at(test_input, environment, x + 210, y + 208)?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.acceptance-windows/second",
+        "hide",
+        (x, y),
+    )?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let windows = checked(test_input, environment, &["windows"])?;
