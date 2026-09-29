@@ -2527,14 +2527,10 @@ impl PanelNode {
                 if let Some(color) = style.color {
                     field = field.color(color);
                 }
-                if style == ControlStyle::default() {
-                    AnyView::new(field.height(44.0))
-                } else {
-                    with_margin(
-                        AnyView::new(apply_container_style(Container::new().child(field), &style)),
-                        &style,
-                    )
-                }
+                with_margin(
+                    AnyView::new(apply_container_style(Container::new().child(field), &style)),
+                    &style,
+                )
             }
             Self::Button {
                 id,
