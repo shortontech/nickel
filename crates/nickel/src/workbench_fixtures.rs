@@ -19,8 +19,8 @@ use crate::{
     notification::{DesktopNotification, NotificationAction},
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
     plugin_panel::{
-        NotificationPluginProjection, PluginImages, PluginPanelApplication, TaskbarPluginItem,
-        TaskbarPluginProjection, TaskbarPluginTrayItem,
+        LauncherPluginProjection, NotificationPluginProjection, PluginImages,
+        PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection, TaskbarPluginTrayItem,
     },
     screenshot::ScreenshotApp,
 };
@@ -338,9 +338,9 @@ metadata!(
     SEARCH_METADATA,
     "shell.launcher-search",
     "Launcher search",
-    "Production launcher search surface",
+    "Bundled JSX launcher search surface",
     SEARCH_VARIANTS,
-    &["shell", "launcher", "search"]
+    &["shell", "launcher", "search", "jsx"]
 );
 
 fn palette() -> ThemePalette {
@@ -711,7 +711,7 @@ impl Fixture for ControlCenterFixture {
     }
 }
 
-fn launcher_application(kind: &str) -> LauncherApplication {
+fn launcher_search_application(kind: &str) -> PluginPanelApplication {
     let mut launcher = Launcher::default();
     match kind {
         "search-results" => {
@@ -728,12 +728,12 @@ fn launcher_application(kind: &str) -> LauncherApplication {
         }
         _ => {}
     }
-    LauncherApplication::new(
-        launcher,
-        LauncherViewState::default(),
-        LauncherIconCache::new(),
-        palette(),
+    PluginPanelApplication::bundled_with_data(
+        crate::plugin_panel::launcher_manifest(),
+        "main.js",
+        LauncherPluginProjection::from_launcher(&launcher).to_json(),
     )
+    .expect("bundled JSX launcher search fixture")
 }
 
 impl Fixture for CodexProjectMenuFixture {
@@ -756,15 +756,15 @@ impl Fixture for CodexProjectMenuFixture {
 }
 
 impl Fixture for LauncherSearchFixture {
-    type App = LauncherApplication;
+    type App = PluginPanelApplication;
     fn metadata() -> &'static FixtureMetadata {
         &SEARCH_METADATA
     }
     fn create() -> Self::App {
-        launcher_application("search-results")
+        launcher_search_application("search-results")
     }
     fn create_variant(v: &FixtureVariant) -> Self::App {
-        launcher_application(match v.id {
+        launcher_search_application(match v.id {
             "results" => "search-results",
             "no-results" => "search-none",
             "scroll" => "search-scroll",
@@ -775,7 +775,7 @@ impl Fixture for LauncherSearchFixture {
         (920, 680)
     }
     fn default_activation() -> Option<Selector> {
-        Some(Selector::keyed_item("launcher-applications", "firefox"))
+        Some(Selector::role_name(SemanticRole::Button, "Firefox"))
     }
 }
 
@@ -896,6 +896,35 @@ mod tests {
                 "shell.screenshot",
                 "shell.window-preview",
             ]
+        );
+    }
+
+    #[test]
+    fn launcher_search_fixture_uses_bundled_jsx_results_and_empty_state() {
+        let results = nickel_ui::UiHost::new(LauncherSearchFixture::create(), 920, 680);
+        assert_eq!(
+            nickel_ui::Application::title(results.application()),
+            "Nickel Launcher"
+        );
+        assert!(
+            results
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Firefox".into(),
+                })
+                .is_ok()
+        );
+
+        let empty = nickel_ui::UiHost::new(
+            LauncherSearchFixture::create_variant(&SEARCH_VARIANTS[2]),
+            920,
+            680,
+        );
+        assert!(
+            empty
+                .accessibility_nodes()
+                .iter()
+                .any(|node| node.label.as_deref() == Some("No applications found"))
         );
     }
 
