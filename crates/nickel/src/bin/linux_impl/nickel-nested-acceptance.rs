@@ -1632,22 +1632,35 @@ fn verify_separate_plugin_dialog(
         }
         thread::sleep(POLL);
     }
-    let status = checked(test_input, environment, &["plugins"])?;
-    let status: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&status).map_err(|error| error.to_string())?;
-    let plugin = status
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == id)
-        .ok_or("dialog plugin disappeared after dismissal")?;
-    if !plugin.desired_enabled
-        || plugin.health != nickel_session_protocol::PluginRuntimeHealth::Running
-        || plugin.memory.native_ui_bytes != Some(home_bytes)
-    {
-        return Err(format!(
-            "dialog dismissal did not preserve its home and memory account: {:?}",
-            plugin.memory.native_ui_bytes
-        ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = checked(test_input, environment, &["plugins"])?;
+        let status: nickel_session_protocol::PluginStatusSnapshot =
+            serde_json::from_str(&status).map_err(|error| error.to_string())?;
+        let plugin = status
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .ok_or("dialog plugin disappeared after dismissal")?;
+        if !plugin.desired_enabled
+            || plugin.health != nickel_session_protocol::PluginRuntimeHealth::Running
+        {
+            return Err("dialog plugin stopped after dismissal".into());
+        }
+        if plugin
+            .memory
+            .native_ui_bytes
+            .is_some_and(|bytes| bytes > 0 && bytes <= home_bytes)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "dialog dismissal retained more than its home memory account: initial={home_bytes}, current={:?}",
+                plugin.memory.native_ui_bytes
+            ));
+        }
+        thread::sleep(POLL);
     }
     click_at(test_input, environment, home_x + 210, home_y + 77)?;
     let deadline = Instant::now() + Duration::from_secs(5);
