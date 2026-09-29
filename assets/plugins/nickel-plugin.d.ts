@@ -28,7 +28,7 @@ interface NickelProps {
 interface NickelDivProps extends NickelProps {
     id?: string;
     onClick?: NickelClick;
-    role?: "button" | "radio" | "radiogroup" | "option";
+    role?: "button" | "radio" | "radiogroup" | "option" | "group";
     "aria-label"?: string;
     "aria-checked"?: boolean;
     "aria-selected"?: boolean;
@@ -108,6 +108,17 @@ interface NickelColorSwatchProps extends NickelProps {
     color?: string;
     selected?: boolean;
     accessibilityLabel: string;
+    onClick: NickelClick;
+}
+interface NickelSelectProps extends NickelProps {
+    id: string;
+    value: string;
+    open?: boolean;
+    accessibilityLabel: string;
+    onClick: NickelClick;
+}
+interface NickelOptionProps extends NickelProps {
+    id: string;
     onClick: NickelClick;
 }
 interface NickelImageProps extends NickelProps {
@@ -223,6 +234,8 @@ declare function TextField(props: NickelTextFieldProps): JSX.Element;
 declare function Slider(props: NickelSliderProps): JSX.Element;
 declare function Switch(props: NickelSwitchProps): JSX.Element;
 declare function ColorSwatch(props: NickelColorSwatchProps): JSX.Element;
+declare function Select(props: NickelSelectProps): JSX.Element;
+declare function Option(props: NickelOptionProps): JSX.Element;
 declare function Button(props: NickelButtonProps): JSX.Element;
 declare function Spacer(props: NickelProps): JSX.Element;
 declare function Dialog(props: NickelDialogProps): JSX.Element;

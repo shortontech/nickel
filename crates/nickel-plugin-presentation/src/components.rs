@@ -8,9 +8,9 @@ use std::{
 use nickel_core::plugins::{PluginManifest, PluginSurfaceKind};
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, DragGesture, FilePlaneItem, Grid, Image,
-    ImageFit, Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Slider, Spacer,
-    Text, TextField as UiTextField, VerticalScroll,
+    AnyView, Column, ComponentBuilderExt, Container, DragGesture, Dropdown, FilePlaneItem, Grid,
+    Image, ImageFit, Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Slider,
+    Spacer, Text, TextField as UiTextField, VerticalScroll,
 };
 use serde_json::Value;
 
@@ -345,6 +345,15 @@ pub enum PanelNode {
         label: String,
         action: usize,
     },
+    Select {
+        id: String,
+        class_name: Option<String>,
+        label: String,
+        value: String,
+        open: bool,
+        action: usize,
+        options: Vec<(String, String, usize)>,
+    },
     Spacer {
         class_name: Option<String>,
     },
@@ -505,6 +514,24 @@ impl PanelNode {
                 label,
                 ..
             } => capacity(id) + class_name.as_ref().map_or(0, capacity) + capacity(label),
+            Self::Select {
+                id,
+                class_name,
+                label,
+                value,
+                options,
+                ..
+            } => {
+                capacity(id)
+                    + class_name.as_ref().map_or(0, capacity)
+                    + capacity(label)
+                    + capacity(value)
+                    + (options.capacity() * std::mem::size_of::<(String, String, usize)>()) as u64
+                    + options
+                        .iter()
+                        .map(|(id, label, _)| capacity(id) + capacity(label))
+                        .sum::<u64>()
+            }
             Self::Div {
                 id,
                 class_name,
@@ -662,6 +689,7 @@ impl PanelNode {
                     | "slider"
                     | "switch"
                     | "color-swatch"
+                    | "select"
                     | "button"
             )
         {
@@ -915,6 +943,7 @@ impl PanelNode {
                         Some(Value::String(role)) if role == "radiogroup" => {
                             Some(SemanticRole::RadioGroup)
                         }
+                        Some(Value::String(role)) if role == "group" => Some(SemanticRole::Group),
                         Some(Value::String(role)) if role == "option" => Some(SemanticRole::Option),
                         _ => return Err("div role is unsupported".into()),
                     },
@@ -1320,6 +1349,68 @@ impl PanelNode {
                         .ok_or("switch needs an accessibility label")?
                         .to_owned(),
                     action,
+                })
+            }
+            "select" => {
+                if children.is_empty() || children.len() > 64 {
+                    return Err("select needs 1 to 64 options".into());
+                }
+                let mut options = Vec::with_capacity(children.len());
+                let mut seen = HashSet::new();
+                for child in children {
+                    if child.get("kind").and_then(Value::as_str) != Some("option") {
+                        return Err("select children must be Option components".into());
+                    }
+                    let id = child
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 128)
+                        .ok_or("option needs a bounded id")?;
+                    if !seen.insert(id) {
+                        return Err("select option IDs must be unique".into());
+                    }
+                    let label = child
+                        .get("children")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| "option needs text".to_owned())
+                        .and_then(|children| child_text(children))?;
+                    if label.is_empty() || label.chars().count() > 120 {
+                        return Err("option label is invalid".into());
+                    }
+                    let action = child
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok())
+                        .ok_or("option needs an onClick handler")?;
+                    options.push((id.to_owned(), label, action));
+                }
+                Ok(Self::Select {
+                    id: value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 128)
+                        .ok_or("select needs a bounded id")?
+                        .to_owned(),
+                    class_name,
+                    label: value
+                        .get("accessibilityLabel")
+                        .and_then(Value::as_str)
+                        .filter(|label| !label.is_empty() && label.len() <= 256)
+                        .ok_or("select needs an accessibility label")?
+                        .to_owned(),
+                    value: value
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .filter(|value| value.len() <= 256)
+                        .ok_or("select needs a bounded value")?
+                        .to_owned(),
+                    open: value.get("open").and_then(Value::as_bool).unwrap_or(false),
+                    action: value
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok())
+                        .ok_or("select needs an onClick handler")?,
+                    options,
                 })
             }
             "color-swatch" => {
@@ -2280,6 +2371,41 @@ impl PanelNode {
                 }
                 with_margin(AnyView::new(control), &style)
             }
+            Self::Select {
+                id,
+                class_name,
+                label,
+                value,
+                open,
+                action,
+                options,
+            } => {
+                let style = stylesheet.resolve("select", Some(id), class_name.as_deref());
+                let select = Dropdown::new(
+                    Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
+                    value,
+                    options.iter().map(|(_, label, action)| {
+                        (
+                            label.as_str(),
+                            Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
+                        )
+                    }),
+                )
+                .id(id.clone())
+                .accessibility_label(label)
+                .overlay(true)
+                .expanded(*open)
+                .colors(
+                    style.background.unwrap_or(0xff30343d),
+                    style.background.unwrap_or(0xff424957),
+                    style.color.unwrap_or(0xfff0f0f0),
+                );
+                let container = Container::new().width(180.0).child(select);
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
+                )
+            }
             Self::ColorSwatch {
                 id,
                 class_name,
@@ -2552,6 +2678,21 @@ impl PanelNode {
                 ..
             } if id == requested_id => Some(*action),
             Self::ColorSwatch { id, action, .. } if id == requested_id => Some(*action),
+            Self::Select {
+                id,
+                action,
+                options,
+                ..
+            } => {
+                if id == requested_id {
+                    Some(*action)
+                } else {
+                    options
+                        .iter()
+                        .find(|(id, _, _)| id == requested_id)
+                        .map(|(_, _, action)| *action)
+                }
+            }
             Self::Image {
                 id: Some(id),
                 action: Some(action),

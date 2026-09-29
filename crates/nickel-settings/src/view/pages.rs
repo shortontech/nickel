@@ -1751,9 +1751,7 @@ impl SettingsApp {
                 .get_or_insert_with(crate::appearance_plugin::AppearancePage::new)
                 .as_mut()
                 .map_err(|error| error.clone())
-                .and_then(|page| {
-                    page.render(&data, theme, appearance, self.wallpaper_preview.as_ref())
-                })
+                .and_then(|page| page.render(&data, theme, self.wallpaper_preview.as_ref()))
                 .ok();
             if let Some(plugin_view) = plugin_view {
                 return self.appearance_frame(theme, plugin_view);

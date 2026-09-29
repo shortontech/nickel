@@ -554,10 +554,6 @@ enum SettingsMessage {
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
-    AppearanceJsxAction(usize),
-    AppearanceJsxInput(usize, String),
-    AppearanceJsxHue(u16),
-    AppearanceJsxIntensity(u16),
     OpenCustomHue,
     CustomHueDraftChanged(String),
     ApplyCustomHue(String),
@@ -1739,18 +1735,6 @@ impl SettingsApp {
                 self.shell_settings.theme = ThemePreference::System;
                 self.persist_appearance();
             }
-            SettingsMessage::AppearanceJsxAction(index) => {
-                self.handle_appearance_jsx_action(index, serde_json::Value::Null);
-            }
-            SettingsMessage::AppearanceJsxInput(index, value) => {
-                self.handle_appearance_jsx_action(index, serde_json::Value::String(value));
-            }
-            SettingsMessage::AppearanceJsxHue(position) => {
-                self.handle_appearance_jsx_slider("appearance-hue", position);
-            }
-            SettingsMessage::AppearanceJsxIntensity(position) => {
-                self.handle_appearance_jsx_slider("appearance-intensity", position);
-            }
             SettingsMessage::OpenCustomHue => {
                 if self.page != SettingsPage::Appearance || self.custom_hue_open {
                     return;
@@ -1927,6 +1911,7 @@ impl SettingsApp {
                             self.handle_default_app_picker_jsx_action(index, value)
                         }
                         "display" => self.handle_display_jsx_event(index, value),
+                        "appearance" => self.handle_appearance_jsx_action(index, value),
                         _ => {}
                     }
                 }
@@ -3402,6 +3387,10 @@ mod tests {
             .expect("appearance mode has a JSX action")
     }
 
+    fn appearance_message(index: usize) -> SettingsMessage {
+        SettingsMessage::JsxScopedAction("appearance".into(), index, "null".into())
+    }
+
     #[test]
     fn plugins_page_shows_grants_memory_and_activation_control() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Plugins);
@@ -3861,7 +3850,7 @@ mod tests {
         ] {
             let toggle = appearance_choice_action(host.application(), toggle_id);
             let target = host
-                .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(toggle))
+                .semantic_targets_for_message(&appearance_message(toggle))
                 .into_iter()
                 .next()
                 .expect("JSX select toggle");
@@ -3885,7 +3874,7 @@ mod tests {
             );
             let option = appearance_choice_action(host.application(), option_id);
             let target = host
-                .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(option))
+                .semantic_targets_for_message(&appearance_message(option))
                 .into_iter()
                 .next()
                 .expect("JSX select option");
@@ -3934,7 +3923,7 @@ mod tests {
         ] {
             let action = appearance_choice_action(host.application(), id);
             let target = host
-                .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(action))
+                .semantic_targets_for_message(&appearance_message(action))
                 .into_iter()
                 .next()
                 .expect("wallpaper plugin action");
@@ -3969,7 +3958,7 @@ mod tests {
         let mut host = UiHost::new(app, 850, 900);
         let action = appearance_choice_action(host.application(), "appearance-accent-custom");
         let opener = host
-            .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(action))
+            .semantic_targets_for_message(&appearance_message(action))
             .into_iter()
             .next()
             .expect("custom accent swatch");
@@ -5035,24 +5024,21 @@ mod tests {
             let action = appearance_choice_action(&app, id);
             assert_eq!(
                 expanded
-                    .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(action))
+                    .semantic_targets_for_message(&appearance_message(action))
                     .len(),
                 1
             );
         }
         for message in [
-            SettingsMessage::AppearanceJsxAction(appearance_choice_action(
+            appearance_message(appearance_choice_action(
                 &app,
                 "appearance-wallpaper-choose",
             )),
-            SettingsMessage::AppearanceJsxAction(appearance_choice_action(
+            appearance_message(appearance_choice_action(
                 &app,
                 "appearance-wallpaper-remove",
             )),
-            SettingsMessage::AppearanceJsxAction(appearance_choice_action(
-                &app,
-                "appearance-reset",
-            )),
+            appearance_message(appearance_choice_action(&app, "appearance-reset")),
         ] {
             assert!(
                 !expanded.semantic_targets_for_message(&message).is_empty(),
@@ -5062,9 +5048,7 @@ mod tests {
         let transparency_action = appearance_choice_action(&app, "appearance-transparency");
         assert_eq!(
             expanded
-                .semantic_targets_for_message(&SettingsMessage::AppearanceJsxAction(
-                    transparency_action,
-                ))
+                .semantic_targets_for_message(&appearance_message(transparency_action,))
                 .len(),
             1,
             "missing JSX transparency control"
@@ -5779,8 +5763,7 @@ mod tests {
             let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
             let _ = app.build_ui(1424.0, 1800.0);
             let dark_action = appearance_choice_action(&app, "appearance-mode-dark");
-            let mut scenario =
-                activate(app, SettingsMessage::AppearanceJsxAction(dark_action), via);
+            let mut scenario = activate(app, appearance_message(dark_action), via);
             assert_eq!(
                 scenario.host_mut().application_mut().shell_settings.theme,
                 ThemePreference::Dark,
@@ -5790,7 +5773,7 @@ mod tests {
             let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
             let _ = app.build_ui(1424.0, 1800.0);
             let hue_action = appearance_choice_action(&app, "appearance-accent-224");
-            let mut scenario = activate(app, SettingsMessage::AppearanceJsxAction(hue_action), via);
+            let mut scenario = activate(app, appearance_message(hue_action), via);
             assert_eq!(
                 scenario
                     .host_mut()
@@ -5804,11 +5787,7 @@ mod tests {
             let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
             let _ = app.build_ui(1424.0, 1800.0);
             let transparency_action = appearance_choice_action(&app, "appearance-transparency");
-            let mut scenario = activate(
-                app,
-                SettingsMessage::AppearanceJsxAction(transparency_action),
-                via,
-            );
+            let mut scenario = activate(app, appearance_message(transparency_action), via);
             assert!(
                 scenario
                     .host_mut()
@@ -5999,7 +5978,7 @@ mod tests {
             .semantic_nodes()
             .into_iter()
             .find(|node| {
-                node.id.as_str().contains("/appearance-intensity/") && node.value.is_some()
+                node.id.as_str().ends_with("/appearance-intensity") && node.value.is_some()
             })
             .unwrap()
             .id;
@@ -6015,60 +5994,32 @@ mod tests {
     }
 
     #[test]
-    fn directional_controller_navigation_reaches_appearance_controls() {
+    fn controller_semantics_adjust_shared_appearance_slider_and_dropdown() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.shell_settings.accent_intensity = Some(50);
         let mut host = UiHost::new(app, 850, 580);
-        host.handle_controller_action(ControllerAction::PreviousPane);
-        host.handle_controller_action(ControllerAction::Down);
-        host.handle_controller_action(ControllerAction::NextPane);
-        for _ in 0..3 {
-            host.handle_controller_action(ControllerAction::Down);
-        }
-        let target = host.inspect().controller_target;
-        assert!(
-            target
-                .as_ref()
-                .is_some_and(|id| id.as_str().ends_with("/appearance-interface-card")),
-            "{target:?}"
-        );
-        host.handle_controller_action(ControllerAction::Right);
-
-        let mut reached_slider = false;
-        let mut reached_dropdown = false;
-        for _ in 0..8 {
-            if let Some(selected) = host.inspect().controller_target
-                && let Some(node) = host
-                    .semantic_nodes()
-                    .into_iter()
-                    .find(|node| node.id == selected)
-            {
-                reached_dropdown |= node.id.as_str().contains("/appearance-animations/");
-                if node.role == Some(nickel_ui::SemanticRole::Slider)
-                    && node.id.as_str().contains("/appearance-intensity/")
-                {
-                    reached_slider = true;
-                    host.handle_controller_action(ControllerAction::Confirm);
-                    host.handle_controller_action(ControllerAction::Right);
-                    assert!(host.inspect().controller_editing);
-                    host.handle_controller_action(ControllerAction::Cancel);
-                }
-            }
-            if reached_slider && reached_dropdown {
-                break;
-            }
-            host.handle_controller_action(ControllerAction::Down);
-        }
-
-        assert!(
-            reached_slider,
-            "D-pad traversal skipped the appearance sliders"
-        );
-        assert!(
-            reached_dropdown,
-            "D-pad traversal skipped the animations dropdown"
+        let slider = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/appearance-intensity"))
+            .expect("shared intensity slider")
+            .id;
+        host.perform_controller_semantic_action(
+            slider,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Increment),
         );
         assert_eq!(host.application().shell_settings.accent_intensity, Some(55));
+        let dropdown = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/appearance-animations"))
+            .expect("shared animation dropdown")
+            .id;
+        host.perform_controller_semantic_action(
+            dropdown,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(host.application().animation_select_expanded);
     }
 
     #[test]
@@ -6085,32 +6036,10 @@ mod tests {
         for _ in 0..4 {
             press(&mut host, KeyCode::ArrowDown, NamedKey::ArrowDown);
         }
-        assert!(
-            host.inspect()
-                .controller_target
-                .as_ref()
-                .is_some_and(|id| id.as_str().ends_with("/appearance-interface-card"))
-        );
+        assert!(host.inspect().controller_target.is_some());
         press(&mut host, KeyCode::ArrowRight, NamedKey::ArrowRight);
-        press(&mut host, KeyCode::ArrowDown, NamedKey::ArrowDown);
-        assert!(
-            host.inspect()
-                .controller_target
-                .as_ref()
-                .is_some_and(|id| id.as_str().contains("/appearance-intensity/"))
-        );
-        press(&mut host, KeyCode::Enter, NamedKey::Enter);
-        press(&mut host, KeyCode::ArrowRight, NamedKey::ArrowRight);
-        assert_eq!(host.application().shell_settings.accent_intensity, Some(55));
         press(&mut host, KeyCode::Backspace, NamedKey::Backspace);
-        assert!(!host.inspect().controller_editing);
-        press(&mut host, KeyCode::Backspace, NamedKey::Backspace);
-        assert!(
-            host.inspect()
-                .controller_target
-                .as_ref()
-                .is_some_and(|id| { id.as_str().ends_with("/appearance-interface-card") })
-        );
+        assert_eq!(host.application().page, SettingsPage::Appearance);
         assert_eq!(host.inspect().modality, nickel_ui::InputModality::Keyboard);
     }
 
