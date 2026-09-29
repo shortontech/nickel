@@ -1448,6 +1448,9 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
     }
     #[cfg(not(target_os = "windows"))]
     shell.configure_launcher_surface(state.launcher_surface_size());
+    if let Some(maximum) = shell.notification_maximum_size() {
+        shell.configure_notification_surface(state.notification_preferred_surface_size(maximum));
+    }
     let surfaces = shell
         .surfaces()
         .map(|surface| (surface.id(), surface.role()))
@@ -1956,13 +1959,27 @@ fn handle_shell_input(
                             .map_err(|error| format!("{error:?}"))?;
                     }
                 }
-            } else if edge == KeyEdge::Pressed && role == SurfaceRole::Notification {
+            } else if role == SurfaceRole::Notification {
                 let (width, height) = shell
                     .surface(surface)
                     .map(|entry| entry.window().size())
                     .unwrap_or_default();
-                if state.notification_click(x, y, width, height) {
+                let event = match edge {
+                    KeyEdge::Pressed => {
+                        nickel_ui::UiEvent::PointerPressed(nickel_ui::Point { x, y })
+                    }
+                    KeyEdge::Released => {
+                        nickel_ui::UiEvent::PointerReleased(nickel_ui::Point { x, y })
+                    }
+                };
+                if state.notification_host_event_authorized(
+                    HostEvent::Ui(event),
+                    width,
+                    height,
+                    None,
+                ) {
                     sync_visibility(shell, state);
+                    render_role(shell, state, SurfaceRole::Notification)?;
                 }
             } else if edge == KeyEdge::Pressed && role == SurfaceRole::ControlCenter {
                 let (width, height) = shell
@@ -1989,6 +2006,19 @@ fn handle_shell_input(
                     .unwrap_or_default();
                 if state.screenshot_pointer_moved(x, y, width, height) {
                     render_role(shell, state, SurfaceRole::Screenshot)?;
+                }
+            } else if role == SurfaceRole::Notification {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                if state.notification_host_event_authorized(
+                    HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(nickel_ui::Point { x, y })),
+                    width,
+                    height,
+                    None,
+                ) {
+                    render_role(shell, state, SurfaceRole::Notification)?;
                 }
             } else if role == SurfaceRole::Panel {
                 if let Some(output) = shell
@@ -2342,6 +2372,12 @@ fn shell_event_ends_process(event: &ShellEvent) -> bool {
 
 /// Runs the Nickel desktop shell using process command-line arguments.
 pub fn run() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--nickel-activate-packaged-app"))
+    {
+        return platform::run_packaged_activation_child();
+    }
     #[cfg(target_os = "windows")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-launch-broker"))
     {

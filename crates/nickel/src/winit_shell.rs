@@ -484,10 +484,7 @@ impl ShellSurface {
 
 fn show_surface_native(surface: &ShellSurface) {
     #[cfg(target_os = "windows")]
-    if matches!(
-        surface.role,
-        SurfaceRole::WindowPreview | SurfaceRole::Notification
-    ) {
+    if surface.role == SurfaceRole::WindowPreview {
         crate::platform::show_overlay_window_without_activation(&surface.window);
         return;
     }
@@ -526,6 +523,7 @@ pub struct WinitShell {
     active_output_name: Option<String>,
     #[cfg(target_os = "windows")]
     launcher_surface_size: Option<(u32, u32)>,
+    notification_surface_size: Option<(u32, u32)>,
     next_surface_diagnostic_generation: u64,
     #[cfg(target_os = "windows")]
     shortcut_diagnostics: Option<crate::platform::WindowsShortcutDiagnosticSource>,
@@ -590,6 +588,7 @@ impl WinitShell {
             active_output_name: None,
             #[cfg(target_os = "windows")]
             launcher_surface_size: None,
+            notification_surface_size: None,
             next_surface_diagnostic_generation: 0,
             #[cfg(target_os = "windows")]
             shortcut_diagnostics: None,
@@ -987,6 +986,67 @@ impl WinitShell {
             } else {
                 self.relocate_to_active_output(index);
             }
+        }
+    }
+
+    pub fn configure_notification_surface(&mut self, size: Option<(u32, u32)>) {
+        self.notification_surface_size = size;
+        if size.is_none() {
+            return;
+        }
+        let notifications = self
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter_map(|(index, surface)| {
+                (surface.display_connected && surface.role == SurfaceRole::Notification)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in notifications {
+            self.relocate_notification(index);
+        }
+    }
+
+    pub fn notification_maximum_size(&self) -> Option<(u32, u32)> {
+        let index = self.active_output_index()?;
+        let geometry = self.displays.get(index)?.0;
+        let (width, height) = output_layout_size(geometry);
+        Some((
+            crate::notification_view::NOTIFICATION_MAX_WIDTH.min(width),
+            crate::notification_view::NOTIFICATION_MAX_HEIGHT
+                .min(height.saturating_sub(PANEL_HEIGHT + 8)),
+        ))
+    }
+
+    fn relocate_notification(&mut self, index: usize) {
+        let Some(display_index) = self.active_output_index() else {
+            return;
+        };
+        let Some((geometry, output_name)) = self.displays.get(display_index).cloned() else {
+            return;
+        };
+        let (output_width, output_height) = output_layout_size(geometry);
+        let Some((width, height)) = self.notification_surface_size else {
+            return;
+        };
+        let local_x = output_width.saturating_sub(width).saturating_sub(18);
+        let local_y = match self.options.panel_edge {
+            PanelEdge::Top => PANEL_HEIGHT + 8,
+            PanelEdge::Bottom => output_height
+                .saturating_sub(PANEL_HEIGHT)
+                .saturating_sub(height)
+                .saturating_sub(8),
+        };
+        let (x, y) = output_position(geometry, local_x, local_y);
+        let surface = &mut self.surfaces[index];
+        surface.display_index = display_index;
+        surface.output_name = output_name;
+        set_surface_position(&surface.window, x, y);
+        if surface.window.size() != (width, height) {
+            let _ = surface
+                .window
+                .request_inner_size(LogicalSize::new(width, height));
         }
     }
 

@@ -3,6 +3,8 @@ use crate::model::{TrayItem, WindowId};
 pub(crate) use windows::WindowsShortcutDiagnosticSource;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::remote_observation;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::run_packaged_activation_child;
 pub(crate) mod status_mailbox;
 use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
 

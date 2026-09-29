@@ -99,8 +99,11 @@ bytemuck.workspace = true
 windows-core = "0.62.2"
 windows = { workspace = true, features = [
     "Foundation",
+    "ApplicationModel",
     "Media_Control",
     "System",
+    "UI_Notifications",
+    "UI_Notifications_Management",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Dwm",

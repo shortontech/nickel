@@ -7,18 +7,8 @@ use std::{
     time::Instant,
 };
 use windows::{
-    Win32::{
-        Foundation::{CloseHandle, HWND, LPARAM},
-        Storage::Packaging::Appx::GetApplicationUserModelId,
-        System::{
-            Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance, CoTaskMemFree, IServiceProvider},
-            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-        },
-        UI::WindowsAndMessaging::{
-            EnumChildWindows, EnumWindows, GetClassNameW, GetWindowThreadProcessId,
-        },
-    },
-    core::{BOOL, GUID, HRESULT, HSTRING, IUnknown, Interface, PWSTR},
+    Win32::System::Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance, CoTaskMemFree, IServiceProvider},
+    core::{GUID, HRESULT, HSTRING, IUnknown, Interface},
 };
 
 const IMMERSIVE_SHELL: GUID = GUID::from_u128(0xc2f03a33_21f5_47fa_b4bb_156362a2f239);
@@ -33,53 +23,9 @@ const IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
 const IAGILE_OBJECT: GUID = GUID::from_u128(0x94ea2b94_e9cc_49e0_c0ff_ee64ca8f5b90);
 const E_NOINTERFACE: HRESULT = HRESULT(0x80004002_u32 as i32);
 const E_POINTER: HRESULT = HRESULT(0x80004003_u32 as i32);
+const E_NOTIMPL: HRESULT = HRESULT(0x80004001_u32 as i32);
 
-pub(crate) fn app_id_for_process(process_id: u32) -> Option<String> {
-    let process =
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
-    let mut buffer = [0u16; 1024];
-    let mut length = buffer.len() as u32;
-    let status = unsafe {
-        GetApplicationUserModelId(process, &mut length, Some(PWSTR(buffer.as_mut_ptr())))
-    };
-    let _ = unsafe { CloseHandle(process) };
-    if status.0 != 0 || length == 0 || length as usize > buffer.len() {
-        return None;
-    }
-    Some(String::from_utf16_lossy(&buffer[..length as usize - 1]))
-}
-
-fn core_window_for_process(process_id: u32) -> Option<usize> {
-    struct Search {
-        process_id: u32,
-        hwnd: usize,
-    }
-    unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
-        let search = unsafe { &mut *(data.0 as *mut Search) };
-        let mut name = [0u16; 64];
-        let length = unsafe { GetClassNameW(hwnd, &mut name) }.max(0) as usize;
-        if name[..length]
-            == "Windows.UI.Core.CoreWindow"
-                .encode_utf16()
-                .collect::<Vec<_>>()
-        {
-            let mut owner = 0;
-            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-            if owner == search.process_id {
-                search.hwnd = hwnd.0 as usize;
-                return BOOL(0);
-            }
-        }
-        let _ = unsafe { EnumChildWindows(Some(hwnd), Some(visit), data) };
-        BOOL((search.hwnd == 0) as i32)
-    }
-    let mut search = Search {
-        process_id,
-        hwnd: 0,
-    };
-    let _ = unsafe { EnumWindows(Some(visit), LPARAM((&raw mut search) as isize)) };
-    (search.hwnd != 0).then_some(search.hwnd)
-}
+use crate::host::ViewEventCallbackResult;
 
 type QueryService =
     unsafe extern "system" fn(*mut c_void, *const GUID, *const GUID, *mut *mut c_void) -> HRESULT;
@@ -98,6 +44,7 @@ struct Callback {
     references: AtomicU32,
     started: Instant,
     expected_frame_method: usize,
+    result: ViewEventCallbackResult,
     retained_frame_interface: AtomicPtr<c_void>,
     retained_cloak_interface: AtomicPtr<c_void>,
     retained_frame_window_interface: AtomicPtr<c_void>,
@@ -305,7 +252,10 @@ unsafe extern "system" fn invoke(
     println!(
         "phase=view-event elapsed_ms={elapsed_ms} type={event_type} wrapper={wrapper:p} args={args:p} frame_slot={frame_slot:?} frame_method={frame_method:#x} frame={frame:?}"
     );
-    let result = HRESULT(0);
+    let result = match unsafe { (*this).result } {
+        ViewEventCallbackResult::Success => HRESULT(0),
+        ViewEventCallbackResult::NotImplemented => E_NOTIMPL,
+    };
     println!("phase=view-event-return hresult={result:?}");
     let _ = std::io::stdout().flush();
     result
@@ -322,11 +272,12 @@ pub(crate) struct ViewEventTrace {
     dispatcher: IUnknown,
     callback: *mut Callback,
     token: i64,
+    last_frame: usize,
     last_core: usize,
 }
 
 impl ViewEventTrace {
-    pub(crate) fn register(app_id: Option<&str>) -> Result<Self, String> {
+    pub(crate) fn register(result: ViewEventCallbackResult, app_id: &str) -> Result<Self, String> {
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::core::w;
 
@@ -364,13 +315,14 @@ impl ViewEventTrace {
             references: AtomicU32::new(1),
             started: Instant::now(),
             expected_frame_method,
+            result,
             retained_frame_interface: AtomicPtr::new(std::ptr::null_mut()),
             retained_cloak_interface: AtomicPtr::new(std::ptr::null_mut()),
             retained_frame_window_interface: AtomicPtr::new(std::ptr::null_mut()),
             retained_view_wrapper: AtomicPtr::new(std::ptr::null_mut()),
             process_id: AtomicU32::new(0),
         }));
-        let filter = HSTRING::from(app_id.unwrap_or_default());
+        let filter = HSTRING::from(app_id);
         let filter_raw = unsafe { (&filter as *const HSTRING).cast::<*mut c_void>().read() };
         let mut token = 0;
         let status = unsafe {
@@ -386,13 +338,39 @@ impl ViewEventTrace {
             unsafe { release(callback) };
             return Err(format!("register view events: {error}"));
         }
-        println!("phase=view-event-register token={token}");
+        println!("phase=view-event-register token={token} callback_result={result:?}");
         Ok(Self {
             dispatcher,
             callback,
             token,
+            last_frame: 0,
             last_core: 0,
         })
+    }
+
+    pub(crate) fn poll_frame_hwnd(&mut self) -> Option<usize> {
+        let interface = unsafe {
+            (*self.callback)
+                .retained_frame_interface
+                .load(Ordering::Acquire)
+        };
+        if interface.is_null() {
+            return None;
+        }
+        let vtable = unsafe { interface.cast::<*const usize>().read() };
+        if vtable.is_null()
+            || unsafe { vtable.add(44).read() } != unsafe { (*self.callback).expected_frame_method }
+        {
+            return None;
+        }
+        type GetFrameHwnd = unsafe extern "system" fn(*mut c_void) -> *mut c_void;
+        let get_frame: GetFrameHwnd = unsafe { std::mem::transmute(vtable.add(44).read()) };
+        let frame = unsafe { get_frame(interface) } as usize;
+        if frame == 0 || frame == self.last_frame {
+            return None;
+        }
+        self.last_frame = frame;
+        Some(frame)
     }
 
     pub(crate) fn poll_core_target(&mut self) -> Option<(usize, usize, usize, usize, usize, u32)> {
@@ -419,7 +397,7 @@ impl ViewEventTrace {
                 .process_id
                 .store(process_id, Ordering::Release)
         };
-        let core = core_window_for_process(process_id)?;
+        let core = crate::auto_present::core_window_for_pid(process_id)?;
         if core == self.last_core {
             return None;
         }

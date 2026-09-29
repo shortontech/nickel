@@ -31,6 +31,7 @@ impl<Message> Layer<Message> {
         self.0 = self.0.height(height);
         self
     }
+
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
         self
@@ -210,6 +211,7 @@ impl<Message> VerticalScroll<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -299,6 +301,7 @@ impl<Message> Grid<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -336,6 +339,7 @@ impl<Message> Grid<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -358,6 +362,7 @@ impl<Message> Grid<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -865,6 +870,7 @@ impl<Message> StyledText<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -1119,6 +1125,7 @@ impl<Message> CustomPaint<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -1140,6 +1147,7 @@ impl<Message> CustomPaint<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -1246,6 +1254,7 @@ impl<Message> Image<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -2842,6 +2851,7 @@ impl<Message> Slider<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
@@ -2954,6 +2964,7 @@ impl<Message> Dropdown<Message> {
             context_message: None,
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages,
@@ -3119,6 +3130,7 @@ impl<Message: Clone> Menu<Message> {
             context_message: Some(toggle_message),
             message_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             text_mapper: None,
             option_messages: items.into_iter().map(|item| item.message).collect(),

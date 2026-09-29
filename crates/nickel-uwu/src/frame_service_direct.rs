@@ -1,11 +1,14 @@
-//! Calls into this Windows build's private frame service.
+//! Diagnostic-only call into this Windows build's private frame service.
 
-use std::{cell::RefCell, ffi::c_void, ptr};
+use std::{cell::RefCell, ffi::c_void, process::Command, ptr, thread, time::Duration};
 
 use windows::{
     Win32::System::{
         Com::{IServiceProvider, IServiceProvider_Impl},
         Ole::IObjectWithSite,
+    },
+    Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
     },
     core::IUnknown,
 };
@@ -258,4 +261,45 @@ pub(crate) fn ensure_frame_pool(manager: &IUnknown) -> std::result::Result<Frame
         frame_service,
         _provider: provider,
     })
+}
+
+pub fn probe(manager: &IUnknown, app_id: &str) -> std::result::Result<(), String> {
+    let _frame_pool = ensure_frame_pool(manager)?;
+
+    let launcher = std::env::current_exe()
+        .map_err(|error| format!("fixture path: {error}"))?
+        .with_file_name("nickel-windows-app-probe.exe");
+    println!("phase=ActivateApplication starting");
+    let mut child = Command::new(launcher)
+        .arg(app_id)
+        .spawn()
+        .map_err(|error| format!("activation probe: {error}"))?;
+    let mut dispatched = 0_u64;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("activation probe wait: {error}"))?
+        {
+            break status;
+        }
+        let mut message = MSG::default();
+        // SAFETY: The message is initialized, and all messages belong to this
+        // worker's UI thread, which owns the diagnostic shell window.
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            // SAFETY: PeekMessageW returned a valid message for this thread.
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            dispatched += 1;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    println!("phase=ActivateApplication dispatched_messages={dispatched}");
+    println!("phase=ActivateApplication probe_status={status}");
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("activation probe exited with {status}"))
+    }
 }

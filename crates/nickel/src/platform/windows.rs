@@ -3673,43 +3673,75 @@ fn activate_packaged_application(
     app_user_model_id: &str,
     arguments: &[String],
 ) -> Result<Option<u32>, LaunchError> {
+    let argument_line = arguments
+        .iter()
+        .map(|argument| quote_windows_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    activate_application_on_sta(app_user_model_id, &argument_line)
+        .map(|process_id| (process_id != 0).then_some(process_id))
+        .map_err(LaunchError::Platform)
+}
+
+fn activate_application_on_sta(app_user_model_id: &str, arguments: &str) -> Result<u32, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("find Nickel executable for packaged activation: {error}"))?;
+    let output = std::process::Command::new(executable)
+        .arg("--nickel-activate-packaged-app")
+        .arg(app_user_model_id)
+        .arg(arguments)
+        .output()
+        .map_err(|error| format!("start packaged activation process: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("packaged activation process failed: {error}"));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("read packaged activation result: {error}"))?
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| format!("invalid packaged activation result: {error}"))
+}
+
+pub(crate) fn run_packaged_activation_child() -> Result<(), String> {
     use windows::Win32::{
         System::Com::CLSCTX_LOCAL_SERVER,
         UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
     };
 
-    nickel_uwu::prepare_app(app_user_model_id).map_err(LaunchError::Platform)?;
-    // SAFETY: This thread uses COM only for the duration of the synchronous
-    // activation. If it already has an apartment, CoCreateInstance uses that
-    // apartment and only successful initialization is balanced below.
-    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let mut arguments = std::env::args().skip(2);
+    let app_user_model_id = arguments
+        .next()
+        .ok_or_else(|| "packaged activation child is missing an application ID".to_string())?;
+    let application_arguments = arguments
+        .next()
+        .ok_or_else(|| "packaged activation child is missing its argument line".to_string())?;
+    if arguments.next().is_some() {
+        return Err("packaged activation child received unexpected arguments".into());
+    }
+    // SAFETY: This short-lived process uses COM only on its main thread. The
+    // successful initialization is balanced after the synchronous activation.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        .ok()
+        .map_err(|error| format!("initialize activation STA: {error}"))?;
     let result = (|| {
         let manager: IApplicationActivationManager =
             unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
-                .map_err(|error| LaunchError::Platform(error.to_string()))?;
+                .map_err(|error| format!("create application activation manager: {error}"))?;
         let app_id: Vec<u16> = app_user_model_id.encode_utf16().chain([0]).collect();
-        let argument_line = arguments
-            .iter()
-            .map(|argument| quote_windows_argument(argument))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let argument_line: Vec<u16> = argument_line.encode_utf16().chain([0]).collect();
-        let argument_pointer = if arguments.is_empty() {
+        let application_arguments: Vec<u16> =
+            application_arguments.encode_utf16().chain([0]).collect();
+        let argument_pointer = if application_arguments.len() == 1 {
             PCWSTR::null()
         } else {
-            PCWSTR(argument_line.as_ptr())
+            PCWSTR(application_arguments.as_ptr())
         };
-        let process_id = unsafe {
-            manager.ActivateApplication(PCWSTR(app_id.as_ptr()), argument_pointer, AO_NONE)
-        }
-        .map_err(|error| LaunchError::Platform(error.to_string()))?;
-        Ok((process_id != 0).then_some(process_id))
+        unsafe { manager.ActivateApplication(PCWSTR(app_id.as_ptr()), argument_pointer, AO_NONE) }
+            .map_err(|error| format!("activate {app_user_model_id}: {error}"))
     })();
-    if initialized {
-        // SAFETY: Balances the successful CoInitializeEx call above.
-        unsafe { CoUninitialize() };
-    }
-    result
+    unsafe { CoUninitialize() };
+    println!("{}", result?);
+    Ok(())
 }
 
 fn shell_execute_observed(
@@ -3819,34 +3851,13 @@ fn quote_windows_argument(argument: &str) -> String {
 }
 
 fn launch_uri(uri: &str) -> windows::core::Result<bool> {
-    use windows::{
-        Win32::System::Com::CLSCTX_LOCAL_SERVER,
-        Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
-        Win32::UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
-    };
-
     const SETTINGS_AUMID: &str =
         "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
-    nickel_uwu::prepare_app(SETTINGS_AUMID).map_err(|error| {
-        windows::core::Error::new(windows::core::HRESULT(0x80004005_u32 as i32), error)
-    })?;
-    unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
-    let result = (|| {
-        let manager: IApplicationActivationManager =
-            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)? };
-        let arguments: Vec<u16> = uri.encode_utf16().chain([0]).collect();
-        let process_id = unsafe {
-            manager.ActivateApplication(
-                w!("windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"),
-                PCWSTR(arguments.as_ptr()),
-                AO_NONE,
-            )?
-        };
-        eprintln!("activated Settings URI {uri} as process {process_id}");
-        Ok(process_id != 0)
-    })();
-    unsafe { RoUninitialize() };
-    result
+    activate_application_on_sta(SETTINGS_AUMID, uri)
+        .map(|process_id| process_id != 0)
+        .map_err(|error| {
+            windows::core::Error::new(windows::core::HRESULT(0x80004005_u32 as i32), error)
+        })
 }
 
 pub fn configure_desktop_window(
@@ -3966,21 +3977,19 @@ pub fn configure_launcher_window(window: &impl raw_window_handle::HasWindowHandl
 }
 
 pub fn configure_notification_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
-    if prepare_trusted_control_window(window).is_err() {
-        return false;
-    }
     let Some(hwnd) = window_hwnd(window) else {
         return false;
     };
-    // Approval is trusted local chrome: keep it above ordinary/fullscreen windows and out of
-    // task switching, but do not use NOACTIVATE because keyboard users must be able to focus it.
-    // Capture exclusion is installed above before the window can ever be shown.
+    // Notifications are ordinary user-visible shell chrome. Keep them above application windows
+    // and out of task switching without taking keyboard focus when the first pointer gesture
+    // arrives. Their pixels remain available to screenshots and other user-initiated capture
+    // tools. Trusted indicators use their own protected surface.
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
         SetWindowLongPtrW(
             hwnd,
             GWL_EXSTYLE,
-            ((style | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0 & !WS_EX_NOACTIVATE.0) as isize,
+            ((style | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) & !WS_EX_APPWINDOW.0) as isize,
         );
         SetWindowPos(
             hwnd,
@@ -4842,11 +4851,56 @@ impl TraySource for TrayFeed {
 
 pub struct NotificationFeed {
     store: Arc<Mutex<crate::notification::NotificationStore>>,
+    listener: Option<windows::UI::Notifications::Management::UserNotificationListener>,
+    windows_ids: Arc<Mutex<HashMap<u32, u32>>>,
 }
 impl NotificationFeed {
     pub fn new() -> Result<Self, String> {
+        use windows::UI::Notifications::Management::{
+            UserNotificationListener, UserNotificationListenerAccessStatus,
+        };
+
+        let store = Arc::new(Mutex::new(crate::notification::NotificationStore::default()));
+        let windows_ids = Arc::new(Mutex::new(HashMap::new()));
+        let listener = match UserNotificationListener::Current() {
+            Ok(listener) => {
+                let access = match listener.GetAccessStatus() {
+                    Ok(UserNotificationListenerAccessStatus::Allowed) => {
+                        UserNotificationListenerAccessStatus::Allowed
+                    }
+                    Ok(_) => listener
+                        .RequestAccessAsync()
+                        .and_then(|operation| operation.join())
+                        .unwrap_or(UserNotificationListenerAccessStatus::Denied),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not query Windows notification access");
+                        UserNotificationListenerAccessStatus::Denied
+                    }
+                };
+                if access == UserNotificationListenerAccessStatus::Allowed {
+                    if let Err(error) =
+                        start_windows_notification_worker(store.clone(), windows_ids.clone())
+                    {
+                        tracing::warn!(%error, "could not start Windows notification listener");
+                        None
+                    } else {
+                        tracing::info!("Windows notification listener is active");
+                        Some(listener)
+                    }
+                } else {
+                    tracing::warn!(?access, "Windows notification access is unavailable");
+                    None
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Windows notification listener is unavailable");
+                None
+            }
+        };
         Ok(Self {
-            store: Arc::new(Mutex::new(crate::notification::NotificationStore::default())),
+            store,
+            listener,
+            windows_ids,
         })
     }
 
@@ -4905,6 +4959,20 @@ impl NotificationSource for NotificationFeed {
             .unwrap_or_default()
     }
     fn dismiss(&self, id: u32) {
+        let windows_id = self.windows_ids.lock().ok().and_then(|mut ids| {
+            let windows_id = ids
+                .iter()
+                .find_map(|(windows_id, nickel_id)| (*nickel_id == id).then_some(*windows_id));
+            if let Some(windows_id) = windows_id {
+                ids.remove(&windows_id);
+            }
+            windows_id
+        });
+        if let (Some(listener), Some(windows_id)) = (&self.listener, windows_id)
+            && let Err(error) = listener.RemoveNotification(windows_id)
+        {
+            tracing::warn!(%error, windows_id, "could not dismiss Windows notification");
+        }
         self.close_internal(id);
     }
     fn invoke(&self, id: u32, action_key: &str) {
@@ -4916,6 +4984,169 @@ impl NotificationSource for NotificationFeed {
             self.close_internal(id);
         }
     }
+}
+
+fn start_windows_notification_worker(
+    store: Arc<Mutex<crate::notification::NotificationStore>>,
+    windows_ids: Arc<Mutex<HashMap<u32, u32>>>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("nickel-windows-notifications".into())
+        .spawn(move || {
+            use windows::Foundation::TypedEventHandler;
+            use windows::UI::Notifications::{
+                Management::UserNotificationListener, UserNotificationChangedEventArgs,
+            };
+            use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
+
+            let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+            let Ok(listener) = UserNotificationListener::Current() else {
+                tracing::warn!("could not create the Windows notification listener on its worker");
+                if initialized {
+                    unsafe { RoUninitialize() };
+                }
+                return;
+            };
+            let (sender, receiver) = mpsc::sync_channel::<()>(1);
+            let handler = TypedEventHandler::<
+                UserNotificationListener,
+                UserNotificationChangedEventArgs,
+            >::new(move |_, _| {
+                let _ = sender.try_send(());
+                Ok(())
+            });
+            let token = match listener.NotificationChanged(&handler) {
+                Ok(token) => Some(token),
+                Err(error) => {
+                    tracing::warn!(%error, "Windows notification change events are unavailable; polling instead");
+                    None
+                }
+            };
+            sync_windows_notifications(&listener, &store, &windows_ids);
+            while let Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) =
+                receiver.recv_timeout(Duration::from_secs(2))
+            {
+                sync_windows_notifications(&listener, &store, &windows_ids);
+            }
+            if let Some(token) = token {
+                let _ = listener.RemoveNotificationChanged(token);
+            }
+            if initialized {
+                unsafe { RoUninitialize() };
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn sync_windows_notifications(
+    listener: &windows::UI::Notifications::Management::UserNotificationListener,
+    store: &Arc<Mutex<crate::notification::NotificationStore>>,
+    windows_ids: &Arc<Mutex<HashMap<u32, u32>>>,
+) {
+    use windows::UI::Notifications::NotificationKinds;
+
+    let notifications = match listener
+        .GetNotificationsAsync(NotificationKinds::Toast)
+        .and_then(|operation| operation.join())
+    {
+        Ok(notifications) => notifications,
+        Err(error) => {
+            tracing::warn!(%error, "could not synchronize Windows notifications");
+            return;
+        }
+    };
+    let mut incoming = HashMap::new();
+    let Ok(size) = notifications.Size() else {
+        return;
+    };
+    for index in 0..size {
+        let Ok(notification) = notifications.GetAt(index) else {
+            continue;
+        };
+        let Ok(windows_id) = notification.Id() else {
+            continue;
+        };
+        if let Some(request) = windows_notification_request(&notification) {
+            incoming.insert(windows_id, request);
+        }
+    }
+
+    let (Ok(mut store), Ok(mut ids)) = (store.lock(), windows_ids.lock()) else {
+        return;
+    };
+    let removed = ids
+        .keys()
+        .copied()
+        .filter(|windows_id| !incoming.contains_key(windows_id))
+        .collect::<Vec<_>>();
+    for windows_id in removed {
+        if let Some(nickel_id) = ids.remove(&windows_id) {
+            store.close(nickel_id, 2);
+        }
+    }
+    for (windows_id, request) in incoming {
+        let replaces_id = ids.get(&windows_id).copied().unwrap_or(0);
+        let nickel_id = store.notify(replaces_id, request, Instant::now()).0;
+        if nickel_id != 0 {
+            ids.insert(windows_id, nickel_id);
+        }
+    }
+}
+
+fn windows_notification_request(
+    notification: &windows::UI::Notifications::UserNotification,
+) -> Option<crate::notification::NotificationRequest> {
+    let app_name = notification
+        .AppInfo()
+        .and_then(|app| app.DisplayInfo())
+        .and_then(|display| display.DisplayName())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|_| "Windows application".into());
+    let bindings = notification
+        .Notification()
+        .ok()?
+        .Visual()
+        .ok()?
+        .Bindings()
+        .ok()?;
+    let mut text = Vec::new();
+    let size = bindings.Size().ok()?;
+    for index in 0..size {
+        let Ok(elements) = bindings
+            .GetAt(index)
+            .and_then(|binding| binding.GetTextElements())
+        else {
+            continue;
+        };
+        let Ok(element_count) = elements.Size() else {
+            continue;
+        };
+        for element_index in 0..element_count {
+            if let Ok(value) = elements
+                .GetAt(element_index)
+                .and_then(|element| element.Text())
+            {
+                let value = value.to_string();
+                if !value.trim().is_empty() && !text.contains(&value) {
+                    text.push(value);
+                }
+            }
+        }
+        if !text.is_empty() {
+            break;
+        }
+    }
+    Some(crate::notification::NotificationRequest {
+        app_name,
+        summary: text
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Notification".into()),
+        body: text.into_iter().skip(1).collect::<Vec<_>>().join("\n"),
+        actions: Vec::new(),
+        expire_timeout_ms: 0,
+    })
 }
 
 impl TrayFeed {
@@ -5694,19 +5925,15 @@ fn ordinary_window_metadata(hwnd: HWND) -> Option<(u32, String, String)> {
 }
 
 unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
-    if unsafe { IsWindowVisible(hwnd).as_bool() }
-        && let Some(title) = window_title(hwnd)
-        && let Some(class) = window_class(hwnd)
-        && is_codex_helper_terminal(&title, &class)
-    {
+    let Some((_process_id, title, class)) = ordinary_window_metadata(hwnd) else {
+        return BOOL(1);
+    };
+    if is_codex_helper_terminal(&title, &class) {
         // SAFETY: EnumWindows supplied this live top-level HWND. The asynchronous request avoids
         // waiting for the Windows Terminal UI thread while hiding its helper window from Alt-Tab.
         let _ = unsafe { ShowWindowAsync(hwnd, SW_HIDE) };
         return BOOL(1);
     }
-    let Some((_process_id, title, class)) = ordinary_window_metadata(hwnd) else {
-        return BOOL(1);
-    };
     // This presentation housekeeping belongs only to the existing bar feed.
     if unsafe { IsIconic(hwnd).as_bool() } {
         park_iconic_window(hwnd);

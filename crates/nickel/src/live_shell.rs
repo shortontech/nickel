@@ -1595,11 +1595,13 @@ impl LiveShell {
             self.notification_host
                 .application_mut()
                 .sync(self.notification.as_ref(), self.palette);
-            self.notification_host.step(HostBatch {
+            let outcome = self.notification_host.step(HostBatch {
                 events: vec![HostEvent::Poll],
                 ..HostBatch::default()
             });
-            redraw.push(SurfaceRole::Notification);
+            if outcome.changed || self.apply_notification_effects() {
+                redraw.push(SurfaceRole::Notification);
+            }
         }
         redraw
     }
@@ -2503,6 +2505,22 @@ impl LiveShell {
         crate::launcher_view::preferred_launcher_surface_size(&self.launcher, self.palette, maximum)
     }
 
+    pub(crate) fn notification_preferred_surface_size(
+        &self,
+        maximum: (u32, u32),
+    ) -> Option<(u32, u32)> {
+        if self.notification_history_visible {
+            return None;
+        }
+        self.notification.as_ref().map(|notification| {
+            crate::notification_view::preferred_notification_surface_size(
+                notification,
+                self.palette,
+                maximum,
+            )
+        })
+    }
+
     pub fn next_host_deadline(&self) -> Option<Instant> {
         self.host_deadline_sources()
             .into_iter()
@@ -2910,10 +2928,7 @@ impl LiveShell {
             ],
             ..HostBatch::default()
         });
-        if outcome.effects.is_empty() {
-            self.notification_host.application_mut().request_dismiss();
-        }
-        self.apply_notification_effects()
+        outcome.changed | self.apply_notification_effects()
     }
 
     #[cfg(test)]
