@@ -118,6 +118,7 @@ mod icons;
 mod internal_codex;
 #[allow(clippy::manual_is_multiple_of, dead_code)]
 mod launcher;
+mod launcher_actions;
 #[cfg(target_os = "linux")]
 mod lock_auth;
 use launcher::{DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects};

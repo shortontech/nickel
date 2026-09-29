@@ -9,10 +9,6 @@
 
         shell.apply_session_launcher_visibility(false);
         assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Favorites);
-        assert_eq!(
-            shell.launcher_view.dashboard_narrow_page,
-            crate::launcher_view::DashboardNarrowPage::Primary
-        );
 
         shell.apply_session_launcher_visibility(true);
         assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Favorites);

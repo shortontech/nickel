@@ -122,10 +122,8 @@ use crate::{
     control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
     file_window_host::{FileWindowHost, default_file_window_host},
     launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherView},
-    launcher_view::{
-        DashboardNarrowPage, LauncherAction, LauncherIconCache, LauncherShellEffect,
-        LauncherViewState, reduce_launcher_action,
-    },
+    launcher_actions::{LauncherAction, LauncherShellEffect, reduce_launcher_action},
+    launcher_view::LauncherIconCache,
     model::{Application, OpenWindow, TrayItem, WindowGroup},
     notification::DesktopNotification,
     notification_view::{NotificationApp, NotificationEffect, NotificationHost},
@@ -619,7 +617,6 @@ pub struct LiveShell {
     control_deadline: Option<Instant>,
     projection_chooser: nickel_core::display_projection::ProjectionChooser,
     projection_rollback_deadline: Option<Instant>,
-    launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
     launcher_icon_revision: u64,
     launcher_plugin_result_page: usize,
@@ -1454,7 +1451,6 @@ impl LiveShell {
             1920,
             1080,
         );
-        let launcher_view = LauncherViewState::default();
         let mut launcher_icons = LauncherIconCache::new();
         let (clock, _) = panel_clock_text();
         let initial_taskbar_groups = launcher.taskbar_applications(&windows);
@@ -1829,7 +1825,6 @@ impl LiveShell {
             control_deadline: Some(Instant::now()),
             projection_chooser: Default::default(),
             projection_rollback_deadline: None,
-            launcher_view,
             launcher_icons,
             launcher_icon_revision,
             launcher_plugin_result_page: 0,
@@ -9031,8 +9026,6 @@ impl LiveShell {
             self.run_visible = false;
             self.launcher.clear();
             self.launcher.set_view(LauncherView::Favorites);
-            self.launcher_view.dashboard_selected = 0;
-            self.launcher_view.dashboard_narrow_page = DashboardNarrowPage::Primary;
         }
     }
 
@@ -11529,9 +11522,7 @@ impl LiveShell {
             LauncherAction::SetView(_) => self.launcher_plugin_dashboard_page = 0,
             _ => {}
         }
-        let Some(effect) =
-            reduce_launcher_action(&mut self.launcher, &mut self.launcher_view, action)
-        else {
+        let Some(effect) = reduce_launcher_action(&mut self.launcher, action) else {
             return;
         };
         self.apply_launcher_effect(effect);
