@@ -1095,6 +1095,21 @@ fn validation_surface_projection(
     package.manifest.validation_data.get(&surface.id).cloned()
 }
 
+fn initial_notifications_data(manifest: &PluginManifest) -> Value {
+    if manifest
+        .capabilities
+        .contains(&PluginCapability::NotificationsRead)
+    {
+        serde_json::json!({
+            "notification": null,
+            "history": [],
+            "historyVisible": false,
+        })
+    } else {
+        Value::Null
+    }
+}
+
 impl PluginPanelApplication {
     pub fn resolved_surface(&self, grant: &PluginSurface) -> PluginSurface {
         let mut surface = grant.clone();
@@ -1201,6 +1216,7 @@ impl PluginPanelApplication {
             "settings": settings,
             "slots": {},
             "windows": [],
+            "notifications": initial_notifications_data(&package.manifest),
             "surface": {
                 "id": surface.id,
                 "kind": surface.kind.as_str(),
@@ -1240,6 +1256,7 @@ impl PluginPanelApplication {
                     "settings": settings,
                     "slots": {},
                     "windows": [],
+                    "notifications": initial_notifications_data(&package.manifest),
                     "surface": {
                         "id": surface.id,
                         "kind": surface.kind.as_str(),
@@ -1568,17 +1585,41 @@ impl PluginPanelApplication {
         field: &str,
         value: &Value,
     ) -> Result<bool, String> {
-        if !matches!(field, "slots" | "windows") {
+        self.sync_host_data_fields(&[(field, value)])
+    }
+
+    pub(crate) fn sync_host_data_fields(
+        &mut self,
+        fields: &[(&str, &Value)],
+    ) -> Result<bool, String> {
+        if fields.is_empty() {
+            return Ok(false);
+        }
+        if fields
+            .iter()
+            .any(|(field, _)| !matches!(*field, "slots" | "windows" | "notifications"))
+        {
             return Err("unknown host data field".into());
+        }
+        if fields.iter().any(|(field, _)| *field == "notifications")
+            && !self
+                .manifest
+                .capabilities
+                .contains(&PluginCapability::NotificationsRead)
+        {
+            return Err("notification data requires notifications.read".into());
         }
         let Some(data) = self.projection_data.as_deref() else {
             return Err("plugin has no external projection".into());
         };
         let mut data: Value = serde_json::from_str(data)
             .map_err(|error| format!("invalid external plugin projection: {error}"))?;
-        data.as_object_mut()
-            .ok_or("external plugin projection must be an object")?
-            .insert(field.into(), value.clone());
+        let object = data
+            .as_object_mut()
+            .ok_or("external plugin projection must be an object")?;
+        for (field, value) in fields {
+            object.insert((*field).into(), (*value).clone());
+        }
         self.sync_data(&data)
     }
 
@@ -2657,7 +2698,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("notification-invoke")
-                            && self.manifest.id == notification_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2687,7 +2727,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("notification-dismiss")
-                            && self.manifest.id == notification_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2706,11 +2745,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("notification-close-history")
-                            && self.manifest.id == notification_manifest().id
                             && self
                                 .manifest
                                 .capabilities
-                                .contains(&PluginCapability::NotificationsRead) =>
+                                .contains(&PluginCapability::NotificationsAct) =>
                         {
                             approved.push(PluginEffect::CloseNotificationHistory);
                         }
@@ -4310,6 +4348,74 @@ mod tests {
             granted.update(granted.button_message("action").unwrap());
             assert_eq!(granted.take_effects(), vec![expected]);
         }
+    }
+
+    #[test]
+    fn external_notification_data_and_actions_follow_capabilities() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities.clear();
+        let source = r#"
+            function App() {
+                return h(Window, {width: 320, height: 180},
+                    h(Text, {}, nickel.data.notifications?.notification?.summary || 'None'),
+                    h(Button, {id: 'dismiss', onClick: () => nickel.request({type: 'notification-dismiss', id: 71})}, 'Dismiss'));
+            }
+        "#;
+        let projection = serde_json::json!({
+            "notification": {"id":71,"appName":"Mail","summary":"New mail","body":"Hello","actions":[]},
+            "history":[],"historyVisible":false
+        });
+        let mut denied = PluginPanelApplication::new_with_manifest(
+            source,
+            &manifest,
+            Some(r#"{"notifications":null}"#.into()),
+        )
+        .unwrap();
+        assert!(
+            denied
+                .sync_host_data_field("notifications", &projection)
+                .is_err()
+        );
+        denied.update(denied.button_message("dismiss").unwrap());
+        assert!(denied.take_effects().is_empty());
+
+        manifest
+            .capabilities
+            .push(PluginCapability::NotificationsRead);
+        let mut read_only = PluginPanelApplication::new_with_manifest(
+            source,
+            &manifest,
+            Some(r#"{"notifications":null}"#.into()),
+        )
+        .unwrap();
+        assert!(
+            read_only
+                .sync_host_data_field("notifications", &projection)
+                .unwrap()
+        );
+        assert!(format!("{:?}", read_only.node).contains("New mail"));
+        read_only.update(read_only.button_message("dismiss").unwrap());
+        assert!(read_only.take_effects().is_empty());
+
+        manifest
+            .capabilities
+            .push(PluginCapability::NotificationsAct);
+        let mut granted = PluginPanelApplication::new_with_manifest(
+            source,
+            &manifest,
+            Some(r#"{"notifications":null}"#.into()),
+        )
+        .unwrap();
+        granted.update(granted.button_message("dismiss").unwrap());
+        assert_eq!(
+            granted.take_effects(),
+            vec![PluginEffect::DismissNotification { id: 71 }]
+        );
     }
 
     #[test]

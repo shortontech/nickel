@@ -299,6 +299,15 @@ Each window has a string `id`, title, application ID, active state, and
 `{ type: "window-action", action: "activate", window: id }`; `windows-context`
 permits `action: "close"`. Nickel checks the current window and its capability
 again when handling the request.
+Plugins granted `notifications-read` receive `nickel.data.notifications` with
+the current ordinary notification, up to 12 history entries, and
+`historyVisible`. Items include an ID, app name, summary, body, and bounded
+action list. `notifications-act` permits
+`{ type: "notification-invoke", id, key }`,
+`{ type: "notification-dismiss", id }`, and
+`{ type: "notification-close-history" }`. Nickel checks the live notification
+again before acting. Trusted approval notifications stay in native UI and are
+excluded from plugin data and actions.
 Any plugin granted `windows-focus` or `windows-context` can request
 `{ type: "preview-action", action: "activate" | "close" | "menu", window: id }`
 for a window in the currently open preview. `activate` requires `windows-focus`;

@@ -722,6 +722,74 @@ fn installed_component_window_activates_and_retires_with_its_plugin() {
 }
 
 #[test]
+fn external_notification_projection_requires_read_capability() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/plugins/example-window");
+    let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let id = descriptor.manifest.id.clone();
+    let mut shell = LiveShell::new().unwrap();
+    let notification_id =
+        shell
+            .notification_feed
+            .notify_internal(crate::notification::NotificationRequest {
+                app_name: "Mail".into(),
+                summary: "New mail".into(),
+                body: "Hello".into(),
+                actions: Vec::new(),
+                expire_timeout_ms: 0,
+            });
+    shell.notification = shell.notification_feed.snapshot();
+    shell
+        .external_plugin_packages
+        .insert(id.clone(), descriptor);
+    assert!(shell.external_plugin_notifications(&id).is_none());
+
+    shell
+        .external_plugin_packages
+        .get_mut(&id)
+        .unwrap()
+        .manifest
+        .capabilities
+        .push(nickel_core::plugins::PluginCapability::NotificationsRead);
+    let data = shell.external_plugin_notifications(&id).unwrap();
+    assert_eq!(data["notification"]["id"], notification_id);
+    assert_eq!(data["notification"]["summary"], "New mail");
+    assert!(
+        data["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == notification_id)
+    );
+
+    shell.remote_lease_notifications.insert(
+        notification_id,
+        nickel_session_protocol::RemotePendingLease {
+            pending_generation: 1,
+            client_id: "test".into(),
+            client_label: "Test".into(),
+            request: nickel_session_protocol::RemoteLeaseRequest {
+                renewal: None,
+                scope: nickel_session_protocol::RemoteResourceScope::FullSession,
+                duration_seconds: None,
+                allow_resumption: false,
+                full_debug: false,
+            },
+            resource_label: None,
+            changes: nickel_session_protocol::RemoteLeaseRequestChanges::default(),
+        },
+    );
+    let protected = shell.external_plugin_notifications(&id).unwrap();
+    assert!(protected["notification"].is_null());
+    assert!(protected["history"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.bounded-windows");

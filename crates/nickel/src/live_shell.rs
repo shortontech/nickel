@@ -2715,24 +2715,20 @@ impl LiveShell {
             SurfaceRole::Panel => {
                 let slots = self.plugin_slot_projection(&self.plugin_panel_owner);
                 let windows = self.external_plugin_windows(&self.plugin_panel_owner);
+                let notifications = self.external_plugin_notifications(&self.plugin_panel_owner);
                 let owner = self.plugin_panel_owner.clone();
                 let Some(host) = self.plugin_panel_host.as_mut() else {
                     return Vec::new();
                 };
-                let slots_changed = slots
-                    .as_ref()
-                    .map(|slots| host.application_mut().sync_external_slots(slots))
-                    .unwrap_or(Ok(false));
-                let windows_changed = windows
-                    .as_ref()
-                    .map(|windows| {
-                        host.application_mut()
-                            .sync_host_data_field("windows", windows)
-                    })
-                    .unwrap_or(Ok(false));
-                let data_changed = match slots_changed
-                    .and_then(|slots| windows_changed.map(|windows| slots || windows))
-                {
+                let fields = [
+                    ("slots", slots.as_ref()),
+                    ("windows", windows.as_ref()),
+                    ("notifications", notifications.as_ref()),
+                ]
+                .into_iter()
+                .filter_map(|(field, value)| value.map(|value| (field, value)))
+                .collect::<Vec<_>>();
+                let data_changed = match host.application_mut().sync_host_data_fields(&fields) {
                     Ok(changed) => changed,
                     Err(error) => {
                         self.fail_plugin_panel_runtime(&owner, error);
@@ -3707,6 +3703,32 @@ impl LiveShell {
         ))
     }
 
+    fn external_plugin_notifications(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        if !package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::NotificationsRead)
+        {
+            return None;
+        }
+        let history = self
+            .notification_feed
+            .history()
+            .into_iter()
+            .filter(|notification| !self.trusted_notification_id(notification.id))
+            .collect::<Vec<_>>();
+        let mut projection = crate::plugin_panel::NotificationPluginProjection::from_feed(
+            self.notification
+                .as_ref()
+                .filter(|notification| !self.trusted_notification_id(notification.id)),
+            &history,
+            true,
+        );
+        projection.history_visible = self.notification_history_visible;
+        serde_json::from_str(&projection.to_json()).ok()
+    }
+
     fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
         use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
 
@@ -3833,6 +3855,7 @@ impl LiveShell {
         }
         let slots = self.plugin_slot_projection(&key.plugin_id);
         let windows = self.external_plugin_windows(&key.plugin_id);
+        let notifications = self.external_plugin_notifications(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
         let result = (|| {
@@ -3843,20 +3866,16 @@ impl LiveShell {
                     .map(|data| host.application_mut().sync_data(data))
                     .transpose()?
                     .unwrap_or(false);
-                let slots_changed = slots
-                    .as_ref()
-                    .map(|slots| host.application_mut().sync_external_slots(slots))
-                    .transpose()?
-                    .unwrap_or(false);
-                let windows_changed = windows
-                    .as_ref()
-                    .map(|windows| {
-                        host.application_mut()
-                            .sync_host_data_field("windows", windows)
-                    })
-                    .transpose()?
-                    .unwrap_or(false);
-                Ok(keyboard_changed || slots_changed || windows_changed)
+                let fields = [
+                    ("slots", slots.as_ref()),
+                    ("windows", windows.as_ref()),
+                    ("notifications", notifications.as_ref()),
+                ]
+                .into_iter()
+                .filter_map(|(field, value)| value.map(|value| (field, value)))
+                .collect::<Vec<_>>();
+                let resource_changed = host.application_mut().sync_host_data_fields(&fields)?;
+                Ok(keyboard_changed || resource_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
@@ -6495,6 +6514,7 @@ impl LiveShell {
                 }
                 crate::plugin_panel::PluginEffect::InvokeNotification { id, key } => {
                     if !self.notification_history_visible
+                        && !self.trusted_notification_id(id)
                         && self.notification.as_ref().is_some_and(|item| item.id == id)
                     {
                         self.notification_host.application_mut().request_effect(
@@ -6508,6 +6528,7 @@ impl LiveShell {
                 }
                 crate::plugin_panel::PluginEffect::DismissNotification { id } => {
                     if !self.notification_history_visible
+                        && !self.trusted_notification_id(id)
                         && self.notification.as_ref().is_some_and(|item| item.id == id)
                     {
                         self.notification_host.application_mut().request_effect(
@@ -6519,7 +6540,7 @@ impl LiveShell {
                     }
                 }
                 crate::plugin_panel::PluginEffect::CloseNotificationHistory => {
-                    if self.notification_history_visible {
+                    if self.notification_history_visible && !self.trusted_notification_visible() {
                         self.notification_host
                             .application_mut()
                             .request_effect(NotificationEffect::CloseHistory);
