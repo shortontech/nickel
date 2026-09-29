@@ -1765,11 +1765,16 @@ impl PluginPanelApplication {
             "main.js",
             include_str!("../../../assets/plugins/screenshot/main.js"),
         )?;
-        Self::new_with_manifest(
+        let mut application = Self::new_with_manifest(
             source.as_ref(),
             screenshot_manifest(),
             Some(data.to_string()),
-        )
+        )?;
+        application.stylesheet = bundled_stylesheet(
+            screenshot_manifest(),
+            include_str!("../../../assets/plugins/screenshot/ui.css"),
+        )?;
+        Ok(application)
     }
 
     #[cfg(test)]
@@ -4054,6 +4059,74 @@ mod tests {
             .join("../../target/nickel-ui-snapshots/keyboard-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         image.save(output).unwrap();
+    }
+
+    #[test]
+    fn bundled_screenshot_uses_shared_window_and_keeps_selection_overlay() {
+        let data = serde_json::json!({
+            "width": 960, "height": 540, "generation": 2,
+            "status": "Selection ready", "confirmed": true,
+            "imageAvailable": false,
+            "selection": {"x": 120, "y": 100, "width": 300, "height": 180},
+        });
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::screenshot_with_data(&data).unwrap(),
+            960,
+            540,
+        );
+        assert!(matches!(
+            host.application().node,
+            PanelNode::Surface {
+                window_request: Some(_),
+                ..
+            }
+        ));
+        for name in ["Copy", "Save", "Cancel"] {
+            assert!(
+                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: name.into(),
+                })
+                .is_ok()
+            );
+        }
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(960, 540, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(960, 540, |x, y| {
+            let pixel = renderer.pixels()[(y * 960 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/screenshot-shared.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
+
+        let mut action_data = data;
+        action_data["errorVisible"] = Value::Bool(true);
+        let mut action_host = nickel_ui::UiHost::new(
+            PluginPanelApplication::screenshot_with_data(&action_data).unwrap(),
+            960,
+            540,
+        );
+        let cancel = action_host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Cancel".into(),
+            })
+            .unwrap();
+        action_host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(cancel.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            action_host.application_mut().take_effects(),
+            vec![PluginEffect::ScreenshotAction {
+                action: crate::screenshot::ToolbarAction::Cancel,
+                generation: 2,
+            }]
+        );
     }
 
     #[test]

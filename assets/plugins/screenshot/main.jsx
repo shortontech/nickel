@@ -10,10 +10,10 @@ function App() {
         <Button id={id} width={buttonWidth} onClick={() => request(action)}>{label}</Button>;
     const preview = data.imageRect || {x: 0, y: 70, width: 1, height: 1};
     const selection = data.selection;
-    return <Surface id="screenshot" width={width} height={height} background={0xff11151b}>
-        <Box x={0} y={0} width={width} height={70} background={0xff242b35}>
-            <Row>
-                <Text color={0xffdce3eb}>{data.status || "Preparing screenshot…"}</Text>
+    return <FixedWindow width="100%" height="100%" className="screenshot-window">
+        <Box x={0} y={0} width={width} height={70} className="screenshot-toolbar">
+            <Row className="screenshot-actions">
+                <Text className="screenshot-status">{data.status || "Preparing screenshot…"}</Text>
                 {data.confirmed ? button("screenshot-copy", "Copy", "copy", 112) : null}
                 {data.confirmed ? button("screenshot-save", "Save", "save", 104) : null}
                 {data.confirmed ? button("screenshot-path", "Copy file path", "temporary-path", 158) : null}
@@ -25,12 +25,12 @@ function App() {
             <Image asset="capture" width={preview.width} height={preview.height} fit="stretch" />
         </Box> : null}
         {selection ? <Box x={selection.x} y={selection.y}
-            width={selection.width} height={2} background={0xff81b6ff} /> : null}
+            width={selection.width} height={2} className="screenshot-selection" /> : null}
         {selection ? <Box x={selection.x} y={selection.y + selection.height - 2}
-            width={selection.width} height={2} background={0xff81b6ff} /> : null}
+            width={selection.width} height={2} className="screenshot-selection" /> : null}
         {selection ? <Box x={selection.x} y={selection.y}
-            width={2} height={selection.height} background={0xff81b6ff} /> : null}
+            width={2} height={selection.height} className="screenshot-selection" /> : null}
         {selection ? <Box x={selection.x + selection.width - 2} y={selection.y}
-            width={2} height={selection.height} background={0xff81b6ff} /> : null}
-    </Surface>;
+            width={2} height={selection.height} className="screenshot-selection" /> : null}
+    </FixedWindow>;
 }
