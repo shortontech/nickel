@@ -329,7 +329,7 @@ fn insets(source: &str) -> Result<Insets, String> {
     })
 }
 
-fn color(source: &str) -> Result<u32, String> {
+pub(crate) fn color(source: &str) -> Result<u32, String> {
     let source = source.trim();
     if source.eq_ignore_ascii_case("transparent") {
         return Ok(0);

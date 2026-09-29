@@ -7,6 +7,38 @@ use nickel_shell::plugin_panel::{
 };
 
 #[test]
+fn generic_color_swatch_renders_accessible_radio_and_custom_action() {
+    let script = "function App() { return h(Panel, {}, h(ColorSwatch, {id: 'blue', color: '#336699', selected: true, accessibilityLabel: 'Blue accent', onClick: () => nickel.request('show-launcher')}), h(ColorSwatch, {id: 'custom', accessibilityLabel: 'Custom color', onClick: () => nickel.request('show-launcher')})); }";
+    let host = UiHost::new(PluginPanelApplication::new(script).unwrap(), 320, 80);
+    assert!(
+        host.query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Radio,
+            name: "Blue accent".into(),
+        })
+        .is_ok()
+    );
+    assert!(
+        host.query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: "Custom color".into(),
+        })
+        .is_ok()
+    );
+    assert!(host.accessibility_nodes().iter().any(|node| {
+        node.semantic_role == Some(SemanticRole::Radio)
+            && node.label.as_deref() == Some("Blue accent")
+            && node.state.as_deref() == Some("selected")
+    }));
+    assert!(host.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::RoundedFill {
+            color: 0xff336699,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn directory_package_runs_in_the_same_jsx_host() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(

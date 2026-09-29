@@ -23,6 +23,7 @@ const ImageButton = 'image-button';
 const Progress = 'progress';
 const Slider = 'slider';
 const Switch = 'switch';
+const ColorSwatch = 'color-swatch';
 const TextField = 'text-field';
 const Button = 'button';
 const Spacer = 'spacer';

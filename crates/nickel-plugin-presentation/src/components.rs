@@ -332,6 +332,14 @@ pub enum PanelNode {
         label: String,
         action: Option<usize>,
     },
+    ColorSwatch {
+        id: String,
+        class_name: Option<String>,
+        color: Option<u32>,
+        selected: bool,
+        label: String,
+        action: usize,
+    },
     Spacer {
         class_name: Option<String>,
     },
@@ -486,6 +494,12 @@ impl PanelNode {
             Self::Section {
                 id, label, value, ..
             } => capacity(id) + capacity(label) + capacity(value),
+            Self::ColorSwatch {
+                id,
+                class_name,
+                label,
+                ..
+            } => capacity(id) + class_name.as_ref().map_or(0, capacity) + capacity(label),
             Self::Div { children, .. }
             | Self::Row { children, .. }
             | Self::Column { children, .. }
@@ -627,6 +641,7 @@ impl PanelNode {
                     | "text-field"
                     | "slider"
                     | "switch"
+                    | "color-swatch"
                     | "button"
             )
         {
@@ -1212,6 +1227,41 @@ impl PanelNode {
                         .ok_or("switch needs an accessibility label")?
                         .to_owned(),
                     action,
+                })
+            }
+            "color-swatch" => {
+                if !children.is_empty() {
+                    return Err("color swatch cannot have children".into());
+                }
+                let label = value
+                    .get("accessibilityLabel")
+                    .and_then(Value::as_str)
+                    .filter(|label| !label.is_empty() && label.len() <= 256)
+                    .ok_or("color swatch needs an accessibility label")?;
+                let color = match value.get("color") {
+                    Some(Value::String(color)) => Some(crate::css::color(color)?),
+                    Some(Value::Null) | None => None,
+                    _ => return Err("color swatch color must be a CSS color".into()),
+                };
+                Ok(Self::ColorSwatch {
+                    id: value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 128)
+                        .ok_or("color swatch needs a bounded id")?
+                        .to_owned(),
+                    class_name,
+                    color,
+                    selected: value
+                        .get("selected")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    label: label.to_owned(),
+                    action: value
+                        .get("action")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok())
+                        .ok_or("color swatch needs an onClick handler")?,
                 })
             }
             "text-field" => Ok(Self::TextField {
@@ -2115,6 +2165,62 @@ impl PanelNode {
                 }
                 with_margin(AnyView::new(control), &style)
             }
+            Self::ColorSwatch {
+                id,
+                class_name,
+                color,
+                selected,
+                label,
+                action,
+            } => {
+                let style = stylesheet.resolve("color-swatch", Some(id), class_name.as_deref());
+                let inner = if let Some(color) = color {
+                    let mut fill = Container::new().width(32.0).height(32.0).radius(16.0);
+                    fill = if *color == 0 {
+                        fill.clear_background()
+                    } else {
+                        fill.background(*color)
+                    };
+                    AnyView::new(fill)
+                } else {
+                    AnyView::new(
+                        Text::new("+")
+                            .font_size(24.0)
+                            .color(style.color.unwrap_or(0xff777777)),
+                    )
+                };
+                let control = Container::new()
+                    .id(id.clone())
+                    .width(42.0)
+                    .height(42.0)
+                    .radius(21.0)
+                    .padding(Insets::all(4.0))
+                    .border(
+                        style.border_color.unwrap_or(if *selected {
+                            0xfff0f0f0
+                        } else {
+                            0xff777777
+                        }),
+                        style
+                            .border_width
+                            .unwrap_or(if *selected { 2.0 } else { 1.0 }),
+                    )
+                    .align_items(nickel_ui::Align::Center)
+                    .justify_content(nickel_ui::Justify::Center)
+                    .semantic_role(if color.is_some() {
+                        SemanticRole::Radio
+                    } else {
+                        SemanticRole::Button
+                    })
+                    .accessibility_label(label)
+                    .accessibility_state(if *selected { "selected" } else { "unselected" })
+                    .message(Message::from_plugin_scoped(
+                        PluginMessage::Click(*action),
+                        scope,
+                    ))
+                    .child(inner);
+                with_margin(AnyView::new(apply_container_style(control, &style)), &style)
+            }
             Self::TextField {
                 id,
                 class_name,
@@ -2324,6 +2430,7 @@ impl PanelNode {
                 action: Some(action),
                 ..
             } if id == requested_id => Some(*action),
+            Self::ColorSwatch { id, action, .. } if id == requested_id => Some(*action),
             Self::Image {
                 id: Some(id),
                 action: Some(action),
@@ -2524,7 +2631,11 @@ fn parse_panel_for_manifest(
             return;
         };
         let kind = node.get("kind").and_then(Value::as_str).unwrap_or("");
-        if matches!(kind, "text-field" | "image-button" | "slider") && !node.contains_key("id") {
+        if matches!(
+            kind,
+            "text-field" | "image-button" | "slider" | "color-swatch"
+        ) && !node.contains_key("id")
+        {
             let mut hash = 0xcbf29ce484222325_u64;
             for byte in path.bytes().chain(kind.bytes()) {
                 hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);

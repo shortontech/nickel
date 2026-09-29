@@ -80,6 +80,26 @@ interface NickelTextFieldProps extends NickelProps {
     secure?: boolean;
     onChange: (value: string) => void;
 }
+interface NickelSliderProps extends NickelProps {
+    id?: string;
+    value: number;
+    accessibilityLabel: string;
+    onChange: (fraction: number) => void;
+}
+interface NickelSwitchProps extends NickelProps {
+    id: string;
+    state: "on" | "off" | "disabled-on" | "disabled-off";
+    accessibilityLabel: string;
+    onClick?: NickelClick;
+}
+interface NickelColorSwatchProps extends NickelProps {
+    id?: string;
+    /** CSS color; omit for the custom-color button. */
+    color?: string;
+    selected?: boolean;
+    accessibilityLabel: string;
+    onClick: NickelClick;
+}
 interface NickelImageProps extends NickelProps {
     asset: string;
     width: number;
@@ -190,6 +210,9 @@ declare function Image(props: NickelImageProps): JSX.Element;
 declare function ImageButton(props: NickelImageButtonProps): JSX.Element;
 declare function Progress(props: NickelProgressProps): JSX.Element;
 declare function TextField(props: NickelTextFieldProps): JSX.Element;
+declare function Slider(props: NickelSliderProps): JSX.Element;
+declare function Switch(props: NickelSwitchProps): JSX.Element;
+declare function ColorSwatch(props: NickelColorSwatchProps): JSX.Element;
 declare function Button(props: NickelButtonProps): JSX.Element;
 declare function Spacer(props: NickelProps): JSX.Element;
 declare function Dialog(props: NickelDialogProps): JSX.Element;

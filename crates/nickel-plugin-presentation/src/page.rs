@@ -184,4 +184,39 @@ mod tests {
         assert_eq!(node.button_action("pending"), None);
         assert!(matches!(node, PanelNode::Button { disabled: true, .. }));
     }
+
+    #[test]
+    fn color_swatch_keeps_selection_and_dispatches_its_handler() {
+        let manifest =
+            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
+                .unwrap();
+        let source = "function App() { return h(Div, {}, h(ColorSwatch, {id: 'accent', color: '#336699', selected: true, accessibilityLabel: 'Blue accent', onClick: () => nickel.request({type: 'accent', hue: 210})}), h(ColorSwatch, {accessibilityLabel: 'Custom color', onClick: () => nickel.request({type: 'custom'})})); }";
+        let mut page = JsxPage::new(source, manifest, None).unwrap();
+        let node = page.render(&json!({})).unwrap();
+        let PanelNode::Div { children, .. } = node else {
+            panic!("expected color swatch container")
+        };
+        assert!(matches!(
+            &children[0],
+            PanelNode::ColorSwatch {
+                color: Some(0xff336699),
+                selected: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &children[1],
+            PanelNode::ColorSwatch {
+                color: None,
+                selected: false,
+                ..
+            }
+        ));
+        let action = node.button_action("accent").unwrap();
+        assert_eq!(
+            page.dispatch(action, &Value::Null, &json!({}), Ok::<_, String>)
+                .unwrap(),
+            json!({"type": "accent", "hue": 210})
+        );
+    }
 }
