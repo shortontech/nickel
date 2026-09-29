@@ -5407,7 +5407,7 @@ impl NickelSession {
             if !shell.visible(surface.id) {
                 continue;
             }
-            if surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
+            if surface.role == crate::winit_shell::SurfaceRole::Screenshot
                 && let Some(target) = shell.screenshot_output()
                 && let Some((output, _, _)) =
                     outputs.iter().find(|(output, _, _)| output.name == target)
@@ -7250,28 +7250,20 @@ impl NickelSession {
             {
                 surface.size = size;
             }
-            let screenshot_plugin =
-                surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key());
-            let interaction_output = if screenshot_plugin {
-                shell.screenshot_output().map(str::to_owned)
-            } else {
-                match surface.role {
-                    crate::winit_shell::SurfaceRole::ControlCenter => shell
-                        .popover_anchor(nickel_session_protocol::AnchorSide::Above)
-                        .filter(|(role, _)| {
-                            *role == nickel_session_protocol::ShellRole::ControlCenter
-                        })
-                        .map(|(_, anchor)| anchor.output),
-                    crate::winit_shell::SurfaceRole::VolumeOsd => {
-                        self.preferred_interaction_output_name()
-                    }
-                    crate::winit_shell::SurfaceRole::Screenshot => {
-                        shell.screenshot_output().map(str::to_owned)
-                    }
-                    _ => None,
+            let interaction_output = match surface.role {
+                crate::winit_shell::SurfaceRole::ControlCenter => shell
+                    .popover_anchor(nickel_session_protocol::AnchorSide::Above)
+                    .filter(|(role, _)| *role == nickel_session_protocol::ShellRole::ControlCenter)
+                    .map(|(_, anchor)| anchor.output),
+                crate::winit_shell::SurfaceRole::VolumeOsd => {
+                    self.preferred_interaction_output_name()
                 }
+                crate::winit_shell::SurfaceRole::Screenshot => {
+                    shell.screenshot_output().map(str::to_owned)
+                }
+                _ => None,
             };
-            if screenshot_plugin
+            if surface.role == crate::winit_shell::SurfaceRole::Screenshot
                 && let Some((output, _, _)) = outputs.iter().find(|(output, _, _)| {
                     interaction_output.as_deref() == Some(output.name.as_str())
                 })
@@ -7294,9 +7286,9 @@ impl NickelSession {
                 surface.role,
                 crate::winit_shell::SurfaceRole::Launcher
                     | crate::winit_shell::SurfaceRole::ControlCenter
+                    | crate::winit_shell::SurfaceRole::Screenshot
             ) || surface.plugin.as_ref()
                 == Some(&crate::plugin_panel::control_center_surface_key())
-                || screenshot_plugin
             {
                 surface.size = (placement.geometry.2, placement.geometry.3);
                 resized = shell.set_surface_size(surface.id, surface.size);
@@ -7456,8 +7448,7 @@ impl NickelSession {
                 crate::winit_shell::SurfaceRole::ControlCenter
                     | crate::winit_shell::SurfaceRole::Screenshot
                     | crate::winit_shell::SurfaceRole::WindowContextMenu
-            ) || screenshot_plugin
-            {
+            ) {
                 focus_on_show = Some(runtime_id);
             }
         }
@@ -7907,8 +7898,6 @@ fn remote_shell_surface_event_role(
 ) -> Option<nickel_remote_control::desktop_events::ShellEventRole> {
     if shell.is_taskbar_surface_id(id) {
         Some(nickel_remote_control::desktop_events::ShellEventRole::Panel)
-    } else if shell.is_screenshot_surface_id(id) {
-        Some(nickel_remote_control::desktop_events::ShellEventRole::Screenshot)
     } else {
         remote_shell_event_role(role)
     }

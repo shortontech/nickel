@@ -1293,9 +1293,6 @@ impl NickelSession {
                 SurfaceRole::Panel if shell.is_taskbar_surface_id(entry.id) => {
                     ShellDiagnosticRole::Panel
                 }
-                SurfaceRole::Panel if shell.is_screenshot_surface_id(entry.id) => {
-                    ShellDiagnosticRole::Screenshot
-                }
                 SurfaceRole::Launcher => ShellDiagnosticRole::Launcher,
                 SurfaceRole::ControlCenter => ShellDiagnosticRole::ControlCenter,
                 SurfaceRole::Notification => ShellDiagnosticRole::Notification,

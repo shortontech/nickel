@@ -371,13 +371,6 @@ impl InternalShellCoordinator {
                 {
                     continue;
                 }
-                if role == SurfaceRole::Screenshot
-                    && (self
-                        .shell
-                        .plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key()))
-                {
-                    continue;
-                }
                 let plugin = match role {
                     SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
                     SurfaceRole::WindowPreview => {
@@ -499,19 +492,12 @@ impl InternalShellCoordinator {
             .is_none_or(|entry| {
                 let role = if self.is_taskbar_surface(entry) {
                     SurfaceRole::Taskbar
-                } else if self.is_screenshot_surface_id(id) {
-                    SurfaceRole::Screenshot
                 } else {
                     entry.role
-                };
-                let visible_role = if self.is_screenshot_surface_id(id) {
-                    entry.role
-                } else {
-                    role
                 };
                 !self
                     .shell
-                    .native_surface_visible(visible_role, entry.plugin.as_ref())
+                    .native_surface_visible(role, entry.plugin.as_ref())
                     || self.shell.surface_remote_access_protected(role)
             })
     }
@@ -520,8 +506,6 @@ impl InternalShellCoordinator {
         let entry = self.entries.iter().find(|entry| entry.id == id)?;
         let role = if self.is_taskbar_surface(entry) {
             SurfaceRole::Taskbar
-        } else if self.is_screenshot_surface_id(id) {
-            SurfaceRole::Screenshot
         } else {
             entry.role
         };
@@ -543,9 +527,6 @@ impl InternalShellCoordinator {
             .native_surface_visible(entry.role, entry.plugin.as_ref())
         {
             return Err("shell surface is hidden or retired".into());
-        }
-        if self.is_screenshot_surface_id(id) {
-            return self.shell.bounded_plugin_screenshot_semantics();
         }
         if self.is_taskbar_surface(entry) {
             return self.shell.bounded_plugin_panel_semantics(
@@ -695,8 +676,6 @@ impl InternalShellCoordinator {
             || (roles.contains(&SurfaceRole::OnScreenKeyboard)
                 && surface.plugin.as_ref()
                     == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()))
-            || (roles.contains(&SurfaceRole::Screenshot)
-                && surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key()))
     }
 
     pub fn visible(&self, id: InternalSurfaceId) -> bool {
@@ -1534,15 +1513,6 @@ impl InternalShellCoordinator {
             .iter()
             .find(|surface| surface.id == id)
             .is_some_and(|surface| self.is_taskbar_surface(surface))
-    }
-
-    pub(crate) fn is_screenshot_surface_id(&self, id: InternalSurfaceId) -> bool {
-        self.entries
-            .iter()
-            .find(|surface| surface.id == id)
-            .is_some_and(|surface| {
-                surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
-            })
     }
 
     pub(crate) fn is_reserved_panel_surface_id(&self, id: InternalSurfaceId) -> bool {
@@ -3518,9 +3488,6 @@ mod tests {
 
     fn opened_screenshot() -> (InternalShellCoordinator, InternalSurfaceId) {
         let mut coordinator = coordinator();
-        coordinator
-            .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
-            .unwrap();
         coordinator.set_outputs(&[InternalOutput {
             x: 0,
             y: 0,
@@ -3703,9 +3670,6 @@ mod tests {
         let mut coordinator =
             InternalShellCoordinator::new(Arc::new(CopyHost(copies.clone())), PanelEdge::Bottom)
                 .unwrap();
-        coordinator
-            .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
-            .unwrap();
         coordinator.set_outputs(&[InternalOutput {
             x: 0,
             y: 0,
@@ -3777,9 +3741,6 @@ mod tests {
     #[test]
     fn native_screenshot_capture_is_available_without_plugin() {
         let mut coordinator = coordinator();
-        coordinator
-            .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
-            .unwrap();
         coordinator.set_outputs(&[InternalOutput {
             x: 0,
             y: 0,
@@ -3804,9 +3765,6 @@ mod tests {
     #[test]
     fn production_print_screen_reducer_requests_internal_capture_surface() {
         let mut coordinator = coordinator();
-        coordinator
-            .set_plugin_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
-            .unwrap();
         coordinator.set_outputs(&[InternalOutput {
             x: 0,
             y: 0,

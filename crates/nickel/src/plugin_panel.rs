@@ -3468,7 +3468,6 @@ mod tests {
             "hello-panel",
             "taskbar",
             "launcher",
-            "desktop",
             "notification",
             "run",
             "control-center",

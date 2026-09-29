@@ -1904,7 +1904,8 @@ impl LiveShell {
             }
         }
         #[cfg(test)]
-        if plugin_activation.desired_enabled(&crate::plugin_panel::screenshot_manifest().id, true) {
+        if plugin_activation.desired_enabled(&crate::plugin_panel::screenshot_manifest().id, false)
+        {
             let id = &crate::plugin_panel::screenshot_manifest().id;
             shell.plugin_registry.set_enabled(id, true)?;
             let data = shell.screenshot.plugin_presentation(1, 1).data;

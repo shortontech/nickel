@@ -135,15 +135,6 @@ impl LiveShell {
         })
     }
 
-    pub(crate) fn bounded_plugin_screenshot_semantics(&self) -> Result<Projection, String> {
-        let key = crate::plugin_panel::screenshot_surface_key();
-        let (_, host) = self
-            .plugin_panel_extra_hosts
-            .get(&key)
-            .ok_or("screenshot plugin is unavailable")?;
-        Ok(observe_only(plugin_projection(host, |_, _| false)?))
-    }
-
     pub(crate) fn bounded_shell_semantics(
         &self,
         role: SurfaceRole,

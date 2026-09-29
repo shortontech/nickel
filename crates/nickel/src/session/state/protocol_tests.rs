@@ -7955,7 +7955,7 @@ fn task_switcher_opens_on_the_pointer_output() {
 }
 
 #[test]
-fn screenshot_plugin_captures_and_opens_on_the_invoking_pointer_output() {
+fn native_screenshot_captures_and_opens_on_the_invoking_pointer_output() {
     use crate::session_host::DesktopCapturePoll;
     use nickel_session_protocol::{InputState, TestInput, TestKey, TestPointerButton};
     #[derive(Default)]
@@ -8017,11 +8017,7 @@ fn screenshot_plugin_captures_and_opens_on_the_invoking_pointer_output() {
     let shell = session.internal_shell.as_mut().unwrap();
     shell.poll(Instant::now() + Duration::from_millis(100));
     let screenshot = shell
-        .surfaces()
-        .iter()
-        .find(|surface| {
-            surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
-        })
+        .surface(crate::winit_shell::SurfaceRole::Screenshot, None)
         .unwrap()
         .id;
     assert!(shell.visible(screenshot));
@@ -8056,7 +8052,7 @@ fn screenshot_plugin_captures_and_opens_on_the_invoking_pointer_output() {
             }
             _ => None,
         })
-        .expect("JSX screenshot renders the captured image on the selected output");
+        .expect("native screenshot renders the captured image on the selected output");
     assert_eq!(rendered_capture.get_pixel(23, 19).0, [17, 91, 213, 255]);
 
     session
@@ -8176,7 +8172,7 @@ fn native_screenshot_clipboard_retains_each_payload_for_repeated_paste() {
 }
 
 #[test]
-fn screenshot_plugin_claims_keyboard_on_show_and_escape_hides_without_clicking() {
+fn native_screenshot_claims_keyboard_on_show_and_escape_hides_without_clicking() {
     use nickel_session_protocol::{InputState, ShortcutAction, TestInput, TestKey};
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
@@ -8184,11 +8180,7 @@ fn screenshot_plugin_claims_keyboard_on_show_and_escape_hides_without_clicking()
     shell.global_shortcut(ShortcutAction::ShowScreenshotTool);
     shell.poll(Instant::now() + Duration::from_millis(100));
     let screenshot = shell
-        .surfaces()
-        .iter()
-        .find(|surface| {
-            surface.plugin.as_ref() == Some(&crate::plugin_panel::screenshot_surface_key())
-        })
+        .surface(crate::winit_shell::SurfaceRole::Screenshot, None)
         .unwrap()
         .id;
     assert!(shell.visible(screenshot));
