@@ -2561,8 +2561,10 @@ impl PanelNode {
                 let mut container = Container::new()
                     .id(id.clone())
                     .accessibility_label(accessibility_label)
-                    .semantic_role(SemanticRole::Button)
-                    .height(height.unwrap_or(42) as f32);
+                    .semantic_role(SemanticRole::Button);
+                if let Some(height) = height {
+                    container = container.height(*height as f32);
+                }
                 if !disabled {
                     container = container.message(Message::from_plugin_scoped(
                         PluginMessage::Click(*action),
