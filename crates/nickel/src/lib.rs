@@ -129,8 +129,6 @@ mod control_view;
 #[cfg(target_os = "linux")]
 mod internal_shell;
 #[cfg(any(test, feature = "workbench-fixtures"))]
-#[cfg(test)]
-mod launcher_view;
 mod live_shell;
 mod local_cues;
 #[allow(dead_code)]

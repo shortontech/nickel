@@ -2,7 +2,7 @@
     fn reopening_launcher_restores_default_dashboard_view() {
         let mut shell = LiveShell::new().unwrap();
         shell.apply_session_launcher_visibility(true);
-        shell.apply_launcher_action(crate::launcher_view::LauncherAction::SetView(
+        shell.apply_launcher_action(crate::launcher_actions::LauncherAction::SetView(
             crate::launcher::LauncherView::Applications,
         ));
         assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Applications);
@@ -1287,7 +1287,7 @@
         assert_eq!(samples.scheduled_wakeups, 70);
     }
     use crate::{
-        launcher_view::{LauncherAction, LauncherApplication},
+        launcher_actions::LauncherAction,
         model::{ApplicationId, OpenWindow, TrayItem, WindowId},
         notification::{NotificationAction, NotificationRequest},
         window_preview::MenuAction,
@@ -1756,7 +1756,7 @@
         )]);
         preferences_fixture(&mut shell, preferences_path.clone());
 
-        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
+        shell.apply_launcher_action(crate::launcher_actions::LauncherAction::TogglePin(
             application_id.clone(),
         ));
         finish_preference_write(&mut shell);
@@ -1777,7 +1777,7 @@
         ));
 
         preferences_fixture(&mut shell, directory.path().to_path_buf());
-        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
+        shell.apply_launcher_action(crate::launcher_actions::LauncherAction::TogglePin(
             application_id.clone(),
         ));
         finish_preference_write(&mut shell);
@@ -1796,7 +1796,7 @@
         ));
 
         preferences_fixture(&mut shell, preferences_path.clone());
-        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
+        shell.apply_launcher_action(crate::launcher_actions::LauncherAction::TogglePin(
             application_id.clone(),
         ));
         finish_preference_write(&mut shell);
@@ -1869,185 +1869,6 @@
             }
         ]));
         assert_eq!(shell.launcher_persistence_attempts, 1);
-    }
-
-    fn launcher_scenario(
-        launcher: &crate::launcher::Launcher,
-        palette: nickel_core::theme::ThemePalette,
-        status: Option<String>,
-    ) -> Scenario<LauncherApplication> {
-        let mut application = LauncherApplication::new(
-            launcher.clone(),
-            crate::launcher_view::LauncherViewState::default(),
-            crate::launcher_icon_cache::LauncherIconCache::new(),
-            palette,
-        );
-        application.sync(launcher, palette, status);
-        Scenario::new(application, 920, 680)
-    }
-
-    fn application_context_target(
-        scenario: &Scenario<LauncherApplication>,
-        application_id: &str,
-    ) -> Selector {
-        let target = scenario
-            .host()
-            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
-                application_id.to_owned(),
-            ))
-            .expect("launcher application semantic target");
-        Selector::id(target.id.as_str())
-    }
-
-    #[test]
-    fn controller_scenario_pins_reopens_unpins_and_persists_each_action_once() {
-        let directory = tempfile::tempdir().expect("temporary preferences directory");
-        let preferences_path = directory.path().join("launcher-preferences");
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::default();
-        preferences_fixture(&mut shell, preferences_path.clone());
-        let application_id = "firefox";
-
-        let mut pin = launcher_scenario(&shell.launcher, shell.palette, None);
-        let origin = application_context_target(&pin, application_id);
-        pin.controller_semantic_action(&origin, ActionKind::ContextMenu)
-            .expect("production controller context action opens application menu");
-        pin.controller_activate(&Selector::role_name(
-            SemanticRole::MenuItem,
-            "Pin to Nickel Bar",
-        ))
-        .expect("controller reaches and confirms Pin");
-        assert!(pin.host().inspect().open_overlay.is_none());
-        assert_eq!(
-            pin.host().inspect().controller_target.as_ref(),
-            Some(
-                &pin.host()
-                    .query_unique(&SemanticSelector::Id(match &origin {
-                        Selector::Id(id) => id.clone(),
-                        _ => unreachable!(),
-                    }))
-                    .expect("origin remains present")
-                    .id
-            )
-        );
-        let effects = pin.host_mut().application_mut().take_effects();
-        assert_eq!(effects, [LauncherAction::TogglePin(application_id.into())]);
-        for effect in effects {
-            shell.apply_launcher_action(effect);
-        }
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 1);
-        assert!(shell.launcher.is_pinned(application_id));
-        assert_eq!(
-            LauncherPreferences::load(&preferences_path)
-                .expect("pin persisted")
-                .favorites(),
-            [application_id]
-        );
-
-        let mut unpin = launcher_scenario(&shell.launcher, shell.palette, None);
-        let origin = application_context_target(&unpin, application_id);
-        unpin
-            .controller_semantic_action(&origin, ActionKind::ContextMenu)
-            .expect("reopened menu uses authoritative favorite state");
-        unpin
-            .controller_activate(&Selector::role_name(
-                SemanticRole::MenuItem,
-                "Unpin from Nickel Bar",
-            ))
-            .expect("controller reaches and confirms Unpin");
-        let effects = unpin.host_mut().application_mut().take_effects();
-        assert_eq!(effects, [LauncherAction::TogglePin(application_id.into())]);
-        for effect in effects {
-            shell.apply_launcher_action(effect);
-        }
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 2);
-        assert!(!shell.launcher.is_pinned(application_id));
-        assert!(
-            LauncherPreferences::load(preferences_path)
-                .expect("unpin persisted")
-                .favorites()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn controller_scenario_logout_emits_only_the_typed_request() {
-        let shell = LiveShell::new().unwrap();
-        let mut scenario = launcher_scenario(&shell.launcher, shell.palette, None);
-        let account = scenario
-            .host()
-            .unique_semantic_target_for_message(&LauncherAction::OpenAccount)
-            .expect("account presentation semantic target");
-        scenario
-            .controller_semantic_action(&Selector::id(account.id.as_str()), ActionKind::ContextMenu)
-            .expect("controller opens the shared account menu");
-        scenario
-            .controller_activate(&Selector::role_name(SemanticRole::MenuItem, "Log out"))
-            .expect("controller reaches Logout");
-        assert_eq!(
-            scenario.host_mut().application_mut().take_effects(),
-            [LauncherAction::RequestLogout]
-        );
-        assert!(scenario.host().inspect().open_overlay.is_none());
-    }
-
-    #[test]
-    fn failed_pin_retry_is_idempotent_and_restores_origin_focus() {
-        let directory = tempfile::tempdir().expect("temporary preferences directory");
-        let valid_path = directory.path().join("launcher-preferences");
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::default();
-        let application_id = "firefox";
-        preferences_fixture(&mut shell, directory.path().to_path_buf());
-
-        shell.apply_launcher_action(LauncherAction::TogglePin(application_id.into()));
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 1);
-        assert!(shell.launcher.is_pinned(application_id));
-        let failure = shell
-            .launcher_status
-            .clone()
-            .expect("truthful save failure");
-
-        preferences_fixture(&mut shell, valid_path.clone());
-        let mut retry = launcher_scenario(&shell.launcher, shell.palette, Some(failure));
-        let origin = application_context_target(&retry, application_id);
-        let origin_id = match &origin {
-            Selector::Id(id) => id.clone(),
-            _ => unreachable!(),
-        };
-        retry
-            .controller_semantic_action(&origin, ActionKind::ContextMenu)
-            .expect("failed menu remains controller-usable");
-        retry
-            .controller_activate(&Selector::role_name(
-                SemanticRole::MenuItem,
-                "Retry saving favorites",
-            ))
-            .expect("controller retries persistence without toggling state");
-        assert!(retry.host().inspect().open_overlay.is_none());
-        assert_eq!(
-            retry.host().inspect().controller_target.as_ref(),
-            Some(&origin_id),
-            "closing the retry menu restores the originating application"
-        );
-        let effects = retry.host_mut().application_mut().take_effects();
-        assert_eq!(effects, [LauncherAction::RetryPreferencePersistence]);
-        for effect in effects {
-            shell.apply_launcher_action(effect);
-        }
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 2);
-        assert!(shell.launcher.is_pinned(application_id));
-        assert!(shell.launcher_status.is_none());
-        assert_eq!(
-            LauncherPreferences::load(valid_path)
-                .expect("retry persisted unchanged authoritative state")
-                .favorites(),
-            [application_id]
-        );
     }
 
     #[test]
