@@ -58,16 +58,15 @@ impl DisplayPage {
             )?;
             self.last_theme = Some(theme);
         }
-        let Some(PanelNode::Div { children, .. }) = self.page.node() else {
+        let Some(root @ PanelNode::Div { .. }) = self.page.node() else {
             return Err("Display actions have an invalid root".into());
         };
-        if children.len() != 8 {
-            return Err("Display actions have an invalid structure".into());
-        }
         let PanelNode::Div {
             children: card_nodes,
             ..
-        } = &children[0]
+        } = root
+            .direct_child_with_class("display-cards")
+            .ok_or("Display arrangement is unavailable")?
         else {
             return Err("Display arrangement is invalid".into());
         };
@@ -121,8 +120,23 @@ impl DisplayPage {
             });
         }
         let images = PluginImages::new();
+        let control_nodes = [
+            "display-enabled-row",
+            "display-resolution",
+            "display-refresh",
+            "display-scale",
+            "display-actions",
+            "display-confirmation",
+            "display-application-scale",
+        ]
+        .map(|class| {
+            root.direct_child_with_class(class)
+                .ok_or_else(|| format!("Display section {class:?} is unavailable"))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
         let controls = std::array::from_fn(|index| {
-            children[index + 1].view_as_scoped::<SettingsMessage>(
+            control_nodes[index].view_as_scoped::<SettingsMessage>(
                 &images,
                 &self.stylesheet,
                 Some("display"),

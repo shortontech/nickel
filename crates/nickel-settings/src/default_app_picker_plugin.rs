@@ -63,16 +63,18 @@ impl DefaultAppPickerPage {
             )?;
             self.last_theme = Some(theme);
         }
-        let Some(PanelNode::Div { children, .. }) = self.page.node() else {
+        let Some(root @ PanelNode::Div { .. }) = self.page.node() else {
             return Err("Default application picker structure is invalid".into());
         };
-        if children.len() != 2 {
-            return Err("Default application picker needs header and candidate sections".into());
-        }
+        let header = root
+            .direct_child_with_class("app-picker-header")
+            .ok_or("Default application picker header is unavailable")?;
         let PanelNode::Div {
             children: candidates,
             ..
-        } = &children[1]
+        } = root
+            .direct_child_with_class("app-picker-candidates")
+            .ok_or("Default application candidates are unavailable")?
         else {
             return Err("Default application candidate list is invalid".into());
         };
@@ -101,7 +103,7 @@ impl DefaultAppPickerPage {
         self.data = Some(data.clone());
         self.data_bytes = data.to_string().len();
         Ok(DefaultAppPickerRendered {
-            header: children[0].view_as_scoped::<SettingsMessage>(
+            header: header.view_as_scoped::<SettingsMessage>(
                 &PluginImages::new(),
                 &self.stylesheet,
                 Some("default-app-picker"),

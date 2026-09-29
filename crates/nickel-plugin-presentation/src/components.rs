@@ -509,6 +509,46 @@ fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<M
 }
 
 impl PanelNode {
+    pub fn direct_child_with_class(&self, class: &str) -> Option<&Self> {
+        let children = match self {
+            Self::Box { children, .. }
+            | Self::Div { children, .. }
+            | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
+            | Self::Panel { children, .. }
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
+            | Self::ScrollView { children, .. } => children,
+            _ => return None,
+        };
+        let mut matches = children.iter().filter(|child| {
+            let class_name = match child {
+                Self::Box { class_name, .. }
+                | Self::Div { class_name, .. }
+                | Self::Surface { class_name, .. }
+                | Self::Viewport { class_name, .. }
+                | Self::Panel { class_name, .. }
+                | Self::Row { class_name, .. }
+                | Self::Column { class_name, .. }
+                | Self::ScrollView { class_name, .. }
+                | Self::Text { class_name, .. }
+                | Self::Slider { class_name, .. }
+                | Self::Switch { class_name, .. }
+                | Self::ColorSwatch { class_name, .. }
+                | Self::Select { class_name, .. }
+                | Self::Spacer { class_name, .. }
+                | Self::Slot { class_name, .. }
+                | Self::TextField { class_name, .. }
+                | Self::Button { class_name, .. } => class_name.as_deref(),
+                _ => None,
+            };
+            class_name
+                .is_some_and(|classes| classes.split_ascii_whitespace().any(|name| name == class))
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
     pub fn requested_window_size(&self, surface: &PluginSurface) -> Option<(u32, u32)> {
         let Self::Surface {
             window_request: Some(request),
@@ -3152,6 +3192,29 @@ pub fn render_panel(
     runtime.render(expression, |value| {
         parse_panel_for_manifest(value, manifest, expected_surface_id)
     })
+}
+
+#[cfg(test)]
+mod class_lookup_tests {
+    use super::PanelNode;
+
+    #[test]
+    fn direct_class_lookup_uses_whitespace_tokens_and_rejects_duplicates() {
+        let child = |class_name: &str| PanelNode::Column {
+            children: Vec::new(),
+            class_name: Some(class_name.into()),
+        };
+        let mut root = PanelNode::Column {
+            children: vec![child("content selected"), child("footer")],
+            class_name: None,
+        };
+        assert!(root.direct_child_with_class("selected").is_some());
+        assert!(root.direct_child_with_class("select").is_none());
+        if let PanelNode::Column { children, .. } = &mut root {
+            children.push(child("selected"));
+        }
+        assert!(root.direct_child_with_class("selected").is_none());
+    }
 }
 
 fn child_text(children: &[Value]) -> Result<String, String> {

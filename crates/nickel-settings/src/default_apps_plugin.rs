@@ -58,15 +58,19 @@ impl DefaultAppsPage {
             )?;
             self.last_theme = Some(theme);
         }
-        let Some(PanelNode::Div { children, .. }) = self.page.node() else {
+        let Some(root @ PanelNode::Div { children, .. }) = self.page.node() else {
             return Err("Default Apps page structure is invalid".into());
         };
-        if children.len() != 3 {
-            return Err("Default Apps page needs curated, advanced, and catalog sections".into());
-        }
+        root.direct_child_with_class("default-app-curated")
+            .ok_or("Default Apps curated section is unavailable")?;
+        root.direct_child_with_class("default-app-advanced")
+            .ok_or("Default Apps advanced section is unavailable")?;
+        let catalog_section = root
+            .direct_child_with_class("default-app-catalog")
+            .ok_or("Default Apps catalog is unavailable")?;
         let PanelNode::Div {
             children: catalog, ..
-        } = &children[2]
+        } = catalog_section
         else {
             return Err("Default Apps catalog structure is invalid".into());
         };
@@ -95,8 +99,9 @@ impl DefaultAppsPage {
         let images = PluginImages::new();
         let view = AnyView::new(
             Column::new().fill_width().gap(16.0).children(
-                children[..2]
+                children
                     .iter()
+                    .filter(|child| !std::ptr::eq(*child, catalog_section))
                     .map(|child| child.view_as::<SettingsMessage>(&images, &self.stylesheet)),
             ),
         );
