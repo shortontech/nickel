@@ -688,4 +688,10 @@ mod tests {
         let source = include_str!("../../../assets/plugins/taskbar/ui.css");
         StyleSheet::compile(source).unwrap();
     }
+
+    #[test]
+    fn bundled_launcher_stylesheet_compiles() {
+        let source = include_str!("../../../assets/plugins/launcher/ui.css");
+        StyleSheet::compile(source).unwrap();
+    }
 }

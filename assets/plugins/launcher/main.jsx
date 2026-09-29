@@ -8,14 +8,15 @@ function App() {
         setMenuTarget({id: item.id, index: item.index, pinned: item.pinned, kind, anchor});
         nickel.openMenu("launcher-app-actions");
     };
-    return <Viewport background={0xf12b303c} padding={20}>
-        <Text>Nickel Launcher</Text>
+    return <Window width={920} height={680} className="launcher-window">
+      <div className="launcher-content">
+        <Text className="launcher-title">Nickel Launcher</Text>
         {data.status ? <Text>{data.status}</Text> : null}
         <TextField id="launcher-query" value={data.query} placeholder="Search applications"
             onChange={query => nickel.request({type: "launcher-set-query", query})} />
         {data.dashboardVisible ? <ScrollView id="launcher-dashboard-scroll" grow={true}>
             <Text>Places</Text>
-            {data.places.map(place => <Row>
+            {data.places.map(place => <Row key={place.id}>
                 <Button id={"launcher-place-" + place.index}
                     icon={"place:" + place.index} showLabel={true}
                     onContextMenu={() => openAppMenu(place, "dashboard", "launcher-place-" + place.index)}
@@ -29,7 +30,7 @@ function App() {
             </Row>)}
             {data.codexAvailable ? <Column>
                 <Text>Recent projects</Text>
-                {data.projects.map(project => <Button id={"launcher-project-" + project.id}
+                {data.projects.map(project => <Button key={project.id} id={"launcher-project-" + project.id}
                     onClick={() => nickel.request({type: "launcher-open-project", id: project.id})}>
                     {project.name}
                 </Button>)}
@@ -51,7 +52,7 @@ function App() {
             </Row>
             <Text>{data.view === "favorites" ? "Pinned and recent" : data.view === "applications" ? "All applications" : "Places"}</Text>
             {data.dashboard.length === 0 ? <Text>No applications in this view</Text> : null}
-            {data.dashboard.map(app => <Row>
+            {data.dashboard.map(app => <Row key={app.id}>
                 <Button id={"launcher-dashboard-" + app.index}
                     icon={"dashboard:" + app.index} showLabel={true}
                     onContextMenu={() => openAppMenu(app, "dashboard", "launcher-dashboard-" + app.index)}
@@ -87,7 +88,7 @@ function App() {
         {!data.dashboardVisible ?
         <ScrollView id="launcher-search-scroll" grow={true}>
             {data.results.length === 0 ? <Text>No applications found</Text> : null}
-            {data.results.map(result => <Row>
+            {data.results.map(result => <Row key={result.id}>
                 <Button id={"launcher-result-" + result.index}
                     icon={"search:" + result.index} showLabel={true}
                     onContextMenu={() => openAppMenu(result, "search", "launcher-result-" + result.index)}
@@ -132,5 +133,6 @@ function App() {
                 {menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"}
             </MenuItem>
         </Menu> : null}
-    </Viewport>;
+      </div>
+    </Window>;
 }

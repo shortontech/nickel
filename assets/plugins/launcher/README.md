@@ -1,6 +1,6 @@
-# Launcher plugin prototype
+# Launcher plugin
 
-`main.jsx` is the source of Nickel's experimental JavaScript launcher view.
+`main.jsx` is the source of Nickel's JavaScript launcher view.
 `main.js` is the generated file that Nickel embeds at runtime. Rebuild it with:
 
 ```sh
@@ -19,9 +19,10 @@ The host supplies `nickel.data.query`, up to 12 ranked search results, a
 bounded pinned and recent app list, and Places. The plugin renders dashboard
 and search buttons inside native scroll views. The dashboard also shows recent
 projects, account, Settings, and a component logout dialog. The root
-`Viewport` declares the launcher's background and padding and fills the host
-window at its current output size. Its scroll view uses the remaining height,
-including on smaller outputs. Actions go through typed `nickel.request`
+`Window` binds to the manifest's `main` surface, while `ui.css` styles the
+window and a flex column. The title and search field keep their height as the
+scroll view takes the remaining space, including on smaller outputs. Actions
+go through typed `nickel.request`
 calls. The host checks declared capabilities and current launcher state,
 including app and project IDs, before acting. Search ranking,
 favorite state, application execution, and session authority remain Rust
@@ -38,6 +39,4 @@ Search and dashboard application lists request bounded pages from the host.
 Actions include the current catalog index and ID, which the host checks again
 against the visible page before launching or pinning.
 
-This is a comparison path while the full launcher, including keyboard and
-controller behavior and complete menu parity, is migrated and
-tested.
+Controller parity for the new JSX layout remains a later epic.

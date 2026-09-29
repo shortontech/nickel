@@ -662,10 +662,18 @@ fn apply_container_style(
     style: &ControlStyle,
 ) -> Container<PluginMessage> {
     if let Some(width) = style.width {
-        container = container.width_length(width);
+        container = if width == Length::Percent(1.0) {
+            container.fill_width()
+        } else {
+            container.width_length(width)
+        };
     }
     if let Some(height) = style.height {
-        container = container.height_length(height);
+        container = if height == Length::Percent(1.0) {
+            container.fill_height()
+        } else {
+            container.height_length(height)
+        };
     }
     if let Some(width) = style.min_width {
         container = container.min_width(width);
@@ -1801,6 +1809,12 @@ impl PanelNode {
                         if style.flex_direction.unwrap_or_default() == FlexDirection::Row =>
                     {
                         let mut row = Row::new();
+                        if style.width == Some(Length::Percent(1.0)) {
+                            row = row.fill_width();
+                        }
+                        if style.height == Some(Length::Percent(1.0)) {
+                            row = row.fill_height();
+                        }
                         if let Some(gap) = style.gap {
                             row = row.gap(gap);
                         }
@@ -1817,6 +1831,12 @@ impl PanelNode {
                     }
                     Display::Block | Display::Flex => {
                         let mut column = Column::new();
+                        if style.width == Some(Length::Percent(1.0)) {
+                            column = column.fill_width();
+                        }
+                        if style.height == Some(Length::Percent(1.0)) {
+                            column = column.fill_height();
+                        }
                         if let Some(gap) = style.gap {
                             column = column.gap(gap);
                         }
@@ -3799,6 +3819,10 @@ impl PluginPanelApplication {
         let data = projection.to_json();
         let mut application =
             Self::new_with_manifest(source.as_ref(), launcher_manifest(), Some(data))?;
+        application.stylesheet = bundled_stylesheet(
+            launcher_manifest(),
+            include_str!("../../../assets/plugins/launcher/ui.css"),
+        )?;
         application.launcher_shortcuts = Some(projection.into());
         Ok(application)
     }
@@ -5843,8 +5867,10 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        if matches!(&self.node, PanelNode::Viewport { .. })
-            || self.manifest.id == taskbar_manifest().id
+        if matches!(
+            &self.node,
+            PanelNode::Viewport { .. } | PanelNode::Surface { .. }
+        ) || self.manifest.id == taskbar_manifest().id
             || self.manifest.id == notification_manifest().id
             || self.manifest.id == run_manifest().id
             || self.manifest.id == window_preview_manifest().id
@@ -7551,19 +7577,26 @@ mod tests {
     }
 
     #[test]
-    fn launcher_plugin_owns_viewport_and_keeps_nested_controls_reachable() {
+    fn launcher_plugin_uses_window_root_and_keeps_nested_controls_reachable() {
         let launcher = Launcher::new(Vec::new());
         let panel = PluginPanelApplication::launcher(&launcher).unwrap();
         assert!(matches!(
             &panel.node,
-            PanelNode::Viewport {
-                background: 0xf12b_303c,
-                padding: 20,
+            PanelNode::Surface {
+                window_request: Some(_),
                 ..
             }
         ));
         assert!(panel.node.button_action("launcher-settings").is_some());
         assert!(panel.node.dialog("launcher-logout-dialog").is_some());
+        let host = nickel_ui::UiHost::new(panel, 920, 680);
+        let title = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Text,
+                name: "Nickel Launcher".into(),
+            })
+            .unwrap();
+        assert!(title.bounds.size.height >= 20.0, "{title:?}");
     }
 
     #[test]
