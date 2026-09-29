@@ -13,7 +13,9 @@ every `nickel.request` against the owning plugin's capabilities.
 
 ## Root contract needed
 
-- `<FixedWindow>` is a top-level root. `id` matches a manifest-authorized
+- `<Window>` is the single host surface root. `<FixedWindow>` is a normal JSX
+  helper that returns `<Window placement="fixed" ... />`; it has no separate
+  Rust rendering or lifecycle path. `id` matches a manifest-authorized
   surface; JSX chooses its placement and children. The host applies one generic
   creation, input, rendering, and retirement path.
 - Taskbar needs `output="all"`, `anchor="bottom"`, `width="100%"`, `height={56}`,
