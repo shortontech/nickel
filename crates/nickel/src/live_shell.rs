@@ -4795,6 +4795,24 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
+    fn retire_notification_plugin_state(&mut self) {
+        self.plugin_notification_host = None;
+        if !self.trusted_notification_visible() {
+            self.notification = None;
+            self.notification_history_visible = false;
+        }
+    }
+
+    fn fail_notification_plugin_runtime(&mut self, error: String) {
+        let id = &crate::plugin_panel::notification_manifest().id;
+        tracing::warn!(plugin = id, %error, "bundled Notifications plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.retire_notification_plugin_state();
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -4940,11 +4958,7 @@ impl LiveShell {
             } else if id == crate::plugin_panel::taskbar_manifest().id {
                 self.retire_taskbar_plugin_state();
             } else if id == crate::plugin_panel::notification_manifest().id {
-                self.plugin_notification_host = None;
-                if !self.trusted_notification_visible() {
-                    self.notification = None;
-                    self.notification_history_visible = false;
-                }
+                self.retire_notification_plugin_state();
             } else if id == crate::plugin_panel::volume_osd_manifest().id {
                 self.plugin_volume_osd_host = None;
                 self.volume_osd_until = None;
@@ -10194,12 +10208,16 @@ impl LiveShell {
         {
             Ok(changed) => changed,
             Err(error) => {
-                tracing::error!(%error, "notification plugin projection failed");
-                false
+                self.fail_notification_plugin_runtime(error);
+                return None;
             }
         };
         let mut outcome = host.step(batch);
         let effects = host.application_mut().take_effects();
+        if let Some(error) = host.application_mut().take_runtime_failure() {
+            self.fail_notification_plugin_runtime(error);
+            return None;
+        }
         let _ = self.plugin_registry.record_memory(
             &crate::plugin_panel::notification_manifest().id,
             nickel_core::plugins::PluginMemory {

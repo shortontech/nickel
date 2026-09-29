@@ -90,6 +90,70 @@
         );
     }
 
+    #[test]
+    fn notification_callback_failure_retires_ordinary_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let projection = shell.notification_plugin_projection();
+        let application = crate::plugin_panel::PluginPanelApplication::notification_with_test_source(
+            "function App() { return h(Panel, {}, h(Button, {id: 'notification-fail', onClick: () => { throw Error('notification callback exploded'); }}, 'Break Notifications')); }",
+            &projection,
+        )
+        .unwrap();
+        shell.plugin_notification_host = Some(nickel_ui::UiHost::new(application, 420, 180));
+        let target = shell
+            .plugin_notification_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Break Notifications".into(),
+            })
+            .unwrap();
+        assert!(shell
+            .step_notification_plugin(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(UiEvent::AccessibilityActivate(target.id))],
+                ..Default::default()
+            })
+            .is_none());
+        let id = &crate::plugin_panel::notification_manifest().id;
+        let entry = shell.plugin_registry().get(id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("notification callback exploded")));
+        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+        assert!(!shell.plugin_surface_matches(&crate::plugin_panel::notification_surface_key()));
+        assert!(shell.scene(SurfaceRole::Notification, 420, 180).is_empty());
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.plugin_notification_host.is_some());
+    }
+
+    #[test]
+    fn notification_projection_failure_retires_ordinary_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let projection = shell.notification_plugin_projection();
+        let application = crate::plugin_panel::PluginPanelApplication::notification_with_test_source(
+            "function App() { if (nickel.data.notification !== null) throw Error('notification projection exploded'); return h(Panel, {}, h(Text, {}, 'Notifications ready')); }",
+            &projection,
+        )
+        .unwrap();
+        shell.plugin_notification_host = Some(nickel_ui::UiHost::new(application, 420, 180));
+        shell.notification_feed.notify_internal(NotificationRequest {
+            app_name: "Test".into(),
+            summary: "Ready".into(),
+            body: "Ordinary notification".into(),
+            actions: vec![],
+            expire_timeout_ms: 0,
+        });
+        shell.notification = shell.notification_feed.snapshot();
+        assert!(shell.scene(SurfaceRole::Notification, 420, 180).is_empty());
+        let entry = shell
+            .plugin_registry()
+            .get(&crate::plugin_panel::notification_manifest().id)
+            .unwrap();
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("notification projection exploded")));
+        assert!(!shell.surface_visible(SurfaceRole::Notification));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn opening_plugin_notification_history_does_not_reopen_the_trusted_surface() {

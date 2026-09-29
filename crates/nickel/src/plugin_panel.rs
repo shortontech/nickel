@@ -3205,6 +3205,20 @@ impl PluginPanelApplication {
         Ok(application)
     }
 
+    #[cfg(test)]
+    pub(crate) fn notification_with_test_source(
+        source: &str,
+        projection: &NotificationPluginProjection,
+    ) -> Result<Self, String> {
+        let mut application =
+            Self::new_with_manifest(source, notification_manifest(), Some(projection.to_json()))?;
+        application.notification_shortcuts = Some((
+            projection.notification.as_ref().map(|item| item.id),
+            projection.history_visible,
+        ));
+        Ok(application)
+    }
+
     pub fn volume_osd_with_projection(
         projection: &VolumeOsdPluginProjection,
     ) -> Result<Self, String> {
