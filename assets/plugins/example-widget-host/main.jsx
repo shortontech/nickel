@@ -2,7 +2,7 @@
 function App() {
     const widgets = nickel.data.slots.metrics || [];
     const actions = nickel.data.slots.commands || [];
-    return <Panel height={280} background={0xff202830}>
+    return <Window width={420} height={280} className="widget-host">
         <Column>
             <Text>Widget host</Text>
             {actions.map(item => <Button key={item.pluginId + ':' + item.id}
@@ -17,5 +17,5 @@ function App() {
                 <Text>{item.value}</Text>
             </Row>)}
         </Column>
-    </Panel>;
+    </Window>;
 }

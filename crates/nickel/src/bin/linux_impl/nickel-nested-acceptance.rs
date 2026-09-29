@@ -81,6 +81,11 @@ fn run() -> Result<(), String> {
         include_str!("../../../../../assets/plugins/example-reserved-panel/main.js"),
     )
     .map_err(|error| error.to_string())?;
+    fs::write(
+        reserved.join("ui.css"),
+        include_str!("../../../../../assets/plugins/example-reserved-panel/ui.css"),
+    )
+    .map_err(|error| error.to_string())?;
     let window = runtime
         .join("config/nickel/plugins/org.example.component-window");
     fs::create_dir_all(&window).map_err(|error| error.to_string())?;
@@ -152,27 +157,33 @@ fn run() -> Result<(), String> {
         include_str!("../../../../../assets/plugins/example-overlay/ui.css"),
     )
     .map_err(|error| error.to_string())?;
-    for (id, manifest, source) in [
+    for (id, manifest, source, stylesheet) in [
         (
             "org.example.widget-host",
             include_str!("../../../../../assets/plugins/example-widget-host/plugin.json"),
             include_str!("../../../../../assets/plugins/example-widget-host/main.js"),
+            Some(include_str!("../../../../../assets/plugins/example-widget-host/ui.css")),
         ),
         (
             "org.example.widget-contributor",
             include_str!("../../../../../assets/plugins/example-widget-contributor/plugin.json"),
             include_str!("../../../../../assets/plugins/example-widget-contributor/main.js"),
+            None,
         ),
         (
             "org.example.action-contributor",
             include_str!("../../../../../assets/plugins/example-action-contributor/plugin.json"),
             include_str!("../../../../../assets/plugins/example-action-contributor/main.js"),
+            None,
         ),
     ] {
         let directory = runtime.join("config/nickel/plugins").join(id);
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
         fs::write(directory.join("plugin.json"), manifest).map_err(|error| error.to_string())?;
         fs::write(directory.join("main.js"), source).map_err(|error| error.to_string())?;
+        if let Some(stylesheet) = stylesheet {
+            fs::write(directory.join("ui.css"), stylesheet).map_err(|error| error.to_string())?;
+        }
     }
     let capability_file = runtime.join("shell-environment");
 

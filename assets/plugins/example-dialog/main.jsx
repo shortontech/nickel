@@ -2,7 +2,7 @@
 function App() {
     const [open, setOpen] = useState(false);
     const openCount = nickel.data.settings?.["open-count"] ?? 0;
-    return <Panel height={120} background={0xdd202830}>
+    return <FixedWindow width={320} height={120} className="dialog-example">
         <Button id="settings-example" onClick={() => {
             setOpen(true);
             nickel.openDialog("settings-example-dialog");
@@ -27,5 +27,5 @@ function App() {
                 </Row>
             </Column>
         </Dialog>
-    </Panel>;
+    </FixedWindow>;
 }

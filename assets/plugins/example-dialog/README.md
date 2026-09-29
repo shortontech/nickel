@@ -1,6 +1,6 @@
 # Settings dialog example
 
-This installed panel opens a JSX dialog. Its buttons request the typed
+This installed panel uses a `<FixedWindow>` root styled by `ui.css` and opens a JSX dialog. Its buttons request the typed
 `show-settings` and `set-plugin-setting` effects. Nickel opens Settings only
 with the declared `settings-show` grant, and saves the panel's own bounded
 `open-count` preference only with `settings-write`. Escape, outside input, and

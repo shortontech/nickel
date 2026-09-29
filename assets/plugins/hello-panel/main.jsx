@@ -6,7 +6,8 @@ function App() {
     const [count, setCount] = useState(0);
     const [dialogOpen, setDialogOpen] = useState(false);
     const showCount = nickel.data.settings?.["show-count"] !== false;
-    return <Panel background={0xc9262b36}>
+    return <FixedWindow width={440} height={220} output="all" edge="bottom"
+        bottomOffset={24} className="hello-panel">
         <Row>
             <Text>Nickel plugin panel</Text>
             {showCount ? <Button onClick={() => setCount(count + 1)}>Count: {count}</Button> : null}
@@ -25,5 +26,5 @@ function App() {
                 <Button onClick={() => setDialogOpen(false)}>Cancel</Button>
             </Row>
         </Dialog>
-    </Panel>;
+    </FixedWindow>;
 }

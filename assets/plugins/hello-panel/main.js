@@ -6,7 +6,7 @@ function App() {
     const [count, setCount] = useState(0);
     const [dialogOpen, setDialogOpen] = useState(false);
     const showCount = nickel.data.settings?.["show-count"] !== false;
-    return h(Panel, { background: 0xc9262b36 },
+    return h(FixedWindow, { width: 440, height: 220, output: "all", edge: "bottom", bottomOffset: 24, className: "hello-panel" },
         h(Row, null,
             h(Text, null, "Nickel plugin panel"),
             showCount ? h(Button, { onClick: () => setCount(count + 1) },

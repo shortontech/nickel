@@ -2,7 +2,7 @@
 function App() {
     const [open, setOpen] = useState(false);
     const openCount = nickel.data.settings?.["open-count"] ?? 0;
-    return h(Panel, { height: 120, background: 0xdd202830 },
+    return h(FixedWindow, { width: 320, height: 120, className: "dialog-example" },
         h(Button, { id: "settings-example", onClick: () => {
                 setOpen(true);
                 nickel.openDialog("settings-example-dialog");

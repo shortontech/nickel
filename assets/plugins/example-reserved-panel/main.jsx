@@ -1,7 +1,8 @@
 /// <reference path="../nickel-plugin.d.ts" />
 // @jsx h
 function App() {
-    return <Panel background={0xd9293440}>
+    return <FixedWindow width="100%" height={36} output="all" edge="bottom"
+        reserveWorkArea={true} className="reserved-panel">
         <Text>Reserved panel example</Text>
-    </Panel>;
+    </FixedWindow>;
 }

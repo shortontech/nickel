@@ -1335,7 +1335,12 @@ impl PluginPanelApplication {
     }
 
     pub fn new(source: &str) -> Result<Self, String> {
-        Self::new_with_manifest(source, manifest(), None)
+        let mut application = Self::new_with_manifest(source, manifest(), None)?;
+        application.stylesheet = bundled_stylesheet(
+            manifest(),
+            include_str!("../../../assets/plugins/hello-panel/ui.css"),
+        )?;
+        Ok(application)
     }
 
     pub fn from_package(package: &PluginPackage) -> Result<Self, String> {
