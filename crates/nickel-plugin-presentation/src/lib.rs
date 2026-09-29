@@ -2,3 +2,4 @@
 
 pub mod components;
 pub mod css;
+pub mod page;

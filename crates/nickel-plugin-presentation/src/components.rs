@@ -53,18 +53,32 @@ pub enum PluginMessage {
     Scroll,
 }
 
-fn map_plugin_drag(seed: PluginMessage, gesture: DragGesture) -> PluginMessage {
-    let PluginMessage::Button { drag, .. } = seed else {
-        unreachable!("plugin drag seed retains its handler")
-    };
-    PluginMessage::Drag(drag, gesture)
+/// Convert plugin control events at construction time, including controls
+/// whose value or drag messages are produced after hit testing.
+pub trait PluginUiMessage: Clone + 'static {
+    fn from_plugin(message: PluginMessage) -> Self;
+    fn drag(seed: Self, gesture: DragGesture) -> Self;
+    fn value(seed: Self, value: f32) -> Self;
 }
 
-fn map_plugin_value(seed: PluginMessage, value: f32) -> PluginMessage {
-    let PluginMessage::Value(action, _) = seed else {
-        unreachable!("plugin slider seed retains its handler")
-    };
-    PluginMessage::Value(action, value)
+impl PluginUiMessage for PluginMessage {
+    fn from_plugin(message: PluginMessage) -> Self {
+        message
+    }
+
+    fn drag(seed: Self, gesture: DragGesture) -> Self {
+        let Self::Button { drag, .. } = seed else {
+            unreachable!("plugin drag seed retains its handler")
+        };
+        Self::Drag(drag, gesture)
+    }
+
+    fn value(seed: Self, value: f32) -> Self {
+        let Self::Value(action, _) = seed else {
+            unreachable!("plugin slider seed retains its handler")
+        };
+        Self::Value(action, value)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -359,10 +373,10 @@ pub enum PanelNode {
     },
 }
 
-fn apply_container_style(
-    mut container: Container<PluginMessage>,
+fn apply_container_style<Message>(
+    mut container: Container<Message>,
     style: &ControlStyle,
-) -> Container<PluginMessage> {
+) -> Container<Message> {
     if let Some(width) = style.width {
         container = if width == Length::Percent(1.0) {
             container.fill_width()
@@ -426,7 +440,7 @@ fn apply_container_style(
     container
 }
 
-fn with_margin(view: AnyView<PluginMessage>, style: &ControlStyle) -> AnyView<PluginMessage> {
+fn with_margin<Message: Clone>(view: AnyView<Message>, style: &ControlStyle) -> AnyView<Message> {
     if let Some(margin) = style.margin {
         AnyView::new(Container::new().padding(margin).child(view))
     } else {
@@ -434,7 +448,7 @@ fn with_margin(view: AnyView<PluginMessage>, style: &ControlStyle) -> AnyView<Pl
     }
 }
 
-fn styled_text(mut text: Text<PluginMessage>, style: &ControlStyle) -> Text<PluginMessage> {
+fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<Message> {
     if let Some(color) = style.color {
         text = text.color(color);
     }
@@ -1433,6 +1447,14 @@ impl PanelNode {
     }
 
     pub fn view(&self, images: &PluginImages, stylesheet: &StyleSheet) -> AnyView<PluginMessage> {
+        self.view_as::<PluginMessage>(images, stylesheet)
+    }
+
+    pub fn view_as<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+    ) -> AnyView<Message> {
         match self {
             Self::Badge {
                 label,
@@ -1486,7 +1508,7 @@ impl PanelNode {
                 );
                 let icon_id = images.get(asset).map_or(0, |(id, _)| *id);
                 let mut tile = FilePlaneItem::new(
-                    PluginMessage::Click(action.unwrap_or(usize::MAX)),
+                    Message::from_plugin(PluginMessage::Click(action.unwrap_or(usize::MAX))),
                     label.clone(),
                     icon_id,
                     icon,
@@ -1526,7 +1548,7 @@ impl PanelNode {
                 children,
             } => {
                 let style = stylesheet.resolve("div", id.as_deref(), class_name.as_deref());
-                let content: AnyView<PluginMessage> = match style.display.unwrap_or_default() {
+                let content: AnyView<Message> = match style.display.unwrap_or_default() {
                     Display::Grid => {
                         let mut grid = style
                             .grid_columns
@@ -1536,7 +1558,7 @@ impl PanelNode {
                             grid = grid.gap(gap);
                         }
                         for child in children {
-                            grid = grid.child(child.view(images, stylesheet));
+                            grid = grid.child(child.view_as::<Message>(images, stylesheet));
                         }
                         AnyView::new(grid)
                     }
@@ -1560,7 +1582,7 @@ impl PanelNode {
                             row = row.justify_content(justify);
                         }
                         for child in children {
-                            row = row.child(child.view(images, stylesheet));
+                            row = row.child(child.view_as::<Message>(images, stylesheet));
                         }
                         AnyView::new(row)
                     }
@@ -1582,7 +1604,7 @@ impl PanelNode {
                             column = column.justify_content(justify);
                         }
                         for child in children {
-                            column = column.child(child.view(images, stylesheet));
+                            column = column.child(child.view_as::<Message>(images, stylesheet));
                         }
                         AnyView::new(column)
                     }
@@ -1609,7 +1631,7 @@ impl PanelNode {
                 let style = stylesheet.resolve("box", None, class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column = column.child(child.view(images, stylesheet));
+                    column = column.child(child.view_as::<Message>(images, stylesheet));
                 }
                 let container = Container::new()
                     .position(Point {
@@ -1647,7 +1669,7 @@ impl PanelNode {
                 let mut layer = Layer::new().width_length(*width).height_length(*height);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        layer = layer.child(child.view(images, stylesheet));
+                        layer = layer.child(child.view_as::<Message>(images, stylesheet));
                     }
                 }
                 let mut container = Container::new()
@@ -1671,7 +1693,7 @@ impl PanelNode {
             } => {
                 let mut column = Column::new().fill_width().fill_height();
                 for child in children {
-                    column = column.child(child.view(images, stylesheet));
+                    column = column.child(child.view_as::<Message>(images, stylesheet));
                 }
                 let style = stylesheet.resolve("viewport", None, class_name.as_deref());
                 let container = Container::new()
@@ -1700,7 +1722,7 @@ impl PanelNode {
                     .height((*height).saturating_sub(16) as f32);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        row = row.child(child.view(images, stylesheet));
+                        row = row.child(child.view_as::<Message>(images, stylesheet));
                     }
                 }
                 let style = stylesheet.resolve("panel", None, class_name.as_deref());
@@ -1725,7 +1747,7 @@ impl PanelNode {
                     row = row.gap(gap);
                 }
                 for child in children {
-                    row = row.child(child.view(images, stylesheet));
+                    row = row.child(child.view_as::<Message>(images, stylesheet));
                 }
                 if style == ControlStyle::default() {
                     AnyView::new(row)
@@ -1746,7 +1768,7 @@ impl PanelNode {
                     column = column.gap(gap);
                 }
                 for child in children {
-                    column = column.child(child.view(images, stylesheet));
+                    column = column.child(child.view_as::<Message>(images, stylesheet));
                 }
                 if style == ControlStyle::default() {
                     AnyView::new(column)
@@ -1770,9 +1792,9 @@ impl PanelNode {
                 let style = stylesheet.resolve("scroll-view", Some(id), class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column = column.child(child.view(images, stylesheet));
+                    column = column.child(child.view_as::<Message>(images, stylesheet));
                 }
-                let scroll = VerticalScroll::new(PluginMessage::Scroll, 0.0)
+                let scroll = VerticalScroll::new(Message::from_plugin(PluginMessage::Scroll), 0.0)
                     .id(id.clone())
                     .child(column);
                 let scroll = if *grow {
@@ -1859,10 +1881,11 @@ impl PanelNode {
                                 .expect("image button has a label")
                                 .clone(),
                         )
-                        .message(PluginMessage::Click(*action));
+                        .message(Message::from_plugin(PluginMessage::Click(*action)));
                     if let Some(context_action) = context_action {
-                        container =
-                            container.context_message(PluginMessage::Context(*context_action));
+                        container = container.context_message(Message::from_plugin(
+                            PluginMessage::Context(*context_action),
+                        ));
                     }
                 } else if let Some(label) = accessibility_label {
                     container = container
@@ -1904,8 +1927,8 @@ impl PanelNode {
             } => {
                 let style = stylesheet.resolve("slider", Some(id), class_name.as_deref());
                 let slider = Slider::on_change_with(
-                    PluginMessage::Value(*action, *value),
-                    map_plugin_value,
+                    Message::from_plugin(PluginMessage::Value(*action, *value)),
+                    Message::value,
                     *value,
                 )
                 .id(id.clone())
@@ -1948,13 +1971,13 @@ impl PanelNode {
                         '•',
                         {
                             let action = *action;
-                            move |value| PluginMessage::Text(action, value)
+                            move |value| Message::from_plugin(PluginMessage::Text(action, value))
                         },
                     )
                 } else {
                     UiTextField::on_change_with_placeholder_mapped(value, placeholder, {
                         let action = *action;
-                        move |value| PluginMessage::Text(action, value)
+                        move |value| Message::from_plugin(PluginMessage::Text(action, value))
                     })
                 };
                 let mut field = field.id(id.clone()).accessibility_label(placeholder);
@@ -2013,21 +2036,22 @@ impl PanelNode {
                     .id(id.clone())
                     .accessibility_label(accessibility_label)
                     .semantic_role(SemanticRole::Button)
-                    .message(PluginMessage::Click(*action))
+                    .message(Message::from_plugin(PluginMessage::Click(*action)))
                     .height(height.unwrap_or(42) as f32);
                 if let Some(width) = width {
                     container = container.width(*width as f32);
                 }
                 if let Some(action) = context_action {
-                    container = container.context_message(PluginMessage::Context(*action));
+                    container = container
+                        .context_message(Message::from_plugin(PluginMessage::Context(*action)));
                 }
                 if let Some(drag) = drag_action {
                     container = container.on_drag((
-                        PluginMessage::Button {
+                        Message::from_plugin(PluginMessage::Button {
                             click: *action,
                             drag: *drag,
-                        },
-                        map_plugin_drag,
+                        }),
+                        Message::drag,
                     ));
                 }
                 with_margin(
@@ -2112,6 +2136,23 @@ impl PanelNode {
             | Self::ScrollView { children, .. } => children
                 .iter()
                 .find_map(|child| child.button_action(requested_id)),
+            _ => None,
+        }
+    }
+
+    pub fn slider_action(&self, requested_id: &str) -> Option<usize> {
+        match self {
+            Self::Slider { id, action, .. } if id == requested_id => Some(*action),
+            Self::Box { children, .. }
+            | Self::Div { children, .. }
+            | Self::Surface { children, .. }
+            | Self::Viewport { children, .. }
+            | Self::Panel { children, .. }
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
+            | Self::ScrollView { children, .. } => children
+                .iter()
+                .find_map(|child| child.slider_action(requested_id)),
             _ => None,
         }
     }

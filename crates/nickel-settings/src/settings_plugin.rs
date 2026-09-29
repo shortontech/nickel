@@ -2,17 +2,47 @@
 
 use nickel_i18n::Localizer;
 use nickel_plugin_presentation::{
-    components::{PanelNode, PluginImages, render_panel},
+    components::{PluginImages, PluginMessage, PluginUiMessage},
     css::StyleSheet,
+    page::JsxPage,
 };
-use nickel_plugin_runtime::JsxRuntime;
-use nickel_ui::{AnyView, Component, SemanticTheme};
+use nickel_ui::{AnyView, DragGesture, SemanticTheme};
 use serde_json::{Value, json};
 
 use crate::SettingsMessage;
 
-fn stylesheet(theme: SemanticTheme) -> Result<StyleSheet, String> {
-    let mut source = include_str!("../../../assets/plugins/settings/settings-pages.css").to_owned();
+impl PluginUiMessage for SettingsMessage {
+    fn from_plugin(message: PluginMessage) -> Self {
+        match message {
+            PluginMessage::Click(action) | PluginMessage::Context(action) => {
+                Self::JsxAction(action, "null".into())
+            }
+            PluginMessage::Value(action, value) => Self::JsxAction(action, value.to_string()),
+            PluginMessage::Text(action, value) => Self::JsxAction(
+                action,
+                serde_json::to_string(&value).expect("a string serializes to JSON"),
+            ),
+            _ => Self::IgnoredPluginPresentation,
+        }
+    }
+
+    fn drag(_seed: Self, _gesture: DragGesture) -> Self {
+        Self::IgnoredPluginPresentation
+    }
+
+    fn value(seed: Self, value: f32) -> Self {
+        let Self::JsxAction(action, _) = seed else {
+            unreachable!("slider seed retains its handler")
+        };
+        Self::JsxAction(action, value.clamp(0.0, 1.0).to_string())
+    }
+}
+
+pub(super) fn stylesheet_template(
+    template: &str,
+    theme: SemanticTheme,
+) -> Result<StyleSheet, String> {
+    let mut source = template.to_owned();
     for (token, value) in [
         ("@content@", format!("{}", theme.spacing.content)),
         ("@compact@", format!("{}", theme.spacing.compact)),
@@ -34,6 +64,18 @@ fn stylesheet(theme: SemanticTheme) -> Result<StyleSheet, String> {
             "@secondary@",
             format!("#{:06x}", theme.text.secondary & 0x00ff_ffff),
         ),
+        (
+            "@accent@",
+            format!("#{:06x}", theme.accent.ordinary & 0x00ff_ffff),
+        ),
+        (
+            "@accent-soft@",
+            format!("#{:06x}", theme.accent.soft & 0x00ff_ffff),
+        ),
+        (
+            "@selected@",
+            format!("#{:06x}", theme.borders.selected & 0x00ff_ffff),
+        ),
     ] {
         source = source.replace(token, &value);
     }
@@ -41,31 +83,23 @@ fn stylesheet(theme: SemanticTheme) -> Result<StyleSheet, String> {
 }
 
 pub(super) struct OrdinaryPages {
-    runtime: JsxRuntime,
-    last_data: Option<String>,
-    node: Option<PanelNode>,
+    page: JsxPage,
     last_theme: Option<SemanticTheme>,
     stylesheet: StyleSheet,
 }
 
 impl OrdinaryPages {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.last_data.as_ref().map_or(0, String::capacity)
-            + self
-                .node
-                .as_ref()
-                .map_or(0, |node| node.contribution_bytes() as usize)
-            + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
     }
 
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            runtime: JsxRuntime::new(
+            page: JsxPage::new(
                 crate::settings_package::source(crate::settings_package::Script::OrdinaryPages)?,
+                crate::settings_package::manifest()?.clone(),
                 None,
             )?,
-            last_data: None,
-            node: None,
             last_theme: None,
             stylesheet: StyleSheet::default(),
         })
@@ -76,27 +110,16 @@ impl OrdinaryPages {
         data: Value,
         theme: SemanticTheme,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        let data = serde_json::to_string(&data).map_err(|error| error.to_string())?;
-        if self.last_data.as_deref() != Some(&data) {
-            self.runtime.set_data(&data)?;
-            self.node = Some(render_panel(
-                &mut self.runtime,
-                crate::settings_package::manifest()?,
-                None,
-                "__nickelRender()",
-            )?);
-            self.last_data = Some(data);
-        }
+        self.page.render(&data)?;
         if self.last_theme != Some(theme) {
-            self.stylesheet = stylesheet(theme)?;
+            self.stylesheet = stylesheet_template(
+                include_str!("../../../assets/plugins/settings/settings-pages.css"),
+                theme,
+            )?;
             self.last_theme = Some(theme);
         }
-        let node = self.node.as_ref().ok_or("Settings page is unavailable")?;
-        Ok(AnyView::new(
-            node.view(&PluginImages::new(), &self.stylesheet)
-                .into_element()
-                .map_message(|_| SettingsMessage::IgnoredPluginPresentation),
-        ))
+        let node = self.page.node().ok_or("Settings page is unavailable")?;
+        Ok(node.view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet))
     }
 
     pub(super) fn render_keyboard(
@@ -147,6 +170,8 @@ impl OrdinaryPages {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nickel_plugin_presentation::components::{PanelNode, render_panel};
+    use nickel_plugin_runtime::JsxRuntime;
 
     struct PageHost(AnyView<SettingsMessage>);
 
@@ -196,7 +221,7 @@ mod tests {
         let about = pages.render_about(&localizer, theme).unwrap();
         let _ = (keyboard, about);
         assert!(matches!(
-            pages.node.as_ref(),
+            pages.page.node(),
             Some(PanelNode::Div { children, .. }) if children.len() == 4
         ));
         assert_eq!(

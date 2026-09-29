@@ -591,8 +591,7 @@ enum SettingsMessage {
     BarAllDisplays,
     BarDisplayWindows,
     BarAllWindows,
-    BarJsxAction(usize),
-    BarJsxSlider(u16),
+    JsxAction(usize, String),
     SetDesktopCount(u8),
     DisplayScroll,
     DisplayIdentify,
@@ -1919,11 +1918,12 @@ impl SettingsApp {
                 self.shell_settings.all_windows_on_every_bar = true;
                 self.persist_shell_behavior(previous);
             }
-            SettingsMessage::BarJsxAction(index) => {
-                self.handle_bar_jsx_action(index, serde_json::Value::Null);
-            }
-            SettingsMessage::BarJsxSlider(position) => {
-                self.handle_bar_jsx_slider(f32::from(position) / f32::from(u16::MAX));
+            SettingsMessage::JsxAction(index, value) => {
+                if self.page == SettingsPage::Bar
+                    && let Ok(value) = serde_json::from_str(&value)
+                {
+                    self.handle_bar_jsx_action(index, value);
+                }
             }
             SettingsMessage::DisplayIdentify => {
                 match session_request(SessionRequest::Command(SessionCommand::IdentifyOutputs)) {
@@ -4089,12 +4089,40 @@ mod tests {
         app.persistence_enabled = false;
         app.shell_settings.desktop_count = 2;
         let mut host = UiHost::new(app, 850, 580);
+        let action = host
+            .application()
+            .bar_page
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .slider_action()
+            .unwrap();
         host.application_mut()
-            .handle_settings_message(SettingsMessage::BarJsxSlider(u16::MAX));
+            .handle_settings_message(SettingsMessage::JsxAction(action, "1.0".into()));
         assert_eq!(
             host.application().shell_settings.desktop_count,
             nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES
         );
+    }
+
+    #[test]
+    fn shared_jsx_bar_slider_pointer_uses_native_value_mapping() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bar);
+        app.persistence_enabled = false;
+        app.shell_settings.desktop_count = 2;
+        let mut host = UiHost::new(app, 850, 580);
+        let slider = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().contains("bar-desktop-count") && node.value.is_some())
+            .expect("shared slider semantic value");
+        let x = f64::from(slider.bounds.origin.x + slider.bounds.size.width * 0.9);
+        let y = f64::from(slider.bounds.origin.y + slider.bounds.size.height * 0.5);
+        host.handle_input(&primary_event(1, KeyEdge::Pressed, x, y), None);
+        host.handle_input(&primary_event(2, KeyEdge::Released, x, y), None);
+        assert!(host.application().shell_settings.desktop_count > 2);
     }
 
     #[test]
@@ -6167,7 +6195,10 @@ mod tests {
                 .action_for_id(id)
                 .expect("JSX bar radio action");
             let target = host
-                .unique_semantic_target_for_message(&SettingsMessage::BarJsxAction(action))
+                .unique_semantic_target_for_message(&SettingsMessage::JsxAction(
+                    action,
+                    "null".into(),
+                ))
                 .expect("bar radio option");
             let x = f64::from(target.bounds.origin.x + target.bounds.size.width / 2.0);
             let y = f64::from(target.bounds.origin.y + target.bounds.size.height / 2.0);

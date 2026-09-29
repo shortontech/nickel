@@ -47,11 +47,11 @@ The native `ResponsiveNavigation` adapter owns focus, responsive
 layout, and the trusted page slots while the remaining page views migrate.
 Rebuild it with the same `tsc` command and its source filename.
 
-`settings-bar.jsx` owns the ordinary Bar controls and workspace preview. Its
-radio and slider callbacks request typed changes that the Settings host checks
-against the current topology projection before using the existing reducers.
-The native Bar view remains available if JSX fails. It uses the same build
-command with `settings-bar.jsx` as the source.
+`settings-bar.jsx` uses the shared `div`, `Text`, `Button`, and `Slider` components
+with `settings-bar.css`. Its callbacks request typed changes that the Settings
+host checks against the current topology projection before using the existing
+reducers. The native Bar view remains available if JSX fails. Regenerate its
+shipped JS with the same build command, using `settings-bar.jsx` as the source.
 
 `settings-optional-features.jsx` owns the ordinary Codex and on-screen keyboard
 cards. Its callbacks request typed changes, retry, and disable confirmation;
