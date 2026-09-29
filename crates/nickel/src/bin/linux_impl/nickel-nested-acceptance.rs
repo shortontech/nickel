@@ -168,6 +168,7 @@ fn run() -> Result<(), String> {
         .env("XDG_CONFIG_HOME", runtime.join("config"))
         .env("NICKEL_TEST_CONTROL_ENV_FILE", &capability_file)
         .env("NICKEL_NESTED_SIZE", "960x640")
+        .env("NICKEL_ON_SCREEN_KEYBOARD", "1")
         // This harness exercises compositor-owned UI, not the independent
         // XWayland startup contract. Avoid letting a host X server delay the
         // control and input assertions.
@@ -328,6 +329,7 @@ fn exercise(
         "org.nickel.volume-osd",
         "org.nickel.control-center",
         "org.nickel.codex-projects",
+        "org.nickel.on-screen-keyboard",
         "org.nickel.window-preview",
         "org.nickel.desktop",
     ] {
@@ -864,7 +866,46 @@ fn verify_keyboard_plugin_retires(
     if !surface_present(&surfaces) {
         return Err(format!("keyboard plugin surface did not return: {surfaces}"));
     }
+    checked(test_input, environment, &["semantic", "keyboard-toggle"])?;
+    wait_for_keyboard_visibility(test_input, environment, true, Duration::from_secs(2))?;
+    if wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(2))? == 0 {
+        return Err("visible keyboard plugin reported zero native UI memory".into());
+    }
+    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if surface_present(&surfaces) {
+        return Err(format!("visible keyboard plugin survived disable: {surfaces}"));
+    }
+    wait_for_keyboard_visibility(test_input, environment, true, Duration::from_secs(2))?;
+    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    if !surface_present(&surfaces) {
+        return Err(format!("visible keyboard plugin did not return: {surfaces}"));
+    }
+    checked(test_input, environment, &["semantic", "keyboard", "osk-hide"])?;
+    wait_for_keyboard_visibility(test_input, environment, false, Duration::from_secs(2))?;
     Ok(())
+}
+
+fn wait_for_keyboard_visibility(
+    test_input: &Path,
+    environment: &[(String, String)],
+    expected: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = checked(test_input, environment, &["keyboard-status"])?;
+        let snapshot: nickel_session_protocol::OnScreenKeyboardSnapshot =
+            serde_json::from_str(&status).map_err(|error| error.to_string())?;
+        if snapshot.visible == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("keyboard visibility did not become {expected}: {status}"));
+        }
+        thread::sleep(POLL);
+    }
 }
 
 fn wait_for_control_visibility(

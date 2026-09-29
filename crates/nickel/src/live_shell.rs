@@ -3737,6 +3737,16 @@ impl LiveShell {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn plugin_surface_semantic_nodes(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<Vec<nickel_ui::SemanticNodeSnapshot>> {
+        self.plugin_panel_extra_hosts
+            .get(key)
+            .map(|(_, host)| host.semantic_nodes())
+    }
+
     pub(crate) fn plugin_surface_change_token(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -6914,6 +6924,28 @@ impl LiveShell {
     ) -> Option<ResolvedShellTarget> {
         match target {
             ShellSemanticTarget::OnScreenKeyboard { key } => {
+                let plugin_key = crate::plugin_panel::on_screen_keyboard_surface_key();
+                if self.keyboard_visible
+                    && self.plugin_surface_matches(&plugin_key)
+                    && let Some((_, host)) = self.plugin_panel_extra_hosts.get(&plugin_key)
+                {
+                    let button = match key.as_str() {
+                        "osk-hide" => "osk-plugin-hide",
+                        "osk-larger" => "osk-plugin-larger",
+                        "osk-smaller" => "osk-plugin-smaller",
+                        "osk-dock" => "osk-plugin-dock",
+                        "osk-persistent-modifiers" => "osk-plugin-hold",
+                        key => key,
+                    };
+                    let bounds = taskbar_plugin_control_bounds(host, button)?;
+                    return Some(ResolvedShellTarget {
+                        role: ShellRole::OnScreenKeyboard,
+                        output: None,
+                        x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                        y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
+                        interaction: PointerInteraction::LeftClick,
+                    });
+                }
                 use nickel_core::on_screen_keyboard::{
                     KeyboardPanel, compact_us_keyboard_rows, us_keyboard_rows,
                 };

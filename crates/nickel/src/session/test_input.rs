@@ -758,15 +758,25 @@ impl NickelSession {
     }
 
     fn inject_shell_pointer(&mut self, target: ResolvedShellTarget) -> Result<(), String> {
-        let surface = self
-            .protocol_shell_surfaces()
-            .into_iter()
-            .find(|surface| {
-                surface.role == target.role
-                    && target
-                        .output
-                        .as_ref()
-                        .is_none_or(|output| surface.output.as_ref() == Some(output))
+        let surfaces = self.protocol_shell_surfaces();
+        let surface = (target.role == nickel_session_protocol::ShellRole::OnScreenKeyboard)
+            .then(|| {
+                surfaces.iter().find(|surface| {
+                    surface.plugin.as_ref().is_some_and(|plugin| {
+                        plugin.plugin_id == "org.nickel.on-screen-keyboard"
+                            && plugin.surface_id == "main"
+                    })
+                })
+            })
+            .flatten()
+            .or_else(|| {
+                surfaces.iter().find(|surface| {
+                    surface.role == target.role
+                        && target
+                            .output
+                            .as_ref()
+                            .is_none_or(|output| surface.output.as_ref() == Some(output))
+                })
             })
             .ok_or_else(|| format!("shell surface {:?} is not mapped", target.role))?;
         let geometry = surface

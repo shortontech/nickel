@@ -2059,6 +2059,107 @@ mod tests {
     }
 
     #[test]
+    fn jsx_keyboard_click_delivers_to_the_press_time_recipient() {
+        use nickel_input::{
+            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
+        };
+        use nickel_session_protocol::{OnScreenKeyboardInput, OnScreenKeyboardSnapshot, WindowId};
+        struct KeyboardHost {
+            snapshot: std::sync::Mutex<OnScreenKeyboardSnapshot>,
+            inputs: std::sync::Mutex<Vec<(u64, OnScreenKeyboardInput)>>,
+        }
+        impl SessionHost for KeyboardHost {
+            fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
+                Ok(())
+            }
+            fn keyboard_snapshot(&self) -> Result<OnScreenKeyboardSnapshot, SessionRequestError> {
+                Ok(self.snapshot.lock().unwrap().clone())
+            }
+            fn configure_keyboard(
+                &self,
+                _: bool,
+                _: bool,
+                _: u64,
+                _: bool,
+                _: bool,
+                _: u32,
+            ) -> Result<(), SessionRequestError> {
+                Ok(())
+            }
+            fn keyboard_input(
+                &self,
+                epoch: u64,
+                input: OnScreenKeyboardInput,
+            ) -> Result<(), SessionRequestError> {
+                self.inputs.lock().unwrap().push((epoch, input));
+                Ok(())
+            }
+        }
+        let host = Arc::new(KeyboardHost {
+            snapshot: std::sync::Mutex::new(OnScreenKeyboardSnapshot {
+                enabled: true,
+                visible: true,
+                epoch: 19,
+                generation: 1,
+                recipient: Some(WindowId(7)),
+                ..Default::default()
+            }),
+            inputs: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut coordinator =
+            InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "test".into(),
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+        }]);
+        coordinator.poll(Instant::now());
+        let key = crate::plugin_panel::on_screen_keyboard_surface_key();
+        let id = coordinator.plugin_surface(&key, "test").unwrap().id;
+        assert!(coordinator.visible(id));
+        coordinator.scene(id);
+        let button = coordinator
+            .shell
+            .plugin_surface_semantic_nodes(&key)
+            .unwrap()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("a") && node.enabled)
+            .expect("JSX key button");
+        let point = nickel_input::Point {
+            x: f64::from(button.bounds.origin.x + button.bounds.size.width / 2.0),
+            y: f64::from(button.bounds.origin.y + button.bounds.size.height / 2.0),
+        };
+        let event = |edge| HostBatch {
+            events: vec![nickel_ui::HostEvent::Normalized {
+                input: InputEvent::Pointer(PointerEvent::Button {
+                    device: DeviceId(1),
+                    order: EventOrder(1),
+                    button: PointerButton::Primary,
+                    edge,
+                    position: Some(point),
+                }),
+                clipboard_text: None,
+            }],
+            ..Default::default()
+        };
+        coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
+        coordinator.step_slot_changes(id, event(KeyEdge::Released));
+        assert_eq!(
+            *host.inputs.lock().unwrap(),
+            vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
+        );
+        coordinator.scene(id);
+        coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
+        host.snapshot.lock().unwrap().epoch = 20;
+        coordinator.poll(Instant::now());
+        coordinator.step_slot_changes(id, event(KeyEdge::Released));
+        assert_eq!(host.inputs.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn native_consumer_controls_use_typed_host_and_only_show_confirmed_limit_values() {
         use nickel_session_protocol::ConsumerControl;
         struct MediaHost(std::sync::Mutex<Vec<ConsumerControl>>);
