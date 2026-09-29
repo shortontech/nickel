@@ -113,7 +113,7 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onFileAction) - 1 : null;
     const closeAction = typeof props?.onClose === 'function'
         ? __handlers.push(props.onClose) - 1 : null;
-    return {kind, action, id: props?.id, open: props?.open, anchor: props?.anchor,
+    return {kind, action, id: props?.id, className: props?.className, open: props?.open, anchor: props?.anchor,
         x: props?.x, y: props?.y, width: props?.width, height: props?.height, grow: props?.grow,
         background: props?.background, padding: props?.padding, radius: props?.radius, color: props?.color,
         label: props?.label, disabledReason: props?.disabledReason,

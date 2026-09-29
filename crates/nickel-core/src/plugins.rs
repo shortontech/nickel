@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 pub const PLUGIN_API_VERSION: u16 = 1;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_PLUGIN_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PLUGIN_CSS_BYTES: usize = 256 * 1024;
 pub const MAX_PLUGIN_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PLUGIN_IMAGE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PLUGIN_DIRECTORIES: usize = 64;
@@ -22,12 +23,14 @@ fn digest_source(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
-fn digest_package(source: &str, images: &BTreeMap<String, Vec<u8>>) -> String {
-    if images.is_empty() {
+fn digest_package(source: &str, stylesheet: &str, images: &BTreeMap<String, Vec<u8>>) -> String {
+    if images.is_empty() && stylesheet.is_empty() {
         return digest_source(source);
     }
     let mut digest = Sha256::new();
     digest.update(source.as_bytes());
+    digest.update((stylesheet.len() as u64).to_le_bytes());
+    digest.update(stylesheet.as_bytes());
     for (id, bytes) in images {
         digest.update((id.len() as u64).to_le_bytes());
         digest.update(id.as_bytes());
@@ -58,7 +61,7 @@ impl PluginPackageDescriptor {
             return Err("plugin manifest changed after discovery".into());
         }
         if package.source_digest() != self.source_digest {
-            return Err("plugin script or image changed after discovery".into());
+            return Err("plugin content changed after discovery".into());
         }
         Ok(package)
     }
@@ -139,12 +142,13 @@ impl PluginCatalog {
 pub struct PluginPackage {
     pub manifest: PluginManifest,
     pub source: String,
+    pub stylesheet: String,
     pub images: BTreeMap<String, Vec<u8>>,
 }
 
 impl PluginPackage {
     pub fn source_digest(&self) -> String {
-        digest_package(&self.source, &self.images)
+        digest_package(&self.source, &self.stylesheet, &self.images)
     }
 
     pub fn load(directory: impl AsRef<Path>) -> Result<Self, String> {
@@ -171,12 +175,35 @@ impl PluginPackage {
             .ok_or("plugin entry is missing")?;
         let source = String::from_utf8(source)
             .map_err(|error| format!("plugin entry is not UTF-8: {error}"))?;
+        let stylesheet = Self::load_stylesheet(&directory, &manifest)?;
         let images = Self::load_images(&directory, &manifest)?;
         Ok(Self {
             manifest,
             source,
+            stylesheet,
             images,
         })
+    }
+
+    pub fn load_stylesheet(
+        directory: impl AsRef<Path>,
+        manifest: &PluginManifest,
+    ) -> Result<String, String> {
+        let Some(relative_path) = &manifest.stylesheet else {
+            return Ok(String::new());
+        };
+        let directory = std::fs::canonicalize(directory.as_ref())
+            .map_err(|error| format!("could not open plugin directory: {error}"))?;
+        let path = directory.join(relative_path);
+        let resolved = std::fs::canonicalize(&path)
+            .map_err(|error| format!("could not open plugin stylesheet: {error}"))?;
+        if !resolved.starts_with(&directory) {
+            return Err("plugin stylesheet escapes its directory".into());
+        }
+        let bytes = nickel_storage::read_regular_file(&path, MAX_PLUGIN_CSS_BYTES)
+            .map_err(|error| format!("could not read plugin stylesheet: {error}"))?
+            .ok_or("plugin stylesheet is missing")?;
+        String::from_utf8(bytes).map_err(|error| format!("plugin stylesheet is not UTF-8: {error}"))
     }
 
     pub fn load_images(
@@ -223,6 +250,8 @@ struct PluginApproval {
     author: Option<String>,
     version: Option<String>,
     entry: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stylesheet: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     images: Vec<PluginImageAsset>,
     source_digest: String,
@@ -238,6 +267,7 @@ impl PluginApproval {
             author: manifest.author.clone(),
             version: manifest.version.clone(),
             entry: manifest.entry.clone(),
+            stylesheet: manifest.stylesheet.clone(),
             images: manifest.images.clone(),
             source_digest: source_digest.to_owned(),
             capabilities: manifest.capabilities.clone(),
@@ -510,6 +540,8 @@ pub struct PluginManifest {
     #[serde(default)]
     pub version: Option<String>,
     pub entry: String,
+    #[serde(default)]
+    pub stylesheet: Option<String>,
     #[serde(default)]
     pub images: Vec<PluginImageAsset>,
     #[serde(default)]
@@ -908,6 +940,13 @@ impl PluginManifest {
                 "plugin entry must be a relative .js path inside the plugin directory".into(),
             );
         }
+        if self.stylesheet.as_ref().is_some_and(|path| {
+            !safe_relative_path(path) || !path.ends_with(".css") || *path == self.entry
+        }) {
+            return Err(
+                "plugin stylesheet must be a relative .css path inside the plugin directory".into(),
+            );
+        }
         if self.images.len() > 16 {
             return Err("plugin declares more than 16 images".into());
         }
@@ -1287,7 +1326,7 @@ mod tests {
             catalog.packages["org.nickel.hello-panel"]
                 .load()
                 .unwrap_err()
-                .contains("script or image changed after discovery")
+                .contains("content changed after discovery")
         );
     }
 
@@ -1307,7 +1346,35 @@ mod tests {
         let descriptor = &catalog.packages["org.nickel.hello-panel"];
         assert_eq!(descriptor.load().unwrap().images["icon"], b"first image");
         std::fs::write(directory.join("icon.png"), b"changed image").unwrap();
-        assert!(descriptor.load().unwrap_err().contains("image changed"));
+        assert!(descriptor.load().unwrap_err().contains("content changed"));
+    }
+
+    #[test]
+    fn declared_stylesheet_is_bounded_and_covered_by_package_approval() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("org.nickel.hello-panel");
+        std::fs::create_dir(&directory).unwrap();
+        let manifest = VALID.replace(
+            "\"entry\": \"main.js\",",
+            "\"entry\": \"main.js\", \"stylesheet\": \"ui.css\",",
+        );
+        std::fs::write(directory.join("plugin.json"), manifest).unwrap();
+        std::fs::write(directory.join("main.js"), "function App() {}").unwrap();
+        std::fs::write(directory.join("ui.css"), "button { padding: 8px; }").unwrap();
+        let catalog = PluginCatalog::discover(root.path()).unwrap();
+        let descriptor = &catalog.packages["org.nickel.hello-panel"];
+        assert_eq!(
+            descriptor.load().unwrap().stylesheet,
+            "button { padding: 8px; }"
+        );
+        std::fs::write(directory.join("ui.css"), "button { padding: 9px; }").unwrap();
+        assert!(descriptor.load().unwrap_err().contains("content changed"));
+        std::fs::write(
+            directory.join("ui.css"),
+            vec![b'x'; MAX_PLUGIN_CSS_BYTES + 1],
+        )
+        .unwrap();
+        assert!(PluginPackage::load(&directory).is_err());
     }
 
     #[test]

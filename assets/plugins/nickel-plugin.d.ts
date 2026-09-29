@@ -18,6 +18,7 @@ interface NickelDragGesture {
 
 interface NickelProps {
     key?: string | number;
+    className?: string;
     children?: NickelChild;
 }
 

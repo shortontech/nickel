@@ -1862,6 +1862,9 @@ fn measure_styled_text(
 }
 
 fn text_font_size(scale: f32) -> f32 {
+    if scale < 0.0 {
+        return -scale;
+    }
     match scale.round() as i32 {
         0 | 1 => 12.0,
         2 => 16.0,

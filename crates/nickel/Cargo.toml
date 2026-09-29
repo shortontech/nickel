@@ -58,6 +58,7 @@ nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
 serde_json.workspace = true
 tempfile = "3.25.0"
 ctrlc.workspace = true
+cssparser = "0.38.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit = "0.24.1"

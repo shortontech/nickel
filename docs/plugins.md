@@ -87,9 +87,9 @@ separate Nickel shell without desktop windows and gives it a temporary
 when you press Ctrl+C. This is a native Windows test shell, so its taskbar and
 plugin surfaces appear on the current desktop.
 
-The command validates the manifest and JavaScript, stages the package in a
+The command validates the manifest, JavaScript, and declared CSS, stages the package in a
 temporary Nickel profile, and launches the test shell. Saving `plugin.json`,
-a declared image, the JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
+a declared image or stylesheet, the JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the test shell. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
 profile. For first-party shell plugins, pass a bundled directory such as
@@ -173,6 +173,22 @@ prevent testing; `tsc -p` gives the stricter check before packaging.
 The runtime provides `h`, `Panel`, `Viewport`, `Row`, `Column`, `Text`, `Button`,
 `Dialog`, `Image`, `ImageButton`, `useState`, `useRef`, and other small native
 components.
+An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
+256 KiB. `className` accepts space-separated class names on `Surface`, `Panel`,
+`Viewport`, `Box`, `Row`, `Column`, `ScrollView`, `Spacer`, `Text`, `Button`, and
+`TextField`. For example, `<Button className="primary" onClick={save}>Save</Button>`
+matches `button.primary { padding: 8px; background: #345678; }`. The supported
+selectors are element names, `.class`, and `#id`, combined without descendant
+selectors. Pseudo-classes such as `:focus` and plugin `onFocus`/`onBlur`
+callbacks are not exposed yet. Rules use source order. Supported declarations are `padding`,
+`margin`, `border` (solid only), `border-width`, `border-color`,
+`border-radius`, `font-size`, `line-height` (pixel lengths), `background` or
+`background-color`, `color`, `gap`, and `flex-grow`. Colors accept hex, `rgba()`,
+and `transparent`. Unsupported selectors or declarations fail validation with a
+CSS error. Button and text-field behavior and accessibility remain native;
+their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
+props remain available while CSS sizing and grid declarations are developed.
+
 `Viewport` fills its host window and accepts an ARGB `background` and `padding`
 from 0 to 256 logical pixels. Use it as the root for a full-window layout such
 as the bundled launcher; its size follows the declared surface and output.

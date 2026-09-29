@@ -110,6 +110,7 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
     if let Some(source) = jsx_source(&directory, &manifest.entry)? {
         Ok(PluginPackage {
             source: compile_jsx(&directory, &manifest, &source)?,
+            stylesheet: PluginPackage::load_stylesheet(&directory, &manifest)?,
             images: PluginPackage::load_images(&directory, &manifest)?,
             manifest,
         })
@@ -260,6 +261,12 @@ mod platform {
             std::fs::read(sibling).unwrap_or_default().hash(&mut hasher);
         }
         if let Some(manifest) = current_manifest {
+            if let Some(stylesheet) = manifest.stylesheet {
+                stylesheet.hash(&mut hasher);
+                std::fs::read(directory.join(stylesheet))
+                    .unwrap_or_default()
+                    .hash(&mut hasher);
+            }
             for image in manifest.images {
                 image.path.hash(&mut hasher);
                 std::fs::read(directory.join(image.path))
@@ -285,6 +292,19 @@ mod platform {
                 .map_err(|error| format!("could not stage plugin image: {error}"))?;
         }
         Ok(())
+    }
+
+    fn stage_stylesheet(package: &PluginPackage, target: &Path) -> Result<(), String> {
+        let Some(relative) = &package.manifest.stylesheet else {
+            return Ok(());
+        };
+        let path = target.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("could not stage plugin stylesheet directory: {error}"))?;
+        }
+        std::fs::write(path, &package.stylesheet)
+            .map_err(|error| format!("could not stage plugin stylesheet: {error}"))
     }
 
     fn stage(package: &PluginPackage, directory: &Path, root: &Path) -> Result<(), String> {
@@ -328,6 +348,7 @@ mod platform {
             }
             std::fs::write(entry, &package.source)
                 .map_err(|error| format!("could not stage bundled entry: {error}"))?;
+            stage_stylesheet(package, &target)?;
             return stage_images(package, &target);
         }
         let manifest_bytes = std::fs::read(directory.join("plugin.json"))
@@ -355,6 +376,7 @@ mod platform {
         }
         std::fs::write(entry, &package.source)
             .map_err(|error| format!("could not stage JavaScript: {error}"))?;
+        stage_stylesheet(package, &target)?;
         stage_images(package, &target)?;
         PluginActivationSettings::update_manifest(
             staged_config_directory(root).join("plugin-activation.json"),
@@ -805,6 +827,36 @@ mod platform {
             assert_eq!(staged.images, package.images);
             assert_eq!(staged.source_digest(), package.source_digest());
             std::fs::write(source.path().join("icon.png"), b"changed image").unwrap();
+            assert_ne!(
+                fingerprint,
+                source_fingerprint(source.path(), &package.manifest.entry).unwrap()
+            );
+        }
+
+        #[test]
+        fn stages_and_watches_declared_plugin_stylesheet() {
+            let source = tempfile::tempdir().unwrap();
+            std::fs::write(
+                source.path().join("plugin.json"),
+                r#"{"api_version":1,"id":"org.example.css","name":"CSS","entry":"main.js","stylesheet":"ui.css","surfaces":[{"id":"main","kind":"panel","width":300,"height":48}]}"#,
+            ).unwrap();
+            std::fs::write(
+                source.path().join("main.js"),
+                "function App() { return h(Panel, {}, h(Text, null, 'CSS')); }",
+            )
+            .unwrap();
+            std::fs::write(source.path().join("ui.css"), "text { color: #fff; }").unwrap();
+            let package = load_dev_package(source.path()).unwrap();
+            let fingerprint = source_fingerprint(source.path(), &package.manifest.entry).unwrap();
+            let profile = tempfile::tempdir().unwrap();
+            stage(&package, source.path(), profile.path()).unwrap();
+            let staged = PluginPackage::load(
+                staged_config_directory(profile.path()).join("plugins/org.example.css"),
+            )
+            .unwrap();
+            assert_eq!(staged.stylesheet, package.stylesheet);
+            assert_eq!(staged.source_digest(), package.source_digest());
+            std::fs::write(source.path().join("ui.css"), "text { color: #000; }").unwrap();
             assert_ne!(
                 fingerprint,
                 source_fingerprint(source.path(), &package.manifest.entry).unwrap()

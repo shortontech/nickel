@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use crate::control_view::ControlAction;
 use crate::platform::SessionAction;
+use crate::plugin_css::{ControlStyle, StyleSheet};
 use nickel_codex_ui::{ProjectMenuProjection, ProjectMenuRevision};
 use nickel_core::display_projection::ProjectionMode;
 
@@ -402,6 +403,7 @@ enum PanelNode {
     },
     Box {
         children: Vec<Self>,
+        class_name: Option<String>,
         x: i32,
         y: i32,
         width: u32,
@@ -412,6 +414,7 @@ enum PanelNode {
     Surface {
         children: Vec<Self>,
         id: Option<String>,
+        class_name: Option<String>,
         background: u32,
         width: u32,
         height: u32,
@@ -420,16 +423,25 @@ enum PanelNode {
         children: Vec<Self>,
         background: u32,
         padding: u32,
+        class_name: Option<String>,
     },
     Panel {
         children: Vec<Self>,
         background: u32,
         height: u32,
+        class_name: Option<String>,
     },
-    Row(Vec<Self>),
-    Column(Vec<Self>),
+    Row {
+        children: Vec<Self>,
+        class_name: Option<String>,
+    },
+    Column {
+        children: Vec<Self>,
+        class_name: Option<String>,
+    },
     ScrollView {
         id: String,
+        class_name: Option<String>,
         height: u32,
         grow: bool,
         children: Vec<Self>,
@@ -437,6 +449,7 @@ enum PanelNode {
     Text {
         value: String,
         color: u32,
+        class_name: Option<String>,
     },
     Image {
         id: Option<String>,
@@ -453,9 +466,12 @@ enum PanelNode {
         width: u32,
         height: u32,
     },
-    Spacer,
+    Spacer {
+        class_name: Option<String>,
+    },
     TextField {
         id: String,
+        class_name: Option<String>,
         value: String,
         placeholder: String,
         secure: bool,
@@ -463,6 +479,7 @@ enum PanelNode {
     },
     Button {
         id: String,
+        class_name: Option<String>,
         label: String,
         accessibility_label: String,
         width: Option<u32>,
@@ -500,6 +517,52 @@ enum PanelNode {
     },
 }
 
+fn apply_container_style(
+    mut container: Container<PluginMessage>,
+    style: &ControlStyle,
+) -> Container<PluginMessage> {
+    if let Some(padding) = style.padding {
+        container = container.padding(padding);
+    }
+    if let Some(background) = style.background {
+        container = container.background(background);
+    }
+    if let Some(radius) = style.radius {
+        container = container.radius(radius);
+    }
+    if style.border_width.is_some() || style.border_color.is_some() {
+        container = container.border(
+            style.border_color.unwrap_or(0xff000000),
+            style.border_width.unwrap_or(1.0),
+        );
+    }
+    if let Some(grow) = style.grow {
+        container = container.grow(grow);
+    }
+    container
+}
+
+fn with_margin(view: AnyView<PluginMessage>, style: &ControlStyle) -> AnyView<PluginMessage> {
+    if let Some(margin) = style.margin {
+        AnyView::new(Container::new().padding(margin).child(view))
+    } else {
+        view
+    }
+}
+
+fn styled_text(mut text: Text<PluginMessage>, style: &ControlStyle) -> Text<PluginMessage> {
+    if let Some(color) = style.color {
+        text = text.color(color);
+    }
+    if let Some(font_size) = style.font_size {
+        text = text.font_size(font_size);
+    }
+    if let Some(line_height) = style.line_height {
+        text = text.line_height(line_height);
+    }
+    text
+}
+
 impl PanelNode {
     fn contribution_bytes(&self) -> u64 {
         let own = std::mem::size_of::<Self>() as u64;
@@ -513,7 +576,9 @@ impl PanelNode {
             Self::Section {
                 id, label, value, ..
             } => capacity(id) + capacity(label) + capacity(value),
-            Self::Row(children) | Self::Column(children) | Self::Viewport { children, .. } => {
+            Self::Row { children, .. }
+            | Self::Column { children, .. }
+            | Self::Viewport { children, .. } => {
                 let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
                 spare as u64 + children.iter().map(Self::contribution_bytes).sum::<u64>()
             }
@@ -532,8 +597,8 @@ impl PanelNode {
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
-            | Self::Row(children)
-            | Self::Column(children)
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => {
                 children.iter().find_map(|child| child.file_tile_action(id))
             }
@@ -552,8 +617,8 @@ impl PanelNode {
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
-            | Self::Row(children)
-            | Self::Column(children)
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => children
                 .iter()
                 .find_map(|child| child.file_tile_select_action(id)),
@@ -572,8 +637,8 @@ impl PanelNode {
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
-            | Self::Row(children)
-            | Self::Column(children)
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => children
                 .iter()
                 .find_map(|child| child.file_tile_move_action(id)),
@@ -592,8 +657,8 @@ impl PanelNode {
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
-            | Self::Row(children)
-            | Self::Column(children)
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => children
                 .iter()
                 .find_map(|child| child.file_tile_file_action(id)),
@@ -610,6 +675,44 @@ impl PanelNode {
             .get("children")
             .and_then(Value::as_array)
             .ok_or("component needs children")?;
+        let class_name =
+            match value.get("className") {
+                None => None,
+                Some(Value::String(value))
+                    if value.len() <= 256
+                        && value.split_ascii_whitespace().all(|name| {
+                            !name.is_empty()
+                                && name.len() <= 64
+                                && name.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                                })
+                        }) =>
+                {
+                    Some(value.clone())
+                }
+                _ => return Err(
+                    "className must contain space-separated class identifiers (at most 256 bytes)"
+                        .into(),
+                ),
+            };
+        if class_name.is_some()
+            && !matches!(
+                kind,
+                "box"
+                    | "surface"
+                    | "viewport"
+                    | "panel"
+                    | "row"
+                    | "column"
+                    | "scroll-view"
+                    | "text"
+                    | "spacer"
+                    | "text-field"
+                    | "button"
+            )
+        {
+            return Err(format!("className is not supported on {kind} yet"));
+        }
         match kind {
             "section" => {
                 if !children.is_empty() {
@@ -819,6 +922,7 @@ impl PanelNode {
                         .ok_or_else(|| format!("box {name} must be 1 to 8192"))
                 };
                 Ok(Self::Box {
+                    class_name,
                     children: children
                         .iter()
                         .filter(|child| !child.is_null())
@@ -849,6 +953,7 @@ impl PanelNode {
                         .ok_or_else(|| format!("surface {name} must be 1 to 8192"))
                 };
                 Ok(Self::Surface {
+                    class_name,
                     children: children
                         .iter()
                         .filter(|value| !value.is_null())
@@ -880,6 +985,7 @@ impl PanelNode {
                     }
                     Ok(Self::Viewport {
                         children,
+                        class_name,
                         background: value
                             .get("background")
                             .and_then(Value::as_u64)
@@ -898,11 +1004,15 @@ impl PanelNode {
                         .unwrap_or(64) as u32;
                     Ok(Self::Panel {
                         children,
+                        class_name,
                         background,
                         height,
                     })
                 } else if kind == "row" {
-                    Ok(Self::Row(children))
+                    Ok(Self::Row {
+                        children,
+                        class_name,
+                    })
                 } else if kind == "scroll-view" {
                     let id = value
                         .get("id")
@@ -921,16 +1031,21 @@ impl PanelNode {
                     }
                     Ok(Self::ScrollView {
                         id: id.to_owned(),
+                        class_name,
                         height: height as u32,
                         grow,
                         children,
                     })
                 } else {
-                    Ok(Self::Column(children))
+                    Ok(Self::Column {
+                        children,
+                        class_name,
+                    })
                 }
             }
             "text" => Ok(Self::Text {
                 value: child_text(children)?,
+                class_name,
                 color: value
                     .get("color")
                     .and_then(Value::as_u64)
@@ -1028,8 +1143,9 @@ impl PanelNode {
                     height,
                 })
             }
-            "spacer" => Ok(Self::Spacer),
+            "spacer" => Ok(Self::Spacer { class_name }),
             "text-field" => Ok(Self::TextField {
+                class_name,
                 id: value
                     .get("id")
                     .and_then(Value::as_str)
@@ -1070,6 +1186,7 @@ impl PanelNode {
                     }
                 };
                 Ok(Self::Button {
+                    class_name,
                     id: value
                         .get("id")
                         .and_then(Value::as_str)
@@ -1316,7 +1433,7 @@ impl PanelNode {
         Some(item.separator_before(*separator_before))
     }
 
-    fn view(&self, images: &PluginImages) -> AnyView<PluginMessage> {
+    fn view(&self, images: &PluginImages, stylesheet: &StyleSheet) -> AnyView<PluginMessage> {
         match self {
             Self::Badge {
                 label,
@@ -1406,6 +1523,7 @@ impl PanelNode {
             }
             Self::Box {
                 children,
+                class_name,
                 x,
                 y,
                 width,
@@ -1413,34 +1531,39 @@ impl PanelNode {
                 background,
                 radius,
             } => {
+                let style = stylesheet.resolve("box", None, class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column = column.child(child.view(images));
+                    column = column.child(child.view(images, stylesheet));
                 }
-                AnyView::new(
-                    Container::new()
-                        .position(Point {
-                            x: *x as f32,
-                            y: *y as f32,
-                        })
-                        .width(*width as f32)
-                        .height(*height as f32)
-                        .background(*background)
-                        .radius(*radius as f32)
-                        .child(column),
+                let container = Container::new()
+                    .position(Point {
+                        x: *x as f32,
+                        y: *y as f32,
+                    })
+                    .width(*width as f32)
+                    .height(*height as f32)
+                    .background(*background)
+                    .radius(*radius as f32)
+                    .child(column);
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
                 )
             }
             Self::Surface {
                 children,
                 id,
+                class_name,
                 background,
                 width,
                 height,
             } => {
+                let style = stylesheet.resolve("surface", id.as_deref(), class_name.as_deref());
                 let mut layer = Layer::new().width(*width as f32).height(*height as f32);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        layer = layer.child(child.view(images));
+                        layer = layer.child(child.view(images, stylesheet));
                     }
                 }
                 let mut container = Container::new()
@@ -1451,89 +1574,162 @@ impl PanelNode {
                 if let Some(id) = id {
                     container = container.id(id.clone());
                 }
-                AnyView::new(container)
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
+                )
             }
             Self::Viewport {
                 children,
                 background,
                 padding,
+                class_name,
             } => {
                 let mut column = Column::new().fill_width().fill_height();
                 for child in children {
-                    column = column.child(child.view(images));
+                    column = column.child(child.view(images, stylesheet));
                 }
-                AnyView::new(
-                    Container::new()
-                        .fill_width()
-                        .fill_height()
-                        .padding(Insets::all(*padding as f32))
-                        .background(*background)
-                        .child(column),
+                let style = stylesheet.resolve("viewport", None, class_name.as_deref());
+                let container = Container::new()
+                    .fill_width()
+                    .fill_height()
+                    .padding(
+                        style
+                            .padding
+                            .unwrap_or_else(|| Insets::all(*padding as f32)),
+                    )
+                    .background(*background)
+                    .child(column);
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
                 )
             }
             Self::Panel {
                 children,
                 background,
                 height,
+                class_name,
             } => {
                 let mut row = Row::new()
                     .fill_width()
                     .height((*height).saturating_sub(16) as f32);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
-                        row = row.child(child.view(images));
+                        row = row.child(child.view(images, stylesheet));
                     }
                 }
-                AnyView::new(
-                    Container::new()
-                        .height(*height as f32)
-                        .background(*background)
-                        .radius(16.0)
-                        .padding(Insets::all(8.0))
-                        .child(row),
+                let style = stylesheet.resolve("panel", None, class_name.as_deref());
+                let container = Container::new()
+                    .height(*height as f32)
+                    .background(*background)
+                    .radius(style.radius.unwrap_or(16.0))
+                    .padding(style.padding.unwrap_or_else(|| Insets::all(8.0)))
+                    .child(row);
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
                 )
             }
-            Self::Row(children) => {
+            Self::Row {
+                children,
+                class_name,
+            } => {
+                let style = stylesheet.resolve("row", None, class_name.as_deref());
                 let mut row = Row::new().fill_width().height(48.0);
-                for child in children {
-                    row = row.child(child.view(images));
+                if let Some(gap) = style.gap {
+                    row = row.gap(gap);
                 }
-                AnyView::new(row)
+                for child in children {
+                    row = row.child(child.view(images, stylesheet));
+                }
+                if style == ControlStyle::default() {
+                    AnyView::new(row)
+                } else {
+                    with_margin(
+                        AnyView::new(apply_container_style(Container::new().child(row), &style)),
+                        &style,
+                    )
+                }
             }
-            Self::Column(children) => {
+            Self::Column {
+                children,
+                class_name,
+            } => {
+                let style = stylesheet.resolve("column", None, class_name.as_deref());
                 let mut column = Column::new().fill_width();
-                for child in children {
-                    column = column.child(child.view(images));
+                if let Some(gap) = style.gap {
+                    column = column.gap(gap);
                 }
-                AnyView::new(column)
+                for child in children {
+                    column = column.child(child.view(images, stylesheet));
+                }
+                if style == ControlStyle::default() {
+                    AnyView::new(column)
+                } else {
+                    with_margin(
+                        AnyView::new(apply_container_style(
+                            Container::new().child(column),
+                            &style,
+                        )),
+                        &style,
+                    )
+                }
             }
             Self::ScrollView {
                 id,
+                class_name,
                 height,
                 grow,
                 children,
             } => {
+                let style = stylesheet.resolve("scroll-view", Some(id), class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column = column.child(child.view(images));
+                    column = column.child(child.view(images, stylesheet));
                 }
                 let scroll = VerticalScroll::new(PluginMessage::Scroll, 0.0)
                     .id(id.clone())
                     .child(column);
-                AnyView::new(if *grow {
+                let scroll = if *grow {
                     scroll.grow(1.0)
                 } else {
                     scroll.height(*height as f32)
-                })
+                };
+                if style == ControlStyle::default() {
+                    AnyView::new(scroll)
+                } else {
+                    with_margin(
+                        AnyView::new(apply_container_style(
+                            Container::new().child(scroll),
+                            &style,
+                        )),
+                        &style,
+                    )
+                }
             }
-            Self::Text { value, color } => AnyView::new(
-                Container::new()
+            Self::Text {
+                value,
+                color,
+                class_name,
+            } => {
+                let style = stylesheet.resolve("text", None, class_name.as_deref());
+                let text = styled_text(
+                    Text::new(value)
+                        .color(style.color.unwrap_or(*color))
+                        .scale(1.0),
+                    &style,
+                );
+                let container = Container::new()
                     .semantic_role(SemanticRole::Text)
                     .accessibility_label(value.clone())
                     .height(48.0)
-                    .padding(Insets::all(10.0))
-                    .child(Text::new(value).color(*color).scale(1.0)),
-            ),
+                    .child(text);
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
+                )
+            }
             Self::Image {
                 id,
                 asset,
@@ -1609,14 +1805,19 @@ impl PanelNode {
                             .radius(*height as f32 / 2.0),
                     ),
             ),
-            Self::Spacer => AnyView::new(Spacer::flex()),
+            Self::Spacer { class_name } => {
+                let style = stylesheet.resolve("spacer", None, class_name.as_deref());
+                AnyView::new(Spacer::flex().grow(style.grow.unwrap_or(1.0)))
+            }
             Self::TextField {
                 id,
+                class_name,
                 value,
                 placeholder,
                 secure,
                 action,
             } => {
+                let style = stylesheet.resolve("text-field", Some(id), class_name.as_deref());
                 let field = if *secure {
                     UiTextField::on_change_masked_with_placeholder_mapped(
                         value,
@@ -1633,15 +1834,28 @@ impl PanelNode {
                         move |value| PluginMessage::Text(action, value)
                     })
                 };
-                AnyView::new(
-                    field
-                        .id(id.clone())
-                        .accessibility_label(placeholder)
-                        .height(44.0),
-                )
+                let mut field = field.id(id.clone()).accessibility_label(placeholder);
+                if let Some(size) = style.font_size {
+                    field = field.font_size(size);
+                }
+                if let Some(height) = style.line_height {
+                    field = field.line_height(height);
+                }
+                if let Some(color) = style.color {
+                    field = field.color(color);
+                }
+                if style == ControlStyle::default() {
+                    AnyView::new(field.height(44.0))
+                } else {
+                    with_margin(
+                        AnyView::new(apply_container_style(Container::new().child(field), &style)),
+                        &style,
+                    )
+                }
             }
             Self::Button {
                 id,
+                class_name,
                 label,
                 accessibility_label,
                 width,
@@ -1652,11 +1866,12 @@ impl PanelNode {
                 context_action,
                 drag_action,
             } => {
+                let style = stylesheet.resolve("button", Some(id), class_name.as_deref());
                 let visual = icon
                     .as_ref()
                     .and_then(|asset| images.get(asset))
                     .map_or_else(
-                        || AnyView::new(Text::new(label).color(0xffffff)),
+                        || AnyView::new(styled_text(Text::new(label), &style)),
                         |(id, image)| {
                             let icon = Image::new(*id, Arc::clone(image)).width(32.0).height(32.0);
                             if *show_label {
@@ -1664,7 +1879,7 @@ impl PanelNode {
                                     Row::new()
                                         .gap(8.0)
                                         .child(icon)
-                                        .child(Text::new(label).color(0xffffff)),
+                                        .child(styled_text(Text::new(label), &style)),
                                 )
                             } else {
                                 AnyView::new(icon)
@@ -1676,10 +1891,7 @@ impl PanelNode {
                     .accessibility_label(accessibility_label)
                     .semantic_role(SemanticRole::Button)
                     .message(PluginMessage::Click(*action))
-                    .height(height.unwrap_or(42) as f32)
-                    .padding(Insets::all(10.0))
-                    .background(0x6645_5675)
-                    .radius(10.0);
+                    .height(height.unwrap_or(42) as f32);
                 if let Some(width) = width {
                     container = container.width(*width as f32);
                 }
@@ -1695,7 +1907,10 @@ impl PanelNode {
                         map_plugin_drag,
                     ));
                 }
-                AnyView::new(container.child(visual))
+                with_margin(
+                    AnyView::new(apply_container_style(container.child(visual), &style)),
+                    &style,
+                )
             }
             Self::Dialog { .. } | Self::Menu { .. } | Self::MenuItem { .. } => {
                 AnyView::new(Spacer::fixed(0.0))
@@ -1710,8 +1925,8 @@ impl PanelNode {
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
-            | Self::Row(children)
-            | Self::Column(children)
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => {
                 children.iter().find_map(|child| child.dialog(requested_id))
             }
@@ -1726,8 +1941,8 @@ impl PanelNode {
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
-            | Self::Row(children)
-            | Self::Column(children)
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => {
                 children.iter().find_map(|child| child.menu(requested_id))
             }
@@ -1742,8 +1957,8 @@ impl PanelNode {
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
-            | Self::Row(children)
-            | Self::Column(children)
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => {
                 for child in children {
                     child.transients(output);
@@ -1765,8 +1980,8 @@ impl PanelNode {
             | Self::Surface { children, .. }
             | Self::Viewport { children, .. }
             | Self::Panel { children, .. }
-            | Self::Row(children)
-            | Self::Column(children)
+            | Self::Row { children, .. }
+            | Self::Column { children, .. }
             | Self::ScrollView { children, .. } => children
                 .iter()
                 .find_map(|child| child.button_action(requested_id)),
@@ -1791,7 +2006,7 @@ impl PanelNode {
                 badges.push((item.clone(), label.clone(), *count, *color));
                 Ok(())
             }
-            Self::Row(children) | Self::Column(children) => {
+            Self::Row { children, .. } | Self::Column { children, .. } => {
                 for child in children {
                     child.collect_taskbar_badges(badges)?;
                 }
@@ -1823,7 +2038,7 @@ impl PanelNode {
                 });
                 Ok(())
             }
-            Self::Row(children) | Self::Column(children) => {
+            Self::Row { children, .. } | Self::Column { children, .. } => {
                 for child in children {
                     child.collect_desktop_widgets(widgets)?;
                 }
@@ -1856,7 +2071,7 @@ impl PanelNode {
                 });
                 Ok(())
             }
-            Self::Row(children) | Self::Column(children) => {
+            Self::Row { children, .. } | Self::Column { children, .. } => {
                 for child in children {
                     child.collect_taskbar_actions(actions)?;
                 }
@@ -1889,7 +2104,7 @@ impl PanelNode {
                 });
                 Ok(())
             }
-            Self::Row(children) | Self::Column(children) => {
+            Self::Row { children, .. } | Self::Column { children, .. } => {
                 for child in children {
                     child.collect_control_sections(sections)?;
                 }
@@ -1927,6 +2142,7 @@ pub struct PluginPanelApplication {
     notification_shortcuts: Option<(Option<u32>, bool)>,
     overlay_open: bool,
     images: PluginImages,
+    stylesheet: StyleSheet,
 }
 
 struct LauncherShortcutState {
@@ -2903,6 +3119,7 @@ impl PluginPanelApplication {
 
     pub fn from_package(package: &PluginPackage) -> Result<Self, String> {
         let mut application = Self::new_with_manifest(&package.source, &package.manifest, None)?;
+        application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
         application.sync_images(package_images(package)?);
         Ok(application)
     }
@@ -2914,6 +3131,7 @@ impl PluginPanelApplication {
         let data = serde_json::json!({ "settings": settings, "slots": {} }).to_string();
         let mut application =
             Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
+        application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
         application.sync_images(package_images(package)?);
         Ok(application)
     }
@@ -2945,11 +3163,13 @@ impl PluginPanelApplication {
         .to_string();
         let mut application =
             Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
+        application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
         application.sync_images(images);
         Ok(application)
     }
 
     pub fn validate_package(package: &PluginPackage) -> Result<(), String> {
+        StyleSheet::compile(&package.stylesheet)?;
         package_images(package)?;
         let settings: std::collections::BTreeMap<_, _> = package
             .manifest
@@ -3019,7 +3239,7 @@ impl PluginPanelApplication {
     }
 
     pub fn retained_contribution_bytes(&self) -> u64 {
-        self.node.contribution_bytes()
+        self.node.contribution_bytes() + self.stylesheet.estimated_retained_bytes()
     }
 
     pub fn control_sections(&self) -> Result<Vec<ControlPluginSection>, String> {
@@ -3039,7 +3259,7 @@ impl PluginPanelApplication {
                     action,
                     ..
                 } if section_id == id => Some(*action),
-                PanelNode::Row(children) | PanelNode::Column(children) => {
+                PanelNode::Row { children, .. } | PanelNode::Column { children, .. } => {
                     children.iter().find_map(|child| find(child, id))
                 }
                 _ => None,
@@ -3076,7 +3296,7 @@ impl PluginPanelApplication {
                 {
                     Some(*action)
                 }
-                PanelNode::Row(children) | PanelNode::Column(children) => children
+                PanelNode::Row { children, .. } | PanelNode::Column { children, .. } => children
                     .iter()
                     .find_map(|child| find(child, id, application_id)),
                 _ => None,
@@ -3458,6 +3678,7 @@ impl PluginPanelApplication {
             notification_shortcuts: None,
             overlay_open: false,
             images: PluginImages::new(),
+            stylesheet: StyleSheet::default(),
         })
     }
 
@@ -5079,7 +5300,7 @@ impl nickel_ui::Application for PluginPanelApplication {
             || self.manifest.id == window_preview_manifest().id
             || self.manifest.id == desktop_manifest().id
         {
-            AnyView::new(self.node.view(&self.images))
+            AnyView::new(self.node.view(&self.images, &self.stylesheet))
         } else {
             AnyView::new(
                 Column::new()
@@ -5090,7 +5311,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         Row::new()
                             .fill_width()
                             .child(Spacer::flex())
-                            .child(self.node.view(&self.images))
+                            .child(self.node.view(&self.images, &self.stylesheet))
                             .child(Spacer::flex()),
                     ),
             )
@@ -5114,7 +5335,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                 } => {
                     let mut content = Column::new().fill_width();
                     for child in children {
-                        content = content.child(child.view(&self.images));
+                        content = content.child(child.view(&self.images, &self.stylesheet));
                     }
                     overlays.push(FrameOverlay::surface(
                         TransientSurface::dialog(
@@ -5738,6 +5959,7 @@ mod tests {
         let package = PluginPackage {
             manifest: external_manifest,
             images: Default::default(),
+            stylesheet: String::new(),
             source: r#"
                 function App() {
                     return h(Panel, {height: 80},
@@ -5783,12 +6005,79 @@ mod tests {
     }
 
     #[test]
+    fn plugin_css_styles_controls_without_changing_actions_or_text_editing() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.css-controls".into();
+        let package = PluginPackage {
+            manifest: external_manifest,
+            images: Default::default(),
+            stylesheet: "button.primary { background-color: #345678; padding: 8px; border: 2px solid #abc; border-radius: 6px; color: #fff; font-size: 18px; } text-field.entry { background-color: rgba(10, 20, 30, 0.5); padding: 4px; line-height: 24px; }".into(),
+            source: "function App() { return h(Panel, {background: 0, height: 120}, h(Button, {id: 'go', className: 'primary', onClick: () => nickel.request('show-launcher')}, 'Go'), h(TextField, {id: 'name', className: 'entry', value: '', onChange: value => {}})); }".into(),
+        };
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let mut host = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package(&package).unwrap(),
+            440,
+            120,
+        );
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill { color: 0xff345678, radius, .. } if *radius == 4.0
+        )));
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill { color: 0xffaabbcc, radius, .. } if *radius == 6.0
+        )));
+        let button = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Go".into(),
+            })
+            .unwrap();
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(button.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ShowLauncher]
+        );
+        assert!(
+            host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn unstyled_plugin_button_has_no_mandatory_paint() {
+        let source = "function App() { return h(Panel, {background: 0}, h(Button, {id: 'go', onClick: () => {}}, 'Go')); }";
+        let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 80);
+        assert!(!host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill {
+                color: 0x66455675,
+                ..
+            }
+        )));
+        assert!(
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Go".into(),
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn installed_viewport_tracks_window_resize_and_keeps_content_inset() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.viewport".into();
         let package = PluginPackage {
             manifest: external_manifest,
             images: Default::default(),
+            stylesheet: String::new(),
             source: "function App() { return h(Viewport, {background: 0xff112233, padding: 20}, h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open')); }".into(),
         };
         let app = PluginPanelApplication::from_package(&package).unwrap();
@@ -6215,6 +6504,7 @@ mod tests {
         let package = PluginPackage {
             manifest: manifest().clone(),
             images: Default::default(),
+            stylesheet: String::new(),
             source: r#"
                 function App() {
                     const [open, setOpen] = useState(false);
@@ -6273,6 +6563,7 @@ mod tests {
         let package = PluginPackage {
             manifest: external_manifest,
             images: Default::default(),
+            stylesheet: String::new(),
             source: "function App() { return h(Panel, {}, h(Text, {}, nickel.data.settings['show-count'] ? 'Shown' : 'Hidden')); }".into(),
         };
         let settings =

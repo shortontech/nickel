@@ -944,6 +944,14 @@ impl<Message> Text<Message> {
         self
     }
 
+    /// Set an exact pixel font size, independent of the legacy discrete text scale.
+    pub fn font_size(mut self, pixels: f32) -> Self {
+        if let Kind::Text { scale, .. } = &mut self.0.kind {
+            *scale = -pixels.max(1.0);
+        }
+        self
+    }
+
     pub fn color(mut self, color: Color) -> Self {
         self.0 = self.0.foreground(color);
         self
@@ -1563,6 +1571,16 @@ impl<Message> TextField<Message> {
 
     pub fn scale(mut self, scale: f32) -> Self {
         self.text = self.text.scale(scale);
+        self
+    }
+
+    pub fn font_size(mut self, pixels: f32) -> Self {
+        self.text = self.text.font_size(pixels);
+        self
+    }
+
+    pub fn line_height(mut self, pixels: f32) -> Self {
+        self.text = self.text.line_height(pixels);
         self
     }
 
