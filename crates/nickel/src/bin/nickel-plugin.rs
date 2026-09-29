@@ -56,6 +56,9 @@ fn run_command() -> Result<(), String> {
                 return Err(usage().into());
             }
             let package = dev::load_package(&PathBuf::from(directory))?;
+            if package.manifest.claims_native_shell_surface() {
+                return Err("desktop and screenshot presentation are native Rust UI".into());
+            }
             PluginPanelApplication::validate_package(&package)
                 .map_err(|error| format!("plugin JavaScript failed: {error}"))?;
             println!("{} ({})", package.manifest.name, package.manifest.id);

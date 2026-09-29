@@ -139,10 +139,9 @@ mod platform {
         PluginPackage, PluginSlotContract, PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::{
-        PluginPanelApplication, codex_projects_manifest, control_center_manifest, desktop_manifest,
+        PluginPanelApplication, codex_projects_manifest, control_center_manifest,
         launcher_manifest, manifest, notification_manifest, on_screen_keyboard_manifest,
-        run_manifest, screenshot_manifest, taskbar_manifest, volume_osd_manifest,
-        window_preview_manifest,
+        run_manifest, taskbar_manifest, volume_osd_manifest, window_preview_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
@@ -150,13 +149,11 @@ mod platform {
             manifest(),
             taskbar_manifest(),
             launcher_manifest(),
-            desktop_manifest(),
             notification_manifest(),
             run_manifest(),
             control_center_manifest(),
             codex_projects_manifest(),
             on_screen_keyboard_manifest(),
-            screenshot_manifest(),
             window_preview_manifest(),
             volume_osd_manifest(),
         ]
@@ -174,6 +171,9 @@ mod platform {
 
     fn load_dev_package(directory: &Path) -> Result<PluginPackage, String> {
         let package = load_package(directory)?;
+        if package.manifest.claims_native_shell_surface() {
+            return Err("desktop and screenshot presentation are native Rust UI".into());
+        }
         let bundled = if let Some(manifest) = bundled_manifest(&package.manifest.id) {
             if *manifest != package.manifest {
                 return Err("bundled plugin dev requires its shipped manifest".into());
@@ -675,14 +675,29 @@ mod platform {
         }
 
         #[test]
-        fn screenshot_uses_the_bundled_dev_path() {
+        fn native_screenshot_is_not_a_developer_plugin() {
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../assets/plugins/screenshot"
             ));
-            let package = load_dev_package(root).unwrap();
-            assert_eq!(package.manifest.id, "org.nickel.screenshot");
-            assert_eq!(package.manifest.surfaces.len(), 1);
+            assert!(
+                load_dev_package(root)
+                    .unwrap_err()
+                    .contains("native Rust UI")
+            );
+        }
+
+        #[test]
+        fn native_desktop_is_not_a_developer_plugin() {
+            let root = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/desktop"
+            ));
+            assert!(
+                load_dev_package(root)
+                    .unwrap_err()
+                    .contains("native Rust UI")
+            );
         }
 
         #[test]
@@ -724,7 +739,7 @@ mod platform {
         #[test]
         fn stages_bundled_shell_sources_without_installing_duplicate_packages() {
             let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
-            for name in ["launcher", "desktop", "taskbar"] {
+            for name in ["launcher", "taskbar"] {
                 let directory = root.join(name);
                 let package = PluginPackage::load(&directory).unwrap();
                 let profile = tempfile::tempdir().unwrap();

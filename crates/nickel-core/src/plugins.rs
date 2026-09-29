@@ -117,6 +117,9 @@ impl PluginCatalog {
                 if package.manifest.id != directory {
                     return Err("plugin manifest ID does not match its directory".into());
                 }
+                if package.manifest.claims_native_shell_surface() {
+                    return Err("desktop and screenshot presentation are native Rust UI".into());
+                }
                 let source_digest = package.source_digest();
                 Ok(PluginPackageDescriptor {
                     directory: entry.path(),
@@ -896,6 +899,16 @@ impl PluginCapability {
 }
 
 impl PluginManifest {
+    pub fn claims_native_shell_surface(&self) -> bool {
+        matches!(
+            self.id.as_str(),
+            "org.nickel.desktop" | "org.nickel.screenshot"
+        ) || self
+            .surfaces
+            .iter()
+            .any(|surface| surface.kind == PluginSurfaceKind::Desktop)
+    }
+
     pub fn from_json(source: &str) -> Result<Self, String> {
         if source.len() > MAX_MANIFEST_BYTES {
             return Err("plugin manifest exceeds 64 KiB".into());
@@ -1327,6 +1340,36 @@ mod tests {
                 .load()
                 .unwrap_err()
                 .contains("content changed after discovery")
+        );
+    }
+
+    #[test]
+    fn installed_packages_cannot_claim_native_shell_surfaces() {
+        let root = tempfile::tempdir().unwrap();
+        for (id, desktop_kind) in [
+            ("org.nickel.desktop", false),
+            ("org.nickel.screenshot", false),
+            ("org.example.desktop-claim", true),
+        ] {
+            let directory = root.path().join(id);
+            std::fs::create_dir(&directory).unwrap();
+            let mut manifest = VALID.replace("org.nickel.hello-panel", id);
+            if desktop_kind {
+                manifest = manifest
+                    .replace("\"kind\":\"panel\"", "\"kind\":\"desktop\"")
+                    .replace("\"bottom_offset\":24,", "");
+            }
+            std::fs::write(directory.join("plugin.json"), manifest).unwrap();
+            std::fs::write(directory.join("main.js"), "function App() {}").unwrap();
+        }
+        let catalog = PluginCatalog::discover(root.path()).unwrap();
+        assert!(catalog.packages.is_empty());
+        assert_eq!(catalog.failures.len(), 3);
+        assert!(
+            catalog
+                .failures
+                .iter()
+                .all(|failure| failure.reason.contains("native Rust UI"))
         );
     }
 

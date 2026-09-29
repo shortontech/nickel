@@ -1443,6 +1443,10 @@ impl LiveShell {
         }
         let mut external_plugin_packages = std::collections::BTreeMap::new();
         for (id, descriptor) in catalog.packages {
+            if descriptor.manifest.claims_native_shell_surface() {
+                tracing::warn!(plugin = %id, "installed plugin cannot replace a native shell surface");
+                continue;
+            }
             if plugin_registry.entries().count() >= 64 {
                 tracing::warn!(plugin = %id, "plugin status capacity reached");
                 continue;
