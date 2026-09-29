@@ -1,33 +1,38 @@
-//! Bluetooth JSX page. Adapter and device operations remain in the Settings host.
+//! Bluetooth JSX page through the shared native component renderer.
 
-use nickel_ui::{AnyView, Column, Insets, SemanticTheme, VerticalScroll};
+use nickel_plugin_presentation::{
+    components::PluginImages,
+    css::StyleSheet,
+    page::{JsxPage, STALE_DATA},
+};
+use nickel_ui::{AnyView, Column, SemanticTheme, VerticalScroll};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    BluetoothOperation, SettingsApp, SettingsMessage, SettingsPage,
-    settings_components::{Node, SettingsJsxContext},
-};
+use crate::{BluetoothOperation, SettingsApp, SettingsMessage, SettingsPage};
 
-const STALE_STATUS: &str = "Bluetooth status changed; refresh the page";
+const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct BluetoothPage {
-    context: SettingsJsxContext,
+    page: JsxPage,
+    stylesheet: StyleSheet,
+    last_theme: Option<SemanticTheme>,
 }
 
 impl BluetoothPage {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.context.retained_bytes()
+        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
     }
 
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            context: SettingsJsxContext::new(
+            page: JsxPage::new(
                 crate::settings_package::source(crate::settings_package::Script::Bluetooth)?,
-                parse_tree,
-                STALE_STATUS,
-                "Bluetooth action must request one operation",
+                crate::settings_package::manifest()?.clone(),
+                None,
             )?,
+            stylesheet: StyleSheet::default(),
+            last_theme: None,
         })
     }
 
@@ -35,54 +40,38 @@ impl BluetoothPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-        pairing: bool,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        let node = self.context.render(data)?;
+        self.page.render(data)?;
+        if self.last_theme != Some(theme) {
+            self.stylesheet = crate::settings_plugin::stylesheet_template(
+                include_str!("../../../assets/plugins/settings/settings-bluetooth.css"),
+                theme,
+            )?;
+            self.last_theme = Some(theme);
+        }
+        let node = self.page.node().ok_or("Bluetooth page is unavailable")?;
         Ok(AnyView::new(
-            Column::new()
-                .grow(1.0)
-                .padding(if pairing {
-                    Insets::all(0.0)
-                } else {
-                    Insets {
-                        top: 20.0,
-                        right: 40.0,
-                        bottom: 20.0,
-                        left: 20.0,
-                    }
-                })
-                .child(
-                    VerticalScroll::new(SettingsMessage::BluetoothScroll, 0.0)
-                        .grow(1.0)
-                        .theme(theme)
-                        .child(node.view(theme, "", SettingsMessage::BluetoothJsxAction)),
-                ),
+            Column::new().grow(1.0).child(
+                VerticalScroll::new(SettingsMessage::BluetoothScroll, 0.0)
+                    .grow(1.0)
+                    .theme(theme)
+                    .child(node.view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet)),
+            ),
         ))
     }
 
     fn dispatch(&mut self, index: usize, data: &Value) -> Result<SettingsMessage, String> {
-        self.context.dispatch(index, &Value::Null, data, |effect| {
+        self.page.dispatch(index, &Value::Null, data, |effect| {
             let request: BluetoothRequest =
-                serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
+                serde_json::from_value(effect).map_err(|error| error.to_string())?;
             validate_request(request, data)
         })
     }
 
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.context.action_for_id(id)
+        self.page.node()?.button_action(id)
     }
-}
-
-fn parse_tree(value: &Value) -> Result<Node, String> {
-    if value.get("kind").and_then(Value::as_str) != Some("settings-stack") {
-        return Err("Bluetooth page root is invalid".into());
-    }
-    let node = Node::parse(value)?;
-    if node.contains_input() {
-        return Err("Bluetooth page cannot request text input".into());
-    }
-    Ok(node)
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,7 +300,7 @@ mod tests {
         });
         let data = projection(&app);
         let mut page = BluetoothPage::new().unwrap();
-        page.render(&data, app.ui_theme(), false).unwrap();
+        page.render(&data, app.ui_theme()).unwrap();
         let power = page.action_for_id("bluetooth-power").unwrap();
         let device = page.action_for_id("bluetooth-device-0-action").unwrap();
         assert_eq!(
@@ -361,7 +350,7 @@ mod tests {
         });
         let data = projection(&app);
         let mut page = BluetoothPage::new().unwrap();
-        page.render(&data, app.ui_theme(), true).unwrap();
+        page.render(&data, app.ui_theme()).unwrap();
         assert!(page.action_for_id("bluetooth-power").is_none());
         assert!(page.action_for_id("bluetooth-device-0-action").is_none());
         let discovery = page.action_for_id("bluetooth-discovery-action").unwrap();

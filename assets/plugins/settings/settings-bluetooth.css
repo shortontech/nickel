@@ -1,0 +1,75 @@
+div.bluetooth-page {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 16px;
+    padding: 20px 40px 20px 20px;
+}
+
+div.bluetooth-page.pairing {
+    padding: 0;
+}
+
+div.bluetooth-card {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 12px;
+    padding: 18px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+}
+
+div.bluetooth-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 16px;
+}
+
+div.bluetooth-label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+text.bluetooth-title,
+text.bluetooth-name {
+    height: auto;
+    color: @primary@;
+    font-size: 15px;
+    line-height: 21px;
+}
+
+text.bluetooth-detail {
+    height: auto;
+    color: @secondary@;
+    font-size: 13px;
+    line-height: 18px;
+}
+
+switch.bluetooth-switch {
+    background: @border@;
+    border: 1px solid @border@;
+    border-radius: 12px;
+    color: @primary@;
+}
+
+switch.bluetooth-switch.on,
+switch.bluetooth-switch.disabled-on {
+    background: @accent-soft@;
+    border: 1px solid @accent@;
+}
+
+button.bluetooth-action {
+    height: 40px;
+    padding: 8px 12px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 13px;
+}

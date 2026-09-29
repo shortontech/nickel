@@ -508,7 +508,6 @@ enum SettingsMessage {
     OpenBluetoothPairing,
     BluetoothDiscovery,
     BluetoothDevice(usize),
-    BluetoothJsxAction(usize),
     BluetoothScroll,
     SetWifiPower(bool),
     WifiNetwork(usize),
@@ -1742,7 +1741,6 @@ impl SettingsApp {
                     toggle_bluetooth_device(&device)
                 });
             }
-            SettingsMessage::BluetoothJsxAction(index) => self.handle_bluetooth_jsx_action(index),
             SettingsMessage::AppearanceLight => {
                 self.shell_settings.theme = ThemePreference::Light;
                 self.persist_appearance();
@@ -1922,6 +1920,11 @@ impl SettingsApp {
                         }
                         SettingsPage::Network if value.is_null() => {
                             self.handle_network_jsx_action(index);
+                        }
+                        SettingsPage::Bluetooth | SettingsPage::BluetoothPair
+                            if value.is_null() =>
+                        {
+                            self.handle_bluetooth_jsx_action(index);
                         }
                         _ => {}
                     }
@@ -5201,7 +5204,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::BluetoothJsxAction(action))
+            tree.semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
                 .len(),
             1
         );
@@ -5247,7 +5250,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             settings_tree
-                .semantic_targets_for_message(&SettingsMessage::BluetoothJsxAction(open_action))
+                .semantic_targets_for_message(&SettingsMessage::JsxAction(
+                    open_action,
+                    "null".into()
+                ))
                 .len(),
             1
         );
@@ -5276,7 +5282,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             pairing_tree
-                .semantic_targets_for_message(&SettingsMessage::BluetoothJsxAction(pair_action))
+                .semantic_targets_for_message(&SettingsMessage::JsxAction(
+                    pair_action,
+                    "null".into()
+                ))
                 .len(),
             1
         );
@@ -5483,7 +5492,7 @@ mod tests {
         assert_eq!(device.label.as_deref(), Some("Connect"));
         assert_eq!(
             bluetooth_tree
-                .semantic_targets_for_message(&SettingsMessage::BluetoothJsxAction(action))
+                .semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
                 .len(),
             1,
             "only the explicit trailing button toggles the device"

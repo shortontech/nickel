@@ -1,25 +1,36 @@
 // @jsx h
-// Bluetooth presentation. The host checks the live adapter and device before acting.
+// The host checks current adapter and device identity before applying requests.
 function request(type, fields = {}) {
     nickel.request({ type, ...fields });
 }
 function App() {
     const data = nickel.data;
-    return h("settings-stack", null,
-        !data.pairing && h("settings-row", { label: data.powerLabel, value: data.adapterName },
-            h("settings-switch", { id: "bluetooth-power", label: data.powerLabel, value: data.switchState, onClick: data.powerEditable
-                    ? () => request('power', { enabled: !data.powered })
-                    : undefined })),
-        h("settings-card", { label: data.statusLabel, value: data.status }),
-        h("settings-card", { label: data.devicesLabel, value: "" },
-            h("settings-row", { label: data.discoveryLabel, value: "" },
-                h("settings-button", { id: "bluetooth-discovery-action", label: data.discoveryLabel, value: "secondary", onClick: data.discoveryEditable
-                        ? () => request(data.pairing ? 'discovery' : 'open-pairing')
-                        : undefined })),
+    return h("div", { className: data.pairing ? 'bluetooth-page pairing' : 'bluetooth-page' },
+        !data.pairing && h("div", { className: "bluetooth-card" },
+            h("div", { className: "bluetooth-row" },
+                h("div", { className: "bluetooth-label" },
+                    h(Text, { className: "bluetooth-title" }, data.powerLabel),
+                    h(Text, { className: "bluetooth-detail" }, data.adapterName)),
+                h(Switch, { id: "bluetooth-power", className: `bluetooth-switch ${data.switchState}`, accessibilityLabel: data.powerLabel, state: data.switchState, onClick: data.powerEditable
+                        ? () => request('power', { enabled: !data.powered })
+                        : undefined }))),
+        h("div", { className: "bluetooth-card" },
+            h(Text, { className: "bluetooth-title" }, data.statusLabel),
+            h(Text, { className: "bluetooth-detail", wrap: true }, data.status)),
+        h("div", { className: "bluetooth-card" },
+            h(Text, { className: "bluetooth-title" }, data.devicesLabel),
+            h("div", { className: "bluetooth-row" },
+                h(Text, { className: "bluetooth-detail" }, data.discoveryLabel),
+                data.discoveryEditable
+                    ? h(Button, { id: "bluetooth-discovery-action", className: "bluetooth-action", onClick: () => request(data.pairing ? 'discovery' : 'open-pairing') }, data.discoveryLabel)
+                    : h(Text, { className: "bluetooth-detail" }, data.discoveryLabel)),
             data.devices.length
-                ? data.devices.map(device => h("settings-row", { key: device.id, label: device.name, value: device.detail },
-                    h("settings-button", { id: `bluetooth-device-${device.index}-action`, label: device.actionLabel, value: "secondary", onClick: data.deviceEditable
-                            ? () => request('device', { index: device.index, id: device.id })
-                            : undefined })))
-                : h("settings-row", { label: data.emptyLabel, value: "" })));
+                ? data.devices.map(device => h("div", { key: device.id, className: "bluetooth-row" },
+                    h("div", { className: "bluetooth-label" },
+                        h(Text, { className: "bluetooth-name" }, device.name),
+                        h(Text, { className: "bluetooth-detail", wrap: true }, device.detail)),
+                    data.deviceEditable
+                        ? h(Button, { id: `bluetooth-device-${device.index}-action`, className: "bluetooth-action", onClick: () => request('device', { index: device.index, id: device.id }) }, device.actionLabel)
+                        : h(Text, { className: "bluetooth-detail" }, device.actionLabel)))
+                : h(Text, { className: "bluetooth-detail" }, data.emptyLabel)));
 }

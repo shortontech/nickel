@@ -1345,13 +1345,7 @@ impl SettingsApp {
                 .get_or_insert_with(crate::bluetooth_plugin::BluetoothPage::new)
                 .as_mut()
                 .map_err(|error| error.clone())
-                .and_then(|page| {
-                    page.render(
-                        &data,
-                        self.ui_theme(),
-                        self.page == SettingsPage::BluetoothPair,
-                    )
-                });
+                .and_then(|page| page.render(&data, self.ui_theme()));
             if let Ok(view) = rendered {
                 return view;
             }
