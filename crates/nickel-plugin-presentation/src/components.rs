@@ -2084,7 +2084,7 @@ impl PanelNode {
                 class_name,
             } => {
                 let style = stylesheet.resolve("row", None, class_name.as_deref());
-                let mut row = Row::new().fill_width().height(48.0);
+                let mut row = Row::new();
                 if let Some(gap) = style.gap {
                     row = row.gap(gap);
                 }
@@ -2105,7 +2105,7 @@ impl PanelNode {
                 class_name,
             } => {
                 let style = stylesheet.resolve("column", None, class_name.as_deref());
-                let mut column = Column::new().fill_width();
+                let mut column = Column::new();
                 if let Some(gap) = style.gap {
                     column = column.gap(gap);
                 }

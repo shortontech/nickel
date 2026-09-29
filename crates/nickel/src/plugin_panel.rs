@@ -3723,15 +3723,7 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn title(&self) -> &str {
-        if self.manifest.id == launcher_manifest().id {
-            "Plugin Launcher"
-        } else if self.manifest.id == run_manifest().id {
-            "Plugin Run Dialog"
-        } else if self.manifest.id == taskbar_manifest().id {
-            "Plugin Taskbar"
-        } else {
-            "Plugin Panel"
-        }
+        &self.manifest.name
     }
 }
 
