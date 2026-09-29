@@ -236,6 +236,7 @@ jobs:
           $stdout = Join-Path $smokeRoot "shell.stdout"
           $stderr = Join-Path $smokeRoot "shell.stderr"
           $statusFile = Join-Path $smokeRoot "plugin-status.json"
+          $env:NICKEL_TEST_ACCEPT_INJECTED_KEYS = "1"
           $shell = Start-Process -FilePath "target/debug/nickel.exe" -ArgumentList "--no-desktop-windows" -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           try {
             $snapshot = $null
@@ -281,6 +282,25 @@ jobs:
                 [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr context);
                 [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
                 [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder title, int capacity);
+                [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);
+                [DllImport("user32.dll")] private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extraInfo);
+                public static void TapKey(byte key) {
+                    keybd_event(key, 0, 0, UIntPtr.Zero);
+                    keybd_event(key, 0, 2, UIntPtr.Zero);
+                }
+                public static int VisibleWindowCount(uint processId, string expected) {
+                    int count = 0;
+                    EnumWindows((handle, context) => {
+                        uint owner;
+                        GetWindowThreadProcessId(handle, out owner);
+                        if (owner != processId || !IsWindowVisible(handle)) return true;
+                        var title = new StringBuilder(256);
+                        GetWindowText(handle, title, title.Capacity);
+                        if (title.ToString() == expected) count++;
+                        return true;
+                    }, IntPtr.Zero);
+                    return count;
+                }
                 public static bool HasWindowTitle(uint processId, string expected) {
                     bool found = false;
                     EnumWindows((handle, context) => {
@@ -305,7 +325,31 @@ jobs:
             if ([NickelCodexMenuWindowProbe]::HasWindowTitle([uint32]$shell.Id, "Nickel Screenshot")) {
               throw "The retired fixed screenshot window is still present"
             }
+            $overlaysBefore = [NickelCodexMenuWindowProbe]::VisibleWindowCount([uint32]$shell.Id, "Nickel Plugin Overlay")
+            [NickelCodexMenuWindowProbe]::TapKey(0x2C)
+            $screenshotOpened = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              $shell.Refresh()
+              if ($shell.HasExited) { throw "Nickel exited during screenshot capture" }
+              if ([NickelCodexMenuWindowProbe]::VisibleWindowCount([uint32]$shell.Id, "Nickel Plugin Overlay") -gt $overlaysBefore) {
+                $screenshotOpened = $true
+                break
+              }
+            }
+            if (-not $screenshotOpened) { throw "Print Screen did not show the screenshot plugin overlay" }
+            [NickelCodexMenuWindowProbe]::TapKey(0x1B)
+            $screenshotClosed = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              if ([NickelCodexMenuWindowProbe]::VisibleWindowCount([uint32]$shell.Id, "Nickel Plugin Overlay") -le $overlaysBefore) {
+                $screenshotClosed = $true
+                break
+              }
+            }
+            if (-not $screenshotClosed) { throw "Escape did not dismiss the screenshot plugin overlay" }
             Write-Host "Live Windows launcher, taskbar, desktop, Codex project, keyboard, and screenshot plugins are running."
+            Write-Host "Print Screen opened the screenshot plugin overlay; Escape dismissed it."
             Write-Host "Taskbar retained UI: $taskbarBytes bytes; peak: $taskbarPeak bytes."
           } finally {
             $shell.Refresh()

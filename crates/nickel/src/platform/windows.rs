@@ -131,9 +131,9 @@ use nickel_input::{
     AggregateModifier, PhysicalKey, PointerButton, Shortcut, ShortcutKey, ShortcutTrigger,
     global::{GlobalShortcutEdge, Registration, RegistrationError, RegistrationTable},
     windows::{
-        HookDisposition, NativeHookCallbacks, NativeHotkeyRegistration, NativeKeyboardEvent,
-        NativePointerEvent, NativePointerKind, SuperPointerGesture, WindowsInputAdapter,
-        physical_key, run_native_hook_loop,
+        HookDisposition, InjectedEventPolicy, NativeHookCallbacks, NativeHotkeyRegistration,
+        NativeKeyboardEvent, NativePointerEvent, NativePointerKind, SuperPointerGesture,
+        WindowsInputAdapter, physical_key, run_native_hook_loop,
     },
 };
 
@@ -2550,7 +2550,16 @@ fn windows_input_adapter() -> &'static Mutex<WindowsInputAdapter<HotkeyAction>> 
         tracing::info!(
             "workspace shortcuts are host-owned on Windows; Nickel leaves them unregistered"
         );
-        Mutex::new(WindowsInputAdapter::new(bindings))
+        let test_input = cfg!(debug_assertions)
+            && std::env::var_os("NICKEL_TEST_ACCEPT_INJECTED_KEYS")
+                .is_some_and(|value| value == "1");
+        let adapter = WindowsInputAdapter::new(bindings).with_injected_policy(if test_input {
+            tracing::warn!("debug test session accepts injected keyboard shortcuts");
+            InjectedEventPolicy::Accept
+        } else {
+            InjectedEventPolicy::Ignore
+        });
+        Mutex::new(adapter)
     })
 }
 
