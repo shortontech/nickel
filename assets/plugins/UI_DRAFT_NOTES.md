@@ -51,10 +51,14 @@ every `nickel.request` against the owning plugin's capabilities.
   for this draft. A future service API can improve their names without tying
   the generic surface path to taskbar or launcher IDs.
 
-## Visual and memory checks before promotion
+## Visual review and performance observation
 
 Compare the draft with master at normal and high DPI, on multiple outputs,
-with menus and dialogs open. Check keyboard/focus behavior and drag pinning.
-Measure stock process memory against 200 MiB Windows / 280 MiB Linux targets
-and stock presentation tree against 12 MiB. These source files alone prove
-neither appearance nor memory use.
+with menus and dialogs open. Check keyboard focus and drag pinning.
+Record stock process memory alongside the aspirational 200 MiB Windows and
+280 MiB Linux figures, and record stock presentation-tree memory alongside
+the 12 MiB figure. Memory is not a promotion gate. These source files alone
+prove neither appearance nor memory use.
+
+Controller navigation parity across new JSX layouts is a later epic. Existing
+native control behavior stays in place during this migration.
