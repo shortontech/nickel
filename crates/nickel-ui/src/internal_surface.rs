@@ -65,6 +65,9 @@ pub trait InternalUiSurface {
     fn step(&mut self, batch: HostBatch) -> HostEventOutcome;
     fn inspect(&self) -> HostInspection;
     fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot>;
+    fn layout_snapshot(&self) -> Option<String> {
+        None
+    }
     /// Local assistive-technology projection from the canonical resolved tree.
     /// Remote adapters remain on the separately bounded semantic interface.
     fn accessibility_nodes(&self) -> Vec<AccessibilityNode>;
@@ -183,6 +186,10 @@ impl<A: crate::Application + 'static> InternalUiSurface for HostedApplication<A>
 
     fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot> {
         self.host.semantic_nodes()
+    }
+
+    fn layout_snapshot(&self) -> Option<String> {
+        Some(self.host.layout_snapshot())
     }
 
     fn accessibility_nodes(&self) -> Vec<AccessibilityNode> {

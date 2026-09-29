@@ -2682,6 +2682,94 @@ impl LiveShell {
         }
     }
 
+    /// Computed production host layout for the opt-in nested test socket.
+    pub(crate) fn layout_snapshot(
+        &self,
+        role: SurfaceRole,
+        plugin: Option<&nickel_core::plugins::PluginSurfaceKey>,
+        output: Option<&str>,
+    ) -> Option<String> {
+        if self.locked {
+            return None;
+        }
+        let snapshot = match role {
+            SurfaceRole::Desktop => self
+                .plugin_desktop_host
+                .as_ref()
+                .map(|host| host.layout_snapshot())
+                .or_else(|| {
+                    output
+                        .filter(|output| *output != self.desktop_active_viewport)
+                        .and_then(|output| self.desktop_viewports.get(output))
+                        .map(|viewport| viewport.host.layout_snapshot())
+                })
+                .or_else(|| Some(self.desktop_host.layout_snapshot())),
+            SurfaceRole::Taskbar => {
+                let host = if output == self.panel_output.as_deref() {
+                    self.plugin_taskbar_host.as_ref()
+                } else {
+                    self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
+                };
+                host.map(|host| host.layout_snapshot())
+            }
+            SurfaceRole::Panel => plugin.and_then(|key| {
+                self.plugin_panel_extra_hosts
+                    .get(key)
+                    .map(|(_, host)| host.layout_snapshot())
+                    .or_else(|| {
+                        self.plugin_panel_host
+                            .as_ref()
+                            .filter(|_| {
+                                self.plugin_panel_owner == key.plugin_id
+                                    && self.plugin_panel_surface.id == key.surface_id
+                            })
+                            .map(|host| host.layout_snapshot())
+                    })
+            }),
+            SurfaceRole::Launcher if self.run_visible => self
+                .plugin_run_host
+                .as_ref()
+                .map(|host| host.layout_snapshot()),
+            SurfaceRole::Launcher => self
+                .plugin_launcher_host
+                .as_ref()
+                .map(|host| host.layout_snapshot()),
+            SurfaceRole::ControlCenter => self
+                .plugin_control_host
+                .as_ref()
+                .map(|host| host.layout_snapshot())
+                .or_else(|| Some(self.control_host.layout_snapshot())),
+            SurfaceRole::Notification => self
+                .plugin_notification_host
+                .as_ref()
+                .map(|host| host.layout_snapshot())
+                .or_else(|| Some(self.notification_host.layout_snapshot())),
+            SurfaceRole::VolumeOsd => self
+                .plugin_volume_osd_host
+                .as_ref()
+                .map(|host| host.layout_snapshot()),
+            SurfaceRole::WindowPreview => self
+                .plugin_preview_host
+                .as_ref()
+                .map(|host| host.layout_snapshot()),
+            SurfaceRole::WindowContextMenu => self
+                .window_menu_plugin_host
+                .as_ref()
+                .map(|host| host.layout_snapshot())
+                .or_else(|| {
+                    self.application_menu_plugin_host
+                        .as_ref()
+                        .map(|host| host.layout_snapshot())
+                }),
+            SurfaceRole::Screenshot => plugin
+                .and_then(|key| self.plugin_panel_extra_hosts.get(key))
+                .map(|(_, host)| host.layout_snapshot()),
+            SurfaceRole::OnScreenKeyboard => Some(self.keyboard_host.layout_snapshot()),
+            _ => None,
+        };
+        snapshot
+    }
+
     pub fn scene(&mut self, role: SurfaceRole, width: u32, height: u32) -> Vec<PaintCommand> {
         let commands = match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),

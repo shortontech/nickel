@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, io::Write};
 
 use nickel_session_protocol::{
     InputState, PointerInteraction, PreviewTargetAction, RecoveryTargetAction,
@@ -20,6 +20,8 @@ Usage:
   nickel-test-input outputs
   nickel-test-input output-set NAME enabled|disabled
   nickel-test-input surfaces
+  nickel-test-input layouts
+  nickel-test-input layout INTERNAL_SURFACE_ID
   nickel-test-input plugins
   nickel-test-input plugin-set ID enabled|disabled
   nickel-test-input plugin-setting ID KEY JSON_VALUE
@@ -77,6 +79,8 @@ enum Parsed {
         enabled: bool,
     },
     Surfaces,
+    Layouts,
+    Layout(String),
     Plugins,
     PluginSet {
         id: String,
@@ -147,6 +151,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
             },
         }),
         [command] if command == "surfaces" => Ok(Parsed::Surfaces),
+        [command] if command == "layouts" => Ok(Parsed::Layouts),
+        [command, surface] if command == "layout" => Ok(Parsed::Layout(surface.clone())),
         [command] if command == "plugins" => Ok(Parsed::Plugins),
         [command, id, state] if command == "plugin-set" => Ok(Parsed::PluginSet {
             id: id.clone(),
@@ -824,6 +830,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )),
             None,
         ),
+        Parsed::Layouts => (
+            Some(Request::Query(nickel_session_protocol::Query::UiLayouts)),
+            None,
+        ),
+        Parsed::Layout(surface) => (
+            Some(Request::Query(nickel_session_protocol::Query::UiLayout {
+                surface,
+            })),
+            None,
+        ),
         Parsed::Plugins => (
             Some(Request::Query(nickel_session_protocol::Query::Plugins)),
             None,
@@ -1265,6 +1281,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
+        ServerMessage::UiLayouts(surfaces) => {
+            for surface in surfaces {
+                println!(
+                    "{}\t{}\t{}\t{}x{}+{},{}\tnodes={}{}",
+                    surface.id,
+                    surface.role,
+                    if surface.visible { "visible" } else { "hidden" },
+                    surface.geometry.width,
+                    surface.geometry.height,
+                    surface.geometry.x,
+                    surface.geometry.y,
+                    surface.node_count,
+                    surface.plugin.map_or_else(String::new, |plugin| format!(
+                        "\t{}/{}",
+                        plugin.plugin_id, plugin.surface_id
+                    ))
+                );
+            }
+            Ok(())
+        }
+        ServerMessage::UiLayout(snapshot) => {
+            match std::io::stdout()
+                .lock()
+                .write_all(snapshot.layout.as_bytes())
+            {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
         ServerMessage::ShellReadiness(readiness) => {
             println!(
                 "ready={} expected_pid={:?} authenticated_pid={:?} outputs={} desktops={} panels={} locks={} launchers={} singletons_ready={} output_roles_ready={} reserved_ordinary_windows={}",
@@ -1303,6 +1349,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::Outputs
         | Parsed::OutputSet { .. }
         | Parsed::Surfaces
+        | Parsed::Layouts
+        | Parsed::Layout(_)
         | Parsed::Plugins
         | Parsed::PluginSet { .. }
         | Parsed::PluginSetting { .. }
@@ -1377,6 +1425,11 @@ mod tests {
         ));
         assert!(matches!(parse(["readiness".into()]), Ok(Parsed::Readiness)));
         assert!(matches!(parse(["plugins".into()]), Ok(Parsed::Plugins)));
+        assert!(matches!(parse(["layouts".into()]), Ok(Parsed::Layouts)));
+        assert!(matches!(
+            parse(["layout".into(), "internal:12".into()]),
+            Ok(Parsed::Layout(surface)) if surface == "internal:12"
+        ));
         assert!(matches!(
             parse([
                 "plugin-setting".into(),

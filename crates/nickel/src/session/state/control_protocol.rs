@@ -1019,6 +1019,15 @@ impl NickelSession {
             ),
             Query::Outputs => ServerMessage::Outputs(self.protocol_outputs()),
             Query::ShellSurfaces => ServerMessage::ShellSurfaces(self.protocol_shell_surfaces()),
+            Query::UiLayouts if self.test_control_enabled => {
+                ServerMessage::UiLayouts(self.protocol_ui_layouts())
+            }
+            Query::UiLayout { surface } if self.test_control_enabled => {
+                match self.protocol_ui_layout(&surface) {
+                    Ok(snapshot) => ServerMessage::UiLayout(snapshot),
+                    Err(message) => protocol_error(ErrorCode::InvalidRequest, &message),
+                }
+            }
             Query::ShellReadiness => ServerMessage::ShellReadiness(self.protocol_shell_readiness()),
             Query::LauncherVisibility => ServerMessage::LauncherVisibility {
                 visible: self.launcher_visibility.is_visible(),
@@ -1240,7 +1249,10 @@ impl NickelSession {
                         "shell semantic target is unavailable",
                     )
                 }),
-            Query::ShellSemanticTarget { .. } | Query::ShellRuntimeDiagnostics => protocol_error(
+            Query::ShellSemanticTarget { .. }
+            | Query::ShellRuntimeDiagnostics
+            | Query::UiLayouts
+            | Query::UiLayout { .. } => protocol_error(
                 ErrorCode::InvalidRequest,
                 "shell-only query is unavailable on this control endpoint",
             ),
@@ -2500,6 +2512,92 @@ impl NickelSession {
             }
         }
         outputs
+    }
+
+    fn protocol_ui_layouts(&self) -> Vec<nickel_session_protocol::UiLayoutSurfaceSnapshot> {
+        if self.locked {
+            return Vec::new();
+        }
+        self.internal_ui
+            .layout_surface_ids()
+            .filter(|id| !self.internal_ui.remote_access_protected(*id))
+            .filter_map(|id| {
+                let placement = self.internal_ui.placement(id)?;
+                let (x, y, width, height) = placement.geometry;
+                let shell_entry = self.internal_shell.as_ref().and_then(|shell| {
+                    shell
+                        .surfaces()
+                        .iter()
+                        .find(|surface| self.internal_shell_surfaces.get(&surface.id) == Some(&id))
+                        .map(|surface| (shell, surface))
+                });
+                let plugin = shell_entry
+                    .and_then(|(_, surface)| surface.plugin.as_ref())
+                    .map(|key| nickel_session_protocol::PluginSurfaceIdentity {
+                        plugin_id: key.plugin_id.clone(),
+                        surface_id: key.surface_id.clone(),
+                    });
+                let node_count = shell_entry
+                    .and_then(|(shell, surface)| shell.layout_snapshot(surface.id))
+                    .map_or_else(
+                        || self.internal_ui.layout_node_count(id).unwrap_or(0),
+                        |layout| layout.lines().count(),
+                    );
+                Some(nickel_session_protocol::UiLayoutSurfaceSnapshot {
+                    id: format!("internal:{}", id.snapshot_token()),
+                    title: self.internal_ui.title(id)?.chars().take(128).collect(),
+                    role: format!("{:?}", placement.role),
+                    visible: self.internal_ui.is_visible(id),
+                    geometry: ProtocolGeometry {
+                        x,
+                        y,
+                        width: i32::try_from(width).unwrap_or(i32::MAX),
+                        height: i32::try_from(height).unwrap_or(i32::MAX),
+                    },
+                    node_count,
+                    plugin,
+                })
+            })
+            .collect()
+    }
+
+    fn protocol_ui_layout(
+        &self,
+        surface: &str,
+    ) -> Result<nickel_session_protocol::UiLayoutSnapshot, String> {
+        let summary = self
+            .protocol_ui_layouts()
+            .into_iter()
+            .find(|entry| entry.id == surface)
+            .ok_or("layout surface is unavailable")?;
+        let token = surface
+            .strip_prefix("internal:")
+            .and_then(|token| token.parse::<u64>().ok())
+            .ok_or("invalid layout surface identity")?;
+        let id = self
+            .internal_ui
+            .layout_surface_ids()
+            .find(|id| id.snapshot_token() == token)
+            .ok_or("layout surface has retired")?;
+        let layout = self
+            .internal_shell
+            .as_ref()
+            .and_then(|shell| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|entry| self.internal_shell_surfaces.get(&entry.id) == Some(&id))
+                    .and_then(|entry| shell.layout_snapshot(entry.id))
+            })
+            .or_else(|| self.internal_ui.layout_snapshot(id))
+            .ok_or("computed layout is unavailable")?;
+        if layout.len() > 150_000 {
+            return Err("computed layout exceeds the test socket response limit".into());
+        }
+        Ok(nickel_session_protocol::UiLayoutSnapshot {
+            surface: summary,
+            layout,
+        })
     }
 
     pub(crate) fn protocol_shell_surfaces(&self) -> Vec<ShellSurfaceSnapshot> {

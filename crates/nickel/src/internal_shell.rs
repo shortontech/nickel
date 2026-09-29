@@ -517,6 +517,19 @@ impl InternalShellCoordinator {
             })
     }
 
+    pub(crate) fn layout_snapshot(&self, id: InternalSurfaceId) -> Option<String> {
+        let entry = self.entries.iter().find(|entry| entry.id == id)?;
+        let role = if self.is_taskbar_surface(entry) {
+            SurfaceRole::Taskbar
+        } else if self.is_screenshot_surface_id(id) {
+            SurfaceRole::Screenshot
+        } else {
+            entry.role
+        };
+        self.shell
+            .layout_snapshot(role, entry.plugin.as_ref(), entry.output.as_deref())
+    }
+
     pub(crate) fn bounded_shell_semantics(
         &self,
         id: InternalSurfaceId,

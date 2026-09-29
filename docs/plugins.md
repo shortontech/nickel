@@ -170,6 +170,21 @@ DOM library's `Text` and `Image` globals conflict with Nickel's components.
 The `dev` command transpiles with `--noCheck` so an editor type error does not
 prevent testing; `tsc -p` gives the stricter check before packaging.
 
+In a nested test session, inspect computed component geometry through the
+authenticated test socket:
+
+```sh
+nickel-test-input layouts
+nickel-test-input layout internal:2
+```
+
+`layouts` lists the current internal surface IDs, roles, geometry, plugin keys,
+and resolved node counts. `layout` reports the selected surface's production
+tree, including allocated and content bounds, flex sizes, scrolling, clipping,
+and child indexes. IDs can change when a surface is recreated. These queries
+are available only when nested test control is enabled; protected surfaces are
+excluded.
+
 The runtime provides `h`, `Panel`, `Viewport`, `Div`, `Row`, `Column`, `Text`, `Button`,
 `Window`, `FixedWindow`, `Dialog`, `Image`, `ImageButton`, `useState`, `useRef`, and other small native
 components.

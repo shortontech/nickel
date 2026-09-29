@@ -1292,6 +1292,8 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::Windows => "query-windows",
             SessionQuery::Outputs => "query-outputs",
             SessionQuery::ShellSurfaces => "query-shell-surfaces",
+            SessionQuery::UiLayouts => "query-ui-layouts",
+            SessionQuery::UiLayout { .. } => "query-ui-layout",
             SessionQuery::ShellReadiness => "query-shell-readiness",
             SessionQuery::LauncherVisibility => "query-launcher-visibility",
             SessionQuery::SecureStorage => "query-secure-storage",

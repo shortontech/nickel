@@ -1418,6 +1418,13 @@ pub struct UiHostViewport<Message> {
 }
 
 impl<Message> UiHostViewport<Message> {
+    pub fn layout_snapshot(&self) -> String
+    where
+        Message: Clone,
+    {
+        self.tree.resolved_layout().deterministic_snapshot()
+    }
+
     /// Observe a retained viewport without activating it or changing focus.
     /// The application owner must also validate current application protection.
     pub fn bounded_semantics(
@@ -2405,6 +2412,11 @@ impl<A: Application> UiHost<A> {
 
     pub fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot> {
         self.tree.semantic_nodes()
+    }
+
+    /// Computed component geometry for the explicitly enabled local test socket.
+    pub fn layout_snapshot(&self) -> String {
+        self.tree.resolved_layout().deterministic_snapshot()
     }
 
     /// Protection is queried from live application state as well as the tree,

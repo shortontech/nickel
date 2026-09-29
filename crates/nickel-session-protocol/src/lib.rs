@@ -10,7 +10,7 @@ pub mod server_windows;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 29;
+pub const PROTOCOL_VERSION: u16 = 30;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -59,6 +59,12 @@ pub enum Query {
     Windows,
     Outputs,
     ShellSurfaces,
+    /// Test-only inventory of compositor-hosted Nickel UI trees.
+    UiLayouts,
+    /// Test-only computed layout for one `internal:<id>` from UiLayouts.
+    UiLayout {
+        surface: String,
+    },
     ShellReadiness,
     LauncherVisibility,
     SecureStorage,
@@ -672,6 +678,8 @@ pub enum ServerMessage {
     Windows(Vec<WindowSnapshot>),
     Outputs(Vec<OutputSnapshot>),
     ShellSurfaces(Vec<ShellSurfaceSnapshot>),
+    UiLayouts(Vec<UiLayoutSurfaceSnapshot>),
+    UiLayout(UiLayoutSnapshot),
     ShellReadiness(ShellReadinessSnapshot),
     LauncherVisibility {
         visible: bool,
@@ -1783,6 +1791,24 @@ pub struct ShellSurfaceSnapshot {
 pub struct PluginSurfaceIdentity {
     pub plugin_id: String,
     pub surface_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiLayoutSurfaceSnapshot {
+    pub id: String,
+    pub title: String,
+    pub role: String,
+    pub visible: bool,
+    pub geometry: Geometry,
+    pub node_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginSurfaceIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiLayoutSnapshot {
+    pub surface: UiLayoutSurfaceSnapshot,
+    pub layout: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3101,6 +3127,42 @@ mod tests {
                 .unwrap()
                 .message,
             message
+        );
+    }
+
+    #[test]
+    fn test_ui_layout_response_round_trips() {
+        let surface = UiLayoutSurfaceSnapshot {
+            id: "internal:12".into(),
+            title: "Launcher".into(),
+            role: "Overlay".into(),
+            visible: true,
+            geometry: Geometry {
+                x: 18,
+                y: 24,
+                width: 920,
+                height: 680,
+            },
+            node_count: 2,
+            plugin: Some(PluginSurfaceIdentity {
+                plugin_id: "org.nickel.launcher".into(),
+                surface_id: "main".into(),
+            }),
+        };
+        let request = Query::UiLayout {
+            surface: surface.id.clone(),
+        };
+        assert_eq!(
+            decode::<Query>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+        let response = ServerMessage::UiLayout(UiLayoutSnapshot {
+            surface,
+            layout: "Column root allocated=0,0,920,680\n".into(),
+        });
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&response).unwrap()).unwrap(),
+            response
         );
     }
 

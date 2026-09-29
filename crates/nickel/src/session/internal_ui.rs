@@ -1602,6 +1602,18 @@ impl Default for InternalUiRuntime {
 }
 
 impl InternalUiRuntime {
+    pub(crate) fn layout_surface_ids(&self) -> impl Iterator<Item = InternalSurfaceId> + '_ {
+        self.presentation.keys().copied()
+    }
+
+    pub(crate) fn layout_snapshot(&self, id: InternalSurfaceId) -> Option<String> {
+        self.surfaces.get(id)?.layout_snapshot()
+    }
+
+    pub(crate) fn layout_node_count(&self, id: InternalSurfaceId) -> Option<usize> {
+        Some(self.surfaces.get(id)?.inspect().resources.node_count)
+    }
+
     fn panel_is_suppressed(&self, surface: &PresentedSurface) -> bool {
         surface.placement.role == InternalSurfaceRole::Taskbar
             && surface
