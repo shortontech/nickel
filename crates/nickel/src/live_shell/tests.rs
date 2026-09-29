@@ -573,9 +573,23 @@ fn fixed_shell_surface_keys_follow_bundled_plugin_activation() {
 #[test]
 fn disabling_screenshot_cancels_in_flight_host_capture() {
     let mut shell = LiveShell::new().unwrap();
+    let id = crate::plugin_panel::screenshot_manifest().id.clone();
+    shell.set_plugin_enabled(&id, true).unwrap();
+    let key = crate::plugin_panel::screenshot_surface_key();
+    assert!(
+        shell
+            .plugin_panels()
+            .iter()
+            .all(|(surface, _)| *surface != key)
+    );
+    assert!(
+        shell
+            .shell_panel_surfaces()
+            .iter()
+            .any(|(surface, _)| *surface == key)
+    );
     shell.screenshot_capture_pending = true;
     shell.screenshot_output = Some("secondary".into());
-    let id = crate::plugin_panel::screenshot_manifest().id.clone();
     shell.set_plugin_enabled(&id, false).unwrap();
     assert!(!shell.screenshot_capture_pending);
     assert!(shell.screenshot_output.is_none());

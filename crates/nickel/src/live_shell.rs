@@ -3614,6 +3614,7 @@ impl LiveShell {
                 .filter(|(key, _)| {
                     **key != crate::plugin_panel::codex_projects_surface_key()
                         && **key != crate::plugin_panel::on_screen_keyboard_surface_key()
+                        && **key != crate::plugin_panel::screenshot_surface_key()
                 })
                 .map(|(key, (surface, _))| (key.clone(), surface.clone())),
         );
@@ -3649,6 +3650,10 @@ impl LiveShell {
         let keyboard_key = crate::plugin_panel::on_screen_keyboard_surface_key();
         if let Some((surface, _)) = self.plugin_panel_extra_hosts.get(&keyboard_key) {
             panels.push((keyboard_key, surface.clone()));
+        }
+        let screenshot_key = crate::plugin_panel::screenshot_surface_key();
+        if let Some((surface, _)) = self.plugin_panel_extra_hosts.get(&screenshot_key) {
+            panels.push((screenshot_key, surface.clone()));
         }
         if self.plugin_notification_host.is_some() {
             panels.push((
