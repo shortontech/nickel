@@ -2683,18 +2683,28 @@ impl LiveShell {
             SurfaceRole::Taskbar => self.panel_scene(width, height),
             SurfaceRole::Panel => {
                 let slots = self.plugin_slot_projection(&self.plugin_panel_owner);
+                let owner = self.plugin_panel_owner.clone();
                 let Some(host) = self.plugin_panel_host.as_mut() else {
                     return Vec::new();
                 };
-                let slots_changed = slots.is_some_and(|slots| {
-                    match host.application_mut().sync_external_slots(&slots) {
-                        Ok(changed) => changed,
-                        Err(error) => {
-                            tracing::warn!(plugin = self.plugin_panel_owner, %error, "plugin slot projection failed");
-                            false
+                let slots_changed = slots
+                    .as_ref()
+                    .map(|slots| host.application_mut().sync_external_slots(slots))
+                    .unwrap_or(Ok(false));
+                let slots_changed = match slots_changed {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        if self.fail_installed_plugin_runtime(&owner, error.clone()) {
+                            return Vec::new();
                         }
+                        tracing::warn!(plugin = owner, %error, "plugin slot projection failed");
+                        false
                     }
-                });
+                };
+                let host = self
+                    .plugin_panel_host
+                    .as_mut()
+                    .expect("panel host remains active");
                 let outcome = host.step(HostBatch {
                     application_changed: slots_changed,
                     surface_size: Some((width, height)),
@@ -3943,6 +3953,9 @@ impl LiveShell {
             let changed = match host.application_mut().sync_external_slots(&slots) {
                 Ok(changed) => changed,
                 Err(error) => {
+                    if self.fail_installed_plugin_runtime(&key.plugin_id, error.clone()) {
+                        break;
+                    }
                     tracing::warn!(plugin = key.plugin_id, %error, "plugin slot projection failed");
                     continue;
                 }
@@ -4005,15 +4018,21 @@ impl LiveShell {
             }
             data_changed | host.application_mut().sync_images(images)
         });
-        let slots_changed = slots.is_some_and(|slots| {
-            match host.application_mut().sync_external_slots(&slots) {
-                Ok(changed) => changed,
-                Err(error) => {
-                    tracing::warn!(plugin = key.plugin_id, %error, "plugin slot projection failed");
-                    false
+        let slots_changed = slots
+            .as_ref()
+            .map(|slots| host.application_mut().sync_external_slots(slots))
+            .unwrap_or(Ok(false));
+        let slots_changed = match slots_changed {
+            Ok(changed) => changed,
+            Err(error) => {
+                if self.fail_installed_plugin_runtime(&key.plugin_id, error.clone()) {
+                    return None;
                 }
+                tracing::warn!(plugin = key.plugin_id, %error, "plugin slot projection failed");
+                false
             }
-        });
+        };
+        let (_, host) = self.plugin_panel_extra_hosts.get_mut(key)?;
         let outcome = host.step(HostBatch {
             application_changed: slots_changed || keyboard_changed || screenshot_changed,
             surface_size: Some((width, height)),

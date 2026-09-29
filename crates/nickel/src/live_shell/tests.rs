@@ -1430,6 +1430,65 @@ fn installed_plugin_callback_failure_retires_all_surfaces_without_changing_desir
     assert!(shell.set_plugin_enabled(id, true).unwrap());
     assert_eq!(shell.plugin_panels().len(), 2);
 }
+
+#[test]
+fn failing_slot_projection_retires_provider_without_stopping_contributor() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "org.example.widget-host";
+    let directory = root.path().join(id);
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.widget-host","name":"Widget Host","entry":"main.js","surfaces":[{"id":"main","kind":"window","width":420,"height":280}],"provides_slots":[{"id":"metrics","contract":"widget","replaceable":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { if ((nickel.data.slots.metrics || []).length) throw Error('projection exploded'); return h(Panel, {}, h(Text, {}, 'Provider ready')); }",
+    )
+    .unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    let provider = catalog.packages.remove(id).unwrap();
+    let contributor_directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/plugins/example-widget-contributor");
+    let package = nickel_core::plugins::PluginPackage::load(&contributor_directory).unwrap();
+    let contributor = nickel_core::plugins::PluginPackageDescriptor {
+        directory: contributor_directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let contributor_id = contributor.manifest.id.clone();
+    let mut shell = LiveShell::new().unwrap();
+    for descriptor in [provider, contributor] {
+        shell
+            .plugin_registry
+            .register(descriptor.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(descriptor.manifest.id.clone(), descriptor);
+    }
+    shell.set_plugin_enabled(id, true).unwrap();
+    let (key, surface) = shell.plugin_panels().pop().unwrap();
+    shell
+        .plugin_panel_scene(&key, surface.width, surface.height)
+        .unwrap();
+    assert!(shell.set_plugin_enabled(&contributor_id, true).unwrap());
+    let provider = shell.plugin_registry.get(id).unwrap();
+    assert!(provider.desired_enabled);
+    assert!(
+        matches!(&provider.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("projection exploded"))
+    );
+    assert_eq!(
+        provider.memory,
+        nickel_core::plugins::PluginMemory::default()
+    );
+    assert!(!shell.plugin_surface_matches(&key));
+    assert_eq!(
+        shell.plugin_registry.get(&contributor_id).unwrap().health,
+        nickel_core::plugins::PluginHealth::Running
+    );
+}
 include!("tests/panel_and_cache.rs");
 include!("tests/desktop_interactions.rs");
 
