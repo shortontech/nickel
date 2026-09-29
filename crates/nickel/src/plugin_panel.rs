@@ -3233,6 +3233,14 @@ impl PluginPanelApplication {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn control_center_with_test_source(
+        source: &str,
+        data: &Value,
+    ) -> Result<Self, String> {
+        Self::new_with_manifest(source, control_center_manifest(), Some(data.to_string()))
+    }
+
     pub fn codex_projects_with_projection(
         projection: &ProjectMenuProjection,
     ) -> Result<Self, String> {

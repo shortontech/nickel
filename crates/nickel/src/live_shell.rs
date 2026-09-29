@@ -4778,6 +4778,23 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
+    fn retire_control_plugin_state(&mut self) {
+        self.plugin_control_host = None;
+        if self.control_visible && !self.control_surface_available() {
+            self.set_control_visible(false);
+        }
+    }
+
+    fn fail_control_plugin_runtime(&mut self, error: String) {
+        let id = &crate::plugin_panel::control_center_manifest().id;
+        tracing::warn!(plugin = id, %error, "bundled Quick Settings plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.retire_control_plugin_state();
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -4932,10 +4949,7 @@ impl LiveShell {
                 self.plugin_volume_osd_host = None;
                 self.volume_osd_until = None;
             } else if id == crate::plugin_panel::control_center_manifest().id {
-                self.plugin_control_host = None;
-                if self.control_visible && !self.control_surface_available() {
-                    self.set_control_visible(false);
-                }
+                self.retire_control_plugin_state();
             } else if id == crate::plugin_panel::codex_projects_manifest().id {
                 self.codex_project_menu_visible = false;
                 self.codex_menu_requests.clear();
@@ -11628,23 +11642,26 @@ impl LiveShell {
 
     fn control_plugin_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         let data = self.control_plugin_data(height);
-        let host = self
-            .plugin_control_host
-            .as_mut()
-            .expect("active control plugin host");
-        let changed = host
-            .application_mut()
-            .sync_control_center_data(&data)
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "control center plugin projection failed");
-                false
-            });
+        let Some(host) = self.plugin_control_host.as_mut() else {
+            return Vec::new();
+        };
+        let changed = match host.application_mut().sync_control_center_data(&data) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.fail_control_plugin_runtime(error);
+                return Vec::new();
+            }
+        };
         let outcome = host.step(HostBatch {
             application_changed: changed,
             surface_size: Some((width, height)),
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+        if let Some(error) = host.application_mut().take_runtime_failure() {
+            self.fail_control_plugin_runtime(error);
+            return Vec::new();
+        }
         let commands = host.commands().to_vec();
         let _ = self.plugin_registry.record_memory(
             &crate::plugin_panel::control_center_manifest().id,
@@ -11664,17 +11681,16 @@ impl LiveShell {
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
         let data = self.control_plugin_data(size.1);
-        let host = self
-            .plugin_control_host
-            .as_mut()
-            .expect("active control plugin host");
-        let changed = host
-            .application_mut()
-            .sync_control_center_data(&data)
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "control center plugin projection failed");
-                false
-            });
+        let Some(host) = self.plugin_control_host.as_mut() else {
+            return nickel_ui::HostEventOutcome::default();
+        };
+        let changed = match host.application_mut().sync_control_center_data(&data) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.fail_control_plugin_runtime(error);
+                return nickel_ui::HostEventOutcome::default();
+            }
+        };
         let mut outcome = host.step(HostBatch {
             application_changed: changed,
             surface_size: Some(size),
@@ -11684,6 +11700,10 @@ impl LiveShell {
             ..HostBatch::default()
         });
         let effects = host.application_mut().take_effects();
+        if let Some(error) = host.application_mut().take_runtime_failure() {
+            self.fail_control_plugin_runtime(error);
+            return nickel_ui::HostEventOutcome::default();
+        }
         outcome.changed |= self.apply_plugin_effects(effects);
         outcome
     }

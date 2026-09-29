@@ -504,6 +504,67 @@
     }
 
     #[test]
+    fn control_center_callback_failure_retires_its_plugin_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let data = shell.control_plugin_data(720);
+        let application = crate::plugin_panel::PluginPanelApplication::control_center_with_test_source(
+            "function App() { return h(Panel, {}, h(Button, {id: 'control-fail', onClick: () => { throw Error('control callback exploded'); }}, 'Break Quick Settings')); }",
+            &data,
+        )
+        .unwrap();
+        shell.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+        shell.apply_control_visibility(true);
+        let target = shell
+            .plugin_control_host
+            .as_ref()
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Break Quick Settings".into(),
+            })
+            .unwrap();
+        let outcome = shell.control_host_event(
+            nickel_ui::HostEvent::Ui(UiEvent::AccessibilityActivate(target.id)),
+            (420, 720),
+            None,
+        );
+        assert!(!outcome.changed);
+        let id = &crate::plugin_panel::control_center_manifest().id;
+        let key = crate::plugin_panel::control_center_surface_key();
+        let entry = shell.plugin_registry().get(id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("control callback exploded")));
+        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+        assert!(!shell.plugin_surface_matches(&key));
+        assert!(!shell.control_visible);
+        assert!(shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.plugin_control_host.is_some());
+    }
+
+    #[test]
+    fn control_center_projection_failure_retires_its_plugin_surface() {
+        let mut shell = LiveShell::new().unwrap();
+        let data = shell.control_plugin_data(720);
+        let application = crate::plugin_panel::PluginPanelApplication::control_center_with_test_source(
+            "function App() { if (nickel.data.height !== 720) throw Error('control projection exploded'); return h(Panel, {}, h(Text, {}, 'Quick Settings ready')); }",
+            &data,
+        )
+        .unwrap();
+        shell.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+        shell.apply_control_visibility(true);
+        assert!(shell.control_plugin_scene(420, 600).is_empty());
+        let entry = shell
+            .plugin_registry()
+            .get(&crate::plugin_panel::control_center_manifest().id)
+            .unwrap();
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("control projection exploded")));
+        assert!(!shell.control_visible);
+        assert!(!shell.control_surface_available());
+    }
+
+    #[test]
     fn codex_project_menu_uses_a_plugin_surface_and_retires_on_disable() {
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::codex_projects_manifest().id;
