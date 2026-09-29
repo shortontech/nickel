@@ -46,14 +46,13 @@ its shipped JS with the same command, replacing `settings-pages.jsx` with
 
 Settings starts each page Boa context when its page is first opened and retires
 it after navigation to another page. Building the navigation destinations for
-other pages does not allocate those contexts. The navigation context stays
+other pages does not allocate those contexts. The Settings shell context stays
 alive while Settings is open.
 
-`settings-navigation.jsx` still declares destination order, grouping, labels,
+`settings-shell.jsx` also declares destination order, grouping, labels,
 headers, and searchable controls. The host accepts only known focus targets.
-The JSX shell uses those declarations for its sidebar while the native
-`ResponsiveNavigation` path remains for controller presentation.
-Rebuild it with the same `tsc` command and its source filename.
+The same JavaScript context renders the window and its navigation definitions;
+native `ResponsiveNavigation` remains for controller presentation.
 
 `settings-bar.jsx` uses the shared `div`, `Text`, `Button`, and `Slider` components
 with `settings-bar.css`. Its callbacks request typed changes that the Settings

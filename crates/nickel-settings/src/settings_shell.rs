@@ -1,10 +1,13 @@
 //! JSX-owned Settings window and navigation layout.
 
+use nickel_i18n::Localizer;
 use nickel_plugin_presentation::{components::PluginImages, css::StyleSheet, page::JsxPage};
+use nickel_ui::SettingsSearchEntry;
 use nickel_ui::{AnyView, SemanticTheme};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::navigation::{Destination, SearchDefinition};
 use crate::{SettingsApp, SettingsMessage, SettingsPage};
 use nickel_ui::search_settings;
 
@@ -22,6 +25,9 @@ pub(super) struct SettingsShell {
     stylesheet: StyleSheet,
     last_theme: Option<SemanticTheme>,
     last_data: Option<Value>,
+    last_navigation_data: Option<String>,
+    destinations: Vec<Destination>,
+    search: Vec<SearchDefinition>,
 }
 
 impl SettingsShell {
@@ -35,6 +41,9 @@ impl SettingsShell {
             stylesheet: StyleSheet::default(),
             last_theme: None,
             last_data: None,
+            last_navigation_data: None,
+            destinations: Vec::new(),
+            search: Vec::new(),
         })
     }
 
@@ -45,6 +54,46 @@ impl SettingsShell {
                 .last_data
                 .as_ref()
                 .map_or(0, |data| data.to_string().len())
+            + self
+                .last_navigation_data
+                .as_ref()
+                .map_or(0, String::capacity)
+            + self.destinations.capacity() * std::mem::size_of::<Destination>()
+            + self
+                .destinations
+                .iter()
+                .map(Destination::retained_bytes)
+                .sum::<usize>()
+            + self.search.capacity() * std::mem::size_of::<SearchDefinition>()
+            + self
+                .search
+                .iter()
+                .map(SearchDefinition::retained_bytes)
+                .sum::<usize>()
+    }
+
+    pub(super) fn navigation(
+        &mut self,
+        localizer: &Localizer,
+    ) -> Result<(Vec<Destination>, Vec<SettingsSearchEntry<SettingsMessage>>), String> {
+        let data = crate::navigation::projection(localizer);
+        let serialized = serde_json::to_string(&data).map_err(|error| error.to_string())?;
+        if self.last_navigation_data.as_deref() != Some(&serialized) {
+            (self.destinations, self.search) = self.page.evaluate_with_data(
+                &data,
+                "__nickelRender(SettingsNavigation)",
+                crate::navigation::parse_tree,
+            )?;
+            self.last_navigation_data = Some(serialized);
+        }
+        Ok((
+            self.destinations.clone(),
+            self.search
+                .clone()
+                .into_iter()
+                .map(SearchDefinition::entry)
+                .collect(),
+        ))
     }
 
     pub(super) fn render(
@@ -98,8 +147,7 @@ impl SettingsApp {
         if !self.settings_jsx_enabled {
             return;
         }
-        let destinations = self.navigation_destinations();
-        let entries = self.navigation_search_entries();
+        let (destinations, entries) = self.navigation_document();
         let query = self.sidebar_query.trim().to_lowercase();
         let results = search_settings(&query, &entries);
         let message = self
@@ -142,6 +190,22 @@ impl SettingsApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_metadata_reuses_the_shell_context_and_invalidates_stale_views() {
+        let mut shell = SettingsShell::new().unwrap();
+        let english = Localizer::for_locale(Some("en-US"));
+        let german = Localizer::for_locale(Some("de-DE"));
+        let (destinations, _) = shell.navigation(&english).unwrap();
+        assert_eq!(destinations.len(), 11);
+        let data = serde_json::json!({"width":1100,"height":800,"active":true});
+        shell.page.render(&data).unwrap();
+        assert!(shell.page.node().is_some());
+        shell.navigation(&english).unwrap();
+        assert!(shell.page.node().is_some());
+        shell.navigation(&german).unwrap();
+        assert!(shell.page.node().is_none());
+    }
 
     #[test]
     fn settings_window_and_active_page_render_through_the_jsx_shell() {

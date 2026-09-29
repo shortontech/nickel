@@ -27,13 +27,12 @@ impl SettingsApp {
         width: f32,
         height: f32,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        let destinations = self.navigation_destinations();
+        let (destinations, entries) = self.navigation_document();
         let active = self.active_destination.map(|_| self.page);
         let selected = destinations
             .iter()
             .find(|destination| destination.page == self.page);
         let query = self.sidebar_query.trim().to_lowercase();
-        let entries = self.navigation_search_entries();
         let results = search_settings(&query, &entries);
         let data = serde_json::json!({
             "width": width, "height": height,
@@ -109,7 +108,7 @@ impl SettingsApp {
         }
         let theme = self.ui_theme();
         let declared_destinations = self.navigation_destinations();
-        let destination_header = |destination: &crate::navigation_plugin::Destination| {
+        let destination_header = |destination: &crate::navigation::Destination| {
             let title = destination.title.clone();
             let subtitle = destination.subtitle.clone();
             if width < 720.0 {

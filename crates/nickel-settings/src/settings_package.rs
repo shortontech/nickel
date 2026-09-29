@@ -24,7 +24,6 @@ const PAGE_SERVICE_GRANTS: [PluginCapability; 8] = [
 #[derive(Clone, Copy)]
 pub(super) enum Script {
     Shell,
-    Navigation,
     Plugins,
     OrdinaryPages,
     Bar,
@@ -98,9 +97,6 @@ pub(super) fn source(script: Script) -> Result<&'static str, String> {
     manifest()?;
     Ok(match script {
         Script::Shell => include_str!("../../../assets/plugins/settings/settings-shell.js"),
-        Script::Navigation => {
-            include_str!("../../../assets/plugins/settings/settings-navigation.js")
-        }
         Script::Plugins => include_str!("../../../assets/plugins/settings/settings-plugins.js"),
         Script::OrdinaryPages => {
             include_str!("../../../assets/plugins/settings/settings-pages.js")
@@ -141,7 +137,6 @@ mod tests {
         assert_eq!(package.source, source(Script::Shell).unwrap());
         for script in [
             Script::Shell,
-            Script::Navigation,
             Script::Plugins,
             Script::OrdinaryPages,
             Script::Bar,

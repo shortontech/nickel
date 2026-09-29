@@ -207,7 +207,7 @@ function __nickelAcceptEvent() {
     __pendingEvent = null;
 }
 
-function __nickelRender() {
+function __nickelRender(component = App) {
     if (__pendingRender !== null) throw Error('previous render was not finalized');
     const previousHandlers = __handlers;
     const previousHooks = new Map(Array.from(__componentHooks, ([path, hooks]) => [path, hooks.slice()]));
@@ -222,7 +222,7 @@ function __nickelRender() {
     __currentComponent = null;
     __hookIndex = 0;
     try {
-        const node = h(App, {});
+        const node = h(component, {});
         if (node?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
         for (const path of __componentHooks.keys()) {
             if (!__visitedComponents.has(path)) __componentHooks.delete(path);

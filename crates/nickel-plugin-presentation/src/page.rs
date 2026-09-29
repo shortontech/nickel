@@ -43,6 +43,21 @@ impl JsxPage {
         self.node.as_ref()
     }
 
+    /// Evaluate an auxiliary JSX document with host data. This invalidates the
+    /// displayed tree so an event cannot run against a different data snapshot.
+    pub fn evaluate_with_data<T>(
+        &mut self,
+        data: &Value,
+        expression: &str,
+        parse: impl FnOnce(&Value) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.data = None;
+        self.node = None;
+        let serialized = serde_json::to_string(data).map_err(|error| error.to_string())?;
+        self.runtime.set_data(&serialized)?;
+        self.runtime.render(expression, parse)
+    }
+
     pub fn render(&mut self, data: &Value) -> Result<&PanelNode, String> {
         let serialized = serde_json::to_string(data).map_err(|error| error.to_string())?;
         if self.data.as_deref() != Some(&serialized) {
@@ -147,6 +162,37 @@ mod tests {
             panic!("expected ordinary div root")
         };
         assert!(matches!(&children[0], PanelNode::Button { label, .. } if label == "1"));
+    }
+
+    #[test]
+    fn auxiliary_render_invalidates_handlers_until_the_window_renders_again() {
+        let manifest =
+            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
+                .unwrap();
+        let source = "function Metadata() { return h('metadata', {value: nickel.data.label}); } function App() { return h(Button, {id: 'go', onClick: () => nickel.request({type: 'go'})}, 'Go'); }";
+        let mut page = JsxPage::new(source, manifest, None).unwrap();
+        let data = json!({"label":"Settings"});
+        let action = page.render(&data).unwrap().button_action("go").unwrap();
+        let label = page
+            .evaluate_with_data(&data, "__nickelRender(Metadata)", |value| {
+                value["value"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or("metadata label is missing".into())
+            })
+            .unwrap();
+        assert_eq!(label, "Settings");
+        assert!(page.node().is_none());
+        assert!(
+            page.dispatch(action, &Value::Null, &data, Ok::<_, String>)
+                .is_err()
+        );
+        let action = page.render(&data).unwrap().button_action("go").unwrap();
+        assert_eq!(
+            page.dispatch(action, &Value::Null, &data, Ok::<_, String>)
+                .unwrap(),
+            json!({"type":"go"})
+        );
     }
 
     #[test]

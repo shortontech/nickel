@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 
 use nickel_i18n::Localizer;
-use nickel_plugin_runtime::JsxRuntime;
 use serde_json::{Value, json};
 
 use crate::{SettingsApp, SettingsMessage, SettingsPage};
@@ -19,7 +18,7 @@ pub(super) struct Destination {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct SearchDefinition {
+pub(super) struct SearchDefinition {
     target: String,
     page_label: String,
     section: String,
@@ -27,6 +26,13 @@ struct SearchDefinition {
 }
 
 impl SearchDefinition {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.target.capacity()
+            + self.page_label.capacity()
+            + self.section.capacity()
+            + self.control.capacity()
+    }
+
     fn parse(value: &Value) -> Result<Self, String> {
         if value["kind"] != "settings-search-entry" {
             return Err("Settings search child must be an entry".into());
@@ -43,7 +49,7 @@ impl SearchDefinition {
         })
     }
 
-    fn entry(self) -> SettingsSearchEntry<SettingsMessage> {
+    pub(super) fn entry(self) -> SettingsSearchEntry<SettingsMessage> {
         let message = search_message(&self.target).expect("validated search target");
         SettingsSearchEntry::new(
             self.page_label,
@@ -72,6 +78,13 @@ fn search_message(target: &str) -> Option<SettingsMessage> {
 }
 
 impl Destination {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.label.capacity()
+            + self.title.capacity()
+            + self.subtitle.capacity()
+            + self.section.capacity()
+    }
+
     fn parse(value: &Value) -> Result<Self, String> {
         if value.get("kind").and_then(Value::as_str) != Some("settings-destination") {
             return Err("Settings navigation child must be a destination".into());
@@ -121,7 +134,9 @@ fn text(value: &Value, key: &str) -> Result<String, String> {
     Ok(text.to_owned())
 }
 
-fn parse_tree(value: &Value) -> Result<(Vec<Destination>, Vec<SearchDefinition>), String> {
+pub(super) fn parse_tree(
+    value: &Value,
+) -> Result<(Vec<Destination>, Vec<SearchDefinition>), String> {
     if value.get("kind").and_then(Value::as_str) != Some("settings-navigation") {
         return Err("Settings navigation root is invalid".into());
     }
@@ -163,75 +178,6 @@ fn parse_tree(value: &Value) -> Result<(Vec<Destination>, Vec<SearchDefinition>)
         return Err("Settings search has duplicate targets".into());
     }
     Ok((destinations, definitions))
-}
-
-pub(super) struct NavigationPlugin {
-    runtime: JsxRuntime,
-    last_data: Option<String>,
-    destinations: Vec<Destination>,
-    search: Vec<SearchDefinition>,
-}
-
-impl NavigationPlugin {
-    pub(super) fn retained_bytes(&self) -> usize {
-        self.last_data.as_ref().map_or(0, String::capacity)
-            + self.destinations.capacity() * std::mem::size_of::<Destination>()
-            + self
-                .destinations
-                .iter()
-                .map(|destination| {
-                    destination.label.capacity()
-                        + destination.title.capacity()
-                        + destination.subtitle.capacity()
-                        + destination.section.capacity()
-                })
-                .sum::<usize>()
-            + self.search.capacity() * std::mem::size_of::<SearchDefinition>()
-            + self
-                .search
-                .iter()
-                .map(|entry| {
-                    entry.target.capacity()
-                        + entry.page_label.capacity()
-                        + entry.section.capacity()
-                        + entry.control.capacity()
-                })
-                .sum::<usize>()
-    }
-
-    pub(super) fn new() -> Result<Self, String> {
-        Ok(Self {
-            runtime: JsxRuntime::new(
-                crate::settings_package::source(crate::settings_package::Script::Navigation)?,
-                None,
-            )?,
-            last_data: None,
-            destinations: Vec::new(),
-            search: Vec::new(),
-        })
-    }
-
-    pub(super) fn render(
-        &mut self,
-        localizer: &Localizer,
-    ) -> Result<(Vec<Destination>, Vec<SettingsSearchEntry<SettingsMessage>>), String> {
-        let data =
-            serde_json::to_string(&projection(localizer)).map_err(|error| error.to_string())?;
-        if self.last_data.as_deref() != Some(&data) {
-            self.runtime.set_data(&data)?;
-            (self.destinations, self.search) =
-                self.runtime.render("__nickelRender()", parse_tree)?;
-            self.last_data = Some(data);
-        }
-        Ok((
-            self.destinations.clone(),
-            self.search
-                .clone()
-                .into_iter()
-                .map(SearchDefinition::entry)
-                .collect(),
-        ))
-    }
 }
 
 pub(super) fn projection(localizer: &Localizer) -> Value {
@@ -314,31 +260,27 @@ pub(super) fn recovery(localizer: &Localizer) -> Vec<Destination> {
 }
 
 impl SettingsApp {
-    pub(super) fn navigation_destinations(&self) -> Vec<Destination> {
+    pub(super) fn navigation_document(
+        &self,
+    ) -> (Vec<Destination>, Vec<SettingsSearchEntry<SettingsMessage>>) {
         if !self.settings_jsx_enabled {
-            return recovery(&self.localizer);
+            return (recovery(&self.localizer), recovery_search(&self.localizer));
         }
-        let result = self
-            .navigation_plugin
+        self.settings_shell
             .borrow_mut()
-            .get_or_insert_with(NavigationPlugin::new)
+            .get_or_insert_with(crate::settings_shell::SettingsShell::new)
             .as_mut()
             .map_err(|error| error.clone())
-            .and_then(|plugin| plugin.render(&self.localizer).map(|document| document.0));
-        result.unwrap_or_else(|_| recovery(&self.localizer))
+            .and_then(|shell| shell.navigation(&self.localizer))
+            .unwrap_or_else(|_| (recovery(&self.localizer), recovery_search(&self.localizer)))
+    }
+
+    pub(super) fn navigation_destinations(&self) -> Vec<Destination> {
+        self.navigation_document().0
     }
 
     pub(super) fn navigation_search_entries(&self) -> Vec<SettingsSearchEntry<SettingsMessage>> {
-        if !self.settings_jsx_enabled {
-            return recovery_search(&self.localizer);
-        }
-        self.navigation_plugin
-            .borrow_mut()
-            .get_or_insert_with(NavigationPlugin::new)
-            .as_mut()
-            .map_err(|error| error.clone())
-            .and_then(|plugin| plugin.render(&self.localizer).map(|document| document.1))
-            .unwrap_or_else(|_| recovery_search(&self.localizer))
+        self.navigation_document().1
     }
 }
 
@@ -413,8 +355,8 @@ mod tests {
 
     #[test]
     fn jsx_navigation_declares_every_page_once() {
-        let mut plugin = NavigationPlugin::new().unwrap();
-        let (destinations, search) = plugin.render(&Localizer::system()).unwrap();
+        let mut shell = crate::settings_shell::SettingsShell::new().unwrap();
+        let (destinations, search) = shell.navigation(&Localizer::system()).unwrap();
         assert_eq!(destinations.len(), 11);
         assert_eq!(destinations[0].page, SettingsPage::Display);
         assert_eq!(destinations[8].page, SettingsPage::Plugins);

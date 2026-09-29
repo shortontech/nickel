@@ -9,7 +9,7 @@ mod default_apps_plugin;
 mod display_plugin;
 mod effects;
 mod model;
-mod navigation_plugin;
+mod navigation;
 mod network_plugin;
 mod optional_features_plugin;
 mod persistence;
@@ -1089,18 +1089,6 @@ impl SettingsApp {
         if self.settings_jsx_enabled == enabled {
             return;
         }
-        let navigation = if enabled {
-            match navigation_plugin::NavigationPlugin::new() {
-                Ok(navigation) => Some(navigation),
-                Err(error) => {
-                    self.plugin_notice = Some(format!("Could not start Settings plugin: {error}"));
-                    self.request_redraw();
-                    return;
-                }
-            }
-        } else {
-            None
-        };
         let shell = if enabled {
             match settings_shell::SettingsShell::new() {
                 Ok(shell) => Some(shell),
@@ -1130,7 +1118,6 @@ impl SettingsApp {
         self.settings_jsx_displayed_memory.get_mut().take();
         self.ordinary_pages.get_mut().take();
         self.plugin_list.get_mut().take();
-        self.navigation_plugin.get_mut().take();
         self.settings_shell.get_mut().take();
         self.bar_page.get_mut().take();
         self.optional_features_page.get_mut().take();
@@ -1146,9 +1133,6 @@ impl SettingsApp {
         }
         self.custom_hue_open = false;
         self.pending_transient_request = None;
-        if let Some(navigation) = navigation {
-            *self.navigation_plugin.get_mut() = Some(Ok(navigation));
-        }
         if let Some(shell) = shell {
             *self.settings_shell.get_mut() = Some(Ok(shell));
         }
@@ -1172,17 +1156,11 @@ impl SettingsApp {
             return Default::default();
         }
         let total = self
-            .navigation_plugin
+            .settings_shell
             .borrow()
             .as_ref()
-            .and_then(|page| page.as_ref().ok())
-            .map_or(0, navigation_plugin::NavigationPlugin::retained_bytes)
-            + self
-                .settings_shell
-                .borrow()
-                .as_ref()
-                .and_then(|shell| shell.as_ref().ok())
-                .map_or(0, settings_shell::SettingsShell::retained_bytes)
+            .and_then(|shell| shell.as_ref().ok())
+            .map_or(0, settings_shell::SettingsShell::retained_bytes)
             + self
                 .ordinary_pages
                 .borrow()
@@ -3645,7 +3623,7 @@ mod tests {
     #[test]
     fn settings_jsx_contexts_start_on_demand_and_retire_after_navigation() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
-        assert!(app.navigation_plugin.borrow().is_none());
+        assert!(app.settings_shell.borrow().is_none());
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
         assert!(app.bar_page.borrow().is_none());
@@ -3653,7 +3631,7 @@ mod tests {
         assert!(app.network_page.borrow().is_none());
         assert!(app.default_apps_page.borrow().is_none());
         let _ = app.build_ui(1100.0, 800.0);
-        assert!(app.navigation_plugin.borrow().is_some());
+        assert!(app.settings_shell.borrow().is_some());
         assert!(app.plugin_list.borrow().is_none());
         assert!(app.ordinary_pages.borrow().is_none());
         assert!(app.bar_page.borrow().is_none());
@@ -3690,7 +3668,7 @@ mod tests {
 
         app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
         assert!(app.network_page.borrow().is_none());
-        assert!(app.navigation_plugin.borrow().is_some());
+        assert!(app.settings_shell.borrow().is_some());
 
         app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::DefaultApps));
         let _ = app.build_ui(1100.0, 800.0);
@@ -3713,7 +3691,7 @@ mod tests {
             .expect("Settings plugin has a JSX disable action");
         app.handle_settings_message(SettingsMessage::JsxAction(action, "null".into()));
         assert!(!app.settings_jsx_enabled);
-        assert!(app.navigation_plugin.borrow().is_none());
+        assert!(app.settings_shell.borrow().is_none());
         assert!(app.plugin_list.borrow().is_none());
         assert!(
             app.plugin_status
@@ -3726,7 +3704,7 @@ mod tests {
                 })
         );
         let recovery = app.build_ui(1100.0, 800.0);
-        assert!(app.navigation_plugin.borrow().is_none());
+        assert!(app.settings_shell.borrow().is_none());
         assert!(app.plugin_list.borrow().is_none());
         assert_eq!(
             recovery
@@ -3748,7 +3726,7 @@ mod tests {
         );
         app.handle_settings_message(SettingsMessage::ConfirmPluginEnable);
         assert!(app.settings_jsx_enabled);
-        assert!(app.navigation_plugin.borrow().is_some());
+        assert!(app.settings_shell.borrow().is_some());
         let _ = app.build_ui(1100.0, 800.0);
         assert!(app.plugin_list.borrow().is_some());
     }
@@ -3775,7 +3753,7 @@ mod tests {
             plugins: vec![disabled],
         });
         assert!(!app.settings_jsx_enabled);
-        assert!(app.navigation_plugin.borrow().is_none());
+        assert!(app.settings_shell.borrow().is_none());
     }
 
     #[test]
@@ -3792,7 +3770,7 @@ mod tests {
 
         app.set_settings_jsx_enabled(false);
         assert!(app.bluetooth_page.borrow().is_none());
-        assert!(app.navigation_plugin.borrow().is_none());
+        assert!(app.settings_shell.borrow().is_none());
         let disabled = app.settings_plugin_memory();
         assert!(disabled.native_ui_bytes.is_none());
         assert!(disabled.tracked_peak_bytes.is_none());
