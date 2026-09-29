@@ -1,0 +1,58 @@
+# Generic surface draft: taskbar and launcher
+
+`taskbar/main.next.jsx` and `launcher/main.next.jsx` are review sources. Their
+`.next.css` files carry visual styling. None is selected by a manifest or loaded
+by Nickel yet. Existing `main.jsx`, `main.js`, and taskbar menu scripts remain
+the functional implementation.
+
+The draft deliberately keeps ordinary JavaScript callbacks and `useRef` /
+`useState`. An author should be able to write `onClick={() => ...}` without
+registering a named export for every button. Named exported functions are an
+optional ABI for actions that another plugin invokes. Rust still validates
+every `nickel.request` against the owning plugin's capabilities.
+
+## Root contract needed
+
+- `<FixedWindow>` is a top-level root. `id` matches a manifest-authorized
+  surface; JSX chooses its placement and children. The host applies one generic
+  creation, input, rendering, and retirement path.
+- Taskbar needs `output="all"`, `anchor="bottom"`, `width="100%"`, `height={56}`,
+  and `reserveWorkArea={true}`. For a dock, CSS background alpha must not imply
+  that text, icons, or input become transparent.
+- Launcher needs `output="active"`, `anchor="bottom-start"`,
+  `avoid="taskbar"`, width and height, and output/work-area maximums. The
+  current native placement is bottom-left of the selected output, above the
+  bottom panel; those host-resolved semantics need one general anchor rule.
+- `className` must work on roots and descendants. Buttons and text fields keep
+  input, focus, editing, accessibility, and sizing behavior but have no forced
+  visual theme. CSS supplies their backgrounds, borders, padding, radii, text
+  size, and line height. The selectors in these examples stay within each
+  plugin's stylesheet.
+
+## Missing generic UI contracts
+
+- `<Slot name="task-badge" for={item.id}>` needs a stable scope/key and a
+  fallback policy. Today's bundled taskbar receives projected `item.badges`;
+  the draft shows where those badges belong in the tree. The taskbar's
+  `task-action` slot remains in its separate context menu script, which should
+  eventually use the same generic slot contract.
+- `<Dialog>` and `<Menu>` should own child surfaces through the same generic
+  surface lifecycle, with anchor IDs resolved from their parent tree. The
+  launcher keeps its existing logout and app menu behavior in the draft.
+- CSS examples use flex alignment, gaps, absolute badge position, hover/focus
+  selectors, box shadow, and text styles. The first CSS implementation may
+  support only a subset; unsupported declarations should be explicit compiler
+  diagnostics, not silently replaced by Rust component defaults.
+- `Spacer grow={1}` needs flexible width, preserving the GNOME 2 style panel
+  composition use case. This is the simplest useful test of generic layout.
+- Projected `nickel.data` and the current typed request names remain intact
+  for this draft. A future service API can improve their names without tying
+  the generic surface path to taskbar or launcher IDs.
+
+## Visual and memory checks before promotion
+
+Compare the draft with master at normal and high DPI, on multiple outputs,
+with menus and dialogs open. Check keyboard/focus behavior and drag pinning.
+Measure stock process memory against 200 MiB Windows / 280 MiB Linux targets
+and stock presentation tree against 12 MiB. These source files alone prove
+neither appearance nor memory use.

@@ -1,0 +1,62 @@
+.launcher-window {
+    background-color: rgba(43, 48, 60, 0.96);
+    color: #f4f6fa;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 14px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+}
+
+.launcher-layout { height: 100%; padding: 20px; gap: 12px; }
+.launcher-title { font-size: 22px; line-height: 28px; font-weight: 600; }
+.status-message { color: #ffd391; font-size: 13px; line-height: 18px; }
+
+.search-field {
+    height: 44px;
+    padding: 8px 12px;
+    color: #f4f6fa;
+    background-color: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    border-radius: 9px;
+    font-size: 15px;
+    line-height: 22px;
+}
+.search-field:focus { border-color: #83b9ff; }
+
+.launcher-content { flex-grow: 1; gap: 8px; }
+.section-heading { margin: 12px 0 5px; font-size: 14px; line-height: 20px; font-weight: 600; }
+.empty-message { padding: 16px; color: #b9c0ce; font-size: 14px; line-height: 20px; }
+.application-row { align-items: center; gap: 8px; }
+
+.application-button, .project-button, .view-tab, .pin-button,
+.secondary-button, .footer-button, .menu-item, .danger-button {
+    min-height: 38px;
+    padding: 7px 10px;
+    color: inherit;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 20px;
+}
+.application-button { flex-grow: 1; text-align: left; }
+.application-button:hover, .project-button:hover, .view-tab:hover,
+.pin-button:hover, .secondary-button:hover, .footer-button:hover, .menu-item:hover {
+    background-color: rgba(255, 255, 255, 0.10);
+}
+.pin-button { min-width: 64px; }
+.projects { gap: 4px; margin: 12px 0; }
+.view-tabs { gap: 4px; margin-top: 12px; }
+.pager { align-items: center; justify-content: center; gap: 12px; margin: 10px 0; }
+.page-label { font-size: 13px; line-height: 18px; }
+.launcher-footer { align-items: center; gap: 8px; padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.12); }
+
+.logout-dialog, .app-menu {
+    background-color: #303747;
+    border: 1px solid rgba(255, 255, 255, 0.17);
+    border-radius: 10px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+.dialog-content { padding: 16px; gap: 18px; }
+.dialog-actions { justify-content: flex-end; gap: 8px; }
+.danger-button { background-color: #a73b47; }
+.danger-button:hover { background-color: #bc4854; }
