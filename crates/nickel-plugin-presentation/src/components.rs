@@ -2181,7 +2181,6 @@ impl PanelNode {
                 let container = Container::new()
                     .semantic_role(SemanticRole::Text)
                     .accessibility_label(value.clone())
-                    .height(48.0)
                     .child(text);
                 with_margin(
                     AnyView::new(apply_container_style(container, &style)),
