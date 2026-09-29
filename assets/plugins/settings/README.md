@@ -53,12 +53,14 @@ host checks against the current topology projection before using the existing
 reducers. The native Bar view remains available if JSX fails. Regenerate its
 shipped JS with the same build command, using `settings-bar.jsx` as the source.
 
-`settings-optional-features.jsx` owns the ordinary Codex and on-screen keyboard
-cards. Its callbacks request typed changes, retry, and disable confirmation;
-the Settings host checks current policy, runtime state, and environment
-overrides before applying them. Its Boa context starts only while this page is
-open, and the native view remains available if JSX fails. Build it with the
-same command and its source filename.
+`settings-optional-features.jsx` uses shared components and
+`settings-optional-features.css` for the Codex and on-screen keyboard cards.
+The generic `<Switch>` preserves native switch semantics for on, off, mixed,
+and unavailable states. Its callbacks request typed changes, retry, and disable
+confirmation; the Settings host checks current policy, runtime state, and
+environment overrides before applying them. Its Boa context starts only while
+this page is open, and the native view remains available if JSX fails. Build
+its shipped JS with the same command and its source filename.
 
 `settings-network.jsx` owns the Network page's Wi-Fi switch, discovered network
 list, and adapter summary. Requests carry the observed network index and

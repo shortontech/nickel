@@ -1,37 +1,41 @@
-//! Optional Features layout from JSX, with policy and persistence owned by Rust.
+//! Optional Features JSX through the shared native component renderer.
 
 use nickel_core::{
     on_screen_keyboard::KeyboardPreference, optional_features::FeatureEffectiveState,
+};
+use nickel_plugin_presentation::{
+    components::PluginImages,
+    css::StyleSheet,
+    page::{JsxPage, STALE_DATA},
 };
 use nickel_ui::{AnyView, Column, Insets, SemanticTheme, VerticalScroll};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    SettingsApp, SettingsMessage, SettingsPage,
-    settings_components::{Node, SettingsJsxContext},
-    view::codex_switch_state,
-};
+use crate::{SettingsApp, SettingsMessage, SettingsPage, view::codex_switch_state};
 
-const STALE_STATUS: &str = "Optional feature status changed; refresh the page";
+const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct OptionalFeaturesPage {
-    context: SettingsJsxContext,
+    page: JsxPage,
+    stylesheet: StyleSheet,
+    last_theme: Option<SemanticTheme>,
 }
 
 impl OptionalFeaturesPage {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.context.retained_bytes()
+        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
     }
 
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            context: SettingsJsxContext::new(
+            page: JsxPage::new(
                 crate::settings_package::source(crate::settings_package::Script::OptionalFeatures)?,
-                parse_tree,
-                STALE_STATUS,
-                "Optional feature action must request one operation",
+                crate::settings_package::manifest()?.clone(),
+                None,
             )?,
+            stylesheet: StyleSheet::default(),
+            last_theme: None,
         })
     }
 
@@ -40,7 +44,18 @@ impl OptionalFeaturesPage {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        let node = self.context.render(data)?;
+        self.page.render(data)?;
+        if self.last_theme != Some(theme) {
+            self.stylesheet = crate::settings_plugin::stylesheet_template(
+                include_str!("../../../assets/plugins/settings/settings-optional-features.css"),
+                theme,
+            )?;
+            self.last_theme = Some(theme);
+        }
+        let node = self
+            .page
+            .node()
+            .ok_or("Optional Features page is unavailable")?;
         Ok(AnyView::new(
             VerticalScroll::new(SettingsMessage::OptionalFeaturesScroll, 0.0)
                 .grow(1.0)
@@ -54,44 +69,25 @@ impl OptionalFeaturesPage {
                             bottom: 24.0,
                             left: 0.0,
                         })
-                        .child(node.view(theme, "", SettingsMessage::OptionalFeaturesJsxAction)),
+                        .child(
+                            node.view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet),
+                        ),
                 ),
         ))
     }
 
     fn dispatch(&mut self, index: usize, data: &Value) -> Result<SettingsMessage, String> {
-        self.context.dispatch(index, &Value::Null, data, |effect| {
+        self.page.dispatch(index, &Value::Null, data, |effect| {
             let request: OptionalRequest =
-                serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
+                serde_json::from_value(effect).map_err(|error| error.to_string())?;
             validate_request(request, data)
         })
     }
 
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.context.action_for_id(id)
+        self.page.node()?.button_action(id)
     }
-}
-
-fn parse_tree(value: &Value) -> Result<Node, String> {
-    if value.get("kind").and_then(Value::as_str) != Some("settings-features")
-        || value
-            .get("children")
-            .and_then(Value::as_array)
-            .is_none_or(|children| {
-                children.len() != 2
-                    || children.iter().any(|child| {
-                        child.get("kind").and_then(Value::as_str) != Some("settings-card")
-                    })
-            })
-    {
-        return Err("Optional Features page structure is invalid".into());
-    }
-    let node = Node::parse(value)?;
-    if node.contains_input() {
-        return Err("Optional Features cannot request text input".into());
-    }
-    Ok(node)
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +255,16 @@ impl SettingsApp {
 mod tests {
     use super::*;
     use nickel_core::optional_features::{FeatureInstallation, FeaturePolicy, FeatureSupport};
+
+    #[test]
+    fn shared_optional_features_has_a_semantic_switch() {
+        let app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        let host = nickel_ui::UiHost::new(app, 960, 498);
+        assert!(host.semantic_nodes().iter().any(|node| {
+            node.id.as_str().contains("optional-feature-codex-enabled")
+                && node.role == Some(nickel_ui::SemanticRole::Switch)
+        }));
+    }
 
     #[test]
     fn jsx_codex_confirmation_requires_current_confirmation_state() {

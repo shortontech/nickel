@@ -144,4 +144,28 @@ mod tests {
         };
         assert!(matches!(&children[0], PanelNode::Button { label, .. } if label == "1"));
     }
+
+    #[test]
+    fn shared_switch_rejects_handlers_while_disabled() {
+        let manifest =
+            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
+                .unwrap();
+        let mut disabled = JsxPage::new(
+            "function App() { return h(Switch, {id: 'integration', state: 'disabled-on', accessibilityLabel: 'Integration', onClick: () => nickel.request({type: 'toggle'})}); }",
+            manifest.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(disabled.render(&json!({})).is_err());
+        let mut passive = JsxPage::new(
+            "function App() { return h(Switch, {id: 'integration', state: 'disabled-on', accessibilityLabel: 'Integration'}); }",
+            manifest,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            passive.render(&json!({})),
+            Ok(PanelNode::Switch { action: None, .. })
+        ));
+    }
 }

@@ -560,7 +560,6 @@ enum SettingsMessage {
     ConfirmDisableCodex,
     CancelDisableCodex,
     RetryCodexProbe,
-    OptionalFeaturesJsxAction(usize),
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
@@ -1729,9 +1728,6 @@ impl SettingsApp {
             SettingsMessage::ConfirmDisableCodex => self.request_codex_enabled(false, true),
             SettingsMessage::CancelDisableCodex => self.codex_disable_confirmation = false,
             SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
-            SettingsMessage::OptionalFeaturesJsxAction(index) => {
-                self.handle_optional_features_jsx_action(index);
-            }
             SettingsMessage::BluetoothDevice(index) => {
                 let Some(device) = self.bluetooth.devices.get(index).cloned() else {
                     return;
@@ -1919,10 +1915,14 @@ impl SettingsApp {
                 self.persist_shell_behavior(previous);
             }
             SettingsMessage::JsxAction(index, value) => {
-                if self.page == SettingsPage::Bar
-                    && let Ok(value) = serde_json::from_str(&value)
-                {
-                    self.handle_bar_jsx_action(index, value);
+                if let Ok(value) = serde_json::from_str(&value) {
+                    match self.page {
+                        SettingsPage::Bar => self.handle_bar_jsx_action(index, value),
+                        SettingsPage::OptionalFeatures if value.is_null() => {
+                            self.handle_optional_features_jsx_action(index);
+                        }
+                        _ => {}
+                    }
                 }
             }
             SettingsMessage::DisplayIdentify => {
@@ -6253,8 +6253,9 @@ mod tests {
             };
             let action = optional_features_action(host.application(), id);
             let target = host
-                .unique_semantic_target_for_message(&SettingsMessage::OptionalFeaturesJsxAction(
+                .unique_semantic_target_for_message(&SettingsMessage::JsxAction(
                     action,
+                    "null".into(),
                 ))
                 .expect("visible keyboard mode");
             assert!(
@@ -6421,7 +6422,7 @@ mod tests {
         let action = optional_features_action(&app, "optional-feature-codex-enabled");
         assert!(
             frame
-                .semantic_targets_for_message(&SettingsMessage::OptionalFeaturesJsxAction(action))
+                .semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
                 .len()
                 == 1
         );
@@ -6486,7 +6487,7 @@ mod tests {
         let action = optional_features_action(&app, "optional-feature-codex-enabled");
         assert_eq!(
             frame
-                .semantic_targets_for_message(&SettingsMessage::OptionalFeaturesJsxAction(action))
+                .semantic_targets_for_message(&SettingsMessage::JsxAction(action, "null".into()))
                 .len(),
             1,
             "the mixed switch remains an explicit way to resolve the failed request"

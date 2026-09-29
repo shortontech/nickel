@@ -322,6 +322,13 @@ pub enum PanelNode {
         label: String,
         action: usize,
     },
+    Switch {
+        id: String,
+        class_name: Option<String>,
+        state: String,
+        label: String,
+        action: Option<usize>,
+    },
     Spacer {
         class_name: Option<String>,
     },
@@ -614,6 +621,7 @@ impl PanelNode {
                     | "spacer"
                     | "text-field"
                     | "slider"
+                    | "switch"
                     | "button"
             )
         {
@@ -1155,6 +1163,50 @@ impl PanelNode {
                         .and_then(Value::as_u64)
                         .and_then(|action| usize::try_from(action).ok())
                         .ok_or("slider needs an onChange handler")?,
+                })
+            }
+            "switch" => {
+                if !children.is_empty() {
+                    return Err("switch cannot have children".into());
+                }
+                let state = value
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .filter(|state| {
+                        matches!(
+                            *state,
+                            "off"
+                                | "on"
+                                | "mixed"
+                                | "mixed-unavailable"
+                                | "disabled-off"
+                                | "disabled-on"
+                        )
+                    })
+                    .ok_or("switch state is invalid")?;
+                let action = value
+                    .get("action")
+                    .and_then(Value::as_u64)
+                    .and_then(|action| usize::try_from(action).ok());
+                if !matches!(state, "off" | "on" | "mixed") && action.is_some() {
+                    return Err("disabled switch cannot have an onClick handler".into());
+                }
+                Ok(Self::Switch {
+                    id: value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= 128)
+                        .ok_or("switch needs a bounded id")?
+                        .to_owned(),
+                    class_name,
+                    state: state.to_owned(),
+                    label: value
+                        .get("accessibilityLabel")
+                        .and_then(Value::as_str)
+                        .filter(|label| !label.is_empty() && label.len() <= 256)
+                        .ok_or("switch needs an accessibility label")?
+                        .to_owned(),
+                    action,
                 })
             }
             "text-field" => Ok(Self::TextField {
@@ -1955,6 +2007,63 @@ impl PanelNode {
                     &wrapper_style,
                 )
             }
+            Self::Switch {
+                id,
+                class_name,
+                state,
+                label,
+                action,
+            } => {
+                let style = stylesheet.resolve("switch", Some(id), class_name.as_deref());
+                let on = matches!(state.as_str(), "on" | "mixed" | "disabled-on");
+                let mixed = matches!(state.as_str(), "mixed" | "mixed-unavailable");
+                let track = Container::new()
+                    .width(42.0)
+                    .height(24.0)
+                    .radius(style.radius.unwrap_or(12.0))
+                    .border(
+                        style.border_color.unwrap_or(0xff646b76),
+                        style.border_width.unwrap_or(1.0),
+                    )
+                    .background(style.background.unwrap_or(if on {
+                        0xff456888
+                    } else {
+                        0xff414958
+                    }))
+                    .padding(Insets::all(3.0))
+                    .child(
+                        Row::new()
+                            .fill_width()
+                            .justify_content(if mixed {
+                                nickel_ui::Justify::Center
+                            } else if on {
+                                nickel_ui::Justify::End
+                            } else {
+                                nickel_ui::Justify::Start
+                            })
+                            .child(
+                                Container::new()
+                                    .width(18.0)
+                                    .height(18.0)
+                                    .radius(9.0)
+                                    .background(style.color.unwrap_or(0xfff4f6fa)),
+                            ),
+                    );
+                let mut control = Container::new()
+                    .id(id.clone())
+                    .width(44.0)
+                    .height(44.0)
+                    .semantic_role(SemanticRole::Switch)
+                    .accessibility_label(label.clone())
+                    .accessibility_state(state.replace('-', " "))
+                    .align_items(nickel_ui::Align::Center)
+                    .justify_content(nickel_ui::Justify::Center)
+                    .child(track);
+                if let Some(action) = action {
+                    control = control.message(Message::from_plugin(PluginMessage::Click(*action)));
+                }
+                with_margin(AnyView::new(control), &style)
+            }
             Self::TextField {
                 id,
                 class_name,
@@ -2121,6 +2230,11 @@ impl PanelNode {
     pub fn button_action(&self, requested_id: &str) -> Option<usize> {
         match self {
             Self::Button { id, action, .. } if id == requested_id => Some(*action),
+            Self::Switch {
+                id,
+                action: Some(action),
+                ..
+            } if id == requested_id => Some(*action),
             Self::Image {
                 id: Some(id),
                 action: Some(action),

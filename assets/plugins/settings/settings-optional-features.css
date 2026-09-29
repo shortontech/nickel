@@ -1,0 +1,117 @@
+div.features-page {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 16px;
+    padding: 0 12px 24px 0;
+}
+
+div.features-card {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 8px;
+    padding: 18px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+}
+
+text.features-title {
+    height: auto;
+    color: @primary@;
+    font-size: 17px;
+    line-height: 23px;
+}
+
+text.features-label {
+    height: auto;
+    color: @primary@;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+text.features-description {
+    height: auto;
+    color: @secondary@;
+    font-size: 13px;
+    line-height: 18px;
+}
+
+div.keyboard-options,
+div.features-actions,
+div.codex-control-row {
+    display: flex;
+    flex-direction: row;
+    gap: 10px;
+}
+
+div.keyboard-option {
+    display: flex;
+    flex-direction: column;
+    width: 33%;
+    gap: 5px;
+}
+
+button.feature-option,
+text.feature-option-disabled {
+    width: 100%;
+    height: 44px;
+    padding: 9px 10px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+button.feature-option.selected {
+    background: @accent-soft@;
+    border: 2px solid @selected@;
+}
+
+text.feature-option-disabled {
+    color: @secondary@;
+}
+
+div.features-status-row,
+div.codex-control-label,
+div.features-confirmation {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+div.codex-control-row {
+    align-items: center;
+    justify-content: space-between;
+}
+
+switch.codex-switch {
+    background: @border@;
+    border: 1px solid @border@;
+    border-radius: 12px;
+    color: @primary@;
+}
+
+switch.codex-switch.on,
+switch.codex-switch.mixed,
+switch.codex-switch.disabled-on {
+    background: @accent-soft@;
+    border: 1px solid @accent@;
+}
+
+button.feature-action {
+    padding: 9px 14px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 14px;
+}
+
+button.feature-action.primary {
+    background: @accent-soft@;
+    border: 1px solid @accent@;
+}

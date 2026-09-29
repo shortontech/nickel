@@ -1,6 +1,5 @@
 // @jsx h
-// Optional Features layout and intent. The host checks current feature policy,
-// runtime generations, and environment overrides before applying any request.
+// Optional Features layout and intent. The host validates current feature policy.
 function request(type, fields = {}) {
     nickel.request({ type, ...fields });
 }
@@ -8,20 +7,33 @@ function App() {
     const data = nickel.data;
     const keyboard = data.keyboard;
     const codex = data.codex;
-    return h("settings-features", null,
-        h("settings-card", { label: keyboard.title, value: keyboard.description },
-            h("settings-radio-group", { id: "on-screen-keyboard-mode" }, keyboard.options.map(option => h("settings-radio", { key: option.value, id: `keyboard-mode-${option.value}`, label: option.label, value: option.description, selected: option.selected, onClick: keyboard.editable
-                    ? () => request('keyboard-mode', { mode: option.value })
-                    : undefined }))),
-            h("settings-row", { label: keyboard.statusLabel, value: keyboard.status })),
-        h("settings-card", { label: codex.title, value: codex.description },
-            h("settings-row", { label: codex.enableLabel, value: codex.status },
-                h("settings-switch", { id: "optional-feature-codex-enabled", label: codex.accessibilityLabel, value: codex.switchState, onClick: codex.editable
+    return h("div", { className: "features-page" },
+        h("div", { className: "features-card" },
+            h(Text, { className: "features-title" }, keyboard.title),
+            h(Text, { className: "features-description", wrap: true }, keyboard.description),
+            h("div", { className: "keyboard-options" }, keyboard.options.map(option => h("div", { key: option.value, className: "keyboard-option" },
+                keyboard.editable
+                    ? h(Button, { id: `keyboard-mode-${option.value}`, className: option.selected ? 'feature-option selected' : 'feature-option', accessibilityLabel: option.label, onClick: () => request('keyboard-mode', { mode: option.value }) }, `${option.selected ? '◉' : '○'}  ${option.label}`)
+                    : h(Text, { className: "feature-option-disabled" }, `${option.selected ? '◉' : '○'}  ${option.label}`),
+                h(Text, { className: "features-description", wrap: true }, option.description)))),
+            h("div", { className: "features-status-row" },
+                h(Text, { className: "features-label" }, keyboard.statusLabel),
+                h(Text, { className: "features-description", wrap: true }, keyboard.status))),
+        h("div", { className: "features-card" },
+            h(Text, { className: "features-title" }, codex.title),
+            h(Text, { className: "features-description", wrap: true }, codex.description),
+            h("div", { className: "codex-control-row" },
+                h("div", { className: "codex-control-label" },
+                    h(Text, { className: "features-label" }, codex.enableLabel),
+                    h(Text, { className: "features-description" }, codex.status)),
+                h(Switch, { id: "optional-feature-codex-enabled", className: `codex-switch ${codex.switchState}`, accessibilityLabel: codex.accessibilityLabel, state: codex.switchState, onClick: codex.editable
                         ? () => request('codex-enabled', { enabled: codex.nextEnabled })
                         : undefined })),
-            codex.confirmation ? h("settings-row", { label: codex.confirmation.title, value: codex.confirmation.description },
-                h("settings-inline", null,
-                    h("settings-button", { id: "codex-confirm-disable", label: codex.confirmation.confirm, value: "primary", onClick: () => request('confirm-disable') }),
-                    h("settings-button", { id: "codex-cancel-disable", label: codex.confirmation.cancel, value: "quiet", onClick: () => request('cancel-disable') }))) : null,
-            codex.retry ? h("settings-button", { id: "codex-retry", label: codex.retryLabel, value: "secondary", onClick: () => request('retry-codex') }) : null));
+            codex.confirmation ? h("div", { className: "features-confirmation" },
+                h(Text, { className: "features-label", wrap: true }, codex.confirmation.title),
+                h(Text, { className: "features-description", wrap: true }, codex.confirmation.description),
+                h("div", { className: "features-actions" },
+                    h(Button, { id: "codex-confirm-disable", className: "feature-action primary", onClick: () => request('confirm-disable') }, codex.confirmation.confirm),
+                    h(Button, { id: "codex-cancel-disable", className: "feature-action", onClick: () => request('cancel-disable') }, codex.confirmation.cancel))) : null,
+            codex.retry ? h(Button, { id: "codex-retry", className: "feature-action", onClick: () => request('retry-codex') }, codex.retryLabel) : null));
 }
