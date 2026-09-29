@@ -5,5 +5,5 @@ The shell supplies a bounded label and percentage. It owns audio observation,
 the overlay timeout, native placement, and device-name redaction while locked.
 
 The overlay uses `Progress`, a passive component with bounded `percent`,
-`width`, and `height` properties. Settings can disable the plugin; Nickel then
-uses its native recovery view.
+`width`, and `height` properties. Disabling the plugin removes the ordinary
+volume overlay.

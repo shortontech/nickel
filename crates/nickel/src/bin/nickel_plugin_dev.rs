@@ -142,7 +142,8 @@ mod platform {
     use nickel_shell::plugin_panel::{
         PluginPanelApplication, codex_projects_manifest, control_center_manifest, desktop_manifest,
         launcher_manifest, manifest, notification_manifest, on_screen_keyboard_manifest,
-        run_manifest, taskbar_manifest, volume_osd_manifest, window_preview_manifest,
+        run_manifest, screenshot_manifest, taskbar_manifest, volume_osd_manifest,
+        window_preview_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
@@ -156,6 +157,7 @@ mod platform {
             control_center_manifest(),
             codex_projects_manifest(),
             on_screen_keyboard_manifest(),
+            screenshot_manifest(),
             window_preview_manifest(),
             volume_osd_manifest(),
         ]
@@ -630,6 +632,17 @@ mod platform {
             ));
             let package = load_dev_package(root).unwrap();
             assert_eq!(package.manifest.id, "org.nickel.on-screen-keyboard");
+            assert_eq!(package.manifest.surfaces.len(), 1);
+        }
+
+        #[test]
+        fn screenshot_uses_the_bundled_dev_path() {
+            let root = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/screenshot"
+            ));
+            let package = load_dev_package(root).unwrap();
+            assert_eq!(package.manifest.id, "org.nickel.screenshot");
             assert_eq!(package.manifest.surfaces.len(), 1);
         }
 

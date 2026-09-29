@@ -10,6 +10,5 @@ Nickel resolves the current key and delivers text only to the recipient lease
 that was current when the input gesture began. The plugin never receives the
 recipient identity or a key injection API.
 
-On Linux, Settings enable and disable swaps the JSX overlay and Nickel's
-host-owned fallback. Windows still uses the host-owned keyboard surface while
-the plugin package and status are available for development.
+Linux and Windows use the JSX overlay for ordinary input. Settings enable and
+disable swaps that overlay with Nickel's host-owned secure-entry fallback.
