@@ -1,4 +1,4 @@
-//! Diagnostic-only call into this Windows build's private frame service.
+//! Diagnostic-only call into Windows' private frame service.
 
 use std::{cell::RefCell, ffi::c_void, process::Command, ptr, thread, time::Duration};
 
@@ -14,11 +14,13 @@ use windows::{
 };
 use windows_core::{Error, GUID, HRESULT, Interface, Result, implement};
 
-// RVAs verified against the matching twinui.pcshell.dll public PDB on build
-// 26200. The code signature and vtable slot are checked before either call.
-const CREATE_FRAME_SERVICE_RVA: usize = 0x0e5284;
-const COMPLETE_INITIALIZATION_RVA: usize = 0x2f8cc0;
-const ENSURE_FRAME_POOL_RVA: usize = 0x0d90e0;
+const CREATE_FRAME_SERVICE: &str = "?CApplicationFrameService_CreateInstance@@YAJPEAUIImmersiveApplicationManagerInternal@@AEBU_GUID@@PEAPEAX@Z";
+const COMPLETE_INITIALIZATION: &str =
+    "?CompleteInitialization@CApplicationFrameService@@UEAAJPEAUIServiceProvider@@@Z";
+const ENSURE_FRAME_POOL: &str = "?EnsureFramePool@CApplicationFrameService@@UEAAJXZ";
+const GET_FRAME: &str =
+    "?GetFrame@CApplicationFrameService@@UEAAJPEBGKPEAPEAUIApplicationFrameProxy@@@Z";
+const IAM_GLOBALS: &str = "?g_pIAMGlobals@CApplicationManagerUtility@@3PEAVCIAMGlobals@@EA";
 const MANAGER_INTERNAL_OFFSET: usize = 0xf0;
 const MANAGER_FRAME_SERVICE_OFFSET: usize = 0x260;
 const FRAME_SERVICE_IID: GUID = GUID::from_u128(0x88b25c81_171b_48b0_91d6_c75846bcf035);
@@ -37,6 +39,8 @@ type EnsureFramePool = unsafe extern "system" fn(*mut c_void) -> HRESULT;
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+    fn GetModuleHandleExW(flags: u32, name_or_address: *const u16, module: *mut *mut c_void)
+    -> i32;
 }
 
 #[implement(IServiceProvider)]
@@ -85,12 +89,11 @@ impl FramePool {
     pub(crate) fn acquire_frame(&self, app_id: &str) -> std::result::Result<IUnknown, String> {
         let vtable = unsafe { self.frame_service.as_raw().cast::<*const usize>().read() };
         let method = unsafe { vtable.add(9).read() };
-        let wide_name: Vec<u16> = "twinui.pcshell.dll".encode_utf16().chain([0]).collect();
-        let base = unsafe { GetModuleHandleW(wide_name.as_ptr()) } as usize;
-        if method != base + 0x0d45d0 {
+        let expected = crate::symbols::address("twinui.pcshell.dll", GET_FRAME)?;
+        if method != expected {
             return Err(format!(
                 "frame service method 9 differs: actual={method:#x} expected={:#x}",
-                base + 0x0d45d0
+                expected
             ));
         }
         type GetFrame =
@@ -119,7 +122,8 @@ impl FramePool {
         println!(
             "phase=frame-pool-entry count={pool_count} app_id={pooled_label:?} glom={pooled_glom}"
         );
-        let globals = unsafe { ((base + 0x912160) as *const *mut u8).read() };
+        let globals_address = crate::symbols::address("twinui.pcshell.dll", IAM_GLOBALS)?;
+        let globals = unsafe { (globals_address as *const *mut u8).read() };
         if globals.is_null() {
             return Err("g_pIAMGlobals is null".into());
         }
@@ -149,19 +153,29 @@ pub(crate) fn ensure_frame_pool(manager: &IUnknown) -> std::result::Result<Frame
         return Err("twinui.pcshell.dll is not loaded".into());
     }
     let base = base as usize;
-    // SAFETY: The matching PDB supplies this RVA. Verify the installed code
+    // SAFETY: The matching PDB supplies this address. Verify the installed code
     // prefix before interpreting the address as a function pointer.
-    let address = base + CREATE_FRAME_SERVICE_RVA;
+    let address = crate::symbols::address("twinui.pcshell.dll", CREATE_FRAME_SERVICE)?;
     let prefix = unsafe { std::slice::from_raw_parts(address as *const u8, 7) };
     if prefix != [0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x18] {
         return Err(format!("frame-service code prefix differs at {address:#x}"));
     }
     // SAFETY: This PDB-verified manager interface subobject is within the
-    // manager returned by this DLL on the same Windows build.
+    // manager returned by this DLL with the validated object layout.
     let internal = unsafe { manager.as_raw().cast::<u8>().add(MANAGER_INTERNAL_OFFSET) };
     // SAFETY: The subobject begins with a COM vtable pointer.
     let internal_vtable = unsafe { internal.cast::<usize>().read() };
-    if !(base..base + 0x99e000).contains(&internal_vtable) {
+    let mut vtable_module = ptr::null_mut();
+    let from_address = 0x4 | 0x2;
+    if unsafe {
+        GetModuleHandleExW(
+            from_address,
+            internal_vtable as *const u16,
+            &mut vtable_module,
+        )
+    } == 0
+        || vtable_module as usize != base
+    {
         return Err(format!(
             "manager internal vtable outside twinui: {internal_vtable:#x}"
         ));
@@ -170,7 +184,7 @@ pub(crate) fn ensure_frame_pool(manager: &IUnknown) -> std::result::Result<Frame
 
     // The manager's initialization stores its own frame service at +0x260.
     // Use that instance so subsequent manager callbacks see the same service.
-    // SAFETY: The offset comes from this build's matching PDB and disassembly.
+    // SAFETY: The offset comes from the validated object layout.
     let mut raw_frame = unsafe {
         manager
             .as_raw()
@@ -220,10 +234,11 @@ pub(crate) fn ensure_frame_pool(manager: &IUnknown) -> std::result::Result<Frame
     // SAFETY: This interface's vtable was identified in the matching PDB.
     let vtable = unsafe { frame.as_raw().cast::<*const usize>().read() };
     let complete_address = unsafe { vtable.add(3).read() };
-    if complete_address != base + COMPLETE_INITIALIZATION_RVA {
+    let expected_complete = crate::symbols::address("twinui.pcshell.dll", COMPLETE_INITIALIZATION)?;
+    if complete_address != expected_complete {
         return Err(format!(
             "frame service method 3 differs: actual={complete_address:#x} expected={:#x}",
-            base + COMPLETE_INITIALIZATION_RVA
+            expected_complete
         ));
     }
     let provider: IServiceProvider = LoggingServiceProvider.into();
@@ -240,10 +255,11 @@ pub(crate) fn ensure_frame_pool(manager: &IUnknown) -> std::result::Result<Frame
 
     // SAFETY: The installed PDB identifies vtable slot 5 as EnsureFramePool.
     let ensure_address = unsafe { vtable.add(5).read() };
-    if ensure_address != base + ENSURE_FRAME_POOL_RVA {
+    let expected_ensure = crate::symbols::address("twinui.pcshell.dll", ENSURE_FRAME_POOL)?;
+    if ensure_address != expected_ensure {
         return Err(format!(
             "frame service method 5 differs: actual={ensure_address:#x} expected={:#x}",
-            base + ENSURE_FRAME_POOL_RVA
+            expected_ensure
         ));
     }
     println!("phase=EnsureFramePool starting");

@@ -1,4 +1,4 @@
-//! Automates the existing build-specific presentation experiment on the shell STA.
+//! Automates private UWP presentation on the shell STA.
 use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
@@ -122,7 +122,7 @@ pub(crate) fn uncloak(app_id: &str) -> windows::core::Result<()> {
     type Lookup = unsafe extern "system" fn(*mut c_void, *const u16, *mut *mut c_void) -> HRESULT;
     type Cloak = unsafe extern "system" fn(*mut c_void, u32, i32) -> HRESULT;
     // SAFETY: Runs on the initialized shell STA. These are the same private
-    // interface slots verified and used by switch-view on this Windows build.
+    // interface slots verified and used by switch-view with the validated layout.
     unsafe {
         let shell: IServiceProvider = CoCreateInstance(&SHELL, None, CLSCTX_LOCAL_SERVER)?;
         let mut raw = std::ptr::null_mut();

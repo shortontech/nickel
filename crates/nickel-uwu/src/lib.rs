@@ -14,6 +14,8 @@ mod host;
 mod presentation_callbacks;
 #[cfg(target_os = "windows")]
 mod shell_window;
+#[cfg(target_os = "windows")]
+mod symbols;
 #[cfg(all(target_os = "windows", feature = "diagnostics"))]
 mod view_event_trace;
 #[cfg(target_os = "windows")]

@@ -8,10 +8,8 @@ use std::{
 
 use libloading::Library;
 
-// RVA of twinui.pcshell!_imp_CreateWindowInBand on Windows build 26200,
-// verified against this installation's matching Microsoft public PDB.
-const CREATE_WINDOW_IN_BAND_IAT_RVA: usize = 0x9839b0;
-const CREATE_WINDOW_IN_BAND_DELAY_THUNK_RVA: usize = 0x2cfe46;
+const CREATE_WINDOW_IN_BAND_IAT: &str = "__imp_CreateWindowInBand";
+const CREATE_WINDOW_IN_BAND_DELAY_THUNK: &str = "__imp_load_CreateWindowInBand";
 const IMMERSIVE_BACKGROUND_BAND: u32 = 12;
 const DESKTOP_BAND: u32 = 1;
 const PAGE_READWRITE: u32 = 4;
@@ -34,7 +32,6 @@ type CreateWindowInBand = unsafe extern "system" fn(
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn VirtualProtect(address: *mut c_void, size: usize, protection: u32, old: *mut u32) -> i32;
 }
 
@@ -113,22 +110,11 @@ impl FallbackBandRedirect {
                 .map_err(|error| format!("resolve-CreateWindowInBand: {error}"))?
                 as usize
         };
-        let wide_name: Vec<u16> = "twinui.pcshell.dll".encode_utf16().chain([0]).collect();
-        // SAFETY: The DLL is already loaded by Library::new above.
-        let base = unsafe { GetModuleHandleW(wide_name.as_ptr()) };
-        if base.is_null() {
-            return Err("GetModuleHandleW returned null".into());
-        }
-        // SAFETY: The RVA is taken from the matching PDB for this installed
-        // DLL. The slot is checked against the resolved user32 export before
-        // any write, so a different build fails without patching.
-        let slot = unsafe {
-            base.cast::<u8>()
-                .add(CREATE_WINDOW_IN_BAND_IAT_RVA)
-                .cast::<usize>()
-        };
+        let slot =
+            crate::symbols::address("twinui.pcshell.dll", CREATE_WINDOW_IN_BAND_IAT)? as *mut usize;
         let current = unsafe { slot.read_volatile() };
-        let delay_thunk = base as usize + CREATE_WINDOW_IN_BAND_DELAY_THUNK_RVA;
+        let delay_thunk =
+            crate::symbols::address("twinui.pcshell.dll", CREATE_WINDOW_IN_BAND_DELAY_THUNK)?;
         if current != original && current != delay_thunk {
             return Err(format!(
                 "IAT target differs from user32 export and delay thunk: current={current:#x} export={original:#x} thunk={delay_thunk:#x}"

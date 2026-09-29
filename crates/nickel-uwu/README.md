@@ -4,10 +4,14 @@
 UWP applications when Explorer is not the registered desktop shell. It is a
 Rust library used by Nickel.
 
-The crate uses private Windows interfaces and build-specific addresses verified
-on Windows build 26200. Every callable address and patched import target is
-checked against the loaded module before use. An unknown build fails during
-startup instead of calling an unchecked target.
+The crate uses private Windows interfaces. It reads the CodeView identity from
+each loaded Windows DLL, obtains the exact matching public PDB from Microsoft's
+symbol server, and resolves private entry points by name. Resolved RVAs are
+cached in an unsigned manifest keyed by the PDB GUID and age under
+`%LOCALAPPDATA%\Nickel\symbols`. Every callable address and patched import
+target is also checked against the live object or loaded module before use.
+Missing or incompatible symbols fail startup instead of calling an unchecked
+target.
 
 ## Integration contract
 
@@ -63,9 +67,8 @@ The host performs these operations on its STA thread:
    redirect until shutdown.
 
 The dispatcher supplies the view identity and wrapper interfaces. This
-implementation does not scan the host heap for wrapper objects, reconcile
-frame and CoreWindow pairs, or use the former polling based `AutoPresent`
-implementation.
+implementation uses those interfaces to associate each frame with its
+CoreWindow.
 
 ## Code to carry into another shell
 
@@ -82,8 +85,9 @@ The implementation is split by responsibility:
   uncloaking, and foreground calls.
 
 Copy these modules together. Their private interface assumptions, controller
-lifetime, STA affinity, and cleanup order are coupled. Update build-specific
-addresses from matching Microsoft symbols before enabling a new Windows build.
+lifetime, STA affinity, and cleanup order are coupled. A new Windows build is
+accepted when its matching public symbols contain the required private entry
+points and the validated private object layouts remain compatible.
 
 ## Building and checking
 
@@ -97,8 +101,10 @@ cargo clippy -p nickel-uwu --all-targets -- -D warnings
 
 ## Current limits
 
-- The implementation is Windows-only and tied to the verified private ABI of
-  Windows build 26200.
+- The implementation is Windows-only and depends on private interfaces and
+  object layouts that may still require adaptation after a Windows update.
+- First use of a new Windows module build requires access to Microsoft's symbol
+  server. Cached PDBs and manifests are reused offline for that exact module.
 - It must own the registered shell window and refuses to start while another
   shell owns it.
 - It presents classic `ApplicationFrameWindow` hosted UWP views. Other window

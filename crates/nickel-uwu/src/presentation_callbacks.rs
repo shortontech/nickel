@@ -22,9 +22,10 @@ pub(crate) fn probe_view_wrapper_discovery(interface: usize, hwnd: usize) -> Res
     {
         return Err("invalid wrapper interface or HWND".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let expected = module.0 as usize + 0x8e960;
+    let expected = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?WindowDiscoveredFromShellHook@UwpWindowWrapperBase@@UEAAXPEAUHWND__@@@Z",
+    )?;
     let vtable = unsafe { (interface as *const *const usize).read() };
     let method = if vtable.is_null() {
         0
@@ -56,10 +57,14 @@ pub(crate) fn probe_view_wrapper_readiness(interface: usize, hwnd: usize) -> Res
     {
         return Err("invalid wrapper interface or HWND".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let expected_visibility = module.0 as usize + 0x1aa550;
-    let expected_layout = module.0 as usize + 0x1a36f0;
+    let expected_visibility = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?VisibilityChanged@UwpWindowWrapperBase@@UEAAXW4EventPhase@@W4Visibility@@@Z",
+    )?;
+    let expected_layout = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?HandlePresentationReadinessChange@UwpWindowWrapperBase@@UEAAX_K@Z",
+    )?;
     let vtable = unsafe { (interface as *const *const usize).read() };
     if vtable.is_null() {
         return Err("null wrapper vtable".into());
@@ -90,9 +95,10 @@ pub(crate) fn probe_view_wrapper_uncloak(interface: usize) -> Result<(), String>
     if interface == 0 {
         return Err("null shell-cloak interface".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let expected = module.0 as usize + 0x1a69a0;
+    let expected = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?SetShellCloak@UwpWindowWrapperBase@@UEAAJW4__MIDL___MIDL_itf_privilegedoperations_0000_0002_0001@@@Z",
+    )?;
     let vtable = unsafe { (interface as *const *const usize).read() };
     let method = if vtable.is_null() {
         0
@@ -119,9 +125,10 @@ pub(crate) fn probe_view_wrapper_foreground(interface: usize) -> Result<(), Stri
     if interface == 0 {
         return Err("null foreground interface".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let expected = module.0 as usize + 0x1cb270;
+    let expected = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?SetForegroundWindow@UwpWindowWrapperBase@@UEAAJXZ",
+    )?;
     let vtable = unsafe { (interface as *const *const usize).read() };
     let method = if vtable.is_null() {
         0
@@ -160,9 +167,10 @@ pub(crate) fn probe_view_wrapper_set_frame(
     {
         return Err("invalid frame-window interface or HWND".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let expected = module.0 as usize + 0x1a8f40;
+    let expected = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?SetFrameWindow@UwpWindowWrapperBase@@UEAAJPEAUHWND__@@W4__MIDL___MIDL_itf_ntuserviewmanagerinterop_0000_0002_0001@@@Z",
+    )?;
     let vtable = unsafe { (interface as *const *const usize).read() };
     let method = if vtable.is_null() {
         0
@@ -199,9 +207,10 @@ pub(crate) fn probe_view_wrapper_set_size(
     if interface == 0 || frame_hwnd == 0 {
         return Err("invalid view wrapper interface or frame HWND".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let expected = module.0 as usize + 0x456640;
+    let expected = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?SetSize@UwpWindowWrapperBase@@UEAAJUSize@Foundation@Windows@@@Z",
+    )?;
     let vtable = unsafe { (interface as *const *const usize).read() };
     let method = if vtable.is_null() {
         0
@@ -243,16 +252,17 @@ pub(crate) fn probe_frame_set_position(frame_proxy: usize) -> Result<(), String>
     if frame_proxy == 0 {
         return Err("null frame proxy".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let base = module.0 as usize;
     let vtable = unsafe { (frame_proxy as *const *const usize).read() };
     let set_position_method = if vtable.is_null() {
         0
     } else {
         unsafe { vtable.add(4).read() }
     };
-    if set_position_method != base + 0x2066d0 {
+    let expected_set_position = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?SetPosition@CApplicationFrameWrapper@@UEAAJPEAUIApplicationViewPosition@@@Z",
+    )?;
+    if set_position_method != expected_set_position {
         return Err(format!(
             "unexpected frame SetPosition method {set_position_method:#x}"
         ));
@@ -281,7 +291,11 @@ pub(crate) fn probe_frame_set_position(frame_proxy: usize) -> Result<(), String>
     };
     type MakePosition = unsafe extern "system" fn(*mut *mut c_void, *const RECT) -> HRESULT;
     type SetPosition = unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT;
-    let make_position: MakePosition = unsafe { std::mem::transmute(base + 0x1176e8) };
+    let make_position_address = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "??$MakeAndInitialize@VCCommonApplicationViewPosition@@UIApplicationViewPosition@@AEAUtagRECT@@@Details@WRL@Microsoft@@YAJPEAPEAUIApplicationViewPosition@@AEAUtagRECT@@@Z",
+    )?;
+    let make_position: MakePosition = unsafe { std::mem::transmute(make_position_address) };
     let set_position: SetPosition = unsafe { std::mem::transmute(set_position_method) };
     let mut position = std::ptr::null_mut();
     unsafe { make_position(&mut position, &bounds) }
@@ -320,9 +334,6 @@ pub(crate) fn probe_frame_set_presented_window(
     {
         return Err("invalid frame proxy or CoreWindow".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let base = module.0 as usize;
     let vtable = unsafe { (frame_proxy as *const *const usize).read() };
     if vtable.is_null() {
         return Err("null frame proxy vtable".into());
@@ -330,9 +341,21 @@ pub(crate) fn probe_frame_set_presented_window(
     let get_frame_method = unsafe { vtable.add(3).read() };
     let set_presented_method = unsafe { vtable.add(6).read() };
     let set_application_id_method = unsafe { vtable.add(9).read() };
-    if get_frame_method != base + 0x177b60
-        || set_presented_method != base + 0x20a700
-        || set_application_id_method != base + 0x20b8a0
+    let expected_get_frame = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?GetFrameWindow@CApplicationFrameWrapper@@UEAAJPEAPEAUHWND__@@@Z",
+    )?;
+    let expected_set_presented = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?SetPresentedWindow@CApplicationFrameWrapper@@UEAAJPEAUHWND__@@@Z",
+    )?;
+    let expected_set_application_id = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?SetApplicationId@CApplicationFrameWrapper@@UEAAJPEBGH@Z",
+    )?;
+    if get_frame_method != expected_get_frame
+        || set_presented_method != expected_set_presented
+        || set_application_id_method != expected_set_application_id
     {
         return Err(format!(
             "unexpected frame proxy methods get={get_frame_method:#x} set-presented={set_presented_method:#x} set-app-id={set_application_id_method:#x}"
@@ -370,9 +393,10 @@ pub(crate) fn probe_frame_fit_to_work_area(frame_proxy: usize) -> Result<(), Str
     if frame_proxy == 0 {
         return Err("null frame proxy".into());
     }
-    let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
-        .map_err(|error| error.to_string())?;
-    let expected = module.0 as usize + 0x2f8e20;
+    let expected = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?FitToWorkArea@CApplicationFrameWrapper@@UEAAJXZ",
+    )?;
     let vtable = unsafe { (frame_proxy as *const *const usize).read() };
     let method = if vtable.is_null() {
         0
@@ -402,7 +426,6 @@ fn probe_window_discovery_interface(
         UI::WindowsAndMessaging::IsWindow,
     };
 
-    const DISCOVER_WINDOW_RVA: usize = 0x8e960;
     const PROLOGUE: [u8; 10] = [0x48, 0x89, 0x5c, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20];
     if discovered_interface == 0
         || hwnd == 0
@@ -413,10 +436,12 @@ fn probe_window_discovery_interface(
     // SAFETY: The controller loads this Windows DLL before pumping messages.
     let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
         .map_err(|error| error.to_string())?;
-    let address = module.0 as usize + DISCOVER_WINDOW_RVA;
-    // SAFETY: The module is loaded, and this build's PDB and disassembly
-    // identified the function at this RVA. The byte check rejects other
-    // builds before the diagnostic call.
+    let address = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?WindowDiscoveredFromShellHook@UwpWindowWrapperBase@@UEAAXPEAUHWND__@@@Z",
+    )?;
+    // SAFETY: The exact-module PDB identified the function. The byte check
+    // rejects an incompatible implementation before the diagnostic call.
     let actual = unsafe { std::slice::from_raw_parts(address as *const u8, PROLOGUE.len()) };
     if actual != PROLOGUE {
         return Err(format!(
@@ -440,7 +465,6 @@ pub(crate) fn probe_window_visibility(wrapper: usize, hwnd: usize) -> Result<(),
         UI::WindowsAndMessaging::IsWindow,
     };
 
-    const VISIBILITY_CHANGED_RVA: usize = 0x1aa550;
     const PROLOGUE: [u8; 10] = [0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18];
     let visibility_interface = wrapper
         .checked_sub(0x20)
@@ -450,7 +474,7 @@ pub(crate) fn probe_window_visibility(wrapper: usize, hwnd: usize) -> Result<(),
         return Err("invalid wrapper or HWND".into());
     }
     // SAFETY: The caller supplies a live wrapper pointer identified by the
-    // matching PDB, and +0x138 holds this wrapper's client HWND on this build.
+    // matching PDB, and +0x138 holds this wrapper's client HWND in the validated layout.
     let client_hwnd = unsafe { ((wrapper + 0x138) as *const usize).read() };
     if client_hwnd != hwnd {
         return Err(format!(
@@ -460,7 +484,10 @@ pub(crate) fn probe_window_visibility(wrapper: usize, hwnd: usize) -> Result<(),
     // SAFETY: The controller loads this Windows DLL before pumping messages.
     let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
         .map_err(|error| error.to_string())?;
-    let address = module.0 as usize + VISIBILITY_CHANGED_RVA;
+    let address = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?VisibilityChanged@UwpWindowWrapperBase@@UEAAXW4EventPhase@@W4Visibility@@@Z",
+    )?;
     // SAFETY: The module is loaded; the PDB and prologue guard identify this
     // private diagnostic method on the current Windows build.
     let actual = unsafe { std::slice::from_raw_parts(address as *const u8, PROLOGUE.len()) };
@@ -469,7 +496,7 @@ pub(crate) fn probe_window_visibility(wrapper: usize, hwnd: usize) -> Result<(),
     }
     type VisibilityChanged = unsafe extern "system" fn(*mut c_void, u32, u32);
     // SAFETY: The live wrapper is checked against its client HWND above. The
-    // interface offset and EventPhase=1, Visibility=1 come from this build's
+    // interface offset and EventPhase=1, Visibility=1 come from the validated
     // PDB and disassembly. The host's shell thread owns the controller.
     let visibility_changed: VisibilityChanged = unsafe { std::mem::transmute(address) };
     unsafe { visibility_changed(visibility_interface as *mut c_void, 1, 1) };
@@ -484,7 +511,6 @@ pub(crate) fn probe_window_layout(wrapper: usize, hwnd: usize) -> Result<(), Str
         UI::WindowsAndMessaging::IsWindow,
     };
 
-    const LAYOUT_EVENT_RVA: usize = 0x1a36f0;
     const PROLOGUE: [u8; 10] = [0x48, 0x89, 0x5c, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20];
     let event_interface = wrapper
         .checked_sub(0x20)
@@ -494,7 +520,7 @@ pub(crate) fn probe_window_layout(wrapper: usize, hwnd: usize) -> Result<(), Str
         return Err("invalid wrapper or HWND".into());
     }
     // SAFETY: The pointer comes from a live wrapper in this diagnostic host;
-    // this build's layout has its client HWND at interface +0x138.
+    // the validated layout has its client HWND at interface +0x138.
     let client_hwnd = unsafe { ((wrapper + 0x138) as *const usize).read() };
     if client_hwnd != hwnd {
         return Err(format!(
@@ -504,7 +530,10 @@ pub(crate) fn probe_window_layout(wrapper: usize, hwnd: usize) -> Result<(), Str
     // SAFETY: The controller loads this Windows DLL before pumping messages.
     let module = unsafe { GetModuleHandleW(windows::core::w!("twinui.pcshell.dll")) }
         .map_err(|error| error.to_string())?;
-    let address = module.0 as usize + LAYOUT_EVENT_RVA;
+    let address = crate::symbols::address(
+        "twinui.pcshell.dll",
+        "?HandlePresentationReadinessChange@UwpWindowWrapperBase@@UEAAX_K@Z",
+    )?;
     // SAFETY: The PDB and prologue guard identify this private diagnostic
     // method on the current Windows build.
     let actual = unsafe { std::slice::from_raw_parts(address as *const u8, PROLOGUE.len()) };
@@ -515,7 +544,7 @@ pub(crate) fn probe_window_layout(wrapper: usize, hwnd: usize) -> Result<(), Str
     // SAFETY: The live wrapper's HWND was checked above. This build's PDB and
     // disassembly identify event 0x26 as clearing layout wait flag 2.
     let layout_event: LayoutEvent = unsafe { std::mem::transmute(address) };
-    // SAFETY: On this build the readiness wait flags are immediately after
+    // SAFETY: In the validated layout the readiness wait flags are immediately after
     // the client HWND, whose value was checked above.
     let flags = (wrapper + 0x140) as *const u32;
     let before = unsafe { flags.read() };

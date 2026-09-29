@@ -308,8 +308,10 @@ impl ViewEventTrace {
         let register: Register = unsafe { std::mem::transmute(vtable.add(6).read()) };
         let module = unsafe { GetModuleHandleW(w!("twinui.pcshell.dll")) }
             .map_err(|error| format!("find twinui.pcshell.dll: {error}"))?;
-        // PDB-verified UwpWindowWrapperBase::GetFrameHwnd RVA on build 26200.
-        let expected_frame_method = module.0 as usize + 0x1804a0;
+        let expected_frame_method = crate::symbols::address(
+            "twinui.pcshell.dll",
+            "?GetFrameHwnd@UwpWindowWrapperBase@@UEAAPEAUHWND__@@XZ",
+        )?;
         let callback = Box::into_raw(Box::new(Callback {
             vtable: &CALLBACK_VTABLE,
             references: AtomicU32::new(1),

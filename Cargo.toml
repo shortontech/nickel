@@ -105,6 +105,8 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 unicode-segmentation = "1.12.0"
 url = "2.5.7"
 ureq = "3.4.0"
+pdb = "0.8.0"
+object = "0.36.7"
 unic-langid = "0.9.6"
 proc-macro2 = { version = "1.0.101", features = ["span-locations"] }
 proptest = "1"

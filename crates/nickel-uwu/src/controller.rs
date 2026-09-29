@@ -1,4 +1,4 @@
-//! Private immersive shell controller startup for the verified Windows build.
+//! Private immersive shell controller startup using exact-module symbols.
 
 #[cfg(target_os = "windows")]
 pub(crate) fn start_immersive_shell_controller(
@@ -17,11 +17,10 @@ pub(crate) fn start_immersive_shell_controller(
 
     const BUILDER: GUID = GUID::from_u128(0xc71c41f1_ddad_42dc_a8fc_f5bfc61df957);
     const BUILDER2: GUID = GUID::from_u128(0x2eb59b15_1487_40ce_916e_ef65330dd224);
-    // These RVAs are PDB-verified for Windows build 26200. Vtable checks
-    // prevent an unsupported build from calling unknown private methods.
-    const CREATE_CONTROLLER_RVA: usize = 0x238e70;
-    const SET_SCENARIO_RVA: usize = 0x3f7660;
-    const START_RVA: usize = 0x13b20;
+    const CREATE_CONTROLLER: &str = "?CreateImmersiveShellController@CImmersiveShellBuilder@@UEAAJPEAPEAUIImmersiveShellController@@@Z";
+    const SET_SCENARIO: &str =
+        "?SetShellScenario@CImmersiveShellBuilder@@UEAAJW4ImmersiveShellScenario@@@Z";
+    const START: &str = "?Start@CImmersiveShellController@@UEAAJXZ";
     type QueryInterface =
         unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT;
     type CreateController = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT;
@@ -53,7 +52,7 @@ pub(crate) fn start_immersive_shell_controller(
     // SAFETY: The builder COM object keeps this in-process DLL loaded.
     let builder_module = unsafe { GetModuleHandleW(w!("twinui.pcshell.dll")) }
         .map_err(|error| format!("builder module: {error}"))?;
-    let expected_create = builder_module.0 as usize + CREATE_CONTROLLER_RVA;
+    let expected_create = crate::symbols::address("twinui.pcshell.dll", CREATE_CONTROLLER)?;
     // SAFETY: Both live COM interfaces have at least the three IUnknown slots
     // and one method slot. The target address is checked before calling it.
     let candidates = [builder.as_raw(), builder2.as_raw()];
@@ -66,9 +65,9 @@ pub(crate) fn start_immersive_shell_controller(
     );
     if scenario1 {
         let scenario_address = create_methods[1];
-        let expected_scenario = builder_module.0 as usize + SET_SCENARIO_RVA;
+        let expected_scenario = crate::symbols::address("twinui.pcshell.dll", SET_SCENARIO)?;
         if scenario_address != expected_scenario {
-            return Err("scenario method does not match this Windows build".into());
+            return Err("scenario method does not match its loaded symbols".into());
         }
         // SAFETY: The pointer matches the PDB-verified SetShellScenario method.
         let set_scenario: SetScenario = unsafe { std::mem::transmute(scenario_address) };
@@ -82,7 +81,7 @@ pub(crate) fn start_immersive_shell_controller(
         .into_iter()
         .zip(create_methods)
         .find(|(_, method)| *method == expected_create)
-        .ok_or("builder vtable does not match this Windows build")?;
+        .ok_or("builder vtable does not match its loaded symbols")?;
     // SAFETY: The address matches the PDB-verified builder method with ABI
     // HRESULT CreateImmersiveShellController(IImmersiveShellController**).
     let create: CreateController = unsafe { std::mem::transmute(create_address) };
@@ -112,14 +111,10 @@ pub(crate) fn start_immersive_shell_controller(
     } else {
         None
     };
-    // SAFETY: The module is loaded by CoCreateInstance and remains loaded while
-    // the returned controller exists.
-    let module = unsafe { GetModuleHandleW(w!("Windows.ImmersiveShell.ServiceProvider.dll")) }
-        .map_err(|error| format!("controller module: {error}"))?;
-    let expected = module.0 as usize + START_RVA;
+    let expected = crate::symbols::address("Windows.ImmersiveShell.ServiceProvider.dll", START)?;
     println!("phase=ImmersiveShellController start={start_address:#x} expected={expected:#x}");
     if start_address != expected {
-        return Err("controller vtable does not match this Windows build".into());
+        return Err("controller vtable does not match its loaded symbols".into());
     }
     // SAFETY: The address matches the PDB-verified CImmersiveShellController::Start
     // method, whose ABI is HRESULT Start(void). The object is still alive.
@@ -206,7 +201,7 @@ fn install_component_filter(
     use windows::core::Interface;
 
     // CImmersiveShellController stores the behavior COM interface at +0x60
-    // on this build. The builder has already installed it before returning.
+    // in the validated layout. The builder has already installed it before returning.
     // SAFETY: This private offset was verified against the matching PDB and
     // the controller stays alive throughout this probe.
     let behavior = unsafe {
@@ -222,14 +217,15 @@ fn install_component_filter(
     }
     // SAFETY: The live COM interface begins with a valid vtable pointer.
     let original_vtable = unsafe { behavior.cast::<*const usize>().read() };
-    // The behavior interface has 12 slots on this Windows build. Slot 8 is
+    // The behavior interface has 12 slots in the validated layout. Slot 8 is
     // CImmersiveShellCreationBehavior::ShouldCreateComponent.
     let method = unsafe { original_vtable.add(8).read() };
-    const SHOULD_CREATE_RVA: usize = 0x1806d0;
-    let expected = twinui_base + SHOULD_CREATE_RVA;
+    const SHOULD_CREATE: &str =
+        "?ShouldCreateComponent@CImmersiveShellCreationBehavior@@UEAAJIPEAHPEAU_GUID@@@Z";
+    let expected = crate::symbols::address("twinui.pcshell.dll", SHOULD_CREATE)?;
     println!("phase=creation-behavior should_create={method:#x} expected={expected:#x}");
     if method != expected {
-        return Err("creation behavior vtable does not match this Windows build".into());
+        return Err("creation behavior vtable does not match its loaded symbols".into());
     }
     let mut copied = Box::new([0usize; 12]);
     // SAFETY: The PDB-verified COM interface has exactly 12 vtable slots.

@@ -25,12 +25,6 @@ pub fn find_wrapper(frame: usize) -> Result<Wrapper, Box<dyn std::error::Error>>
         UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId, IsWindow},
     };
 
-    // These layout constants are from this machine's Windows build 26200
-    // symbols and live objects. They are private to the verified Windows build.
-    const DISPATCHER_VTABLE_RVA: usize = 0x74c4a0;
-    const DISPATCHER_SECOND_VTABLE_RVA: usize = 0x74c510;
-    const WRAPPER_COLLECTION_VTABLE_RVA: usize = 0x74d618;
-    const WRAPPER_VTABLE_RVA: usize = 0x749168;
     const MAX_SCAN_BYTES: usize = 512 * 1024 * 1024;
     const CHUNK_BYTES: usize = 64 * 1024;
 
@@ -112,10 +106,23 @@ pub fn find_wrapper(frame: usize) -> Result<Wrapper, Box<dyn std::error::Error>>
         }
     }
     let module_base = twinui_base.ok_or("twinui.pcshell.dll is not loaded in shell process")?;
-    let dispatcher_vtable = module_base + DISPATCHER_VTABLE_RVA;
-    let expected_second_vtable = module_base + DISPATCHER_SECOND_VTABLE_RVA;
-    let expected_collection_vtable = module_base + WRAPPER_COLLECTION_VTABLE_RVA;
-    let expected_wrapper_vtable = module_base + WRAPPER_VTABLE_RVA;
+    let dispatcher_vtable = module_base
+        + crate::symbols::rva("twinui.pcshell.dll", "??_7UwpWindowEventDispatcher@@6B@")?;
+    let expected_second_vtable = module_base
+        + crate::symbols::rva(
+            "twinui.pcshell.dll",
+            "??_7UwpWindowEventDispatcher@@6BIWeakReferenceSource@@@",
+        )?;
+    let expected_collection_vtable = module_base
+        + crate::symbols::rva(
+            "twinui.pcshell.dll",
+            "??_7UwpWindowEventDispatcher@@6BINtUserViewWrapperCollection@@@",
+        )?;
+    let expected_wrapper_vtable = module_base
+        + crate::symbols::rva(
+            "twinui.pcshell.dll",
+            "??_7UwpWindowWrapper@@6B?$ChainInterfaces@UIUwpWindowWrapperInternal@@UIWindowWrapper@ViewManagerInterop@Shell@Internal@Windows@@VNil@Details@WRL@Microsoft@@V789Microsoft@@V789Microsoft@@V789Microsoft@@V789Microsoft@@V789Microsoft@@V789Microsoft@@V789Microsoft@@@WRL@Microsoft@@@",
+        )?;
     println!("phase=inspect-host pid={host_pid} twinui={module_base:#x} frame={frame:#x}");
 
     // Validate cached ownership on every use. Shell restarts and dispatcher
