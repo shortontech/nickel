@@ -427,6 +427,32 @@
     }
 
     #[test]
+    fn volume_osd_projection_failure_retires_its_overlay() {
+        let mut shell = LiveShell::new().unwrap();
+        let mut projection = shell.volume_osd_projection();
+        projection.label = "fixture-label".into();
+        let application = crate::plugin_panel::PluginPanelApplication::volume_osd_with_test_source(
+            "function App() { if (nickel.data.label !== 'fixture-label') throw Error('volume projection exploded'); return h(Panel, {}, h(Text, {}, 'Volume ready')); }",
+            &projection,
+        )
+        .unwrap();
+        shell.plugin_volume_osd_host = Some(nickel_ui::UiHost::new(application, 420, 96));
+        shell.volume_osd_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        assert!(shell.volume_osd_scene(420, 96).is_empty());
+        let id = &crate::plugin_panel::volume_osd_manifest().id;
+        let entry = shell.plugin_registry().get(id).unwrap();
+        assert!(entry.desired_enabled);
+        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("volume projection exploded")));
+        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
+        assert!(shell.volume_osd_until.is_none());
+        assert!(!shell.plugin_surface_matches(&crate::plugin_panel::volume_osd_surface_key()));
+        assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(shell.set_plugin_enabled(id, true).unwrap());
+        assert!(shell.plugin_volume_osd_host.is_some());
+    }
+
+    #[test]
     fn control_center_plugin_renders_and_dispatches_typed_desktop_action() {
         let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
             crate::session_host::default_session_host(),

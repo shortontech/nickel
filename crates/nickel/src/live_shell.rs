@@ -4813,6 +4813,21 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
+    fn retire_volume_osd_plugin_state(&mut self) {
+        self.plugin_volume_osd_host = None;
+        self.volume_osd_until = None;
+    }
+
+    fn fail_volume_osd_plugin_runtime(&mut self, error: String) {
+        let id = &crate::plugin_panel::volume_osd_manifest().id;
+        tracing::warn!(plugin = id, %error, "bundled Volume OSD plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.retire_volume_osd_plugin_state();
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
     /// Starts or retires a plugin instance after Settings has shown its grants.
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
@@ -4960,8 +4975,7 @@ impl LiveShell {
             } else if id == crate::plugin_panel::notification_manifest().id {
                 self.retire_notification_plugin_state();
             } else if id == crate::plugin_panel::volume_osd_manifest().id {
-                self.plugin_volume_osd_host = None;
-                self.volume_osd_until = None;
+                self.retire_volume_osd_plugin_state();
             } else if id == crate::plugin_panel::control_center_manifest().id {
                 self.retire_control_plugin_state();
             } else if id == crate::plugin_panel::codex_projects_manifest().id {
@@ -9984,18 +9998,25 @@ impl LiveShell {
     fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         let projection = self.volume_osd_projection();
         if let Some(host) = self.plugin_volume_osd_host.as_mut() {
-            let changed = host
+            let changed = match host
                 .application_mut()
                 .sync_volume_osd_projection(&projection)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "volume OSD plugin projection failed");
-                    false
-                });
+            {
+                Ok(changed) => changed,
+                Err(error) => {
+                    self.fail_volume_osd_plugin_runtime(error);
+                    return Vec::new();
+                }
+            };
             let outcome = host.step(HostBatch {
                 application_changed: changed,
                 surface_size: Some((width, height)),
                 ..HostBatch::default()
             });
+            if let Some(error) = host.application_mut().take_runtime_failure() {
+                self.fail_volume_osd_plugin_runtime(error);
+                return Vec::new();
+            }
             let commands = host.commands().to_vec();
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::volume_osd_manifest().id,

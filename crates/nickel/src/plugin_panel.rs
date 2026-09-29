@@ -3234,6 +3234,14 @@ impl PluginPanelApplication {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn volume_osd_with_test_source(
+        source: &str,
+        projection: &VolumeOsdPluginProjection,
+    ) -> Result<Self, String> {
+        Self::new_with_manifest(source, volume_osd_manifest(), Some(projection.to_json()))
+    }
+
     pub fn control_center_with_data(data: &Value) -> Result<Self, String> {
         let source = bundled_source(
             control_center_manifest(),
