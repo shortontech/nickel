@@ -374,8 +374,16 @@ fn exercise(
         }
     }
     assert_no_shell_child(compositor.id())?;
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
+    let taskbar_origin = panel_geometry(&surfaces, "org.nickel.taskbar/main")
+        .map(|(x, y, _, _)| (x, y))
+        .ok_or("taskbar has no panel geometry")?;
+    click_plugin_control(
+        test_input,
+        &environment,
+        "org.nickel.taskbar/main",
+        "taskbar-launcher",
+        taskbar_origin,
+    )?;
     wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
     verify_layout_snapshot(test_input, &environment, "org.nickel.launcher/main")?;
     let launcher_memory = wait_for_plugin_native_memory(
