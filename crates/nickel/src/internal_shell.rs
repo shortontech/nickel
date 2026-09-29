@@ -3777,11 +3777,6 @@ mod tests {
             .surface(SurfaceRole::Screenshot, None)
             .unwrap()
             .id;
-        assert!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::screenshot_surface_key(), "nested")
-                .is_none()
-        );
         let mut hotkeys = CompositorShortcutAdapter::default();
 
         assert_eq!(

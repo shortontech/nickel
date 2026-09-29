@@ -675,19 +675,6 @@ mod platform {
         }
 
         #[test]
-        fn native_screenshot_is_not_a_developer_plugin() {
-            let root = Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/legacy-screenshot-plugin"
-            ));
-            assert!(
-                load_dev_package(root)
-                    .unwrap_err()
-                    .contains("native Rust UI")
-            );
-        }
-
-        #[test]
         fn native_desktop_is_not_a_developer_plugin() {
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -845,6 +832,7 @@ mod platform {
             )
             .unwrap();
             std::fs::copy(root.join("main.js"), directory.path().join("main.js")).unwrap();
+            std::fs::copy(root.join("ui.css"), directory.path().join("ui.css")).unwrap();
             assert!(
                 load_dev_package(directory.path())
                     .unwrap_err()
@@ -888,7 +876,7 @@ mod platform {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../assets/plugins/example-window"
             ));
-            for name in ["plugin.json", "main.js", "icon.png"] {
+            for name in ["plugin.json", "main.js", "ui.css", "icon.png"] {
                 std::fs::copy(example.join(name), source.path().join(name)).unwrap();
             }
             let package = load_dev_package(source.path()).unwrap();

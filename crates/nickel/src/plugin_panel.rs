@@ -210,23 +210,6 @@ pub fn on_screen_keyboard_surface_key() -> nickel_core::plugins::PluginSurfaceKe
     }
 }
 
-pub fn screenshot_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!(
-            "../../../tests/fixtures/legacy-screenshot-plugin/plugin.json"
-        ))
-        .expect("bundled screenshot plugin manifest must be valid")
-    })
-}
-
-pub fn screenshot_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: screenshot_manifest().id.clone(),
-        surface_id: screenshot_manifest().surfaces[0].id.clone(),
-    }
-}
-
 pub fn window_preview_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -532,10 +515,6 @@ pub enum PluginEffect {
     },
     KeyboardResize {
         delta: i32,
-        generation: u64,
-    },
-    ScreenshotAction {
-        action: crate::screenshot::ToolbarAction,
         generation: u64,
     },
     ToggleCodexProjects,
@@ -1696,18 +1675,6 @@ impl PluginPanelApplication {
             include_str!("../../../assets/plugins/on-screen-keyboard/main.js"),
             Some(include_str!(
                 "../../../assets/plugins/on-screen-keyboard/ui.css"
-            )),
-            data.to_string(),
-        )
-    }
-
-    pub fn screenshot_with_data(data: &Value) -> Result<Self, String> {
-        Self::bundled_application(
-            screenshot_manifest(),
-            "main.js",
-            include_str!("../../../tests/fixtures/legacy-screenshot-plugin/main.js"),
-            Some(include_str!(
-                "../../../tests/fixtures/legacy-screenshot-plugin/ui.css"
             )),
             data.to_string(),
         )
@@ -2966,61 +2933,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 _ => unreachable!(),
                             }
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("screenshot-action")
-                            && self.manifest.id == screenshot_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::ScreenshotControl) =>
-                        {
-                            let projected = self
-                                .projection_data
-                                .as_deref()
-                                .and_then(|data| serde_json::from_str::<Value>(data).ok());
-                            let generation = effect.get("generation").and_then(Value::as_u64);
-                            let visible = projected.as_ref().is_some_and(|data| {
-                                data.get("imageAvailable").and_then(Value::as_bool) == Some(true)
-                                    || data.get("errorVisible").and_then(Value::as_bool)
-                                        == Some(true)
-                            });
-                            if !visible
-                                || generation.is_none()
-                                || generation
-                                    != projected.as_ref().and_then(|data| {
-                                        data.get("generation").and_then(Value::as_u64)
-                                    })
-                            {
-                                self.last_error = Some("screenshot request is stale".into());
-                                return;
-                            }
-                            let action = match effect.get("action").and_then(Value::as_str) {
-                                Some("copy") => crate::screenshot::ToolbarAction::Copy,
-                                Some("save") => crate::screenshot::ToolbarAction::Save,
-                                Some("temporary-path") => {
-                                    crate::screenshot::ToolbarAction::TemporaryPath
-                                }
-                                Some("cancel") => crate::screenshot::ToolbarAction::Cancel,
-                                _ => {
-                                    self.last_error = Some("unknown screenshot action".into());
-                                    return;
-                                }
-                            };
-                            if action != crate::screenshot::ToolbarAction::Cancel
-                                && projected
-                                    .as_ref()
-                                    .and_then(|data| data.get("confirmed").and_then(Value::as_bool))
-                                    != Some(true)
-                            {
-                                self.last_error =
-                                    Some("screenshot selection is not confirmed".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::ScreenshotAction {
-                                action,
-                                generation: generation.unwrap(),
-                            });
-                        }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
                             match node.dialog(id) {
@@ -3754,74 +3666,6 @@ mod tests {
             .join("../../target/nickel-ui-snapshots/keyboard-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         image.save(output).unwrap();
-    }
-
-    #[test]
-    fn bundled_screenshot_uses_shared_window_and_keeps_selection_overlay() {
-        let data = serde_json::json!({
-            "width": 960, "height": 540, "generation": 2,
-            "status": "Selection ready", "confirmed": true,
-            "imageAvailable": false,
-            "selection": {"x": 120, "y": 100, "width": 300, "height": 180},
-        });
-        let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::screenshot_with_data(&data).unwrap(),
-            960,
-            540,
-        );
-        assert!(matches!(
-            host.application().node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        for name in ["Copy", "Save", "Cancel"] {
-            assert!(
-                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: SemanticRole::Button,
-                    name: name.into(),
-                })
-                .is_ok()
-            );
-        }
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(960, 540, 1.0);
-        host.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(960, 540, |x, y| {
-            let pixel = renderer.pixels()[(y * 960 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/screenshot-shared.png");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image.save(output).unwrap();
-
-        let mut action_data = data;
-        action_data["errorVisible"] = Value::Bool(true);
-        let mut action_host = nickel_ui::UiHost::new(
-            PluginPanelApplication::screenshot_with_data(&action_data).unwrap(),
-            960,
-            540,
-        );
-        let cancel = action_host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Cancel".into(),
-            })
-            .unwrap();
-        action_host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(cancel.id),
-            )],
-            ..Default::default()
-        });
-        assert_eq!(
-            action_host.application_mut().take_effects(),
-            vec![PluginEffect::ScreenshotAction {
-                action: crate::screenshot::ToolbarAction::Cancel,
-                generation: 2,
-            }]
-        );
     }
 
     #[test]
