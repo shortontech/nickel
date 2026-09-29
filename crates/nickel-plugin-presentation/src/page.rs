@@ -221,6 +221,25 @@ mod tests {
     }
 
     #[test]
+    fn select_preserves_options_and_dispatches_the_chosen_action() {
+        let manifest =
+            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
+                .unwrap();
+        let source = "function App() { return h(Select, {id: 'wallpaper-position', accessibilityLabel: 'Wallpaper position', value: 'Fill', open: true, onClick: () => nickel.request({type: 'toggle'})}, h(Option, {id: 'fill', onClick: () => nickel.request({type: 'position', value: 'fill'})}, 'Fill'), h(Option, {id: 'fit', onClick: () => nickel.request({type: 'position', value: 'fit'})}, 'Fit')); }";
+        let mut page = JsxPage::new(source, manifest, None).unwrap();
+        let node = page.render(&json!({})).unwrap();
+        assert!(
+            matches!(node, PanelNode::Select { value, open: true, options, .. } if value == "Fill" && options.len() == 2)
+        );
+        let action = node.button_action("fit").unwrap();
+        assert_eq!(
+            page.dispatch(action, &Value::Null, &json!({}), Ok::<_, String>)
+                .unwrap(),
+            json!({"type": "position", "value": "fit"})
+        );
+    }
+
+    #[test]
     fn clickable_div_requires_an_accessible_label() {
         let manifest =
             PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
