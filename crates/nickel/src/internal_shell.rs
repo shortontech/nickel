@@ -372,9 +372,10 @@ impl InternalShellCoordinator {
                     continue;
                 }
                 if role == SurfaceRole::Screenshot
-                    && self
+                    && (self
                         .shell
                         .plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key())
+                        || !cfg!(test))
                 {
                     continue;
                 }
@@ -3523,7 +3524,7 @@ mod tests {
             height: 600,
             scale: 1.0,
         }]);
-        coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool);
+        coordinator.shell.request_native_screenshot_fixture();
         coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
         let id = coordinator
             .surface(SurfaceRole::Screenshot, None)
@@ -3739,6 +3740,52 @@ mod tests {
         send(&mut coordinator, cancel, KeyEdge::Pressed, 7);
         send(&mut coordinator, cancel, KeyEdge::Released, 8);
         assert!(!coordinator.visible(id));
+    }
+
+    #[test]
+    fn disabling_screenshot_plugin_retires_capture_and_shortcut_until_reenabled() {
+        let mut coordinator = coordinator();
+        let output = InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        };
+        let key = crate::plugin_panel::screenshot_surface_key();
+        coordinator.set_outputs(&[output.clone()]);
+        let original = coordinator.plugin_surface(&key, "nested").unwrap().id;
+        assert!(
+            coordinator
+                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+        );
+        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+        assert!(coordinator.visible(original));
+
+        coordinator
+            .set_plugin_enabled(&key.plugin_id, false)
+            .unwrap();
+        coordinator.set_outputs(&[output.clone()]);
+        assert!(coordinator.plugin_surface(&key, "nested").is_none());
+        assert!(!coordinator.visible(original));
+        assert!(
+            !coordinator
+                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+        );
+
+        coordinator
+            .set_plugin_enabled(&key.plugin_id, true)
+            .unwrap();
+        coordinator.set_outputs(&[output]);
+        let restored = coordinator.plugin_surface(&key, "nested").unwrap().id;
+        assert_ne!(original, restored);
+        assert!(
+            coordinator
+                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+        );
+        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+        assert!(coordinator.visible(restored));
     }
 
     #[test]

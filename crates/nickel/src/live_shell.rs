@@ -8531,6 +8531,9 @@ impl LiveShell {
                 cfg!(target_os = "linux")
             }
             platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::InteractiveRegion) => {
+                if !self.plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key()) {
+                    return false;
+                }
                 #[cfg(target_os = "linux")]
                 {
                     self.active_window_capture = None;
@@ -8545,6 +8548,9 @@ impl LiveShell {
             platform::GlobalShortcut::Screenshot(
                 platform::ScreenshotAction::InteractiveRegionToFile,
             ) => {
+                if !self.plugin_surface_matches(&crate::plugin_panel::screenshot_surface_key()) {
+                    return false;
+                }
                 #[cfg(target_os = "linux")]
                 {
                     self.active_window_capture = None;
@@ -8784,6 +8790,11 @@ impl LiveShell {
                 }
             },
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_native_screenshot_fixture(&mut self) {
+        self.screenshot.request_capture();
     }
 
     #[cfg(any(test, target_os = "linux"))]

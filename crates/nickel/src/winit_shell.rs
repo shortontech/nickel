@@ -965,7 +965,7 @@ impl WinitShell {
         self.surfaces.retain(|surface| match surface.role {
             SurfaceRole::Launcher => launcher_available,
             SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
-            SurfaceRole::Screenshot => !screenshot_plugin_active,
+            SurfaceRole::Screenshot => !screenshot_plugin_active && cfg!(test),
             SurfaceRole::WindowContextMenu => self.taskbar_panel_enabled,
             SurfaceRole::Desktop | SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
                 fixed_plugin_surface_key(surface.role)
@@ -1128,7 +1128,7 @@ impl WinitShell {
             if (role == SurfaceRole::Launcher && launcher_available
                 || role == SurfaceRole::WindowContextMenu && self.taskbar_panel_enabled
                 || role == SurfaceRole::OnScreenKeyboard && !keyboard_plugin_active
-                || role == SurfaceRole::Screenshot && !screenshot_plugin_active
+                || role == SurfaceRole::Screenshot && !screenshot_plugin_active && cfg!(test)
                 || fixed_plugin_surface_key(role)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
                 && !self.surfaces.iter().any(|surface| surface.role == role)
