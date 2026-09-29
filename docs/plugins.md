@@ -214,8 +214,10 @@ where Nickel's layout context permits them. Colors accept hex, `rgba()`,
 and `transparent`. Unsupported selectors or declarations fail validation with a
 CSS error. Button and text-field behavior and accessibility remain native;
 their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
-props remain available. Row, Column, and specialized widgets still have some
-legacy sizing behavior while the generic layout path expands.
+props remain available. `Row` and `Column` use their CSS width, height,
+`align-items`, and `justify-content` when laying out children. Specialized
+widgets still have some legacy sizing behavior while the generic layout path
+expands.
 
 When the host supplies a right to left reading direction, `Row`, horizontal
 flex layouts, and grids mirror their visual child order. Text and artwork keep

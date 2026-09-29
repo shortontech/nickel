@@ -1914,8 +1914,20 @@ impl PanelNode {
             } => {
                 let style = stylesheet.resolve("row", None, class_name.as_deref());
                 let mut row = Row::new();
+                if let Some(width) = style.width {
+                    row = row.width_length(width);
+                }
+                if let Some(height) = style.height {
+                    row = row.height_length(height);
+                }
                 if let Some(gap) = style.gap {
                     row = row.gap(gap);
+                }
+                if let Some(align) = style.align_items {
+                    row = row.align_items(align);
+                }
+                if let Some(justify) = style.justify_content {
+                    row = row.justify_content(justify);
                 }
                 for child in children {
                     row = row
@@ -1941,8 +1953,20 @@ impl PanelNode {
             } => {
                 let style = stylesheet.resolve("column", None, class_name.as_deref());
                 let mut column = Column::new();
+                if let Some(width) = style.width {
+                    column = column.width_length(width);
+                }
+                if let Some(height) = style.height {
+                    column = column.height_length(height);
+                }
                 if let Some(gap) = style.gap {
                     column = column.gap(gap);
+                }
+                if let Some(align) = style.align_items {
+                    column = column.align_items(align);
+                }
+                if let Some(justify) = style.justify_content {
+                    column = column.justify_content(justify);
                 }
                 for child in children {
                     column = column

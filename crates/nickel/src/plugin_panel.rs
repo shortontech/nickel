@@ -3970,6 +3970,51 @@ mod tests {
     }
 
     #[test]
+    fn row_and_column_classes_apply_css_flex_alignment() {
+        let package = PluginPackage {
+            manifest: manifest().clone(),
+            images: Default::default(),
+            stylesheet: "row.toolbar { width: 100%; height: 80px; align-items: center; justify-content: space-between; } column.stack { width: 100%; height: 100px; align-items: flex-end; justify-content: space-between; } button { width: 50px; height: 20px; }".into(),
+            source: r#"
+                function App() {
+                    return h(FixedWindow, {width: '100%', height: '100%'},
+                        h(Column, {},
+                            h(Row, {className: 'toolbar'},
+                                h(Button, {id: 'left', onClick: () => {}}, 'Left'),
+                                h(Button, {id: 'right', onClick: () => {}}, 'Right')),
+                            h(Column, {className: 'stack'},
+                                h(Button, {id: 'top', onClick: () => {}}, 'Top'),
+                                h(Button, {id: 'bottom', onClick: () => {}}, 'Bottom'))));
+                }
+            "#.into(),
+        };
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package(&package).unwrap(),
+            400,
+            220,
+        );
+        let button = |name: &str| {
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .bounds
+        };
+        let left = button("Left");
+        let right = button("Right");
+        let top = button("Top");
+        let bottom = button("Bottom");
+        assert!(right.origin.x > left.origin.x + 250.0);
+        assert!(
+            left.origin.y > 20.0,
+            "left={left:?} right={right:?} top={top:?} bottom={bottom:?}"
+        );
+        assert!(top.origin.x > 300.0);
+        assert!(bottom.origin.y > top.origin.y + 50.0);
+    }
+
+    #[test]
     fn fixed_window_jsx_helper_uses_one_manifest_checked_window_root() {
         let mut granted = taskbar_manifest().clone();
         granted.id = "org.example.fixed-window".into();
