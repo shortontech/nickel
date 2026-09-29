@@ -39,6 +39,31 @@ fn generic_color_swatch_renders_accessible_radio_and_custom_action() {
 }
 
 #[test]
+fn clickable_div_composes_an_accessible_preview_choice() {
+    let script = "function App() { return h(Panel, {}, h(Div, {id: 'dark-choice', role: 'radio', 'aria-label': 'Dark mode', 'aria-checked': true, onClick: () => nickel.request('show-launcher')}, h(Div, {className: 'preview'}, h(Text, {}, 'Preview')), h(Text, {}, 'Dark'))); }";
+    let mut host = UiHost::new(PluginPanelApplication::new(script).unwrap(), 320, 180);
+    let choice = host
+        .query_unique(&SemanticSelector::RoleAndName {
+            role: SemanticRole::Radio,
+            name: "Dark mode".into(),
+        })
+        .expect("composed div exposes one radio target");
+    assert!(host.accessibility_nodes().iter().any(|node| {
+        node.semantic_role == Some(SemanticRole::Radio)
+            && node.label.as_deref() == Some("Dark mode")
+            && node.state.as_deref() == Some("selected")
+    }));
+    assert!(
+        host.perform_semantic_action(choice.id, SemanticAction::Invoke(ActionKind::Activate),)
+            .changed
+    );
+    assert_eq!(
+        host.application_mut().take_effects(),
+        vec![PluginEffect::ShowLauncher]
+    );
+}
+
+#[test]
 fn directory_package_runs_in_the_same_jsx_host() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(

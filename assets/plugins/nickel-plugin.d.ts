@@ -5,7 +5,7 @@ declare namespace JSX {
     interface Element {}
     interface ElementChildrenAttribute { children: {} }
     interface IntrinsicElements {
-        div: NickelProps & { id?: string };
+        div: NickelDivProps;
     }
 }
 
@@ -23,6 +23,16 @@ interface NickelProps {
     key?: string | number;
     className?: string;
     children?: NickelChild;
+}
+
+interface NickelDivProps extends NickelProps {
+    id?: string;
+    onClick?: NickelClick;
+    role?: "button" | "radio" | "radiogroup" | "option";
+    "aria-label"?: string;
+    "aria-checked"?: boolean;
+    "aria-selected"?: boolean;
+    disabled?: boolean;
 }
 
 interface NickelPanelProps extends NickelProps {
@@ -196,7 +206,7 @@ declare function FixedWindow(props: Omit<NickelWindowProps, "placement">): JSX.E
 declare function Viewport(props: NickelViewportProps): JSX.Element;
 declare function Box(props: NickelBoxProps): JSX.Element;
 /** Generic CSS layout box. Defaults to block layout. */
-declare function Div(props: NickelProps & { id?: string }): JSX.Element;
+declare function Div(props: NickelDivProps): JSX.Element;
 declare function FileTile(props: NickelFileTileProps): JSX.Element;
 declare function Badge(props: NickelBadgeProps): JSX.Element;
 declare function Widget(props: NickelWidgetProps): JSX.Element;

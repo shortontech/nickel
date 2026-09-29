@@ -260,6 +260,11 @@ pub enum PanelNode {
         id: Option<String>,
         class_name: Option<String>,
         children: Vec<Self>,
+        action: Option<usize>,
+        role: Option<SemanticRole>,
+        accessibility_label: Option<String>,
+        accessibility_state: Option<String>,
+        disabled: bool,
     },
     Surface {
         children: Vec<Self>,
@@ -500,8 +505,23 @@ impl PanelNode {
                 label,
                 ..
             } => capacity(id) + class_name.as_ref().map_or(0, capacity) + capacity(label),
-            Self::Div { children, .. }
-            | Self::Row { children, .. }
+            Self::Div {
+                id,
+                class_name,
+                children,
+                accessibility_label,
+                accessibility_state,
+                ..
+            } => {
+                let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
+                spare as u64
+                    + id.as_ref().map_or(0, capacity)
+                    + class_name.as_ref().map_or(0, capacity)
+                    + accessibility_label.as_ref().map_or(0, capacity)
+                    + accessibility_state.as_ref().map_or(0, capacity)
+                    + children.iter().map(Self::contribution_bytes).sum::<u64>()
+            }
+            Self::Row { children, .. }
             | Self::Column { children, .. }
             | Self::Viewport { children, .. } => {
                 let spare = (children.capacity() - children.len()) * std::mem::size_of::<Self>();
@@ -838,21 +858,94 @@ impl PanelNode {
                     complement: color("complement")?,
                 })
             }
-            "div" => Ok(Self::Div {
-                id: match value.get("id") {
-                    None | Some(Value::Null) => None,
-                    Some(Value::String(id)) if !id.is_empty() && id.len() <= 128 => {
-                        Some(id.clone())
-                    }
-                    _ => return Err("div id must contain 1 to 128 bytes".into()),
-                },
-                class_name,
-                children: children
-                    .iter()
-                    .filter(|child| !child.is_null())
-                    .map(Self::parse)
-                    .collect::<Result<Vec<_>, _>>()?,
-            }),
+            "div" => {
+                let role = value.get("role").and_then(Value::as_str);
+                let interactive = value.get("action").and_then(Value::as_u64).is_some();
+                let label = value
+                    .get("aria-label")
+                    .or_else(|| value.get("accessibilityLabel"));
+                if interactive && label.is_none() {
+                    return Err("clickable div needs an accessible label".into());
+                }
+                if role == Some("radiogroup") && interactive {
+                    return Err("radio group cannot have an onClick handler".into());
+                }
+                if value.get("aria-checked").is_some() && role != Some("radio") {
+                    return Err("aria-checked needs role=radio".into());
+                }
+                if value.get("aria-selected").is_some() && role != Some("option") {
+                    return Err("aria-selected needs role=option".into());
+                }
+                if value.get("aria-checked").is_some() && value.get("aria-selected").is_some() {
+                    return Err("div cannot have both checked and selected state".into());
+                }
+                if value
+                    .get("disabled")
+                    .is_some_and(|disabled| !disabled.is_boolean())
+                {
+                    return Err("div disabled must be boolean".into());
+                }
+                Ok(Self::Div {
+                    id: match value.get("id") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(id)) if !id.is_empty() && id.len() <= 128 => {
+                            Some(id.clone())
+                        }
+                        _ => return Err("div id must contain 1 to 128 bytes".into()),
+                    },
+                    class_name,
+                    children: children
+                        .iter()
+                        .filter(|child| !child.is_null())
+                        .map(Self::parse)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    action: match value.get("action") {
+                        None | Some(Value::Null) => None,
+                        Some(action) => Some(
+                            action
+                                .as_u64()
+                                .and_then(|action| usize::try_from(action).ok())
+                                .ok_or("div action index is invalid")?,
+                        ),
+                    },
+                    role: match value.get("role") {
+                        None => interactive.then_some(SemanticRole::Button),
+                        Some(Value::String(role)) if role == "button" => Some(SemanticRole::Button),
+                        Some(Value::String(role)) if role == "radio" => Some(SemanticRole::Radio),
+                        Some(Value::String(role)) if role == "radiogroup" => {
+                            Some(SemanticRole::RadioGroup)
+                        }
+                        Some(Value::String(role)) if role == "option" => Some(SemanticRole::Option),
+                        _ => return Err("div role is unsupported".into()),
+                    },
+                    accessibility_label: match value
+                        .get("aria-label")
+                        .or_else(|| value.get("accessibilityLabel"))
+                    {
+                        None => None,
+                        Some(Value::String(label)) if !label.is_empty() && label.len() <= 256 => {
+                            Some(label.clone())
+                        }
+                        _ => return Err("div accessible label must contain 1 to 256 bytes".into()),
+                    },
+                    accessibility_state: match value
+                        .get("aria-checked")
+                        .or_else(|| value.get("aria-selected"))
+                    {
+                        None => None,
+                        Some(Value::Bool(selected)) => Some(if *selected {
+                            "selected".into()
+                        } else {
+                            "unselected".into()
+                        }),
+                        _ => return Err("div checked or selected state must be boolean".into()),
+                    },
+                    disabled: value
+                        .get("disabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+            }
             "box" => {
                 let coordinate = |name| {
                     value
@@ -1676,6 +1769,11 @@ impl PanelNode {
                 id,
                 class_name,
                 children,
+                action,
+                role,
+                accessibility_label,
+                accessibility_state,
+                disabled,
             } => {
                 let style = stylesheet.resolve("div", id.as_deref(), class_name.as_deref());
                 let content: AnyView<Message> = match style.display.unwrap_or_default() {
@@ -1745,6 +1843,23 @@ impl PanelNode {
                 let mut container = Container::new().child(content);
                 if let Some(id) = id {
                     container = container.id(id.clone());
+                }
+                if let Some(role) = role {
+                    container = container.semantic_role(*role);
+                }
+                if let Some(label) = accessibility_label {
+                    container = container.accessibility_label(label);
+                }
+                if let Some(state) = accessibility_state {
+                    container = container.accessibility_state(state);
+                }
+                if *disabled {
+                    container = container.enabled(false).accessibility_state("disabled");
+                } else if let Some(action) = action {
+                    container = container.message(Message::from_plugin_scoped(
+                        PluginMessage::Click(*action),
+                        scope,
+                    ));
                 }
                 with_margin(
                     AnyView::new(apply_container_style(container, &style)),
@@ -2419,6 +2534,12 @@ impl PanelNode {
 
     pub fn button_action(&self, requested_id: &str) -> Option<usize> {
         match self {
+            Self::Div {
+                id: Some(id),
+                action: Some(action),
+                disabled: false,
+                ..
+            } if id == requested_id => Some(*action),
             Self::Button {
                 id,
                 action,

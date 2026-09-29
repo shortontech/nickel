@@ -219,4 +219,18 @@ mod tests {
             json!({"type": "accent", "hue": 210})
         );
     }
+
+    #[test]
+    fn clickable_div_requires_an_accessible_label() {
+        let manifest =
+            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
+                .unwrap();
+        let mut page = JsxPage::new(
+            "function App() { return h(Div, {onClick: () => nickel.request({type: 'activate'})}, h(Text, {}, 'Visual label')); }",
+            manifest,
+            None,
+        )
+        .unwrap();
+        assert!(page.render(&json!({})).is_err());
+    }
 }
