@@ -676,12 +676,11 @@ mod native_runtime {
                 // can strand bare-Super state when focus changes as Launcher is activated.
                 Some(NativeModifierRelease::SuperOwned) => {}
                 Some(NativeModifierRelease::AltForwarded) => {
-                    if PHYSICAL_ALT_SIDES.load(Ordering::Acquire) == 0 {
-                        with_callbacks(|callbacks| {
-                            (callbacks.modifier_released)(AggregateModifier::Alt)
-                        });
-                    }
-                    return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+                    // Keep the real Alt-up edge on the normal keyboard path. The shortcut
+                    // engine needs that exact edge to commit an active Alt+Tab session. An
+                    // earlier implementation returned here and reconstructed Alt-up from the
+                    // aggregate physical-side state; if that state retained an alias for the
+                    // same key, the switcher opened but never committed its selection.
                 }
                 None => {}
             }
