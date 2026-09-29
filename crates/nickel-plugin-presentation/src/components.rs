@@ -2134,6 +2134,9 @@ impl PanelNode {
             } => {
                 let style = stylesheet.resolve("scroll-view", Some(id), class_name.as_deref());
                 let mut column = Column::new().fill_width();
+                if let Some(gap) = style.gap {
+                    column = column.gap(gap);
+                }
                 for child in children {
                     column =
                         column.child(child.view_as_scoped::<Message>(images, stylesheet, scope));

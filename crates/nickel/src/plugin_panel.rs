@@ -3876,6 +3876,140 @@ mod tests {
     }
 
     #[test]
+    fn bundled_taskbar_visual_snapshot() {
+        let projection = TaskbarPluginProjection {
+            items: ["Files", "Browser", "Editor"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| TaskbarPluginItem {
+                    index,
+                    id: name.to_lowercase(),
+                    name: name.into(),
+                    active: index == 1,
+                    pinned: true,
+                    icon: false,
+                    badges: Vec::new(),
+                })
+                .collect(),
+            tray: vec![TaskbarPluginTrayItem {
+                id: "network".into(),
+                title: "Network".into(),
+                icon: false,
+            }],
+            clock: "12:45".into(),
+            keyboard_enabled: true,
+            codex_available: true,
+        };
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::taskbar_with_projection(&projection).unwrap(),
+            960,
+            56,
+        );
+        let editor = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Editor".into(),
+            })
+            .unwrap();
+        let keyboard = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "On-screen keyboard".into(),
+            })
+            .unwrap();
+        assert!(
+            keyboard.bounds.origin.x > editor.bounds.origin.x + editor.bounds.size.width + 100.0
+        );
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(960, 56, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(960, 56, |x, y| {
+            let pixel = renderer.pixels()[(y * 960 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/taskbar-shared.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
+    }
+
+    #[test]
+    fn bundled_launcher_visual_snapshot() {
+        let launcher = Launcher::default();
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::launcher(&launcher).unwrap(),
+            920,
+            680,
+        );
+        let firefox = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Firefox".into(),
+            })
+            .unwrap();
+        let files = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Files".into(),
+            })
+            .unwrap();
+        assert!(firefox.bounds.size.width >= 64.0);
+        assert!(files.bounds.origin.x > firefox.bounds.origin.x + firefox.bounds.size.width);
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(920, 680, 1.0);
+        host.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(920, 680, |x, y| {
+            let pixel = renderer.pixels()[(y * 920 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/launcher-shared.png");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        image.save(output).unwrap();
+
+        let native = nickel_ui::UiHost::new(
+            crate::launcher_view::LauncherApplication::new(
+                Launcher::default(),
+                crate::launcher_view::LauncherViewState::default(),
+                crate::launcher_view::LauncherIconCache::new(),
+                nickel_core::theme::ThemePalette::from_appearance(
+                    nickel_core::theme::Appearance::default(),
+                ),
+            ),
+            920,
+            680,
+        );
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(920, 680, 1.0);
+        native.render_software(&mut renderer);
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(920, 680, |x, y| {
+            let pixel = renderer.pixels()[(y * 920 + x) as usize];
+            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+        });
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/nickel-ui-snapshots/launcher-native.png");
+        image.save(output).unwrap();
+    }
+
+    #[test]
+    fn bundled_launcher_grid_reflows_with_a_narrow_host() {
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::launcher(&Launcher::default()).unwrap(),
+            600,
+            600,
+        );
+        for name in ["Firefox", "Files", "Nickel Terminal", "Discover"] {
+            let button = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: name.into(),
+                })
+                .unwrap();
+            assert!(
+                button.bounds.origin.x + button.bounds.size.width <= 600.0,
+                "{name} overflowed: {button:?}"
+            );
+        }
+    }
+
+    #[test]
     fn progress_component_rejects_out_of_range_geometry() {
         for properties in [
             "percent: 101, width: 100, height: 8",

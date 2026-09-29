@@ -1,9 +1,9 @@
 # Generic surface draft: taskbar and launcher
 
-`taskbar/main.next.jsx` and `launcher/main.next.jsx` are review sources. Their
-`.next.css` files carry visual styling. None is selected by a manifest or loaded
-by Nickel yet. Existing `main.jsx`, `main.js`, and taskbar menu scripts remain
-the functional implementation.
+`taskbar/main.next.jsx` is a review source, with visual styling in
+`taskbar/main.next.css`. It is not selected by a manifest or loaded by Nickel.
+The launcher draft was retired after its shared CSS grid was incorporated into
+the shipped `launcher/main.jsx` and `launcher/ui.css`.
 
 The draft deliberately keeps ordinary JavaScript callbacks and `useRef` /
 `useState`. An author should be able to write `onClick={() => ...}` without

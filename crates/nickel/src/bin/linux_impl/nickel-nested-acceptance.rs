@@ -347,7 +347,6 @@ fn exercise(
             return Err(format!("bundled plugin {id} is not running: {:?}", plugin.health));
         }
     }
-    verify_screenshot_plugin_lifecycle(test_input, &environment)?;
     assert_no_shell_child(compositor.id())?;
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
@@ -542,6 +541,7 @@ fn exercise(
         ));
     }
     verify_settings_memory_report(settings, test_input, &environment)?;
+    verify_screenshot_plugin_lifecycle(test_input, &environment)?;
     Ok(())
 }
 

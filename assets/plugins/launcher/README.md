@@ -20,8 +20,9 @@ bounded pinned and recent app list, and Places. The plugin renders dashboard
 and search buttons inside native scroll views. The dashboard also shows recent
 projects, account, Settings, and a component logout dialog. The root
 `Window` binds to the manifest's `main` surface, while `ui.css` styles the
-window and a flex column. The title and search field keep their height as the
-scroll view takes the remaining space, including on smaller outputs. Actions
+window, flex layout, and a responsive dashboard grid. Search results remain
+full-width rows. The title and search field keep their height as the scroll
+view takes the remaining space, including on smaller outputs. Actions
 go through typed `nickel.request`
 calls. The host checks declared capabilities and current launcher state,
 including app and project IDs, before acting. Search ranking,

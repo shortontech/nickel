@@ -1,5 +1,7 @@
 window.launcher-window {
     background: #2b303c;
+    border: 1px solid #596274;
+    border-radius: 12px;
 }
 
 div.launcher-content {
@@ -8,7 +10,7 @@ div.launcher-content {
     width: 100%;
     height: 100%;
     padding: 20px;
-    gap: 8px;
+    gap: 12px;
 }
 
 text {
@@ -23,6 +25,17 @@ text.launcher-title {
     flex-shrink: 0;
 }
 
+text.launcher-section {
+    height: 24px;
+    color: #b9c4d7;
+    font-size: 14px;
+}
+
+text.launcher-status {
+    color: #ffd391;
+    font-size: 13px;
+}
+
 text-field {
     height: 44px;
     flex-shrink: 0;
@@ -32,6 +45,67 @@ text-field {
     border-radius: 8px;
     color: #f3f5f8;
     font-size: 15px;
+}
+
+scroll-view.launcher-scroll {
+    width: 100%;
+    gap: 6px;
+}
+
+row.launcher-app-row {
+    width: 100%;
+    gap: 8px;
+}
+
+div.launcher-app-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+    gap: 8px;
+    width: 100%;
+}
+
+div.launcher-app-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    min-height: 130px;
+    padding: 8px;
+    background: #303746;
+    border: 1px solid #414a5b;
+    border-radius: 10px;
+}
+
+text.launcher-app-name {
+    height: 28px;
+    font-size: 13px;
+}
+
+button.launcher-icon-button {
+    width: 64px;
+    height: 64px;
+    background: #414d62;
+    border: 1px solid #65738c;
+    border-radius: 12px;
+    font-size: 22px;
+}
+
+button.launcher-card-pin {
+    width: 72px;
+    height: 26px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: #b9c4d7;
+    font-size: 12px;
+}
+
+row.launcher-tabs {
+    width: 100%;
+    gap: 8px;
+}
+
+column.launcher-projects {
+    gap: 4px;
 }
 
 row {
@@ -46,4 +120,31 @@ button {
     border-radius: 8px;
     color: #f3f5f8;
     font-size: 14px;
+}
+
+button.launcher-app-button {
+    flex-grow: 1;
+    min-width: 180px;
+    background: #313847;
+    border: 1px solid transparent;
+}
+
+button.launcher-pin-button {
+    width: 72px;
+    flex-shrink: 0;
+    background: #313847;
+    border: 1px solid transparent;
+}
+
+button.launcher-tab {
+    background: #303746;
+}
+
+button.launcher-tab.selected {
+    background: #485673;
+    border: 1px solid #738db9;
+}
+
+button.launcher-footer-button {
+    width: 100%;
 }
