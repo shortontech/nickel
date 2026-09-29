@@ -328,6 +328,63 @@ pub fn compact_us_keyboard_rows(panel: KeyboardPanel) -> Vec<Vec<KeyDefinition>>
     }
 }
 
+/// Display-only keyboard data for a plugin. Key meanings and recipient state stay in the host.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct KeyboardDisplayKey {
+    pub id: String,
+    pub label: String,
+    pub quarters: u16,
+    pub selected: bool,
+    pub enabled: bool,
+}
+
+pub fn keyboard_display_rows(
+    panel: KeyboardPanel,
+    modifiers: VirtualModifiers,
+    compact: bool,
+    recipient_available: bool,
+) -> Vec<Vec<KeyboardDisplayKey>> {
+    keyboard_rows(panel, compact)
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|definition| KeyboardDisplayKey {
+                    selected: match definition.key {
+                        KeyboardKey::Modifier(modifier) => modifiers.latch(modifier) != Latch::Off,
+                        KeyboardKey::CapsLock => modifiers.caps_lock,
+                        _ => false,
+                    },
+                    enabled: recipient_available || matches!(definition.key, KeyboardKey::Panel(_)),
+                    label: definition.display_label(modifiers),
+                    id: definition.id,
+                    quarters: definition.quarters,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Resolve a displayed ID only against the host's current panel and density.
+pub fn resolve_keyboard_display_key(
+    panel: KeyboardPanel,
+    compact: bool,
+    id: &str,
+) -> Option<KeyboardKey> {
+    keyboard_rows(panel, compact)
+        .into_iter()
+        .flatten()
+        .find(|definition| definition.id == id)
+        .map(|definition| definition.key)
+}
+
+fn keyboard_rows(panel: KeyboardPanel, compact: bool) -> Vec<Vec<KeyDefinition>> {
+    if compact {
+        compact_us_keyboard_rows(panel)
+    } else {
+        us_keyboard_rows(panel)
+    }
+}
+
 /// A full keyboard is bounded and centered; callers use compact mode below `minimum_width`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeyboardMetrics {
@@ -677,6 +734,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn plugin_display_keys_resolve_only_in_the_current_host_layout() {
+        let mut modifiers = VirtualModifiers::default();
+        modifiers.toggle(VirtualModifier::Shift, false);
+        let rows = keyboard_display_rows(KeyboardPanel::Letters, modifiers, true, false);
+        let keys = rows.into_iter().flatten().collect::<Vec<_>>();
+        let shift = keys.iter().find(|key| key.id == "osk-shift-left").unwrap();
+        assert!(shift.selected);
+        assert!(!shift.enabled);
+        let letter = keys.iter().find(|key| key.id == "osk-char-113").unwrap();
+        assert_eq!(letter.label, "Q");
+        assert!(!letter.enabled);
+        let symbols = keys.iter().find(|key| key.id == "osk-symbols").unwrap();
+        assert!(symbols.enabled);
+        assert_eq!(
+            resolve_keyboard_display_key(KeyboardPanel::Letters, true, &letter.id),
+            Some(KeyboardKey::Character {
+                normal: 'q',
+                shifted: 'Q'
+            })
+        );
+        assert_eq!(
+            resolve_keyboard_display_key(KeyboardPanel::Navigation, true, &letter.id),
+            None
+        );
+        assert_eq!(
+            resolve_keyboard_display_key(KeyboardPanel::Letters, true, "osk-unknown"),
+            None
+        );
+        let serialized = serde_json::to_string(&keys).unwrap();
+        assert!(!serialized.contains("normal"));
+        assert!(!serialized.contains("shifted"));
     }
 
     #[test]
