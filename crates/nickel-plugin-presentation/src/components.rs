@@ -2194,7 +2194,7 @@ impl PanelNode {
                     .as_ref()
                     .and_then(|asset| images.get(asset))
                     .map_or_else(
-                        || AnyView::new(styled_text(Text::new(label), &style)),
+                        || AnyView::new(styled_text(Text::new(label).wrap(true), &style)),
                         |(id, image)| {
                             let icon = Image::new(*id, Arc::clone(image)).width(32.0).height(32.0);
                             if *show_label {
@@ -2202,7 +2202,7 @@ impl PanelNode {
                                     Row::new()
                                         .gap(8.0)
                                         .child(icon)
-                                        .child(styled_text(Text::new(label), &style)),
+                                        .child(styled_text(Text::new(label).wrap(true), &style)),
                                 )
                             } else {
                                 AnyView::new(icon)

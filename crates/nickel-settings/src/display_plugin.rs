@@ -1,19 +1,23 @@
 //! Selected-display actions supplied by the bundled Settings JSX package.
 //! Topology, mode validation, drag geometry, and timed revert stay in Settings.
 
+use nickel_plugin_presentation::{
+    components::{PanelNode, PluginImages},
+    css::StyleSheet,
+    page::JsxPage,
+};
 use nickel_ui::{AnyView, SemanticTheme};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    SettingsApp, SettingsMessage, SettingsPage,
-    settings_components::{Node, SettingsJsxContext},
-};
+use crate::{SettingsApp, SettingsMessage, SettingsPage};
 
 const STALE_STATUS: &str = "Display selection changed; refresh the page";
 
 pub(super) struct DisplayPage {
-    context: SettingsJsxContext,
+    page: JsxPage,
+    stylesheet: StyleSheet,
+    last_theme: Option<SemanticTheme>,
 }
 
 #[derive(Clone)]
@@ -27,89 +31,103 @@ pub(super) struct DisplayCardView {
 impl DisplayPage {
     pub(super) fn new() -> Result<Self, String> {
         Ok(Self {
-            context: SettingsJsxContext::new(
+            page: JsxPage::new(
                 crate::settings_package::source(crate::settings_package::Script::Display)?,
-                parse_tree,
-                STALE_STATUS,
-                "Display action must request one operation",
+                crate::settings_package::manifest()?.clone(),
+                None,
             )?,
+            stylesheet: StyleSheet::default(),
+            last_theme: None,
         })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.context.retained_bytes()
+        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
     }
 
     pub(super) fn render(
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<(Vec<DisplayCardView>, [AnyView<SettingsMessage>; 8]), String> {
-        let Node::Stack(children) = self.context.render(data)? else {
+    ) -> Result<(Vec<DisplayCardView>, [AnyView<SettingsMessage>; 7]), String> {
+        self.page.render(data)?;
+        if self.last_theme != Some(theme) {
+            self.stylesheet = crate::settings_plugin::stylesheet_template(
+                include_str!("../../../assets/plugins/settings/settings-display.css"),
+                theme,
+            )?;
+            self.last_theme = Some(theme);
+        }
+        let Some(PanelNode::Div { children, .. }) = self.page.node() else {
             return Err("Display actions have an invalid root".into());
         };
-        let Node::Fragment(card_nodes) = &children[0] else {
+        if children.len() != 8 {
+            return Err("Display actions have an invalid structure".into());
+        }
+        let PanelNode::Div {
+            children: card_nodes,
+            ..
+        } = &children[0]
+        else {
             return Err("Display arrangement is invalid".into());
         };
         let projected = data["cards"]
             .as_array()
             .ok_or("Display arrangement projection is invalid")?;
-        if card_nodes.len() != projected.len() {
+        if card_nodes.len() != projected.len() || card_nodes.len() > 16 {
             return Err("Display arrangement changed".into());
         }
         let mut cards = Vec::with_capacity(card_nodes.len());
         for node in card_nodes {
-            let Node::Card {
-                label,
-                value,
-                children,
-            } = node
-            else {
+            let PanelNode::Div { children, .. } = node else {
                 return Err("Display card is invalid".into());
             };
+            let Some(PanelNode::Button { id, label, .. }) = children.last() else {
+                return Err("Display card action is invalid".into());
+            };
             let [
-                Node::Button {
-                    id: Some(id),
-                    state: Some(primary_label),
-                    action: Some(_),
-                    ..
-                },
+                PanelNode::Text { value: name, .. },
+                PanelNode::Text { value: detail, .. },
+                _,
             ] = children.as_slice()
             else {
-                return Err("Display card action is invalid".into());
+                return Err("Display card labels are invalid".into());
             };
             let index = id
                 .strip_prefix("display-card-")
                 .and_then(|index| index.parse::<usize>().ok())
                 .ok_or("Display card ID is invalid")?;
-            if !projected
+            let Some(card) = projected
                 .iter()
-                .any(|card| card["index"].as_u64() == Some(index as u64))
-                || cards
-                    .iter()
-                    .any(|card: &DisplayCardView| card.index == index)
+                .find(|card| card["index"].as_u64() == Some(index as u64))
+            else {
+                return Err("Display card identity changed".into());
+            };
+            if cards
+                .iter()
+                .any(|card: &DisplayCardView| card.index == index)
             {
                 return Err("Display card identity changed".into());
             }
             cards.push(DisplayCardView {
                 index,
-                name: label.clone(),
-                detail: value.clone(),
-                primary_label: primary_label.clone(),
+                name: name.clone(),
+                detail: detail.clone(),
+                primary_label: if card["primary"] == true {
+                    label.clone()
+                } else {
+                    String::new()
+                },
             });
         }
-        let view =
-            |index: usize| children[index + 1].view(theme, "", SettingsMessage::DisplayJsxAction);
-        let controls = [
-            view(0),
-            view(1),
-            view(2),
-            children[4].slider_view(theme, display_slider_message)?,
-            view(4),
-            view(5),
-            view(6),
-            children[8].slider_view(theme, application_slider_message)?,
-        ];
+        let images = PluginImages::new();
+        let controls = std::array::from_fn(|index| {
+            children[index + 1].view_as_scoped::<SettingsMessage>(
+                &images,
+                &self.stylesheet,
+                Some("display"),
+            )
+        });
         Ok((cards, controls))
     }
 
@@ -119,78 +137,25 @@ impl DisplayPage {
         value: Value,
         data: &Value,
     ) -> Result<SettingsMessage, String> {
-        self.context.dispatch(index, &value, data, |effect| {
+        self.page.dispatch(index, &value, data, |effect| {
             let request: DisplayRequest =
-                serde_json::from_value(effect.clone()).map_err(|error| error.to_string())?;
+                serde_json::from_value(effect).map_err(|error| error.to_string())?;
             validate_request(request, data)
         })
     }
 
     #[cfg(test)]
     pub(super) fn action_for_id(&self, id: &str) -> Option<usize> {
-        self.context.action_for_id(id)
+        self.page
+            .node()
+            .and_then(|node| node.button_action(id).or_else(|| node.slider_action(id)))
     }
 
     pub(super) fn card_action(&self, index: usize) -> Option<usize> {
-        self.context.action_for_id(&format!("display-card-{index}"))
+        self.page
+            .node()
+            .and_then(|node| node.button_action(&format!("display-card-{index}")))
     }
-
-    fn slider_action(&self, id: &str) -> Option<usize> {
-        match id {
-            "display-scale" | "application-custom-scale" => self.context.action_for_id(id),
-            _ => None,
-        }
-    }
-}
-
-fn slider_position(fraction: f32) -> u16 {
-    (fraction.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
-}
-
-fn display_slider_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::DisplayJsxSlider("display-scale", slider_position(fraction))
-}
-
-fn application_slider_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::DisplayJsxSlider("application-custom-scale", slider_position(fraction))
-}
-
-fn parse_tree(value: &Value) -> Result<Node, String> {
-    let children = value
-        .get("children")
-        .and_then(Value::as_array)
-        .ok_or("Display actions have no children")?;
-    if value["kind"] != "settings-stack"
-        || children.len() != 9
-        || children[0]["kind"] != "settings-fragment"
-        || children[0]["children"].as_array().is_none_or(|cards| {
-            cards.is_empty()
-                || cards.len() > 16
-                || cards.iter().any(|card| {
-                    card["kind"] != "settings-card"
-                        || card["children"].as_array().is_none_or(|children| {
-                            children.len() != 1 || children[0]["kind"] != "settings-button"
-                        })
-                })
-        })
-        || children[1]["kind"] != "settings-row"
-        || children[2]["kind"] != "settings-select"
-        || children[3]["kind"] != "settings-select"
-        || children[4]["kind"] != "settings-slider"
-        || children[5]["kind"] != "settings-grid"
-        || children[6]["kind"] != "settings-inline"
-        || children[7]["kind"] != "settings-radio-group"
-        || children[8]["kind"] != "settings-slider"
-        || children[4]["id"] != "display-scale"
-        || children[8]["id"] != "application-custom-scale"
-    {
-        return Err("Display actions have an invalid structure".into());
-    }
-    let node = Node::parse(value)?;
-    if node.contains_input() {
-        return Err("Display actions cannot request text input".into());
-    }
-    Ok(node)
 }
 
 #[derive(Deserialize)]
@@ -226,10 +191,6 @@ enum DisplayRequest {
     ApplicationScaleValue {
         connector: String,
         fraction: f32,
-    },
-    ApplicationScale {
-        connector: String,
-        policy: String,
     },
     Identify {
         connector: String,
@@ -321,21 +282,6 @@ fn validate_request(request: DisplayRequest, data: &Value) -> Result<SettingsMes
             }
             (connector, crate::application_scale_message(fraction))
         }
-        DisplayRequest::ApplicationScale { connector, policy } => {
-            let message = match policy.as_str() {
-                "follow" => SettingsMessage::ApplicationScaleFollow,
-                "unchanged" => SettingsMessage::ApplicationScaleUnchanged,
-                "custom" => SettingsMessage::SetApplicationScale(
-                    data["customScaleStep"]
-                        .as_u64()
-                        .and_then(|step| u32::try_from(step).ok())
-                        .filter(|step| *step <= 14)
-                        .ok_or(STALE_STATUS)?,
-                ),
-                _ => return Err(STALE_STATUS.into()),
-            };
-            (connector, message)
-        }
         DisplayRequest::Identify { connector } => (connector, SettingsMessage::DisplayIdentify),
         DisplayRequest::Primary { connector } => (connector, SettingsMessage::DisplayPrimary),
         DisplayRequest::Apply { connector } => (connector, SettingsMessage::DisplayApply),
@@ -391,10 +337,11 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         .collect::<Vec<_>>();
     refresh_rates.sort_unstable_by(|left, right| right.cmp(left));
     refresh_rates.dedup();
-    let (application_scale_policy, custom_scale_units) = match app.application_scale_policy {
-        crate::ApplicationScalePolicy::FollowNickel => ("follow", 120),
-        crate::ApplicationScalePolicy::Unchanged => ("unchanged", 120),
-        crate::ApplicationScalePolicy::Custom(scale) => ("custom", scale.units()),
+    let custom_scale_units = match app.application_scale_policy {
+        crate::ApplicationScalePolicy::FollowNickel | crate::ApplicationScalePolicy::Unchanged => {
+            120
+        }
+        crate::ApplicationScalePolicy::Custom(scale) => scale.units(),
     };
     json!({
         "connector": selected.connector,
@@ -415,11 +362,6 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         "refreshRates": refresh_rates.into_iter().map(|refresh| json!({
             "refresh": refresh, "label": format!("{:.2} Hz", f64::from(refresh) / 1000.0)
         })).collect::<Vec<_>>(),
-        "applicationScalePolicy": application_scale_policy,
-        "customScaleStep": custom_scale_units.saturating_sub(60).min(420) / 30,
-        "applicationScaleFollowLabel": "Follow Nickel",
-        "applicationScaleUnchangedLabel": "Leave unchanged",
-        "applicationScaleCustomLabel": "Custom",
         "scaleLabel": "Scale",
         "scaleValue": format!("{}%", selected.scale.units() * 100 / 120),
         "scalePercent": (selected.scale.units().saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
@@ -440,22 +382,7 @@ impl SettingsApp {
         self.handle_display_jsx_event(index, Value::Null);
     }
 
-    pub(super) fn handle_display_jsx_slider(&mut self, id: &str, position: u16) {
-        let action = self
-            .display_page
-            .borrow()
-            .as_ref()
-            .and_then(|page| page.as_ref().ok())
-            .and_then(|page| page.slider_action(id));
-        if let Some(action) = action {
-            self.handle_display_jsx_event(
-                action,
-                Value::from(f32::from(position) / f32::from(u16::MAX)),
-            );
-        }
-    }
-
-    fn handle_display_jsx_event(&mut self, index: usize, value: Value) {
+    pub(super) fn handle_display_jsx_event(&mut self, index: usize, value: Value) {
         if self.page != SettingsPage::Display || !self.settings_jsx_enabled {
             return;
         }
@@ -539,6 +466,7 @@ mod tests {
                 height: 1080,
                 refresh_millihz: 120_000,
             });
+        app.display_resolution_select_expanded = true;
         let data = projection(&app);
         let mut page = DisplayPage::new().unwrap();
         let _ = page.render(&data, app.ui_theme()).unwrap();
@@ -549,11 +477,6 @@ mod tests {
                 width: 1920,
                 height: 1080
             })
-        ));
-        let custom = page.action_for_id("application-scale-custom").unwrap();
-        assert!(matches!(
-            page.dispatch(custom, Value::Null, &data),
-            Ok(SettingsMessage::SetApplicationScale(2))
         ));
         let display_scale = page.action_for_id("display-scale").unwrap();
         assert!(matches!(
@@ -587,7 +510,7 @@ mod tests {
         );
         app.selected = 1;
         assert!(
-            page.dispatch(custom, Value::Null, &projection(&app))
+            page.dispatch(display_scale, json!(0.5), &projection(&app))
                 .is_err()
         );
     }

@@ -101,3 +101,10 @@ scroll range, association capability, and operating-system consent path. The
 host checks the row, target, candidate, and current capability before applying
 a JSX selection. The native picker remains available if this component fails.
 Build it with the same command and its source filename.
+
+`settings-display.jsx` and `settings-display.css` render Display's enabled,
+resolution, refresh, scale, action, and confirmation controls through the shared
+component renderer. The host retains arrangement geometry and dragging, the
+application scale radio group, output validation, and timed revert. Display
+events use a source scope so they do not collide with other Settings pages.
+Build its shipped JavaScript with the same command and `settings-display.jsx`.

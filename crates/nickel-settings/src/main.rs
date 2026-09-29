@@ -15,7 +15,6 @@ mod optional_features_plugin;
 mod persistence;
 mod platform;
 mod plugin_list;
-mod settings_components;
 mod settings_package;
 mod settings_plugin;
 mod view;
@@ -587,8 +586,6 @@ enum SettingsMessage {
     SetDesktopCount(u8),
     DisplayScroll,
     DisplayIdentify,
-    DisplayJsxAction(usize),
-    DisplayJsxSlider(&'static str, u16),
     SelectDisplay(usize),
     DisplayDrag {
         index: usize,
@@ -1924,10 +1921,14 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::JsxScopedAction(scope, index, value) => {
-                if scope == "default-app-picker"
-                    && let Ok(value) = serde_json::from_str(&value)
-                {
-                    self.handle_default_app_picker_jsx_action(index, value);
+                if let Ok(value) = serde_json::from_str(&value) {
+                    match scope.as_str() {
+                        "default-app-picker" => {
+                            self.handle_default_app_picker_jsx_action(index, value)
+                        }
+                        "display" => self.handle_display_jsx_event(index, value),
+                        _ => {}
+                    }
                 }
             }
             SettingsMessage::DisplayIdentify => {
@@ -1937,10 +1938,6 @@ impl SettingsApp {
                     }
                     _ => self.status = self.localizer.text("settings-status-identify-failed"),
                 }
-            }
-            SettingsMessage::DisplayJsxAction(index) => self.handle_display_jsx_action(index),
-            SettingsMessage::DisplayJsxSlider(id, position) => {
-                self.handle_display_jsx_slider(id, position)
             }
             SettingsMessage::SelectDisplay(index) => {
                 let action = if self.page == SettingsPage::Display && self.settings_jsx_enabled {
@@ -4467,14 +4464,19 @@ mod tests {
             height: 720,
         });
         assert_eq!(app.displays[0].mode, app.displays[0].modes[2]);
+        app.display_refresh_select_expanded = true;
 
         let tree = app.build_ui(900.0, 900.0);
         let display_page = app.display_page.borrow();
         let display_page = display_page.as_ref().unwrap().as_ref().unwrap();
         let supported = display_page.action_for_id("display-refresh-75000").unwrap();
         assert_eq!(
-            tree.semantic_targets_for_message(&SettingsMessage::DisplayJsxAction(supported))
-                .len(),
+            tree.semantic_targets_for_message(&SettingsMessage::JsxScopedAction(
+                "display".into(),
+                supported,
+                "null".into()
+            ))
+            .len(),
             1
         );
         assert!(
@@ -5545,7 +5547,11 @@ mod tests {
                 .iter()
                 .flat_map(|id| {
                     let action = display_page.action_for_id(id).unwrap();
-                    tree.semantic_targets_for_message(&SettingsMessage::DisplayJsxAction(action))
+                    tree.semantic_targets_for_message(&SettingsMessage::JsxScopedAction(
+                        "display".into(),
+                        action,
+                        "null".into(),
+                    ))
                 })
                 .map(|target| target.bounds)
                 .collect::<Vec<_>>();

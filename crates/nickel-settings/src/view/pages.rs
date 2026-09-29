@@ -1018,7 +1018,6 @@ impl SettingsApp {
                 scale,
                 actions,
                 confirmation,
-                application_policy,
                 application_scale_slider,
             ],
         ) = plugin_actions
@@ -1030,7 +1029,7 @@ impl SettingsApp {
                 scale,
                 actions,
                 confirmation,
-                application_policy,
+                AnyView::new(application_scale_policy_choices),
                 application_scale_slider,
             )
         } else {
