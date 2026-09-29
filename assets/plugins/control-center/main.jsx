@@ -12,7 +12,8 @@ function App() {
         request("session-prepare", action);
         nickel.openDialog("session-confirm-dialog");
     };
-    return <FixedWindow width={420} height="100%" className="control-center">
+    return <FixedWindow width={420} height="100%" className="control-center"
+        onEscape={() => nickel.request({type: "toggle-control-center"})}>
         <Column className="control-content">
             <Text className="control-title">Control Center</Text>
             <ScrollView id="control-center-scroll" height={data.scrollHeight}>

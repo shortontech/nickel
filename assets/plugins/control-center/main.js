@@ -12,7 +12,7 @@ function App() {
         request("session-prepare", action);
         nickel.openDialog("session-confirm-dialog");
     };
-    return h(FixedWindow, { width: 420, height: "100%", className: "control-center" },
+    return h(FixedWindow, { width: 420, height: "100%", className: "control-center", onEscape: () => nickel.request({ type: "toggle-control-center" }) },
         h(Column, { className: "control-content" },
             h(Text, { className: "control-title" }, "Control Center"),
             h(ScrollView, { id: "control-center-scroll", height: data.scrollHeight },

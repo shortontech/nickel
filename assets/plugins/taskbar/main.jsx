@@ -76,7 +76,7 @@ function App() {
                 onClick={() => nickel.request({type: "taskbar-toggle-codex"})}>Codex</Button> : null}
             {tray.map(item => <TrayItem key={item.id} item={item} />)}
             <Button id="taskbar-control" className="clock-button"
-                onClick={() => nickel.request({type: "taskbar-toggle-control"})}>{data.clock || ""}</Button>
+                onClick={() => nickel.request({type: "toggle-control-center"})}>{data.clock || ""}</Button>
         </div>
     </FixedWindow>;
 }

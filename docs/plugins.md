@@ -238,6 +238,9 @@ arrays inside a `Window` must use unique `key` values, such as `key={item.id}`.
 The root `Window` or `FixedWindow` can handle Enter and Escape through
 `onSubmit` and `onEscape` JavaScript callbacks. Their requested desktop actions
 receive the same capability checks as button callbacks.
+For example, a plugin granted `control-center-show` can call
+`nickel.request({type: "toggle-control-center"})` from a button or a root
+shortcut handler.
 
 `<Slot id="content" />` marks a place where a host can insert its own component
 tree into the JSX layout. The ID names the insertion point; a slot with no

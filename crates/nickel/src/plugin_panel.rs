@@ -2120,10 +2120,6 @@ impl nickel_ui::Application for PluginPanelApplication {
             self.update(PluginMessage::Click(action));
             return nickel_ui::ShortcutOutcome::handled(true);
         }
-        if self.manifest.id == control_center_manifest().id && shortcut == Shortcut::Escape {
-            self.effects.push(PluginEffect::ToggleControlCenter);
-            return nickel_ui::ShortcutOutcome::handled(true);
-        }
         if self.manifest.id == on_screen_keyboard_manifest().id && shortcut == Shortcut::Escape {
             if let Some(generation) = self.projection_data.as_deref().and_then(|data| {
                 serde_json::from_str::<Value>(data)
@@ -2503,8 +2499,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::ToggleLauncher);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-toggle-control")
-                            && self.manifest.id == taskbar_manifest().id
+                            == Some("toggle-control-center")
                             && self
                                 .manifest
                                 .capabilities
@@ -3761,7 +3756,7 @@ mod tests {
         ))
         .unwrap();
         let data = validation_surface_projection(&package, control_center_surface()).unwrap();
-        let host = nickel_ui::UiHost::new(
+        let mut host = nickel_ui::UiHost::new(
             PluginPanelApplication::control_center_with_data(&data).unwrap(),
             420,
             600,
@@ -3792,6 +3787,14 @@ mod tests {
             .join("../../target/nickel-ui-snapshots/control-center-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         image.save(output).unwrap();
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Shortcut(Shortcut::Escape)],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ToggleControlCenter]
+        );
     }
 
     #[test]
@@ -5458,6 +5461,32 @@ mod tests {
             );
             assert_eq!(panel.take_effects(), vec![PluginEffect::ShowLauncher]);
         }
+    }
+
+    #[test]
+    fn external_control_center_toggle_requires_capability() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.control-toggle".into();
+        let source = "function App() { return h(FixedWindow, {width: '100%', height: '100%', onEscape: () => nickel.request({type: 'toggle-control-center'})}); }";
+        let mut package = PluginPackage {
+            manifest: external_manifest,
+            images: Default::default(),
+            stylesheet: String::new(),
+            source: source.into(),
+        };
+        let mut denied = PluginPanelApplication::from_package(&package).unwrap();
+        denied.shortcut_outcome(Shortcut::Escape);
+        assert!(denied.take_effects().is_empty());
+        package
+            .manifest
+            .capabilities
+            .push(PluginCapability::ControlCenterShow);
+        let mut granted = PluginPanelApplication::from_package(&package).unwrap();
+        granted.shortcut_outcome(Shortcut::Escape);
+        assert_eq!(
+            granted.take_effects(),
+            vec![PluginEffect::ToggleControlCenter]
+        );
     }
 
     #[test]

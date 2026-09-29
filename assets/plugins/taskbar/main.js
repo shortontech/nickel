@@ -55,5 +55,5 @@ function App() {
             data.keyboardEnabled ? h(Button, { id: "taskbar-keyboard", className: "utility-button", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.request({ type: "taskbar-toggle-keyboard" }) }, "\u2328") : null,
             data.codexAvailable ? h(Button, { id: "taskbar-codex", className: "utility-button", icon: "codex", accessibilityLabel: "Codex projects", onClick: () => nickel.request({ type: "taskbar-toggle-codex" }) }, "Codex") : null,
             tray.map(item => h(TrayItem, { key: item.id, item: item })),
-            h(Button, { id: "taskbar-control", className: "clock-button", onClick: () => nickel.request({ type: "taskbar-toggle-control" }) }, data.clock || "")));
+            h(Button, { id: "taskbar-control", className: "clock-button", onClick: () => nickel.request({ type: "toggle-control-center" }) }, data.clock || "")));
 }
