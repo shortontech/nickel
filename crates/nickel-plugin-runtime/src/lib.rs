@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 mod composition;
+pub mod composition_runtime;
 mod modules;
 pub mod settings;
 
