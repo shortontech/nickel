@@ -4273,6 +4273,37 @@ mod tests {
     }
 
     #[test]
+    fn top_anchored_overlay_resolves_css_top_within_manifest_bound() {
+        let mut package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-overlay"
+        ))
+        .unwrap();
+        let notice = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "notice")
+            .unwrap()
+            .clone();
+        package
+            .stylesheet
+            .push_str("\nwindow#notice { top: 12px; }");
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let application =
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &notice)
+                .unwrap();
+        assert_eq!(application.resolved_surface(&notice).unwrap().offset_y, 12);
+
+        package.stylesheet = package.stylesheet.replace("top: 12px", "top: 25px");
+        assert!(PluginPanelApplication::validate_package(&package).is_err());
+        package.stylesheet = package
+            .stylesheet
+            .replace("top: 25px", "top: 12px; bottom: 0px");
+        assert!(PluginPanelApplication::validate_package(&package).is_err());
+    }
+
+    #[test]
     fn unstyled_plugin_button_has_no_mandatory_paint() {
         let source = "function App() { return h(Panel, {background: 0}, h(Button, {id: 'go', onClick: () => {}}, 'Go')); }";
         let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 80);

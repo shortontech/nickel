@@ -538,12 +538,14 @@ impl PanelNode {
         else {
             return Ok(None);
         };
-        let css_bottom = stylesheet
-            .resolve("window", id.as_deref(), class_name.as_deref())
-            .bottom;
+        let style = stylesheet.resolve("window", id.as_deref(), class_name.as_deref());
+        let (css_bottom, css_top) = (style.bottom, style.top);
+        if css_bottom.is_some() && css_top.is_some() {
+            return Err("window CSS cannot set both top and bottom".into());
+        }
         let Some(request) = window_request else {
-            if css_bottom.is_some() {
-                return Err("CSS bottom needs a Window root".into());
+            if css_bottom.is_some() || css_top.is_some() {
+                return Err("CSS top or bottom needs a Window root".into());
             }
             return Ok(None);
         };
@@ -567,6 +569,15 @@ impl PanelNode {
         if let Some(offset) = request.bottom_offset {
             surface.bottom_offset = offset;
         } else if let Some(offset) = css_bottom {
+            if !matches!(
+                grant.kind,
+                PluginSurfaceKind::Panel | PluginSurfaceKind::Dock
+            ) {
+                return Err(format!(
+                    "window {:?} CSS bottom needs a panel or dock grant",
+                    request.id
+                ));
+            }
             if offset > grant.bottom_offset as f32 {
                 return Err(format!(
                     "window {:?} CSS bottom exceeds its grant",
@@ -574,6 +585,23 @@ impl PanelNode {
                 ));
             }
             surface.bottom_offset = offset.round() as u32;
+        }
+        if let Some(offset) = css_top {
+            if !matches!(
+                grant.anchor,
+                nickel_core::plugins::PluginSurfaceAnchor::TopLeft
+                    | nickel_core::plugins::PluginSurfaceAnchor::TopRight
+            ) || grant.offset_y < 0
+            {
+                return Err(format!(
+                    "window {:?} CSS top needs a top-anchored grant",
+                    request.id
+                ));
+            }
+            if offset > grant.offset_y as f32 {
+                return Err(format!("window {:?} CSS top exceeds its grant", request.id));
+            }
+            surface.offset_y = offset.round() as i32;
         }
         Ok(Some(surface))
     }

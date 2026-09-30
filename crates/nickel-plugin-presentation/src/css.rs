@@ -51,6 +51,7 @@ pub struct ControlStyle {
     pub grow: Option<f32>,
     pub gap: Option<f32>,
     pub bottom: Option<f32>,
+    pub top: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +163,7 @@ enum Declaration {
     Grow(f32),
     Gap(f32),
     Bottom(f32),
+    Top(f32),
     Border(f32, u32),
 }
 
@@ -198,6 +200,7 @@ impl Declaration {
             Self::Grow(value) => style.grow = Some(*value),
             Self::Gap(value) => style.gap = Some(*value),
             Self::Bottom(value) => style.bottom = Some(*value),
+            Self::Top(value) => style.top = Some(*value),
             Self::Border(width, color) => {
                 style.border_width = Some(*width);
                 style.border_color = Some(*color);
@@ -479,6 +482,7 @@ fn declaration(name: &str, value: &str) -> Result<Declaration, String> {
         }
         "gap" => Declaration::Gap(px(value, 512.0)?),
         "bottom" => Declaration::Bottom(px(value, 8192.0)?),
+        "top" => Declaration::Top(px(value, 8192.0)?),
         _ => return Err(format!("unsupported plugin CSS property {name:?}")),
     })
 }
@@ -556,13 +560,13 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
         }
         if declarations
             .iter()
-            .any(|declaration| matches!(declaration, Declaration::Bottom(_)))
+            .any(|declaration| matches!(declaration, Declaration::Bottom(_) | Declaration::Top(_)))
             && selectors
                 .iter()
                 .any(|selector| selector.kind.as_deref() != Some("window"))
         {
             return Err(ParseError::custom(
-                "bottom is supported only on window selectors",
+                "top and bottom are supported only on window selectors",
             ));
         }
         Ok(Rule {
@@ -976,17 +980,25 @@ mod tests {
     }
 
     #[test]
-    fn bottom_is_bounded_and_requires_window_selector() {
-        let stylesheet = StyleSheet::compile("window.dock { bottom: 20px; }").unwrap();
+    fn positioned_window_distances_are_bounded_and_require_window_selector() {
+        let stylesheet = StyleSheet::compile("window.dock { bottom: 20px; top: 12px; }").unwrap();
         assert_eq!(
             stylesheet.resolve("window", None, Some("dock")).bottom,
             Some(20.0)
         );
+        assert_eq!(
+            stylesheet.resolve("window", None, Some("dock")).top,
+            Some(12.0)
+        );
         for css in [
             ".dock { bottom: 20px; }",
             "button { bottom: 20px; }",
+            ".notice { top: 12px; }",
+            "text { top: 12px; }",
             "window.dock { bottom: -1px; }",
             "window.dock { bottom: 9000px; }",
+            "window.notice { top: -1px; }",
+            "window.notice { top: 9000px; }",
         ] {
             assert!(StyleSheet::compile(css).is_err(), "{css}");
         }

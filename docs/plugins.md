@@ -257,6 +257,9 @@ and anchor until the full authority envelope replaces its duplicated geometry.
 `window.dock { bottom: 20px; }` also sets the bottom distance for a `Window`
 root with `className="dock"`; CSS `bottom` requires a `window` selector and
 cannot exceed the manifest bound. An explicit JSX `bottomOffset` wins over CSS.
+For a top-anchored window or overlay, `window.notice { top: 14px; }` sets the
+distance from the output's top edge within the manifest's positive `offset_y`
+bound. A root cannot set both CSS `top` and `bottom`.
 A plugin cannot create an undeclared native window by changing JSX. `id` is optional: the host
 supplies its surface identity. An explicit ID must match that identity.
 One plugin may declare several surfaces. Nickel renders the plugin for each

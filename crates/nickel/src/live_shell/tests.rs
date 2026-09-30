@@ -522,6 +522,50 @@ fn installed_dock_uses_jsx_distance_and_output_within_its_grant() {
 }
 
 #[test]
+fn installed_top_overlay_uses_css_distance_within_its_grant() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("org.example.top-overlay");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.top-overlay","name":"Top overlay",
+            "entry":"main.js","stylesheet":"ui.css","surfaces":[
+            {"id":"home","kind":"window","width":320,"height":180},
+            {"id":"notice","kind":"overlay","width":240,"height":80,
+            "anchor":"top-right","offset_y":36}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { const notice = nickel.data.surface.id === 'notice'; return h(Window, {width: notice ? 240 : 320, height: notice ? 80 : 180, placement: notice ? 'fixed' : 'managed'}, h(Text, {}, notice ? 'Notice' : 'Home')); }",
+    )
+    .unwrap();
+    std::fs::write(directory.join("ui.css"), "window#notice { top: 14px; }").unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    let descriptor = catalog.packages.remove("org.example.top-overlay").unwrap();
+    let mut shell = LiveShell::new().unwrap();
+    shell
+        .plugin_registry
+        .register(descriptor.manifest.clone())
+        .unwrap();
+    shell
+        .external_plugin_packages
+        .insert(descriptor.manifest.id.clone(), descriptor);
+    shell
+        .set_plugin_enabled("org.example.top-overlay", true)
+        .unwrap();
+    shell
+        .show_plugin_window("org.example.top-overlay", "notice")
+        .unwrap();
+    let (_, surface) = shell
+        .plugin_panels()
+        .into_iter()
+        .find(|(key, _)| key.plugin_id == "org.example.top-overlay" && key.surface_id == "notice")
+        .unwrap();
+    assert_eq!(surface.offset_y, 14);
+}
+
+#[test]
 fn installed_panel_can_be_enabled_measured_and_disabled() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.panel");
