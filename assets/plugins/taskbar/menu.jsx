@@ -15,8 +15,9 @@ function App() {
             </Button> : null}
             {actions.map((action, index) => <Button key={`${action.pluginId}:${action.id}`}
                 id={`taskbar-extension-${index}`} className="taskbar-menu-button"
-                onClick={() => nickel.request({type: "taskbar-extension-action",
-                    plugin: action.pluginId, id: action.id, applicationId: menu.applicationId})}>
+                onClick={() => nickel.request({type: "invoke-plugin-slot-action",
+                    slot: "task-action", pluginId: action.pluginId, id: action.id,
+                    item: menu.applicationId})}>
                 {action.label}
             </Button>)}
         </Column>

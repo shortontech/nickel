@@ -2243,10 +2243,12 @@
             .unwrap();
         assert!(disabled.memory.native_ui_bytes.is_none());
         assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::InvokeTaskbarExtensionAction {
+            crate::plugin_panel::PluginEffect::InvokePluginSlotAction {
+                target_plugin: crate::plugin_panel::taskbar_manifest().id.clone(),
+                slot_id: "task-action".into(),
                 plugin_id: package.manifest.id.clone(),
                 id: "find-apps".into(),
-                application_id: Some("org.nickel.mail".into()),
+                item: Some("org.nickel.mail".into()),
             },
         ]));
     }

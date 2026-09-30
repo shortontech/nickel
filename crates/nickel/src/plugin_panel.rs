@@ -468,16 +468,12 @@ pub enum PluginEffect {
         direction: i8,
     },
     CloseTaskbarMenuWindows,
-    InvokeTaskbarExtensionAction {
-        plugin_id: String,
-        id: String,
-        application_id: Option<String>,
-    },
     InvokePluginSlotAction {
         target_plugin: String,
         slot_id: String,
         plugin_id: String,
         id: String,
+        item: Option<String>,
     },
     InvokeControlExtensionSection {
         plugin_id: String,
@@ -1345,15 +1341,7 @@ impl PluginPanelApplication {
         match contribution.contract {
             PluginSlotContract::Badge => self.taskbar_badges().map(|_| ()),
             PluginSlotContract::Widget => self.desktop_widgets().map(|_| ()),
-            PluginSlotContract::Action => {
-                let actions = self.taskbar_actions()?;
-                if contribution.target_plugin != taskbar_manifest().id
-                    && actions.iter().any(|action| action.item.is_some())
-                {
-                    return Err("generic action slots cannot target a taskbar item".into());
-                }
-                Ok(())
-            }
+            PluginSlotContract::Action => self.taskbar_actions().map(|_| ()),
             PluginSlotContract::Section => self.control_sections().map(|_| ()),
         }
     }
@@ -2096,57 +2084,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::CloseTaskbarMenuWindows);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-extension-action")
-                            && self.manifest.id == taskbar_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::WindowsContext) =>
-                        {
-                            let plugin_id = effect.get("plugin").and_then(Value::as_str);
-                            let id = effect.get("id").and_then(Value::as_str);
-                            let application_id =
-                                effect.get("applicationId").and_then(Value::as_str);
-                            let valid = plugin_id
-                                .is_some_and(|value| !value.is_empty() && value.len() <= 128)
-                                && id.is_some_and(|value| !value.is_empty() && value.len() <= 64)
-                                && application_id
-                                    .is_none_or(|value| !value.is_empty() && value.len() <= 256);
-                            if !valid {
-                                self.last_error =
-                                    Some("taskbar extension action is invalid".into());
-                                return;
-                            }
-                            let projection = self
-                                .projection_data
-                                .as_deref()
-                                .and_then(|data| serde_json::from_str::<Value>(data).ok());
-                            let projected = projection.as_ref().is_some_and(|data| {
-                                data.get("applicationId").and_then(Value::as_str) == application_id
-                                    && data
-                                        .get("slots")
-                                        .and_then(|slots| slots.get("task-action"))
-                                        .and_then(Value::as_array)
-                                        .is_some_and(|actions| {
-                                            actions.iter().any(|action| {
-                                                action.get("pluginId").and_then(Value::as_str)
-                                                    == plugin_id
-                                                    && action.get("id").and_then(Value::as_str)
-                                                        == id
-                                            })
-                                        })
-                            });
-                            if !projected {
-                                self.last_error = Some("taskbar extension action is stale".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::InvokeTaskbarExtensionAction {
-                                plugin_id: plugin_id.unwrap().to_owned(),
-                                id: id.unwrap().to_owned(),
-                                application_id: application_id.map(str::to_owned),
-                            });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-window-menu-action")
                             && self.manifest.id == taskbar_manifest().id
                             && self
@@ -2181,6 +2118,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             let slot_id = effect.get("slot").and_then(Value::as_str);
                             let plugin_id = effect.get("pluginId").and_then(Value::as_str);
                             let id = effect.get("id").and_then(Value::as_str);
+                            let item = effect.get("item").and_then(Value::as_str);
                             let valid = slot_id.is_some_and(|value| {
                                 self.manifest.provides_slots.iter().any(|slot| {
                                     slot.id == value
@@ -2190,7 +2128,12 @@ impl nickel_ui::Application for PluginPanelApplication {
                             }) && plugin_id
                                 .is_some_and(|value| !value.is_empty() && value.len() <= 128)
                                 && id.is_some_and(|value| !value.is_empty() && value.len() <= 64);
-                            if !valid {
+                            if !valid
+                                || effect
+                                    .get("item")
+                                    .is_some_and(|value| !value.is_null() && !value.is_string())
+                                || !item.is_none_or(|value| !value.is_empty() && value.len() <= 256)
+                            {
                                 self.last_error = Some("plugin slot action is invalid".into());
                                 return;
                             }
@@ -2199,12 +2142,22 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .as_deref()
                                 .and_then(|data| serde_json::from_str::<Value>(data).ok())
                                 .and_then(|data| {
+                                    if data
+                                        .get("slotContext")
+                                        .and_then(|context| context.get("item"))
+                                        .is_some_and(|context| context.as_str() != item)
+                                    {
+                                        return None;
+                                    }
                                     data.get("slots")?.get(slot_id?)?.as_array().cloned()
                                 })
                                 .is_some_and(|actions| {
                                     actions.iter().any(|action| {
                                         action.get("pluginId").and_then(Value::as_str) == plugin_id
                                             && action.get("id").and_then(Value::as_str) == id
+                                            && action["item"]
+                                                .as_str()
+                                                .is_none_or(|target| Some(target) == item)
                                     })
                                 });
                             if !projected {
@@ -2216,6 +2169,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 slot_id: slot_id.unwrap().to_owned(),
                                 plugin_id: plugin_id.unwrap().to_owned(),
                                 id: id.unwrap().to_owned(),
+                                item: item.map(str::to_owned),
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
@@ -3427,17 +3381,16 @@ mod tests {
             PluginPackage::load(format!("{root}/example-action-contributor")).unwrap();
         PluginPanelApplication::validate_package(&provider).unwrap();
         PluginPanelApplication::validate_package(&contributor).unwrap();
-        let mut invalid = contributor.clone();
-        invalid.source = invalid.source.replace(
+        let mut scoped = contributor.clone();
+        scoped.source = scoped.source.replace(
             "label: \"Open launcher\"",
             "item: \"mail\", label: \"Open launcher\"",
         );
-        assert!(
-            PluginPanelApplication::from_package(&invalid)
-                .unwrap()
-                .validate_contribution()
-                .unwrap_err()
-                .contains("cannot target a taskbar item")
+        let scoped = PluginPanelApplication::from_package(&scoped).unwrap();
+        scoped.validate_contribution().unwrap();
+        assert_eq!(
+            scoped.taskbar_actions().unwrap()[0].item.as_deref(),
+            Some("mail")
         );
         let mut contributor = PluginPanelApplication::from_package(&contributor).unwrap();
         assert_eq!(
@@ -3478,6 +3431,7 @@ mod tests {
                 slot_id: "commands".into(),
                 plugin_id: "org.example.action-contributor".into(),
                 id: "open-launcher".into(),
+                item: None,
             }]
         );
         assert!(
@@ -3486,6 +3440,63 @@ mod tests {
         );
         app.update(stale_click);
         assert!(app.take_effects().is_empty());
+    }
+
+    #[test]
+    fn item_scoped_slot_action_requires_the_projected_item() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins");
+        let provider = PluginPackage::load(format!("{root}/example-widget-host")).unwrap();
+        let source = r#"
+            function App() {
+                return h(Window, {width: 420, height: 280},
+                    h(Button, {id: 'invoke', onClick: () => nickel.request({
+                        type: 'invoke-plugin-slot-action', slot: 'commands',
+                        pluginId: 'org.example.action-contributor', id: 'open-launcher',
+                        item: 'mail'
+                    })}, 'Invoke'));
+            }
+        "#;
+        let projection = serde_json::json!({
+            "slotContext": {"item": "mail"},
+            "slots": {"commands": [{
+                "pluginId": "org.example.action-contributor",
+                "id": "open-launcher", "label": "Open launcher", "item": "mail"
+            }]}
+        });
+        let mut app = PluginPanelApplication::new_with_manifest(
+            source,
+            &provider.manifest,
+            Some(projection.to_string()),
+        )
+        .unwrap();
+        app.update(app.button_message("invoke").unwrap());
+        assert_eq!(
+            app.take_effects(),
+            vec![PluginEffect::InvokePluginSlotAction {
+                target_plugin: provider.manifest.id.clone(),
+                slot_id: "commands".into(),
+                plugin_id: "org.example.action-contributor".into(),
+                id: "open-launcher".into(),
+                item: Some("mail".into()),
+            }]
+        );
+        let mut forged = PluginPanelApplication::new_with_manifest(
+            &source.replace("item: 'mail'", "item: 'other'"),
+            &provider.manifest,
+            Some(projection.to_string()),
+        )
+        .unwrap();
+        forged.update(forged.button_message("invoke").unwrap());
+        assert!(forged.take_effects().is_empty());
+        assert_eq!(forged.last_error(), Some("plugin slot action is stale"));
+        app.sync_external_slots(&serde_json::json!({"commands": [{
+            "pluginId": "org.example.action-contributor",
+            "id": "open-launcher", "label": "Open launcher", "item": "other"
+        }]}))
+        .unwrap();
+        app.update(app.button_message("invoke").unwrap());
+        assert!(app.take_effects().is_empty());
+        assert_eq!(app.last_error(), Some("plugin slot action is stale"));
     }
 
     #[test]

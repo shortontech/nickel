@@ -529,14 +529,6 @@ pub struct LiveShell {
             crate::plugin_panel::PluginPanelApplication,
         ),
     >,
-    plugin_taskbar_action_hosts: std::collections::BTreeMap<
-        String,
-        (
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
     plugin_control_section_hosts: std::collections::BTreeMap<
         String,
         (
@@ -826,7 +818,6 @@ fn taskbar_plugin_data(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutableExtensionKind {
     TaskbarBadge,
-    TaskbarAction,
     ControlSection,
     PluginWidget,
     PluginAction,
@@ -858,9 +849,6 @@ fn executable_extension_priority(
     ) {
         ("org.nickel.taskbar", "task-badge", PluginSlotContract::Badge) => {
             ExecutableExtensionKind::TaskbarBadge
-        }
-        ("org.nickel.taskbar", "task-action", PluginSlotContract::Action) => {
-            ExecutableExtensionKind::TaskbarAction
         }
         ("org.nickel.control-center", "control-section", PluginSlotContract::Section) => {
             ExecutableExtensionKind::ControlSection
@@ -950,60 +938,6 @@ fn append_badge_slot(
                 badges.push(serde_json::json!({
                     "pluginId": plugin_id, "item": item, "label": label,
                     "count": count, "color": color,
-                }));
-            }
-        }
-    }
-}
-
-fn compose_taskbar_actions(
-    extensions: &std::collections::BTreeMap<
-        String,
-        (
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
-    application_id: Option<&str>,
-) -> Vec<serde_json::Value> {
-    use nickel_core::plugins::PluginContributionMode;
-    let mut ordered = extensions.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
-    let mut actions = Vec::new();
-    if let Some((id, (_, _, application))) = ordered
-        .iter()
-        .rev()
-        .find(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
-    {
-        append_taskbar_actions(&mut actions, id, application, application_id);
-    }
-    for (id, (_, mode, application)) in ordered {
-        if *mode == PluginContributionMode::Add {
-            append_taskbar_actions(&mut actions, id, application, application_id);
-        }
-    }
-    actions.truncate(4);
-    actions
-}
-
-fn append_taskbar_actions(
-    actions: &mut Vec<serde_json::Value>,
-    plugin_id: &str,
-    application: &crate::plugin_panel::PluginPanelApplication,
-    application_id: Option<&str>,
-) {
-    if let Ok(contributions) = application.taskbar_actions() {
-        for contribution in contributions {
-            if contribution
-                .item
-                .as_deref()
-                .is_none_or(|item| Some(item) == application_id)
-            {
-                actions.push(serde_json::json!({
-                    "pluginId": plugin_id,
-                    "id": contribution.id,
-                    "label": contribution.label,
                 }));
             }
         }
@@ -1756,7 +1690,6 @@ impl LiveShell {
             plugin_run_host,
             plugin_taskbar_host,
             plugin_taskbar_badge_hosts: std::collections::BTreeMap::new(),
-            plugin_taskbar_action_hosts: std::collections::BTreeMap::new(),
             plugin_control_section_hosts: std::collections::BTreeMap::new(),
             plugin_widget_slot_hosts: std::collections::BTreeMap::new(),
             plugin_action_slot_hosts: std::collections::BTreeMap::new(),
@@ -3759,11 +3692,26 @@ impl LiveShell {
     }
 
     fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
+        self.plugin_slot_projection_with_item(target_id, None)
+    }
+
+    /// `Some(item)` limits action contributions to entries applicable to that
+    /// item before the bounded projection is built. `None` projects every item.
+    fn plugin_slot_projection_with_item(
+        &self,
+        target_id: &str,
+        item_filter: Option<Option<&str>>,
+    ) -> Option<serde_json::Value> {
         use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
 
         let target = self.plugin_registry.get(target_id)?;
         let mut slots = serde_json::Map::new();
         for slot in &target.manifest.provides_slots {
+            let limit = if slot.contract == PluginSlotContract::Action {
+                32
+            } else {
+                8
+            };
             let hosts = match slot.contract {
                 PluginSlotContract::Widget => &self.plugin_widget_slot_hosts,
                 PluginSlotContract::Action => &self.plugin_action_slot_hosts,
@@ -3790,7 +3738,7 @@ impl LiveShell {
                 match slot.contract {
                     PluginSlotContract::Widget => {
                         if let Ok(widgets) = application.desktop_widgets() {
-                            for widget in widgets.into_iter().take(8 - items.len()) {
+                            for widget in widgets.into_iter().take(limit - items.len()) {
                                 items.push(serde_json::json!({
                                     "pluginId": id,
                                     "label": widget.label,
@@ -3805,26 +3753,54 @@ impl LiveShell {
                         if let Ok(actions) = application.taskbar_actions() {
                             for action in actions
                                 .into_iter()
-                                .filter(|action| action.item.is_none())
-                                .take(8 - items.len())
+                                .filter(|action| {
+                                    item_filter.is_none_or(|item| {
+                                        action
+                                            .item
+                                            .as_deref()
+                                            .is_none_or(|target| Some(target) == item)
+                                    })
+                                })
+                                .take(limit - items.len())
                             {
                                 items.push(serde_json::json!({
                                     "pluginId": id,
                                     "id": action.id,
                                     "label": action.label,
+                                    "item": action.item,
                                 }));
                             }
                         }
                     }
                     _ => unreachable!(),
                 }
-                if items.len() == 8 {
+                if items.len() == limit {
                     break;
                 }
             }
             slots.insert(slot.id.clone(), serde_json::Value::Array(items));
         }
         (!slots.is_empty()).then_some(serde_json::Value::Object(slots))
+    }
+
+    fn slot_actions_for_item(
+        &self,
+        target_id: &str,
+        slot_id: &str,
+        item: Option<&str>,
+        limit: usize,
+    ) -> Vec<serde_json::Value> {
+        self.plugin_slot_projection_with_item(target_id, Some(item))
+            .and_then(|slots| {
+                slots
+                    .get(slot_id)
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+            })
+            .into_iter()
+            .flatten()
+            .take(limit)
+            .collect()
     }
 
     fn refresh_plugin_slot_hosts(&mut self, target_id: &str) {
@@ -4185,12 +4161,6 @@ impl LiveShell {
             .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
             .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
             .map(|(id, _)| id.as_str());
-        let action_replacement = self
-            .plugin_taskbar_action_hosts
-            .iter()
-            .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
-            .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
-            .map(|(id, _)| id.as_str());
         let section_replacement = self
             .plugin_control_section_hosts
             .iter()
@@ -4277,12 +4247,6 @@ impl LiveShell {
                                             && contribution.target_slot == "task-badge"
                                             && badge_replacement
                                                 .is_some_and(|winner| winner != entry.manifest.id))
-                                            || (contribution.target_plugin
-                                                == crate::plugin_panel::taskbar_manifest().id
-                                                && contribution.target_slot == "task-action"
-                                                && action_replacement.is_some_and(|winner| {
-                                                    winner != entry.manifest.id
-                                                }))
                                             || (contribution.target_plugin
                                                 == crate::plugin_panel::control_center_manifest()
                                                     .id
@@ -4492,10 +4456,6 @@ impl LiveShell {
                 } else if let Some((_, _, current)) = self.plugin_taskbar_badge_hosts.get_mut(id) {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
-                } else if let Some((_, _, current)) = self.plugin_taskbar_action_hosts.get_mut(id) {
-                    extension_bytes = Some(application.retained_contribution_bytes());
-                    *current = application;
-                    self.application_menu_plugin_host = None;
                 } else if let Some((_, _, _, _, current)) =
                     self.plugin_widget_slot_hosts.get_mut(id)
                 {
@@ -4506,6 +4466,7 @@ impl LiveShell {
                 {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
+                    self.application_menu_plugin_host = None;
                 } else if let Some((_, _, current)) = self.plugin_control_section_hosts.get_mut(id)
                 {
                     extension_bytes = Some(application.retained_contribution_bytes());
@@ -4574,11 +4535,10 @@ impl LiveShell {
         tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
         self.plugin_taskbar_badge_hosts.remove(id);
-        if self.plugin_taskbar_action_hosts.remove(id).is_some() {
+        self.plugin_widget_slot_hosts.remove(id);
+        if self.plugin_action_slot_hosts.remove(id).is_some() {
             self.application_menu_plugin_host = None;
         }
-        self.plugin_widget_slot_hosts.remove(id);
-        self.plugin_action_slot_hosts.remove(id);
         self.plugin_control_section_hosts.remove(id);
         self.plugin_panel_extra_hosts
             .retain(|key, _| key.plugin_id != id);
@@ -4911,11 +4871,10 @@ impl LiveShell {
         }
         if !enabled {
             self.plugin_taskbar_badge_hosts.remove(id);
-            if self.plugin_taskbar_action_hosts.remove(id).is_some() {
+            self.plugin_widget_slot_hosts.remove(id);
+            if self.plugin_action_slot_hosts.remove(id).is_some() {
                 self.application_menu_plugin_host = None;
             }
-            self.plugin_widget_slot_hosts.remove(id);
-            self.plugin_action_slot_hosts.remove(id);
             self.plugin_control_section_hosts.remove(id);
             self.plugin_panel_extra_hosts
                 .retain(|key, _| key.plugin_id != id);
@@ -4959,11 +4918,6 @@ impl LiveShell {
                     self.plugin_taskbar_badge_hosts
                         .insert(id.to_owned(), (priority, mode, application));
                 }
-                ExecutableExtensionKind::TaskbarAction => {
-                    self.plugin_taskbar_action_hosts
-                        .insert(id.to_owned(), (priority, mode, application));
-                    self.application_menu_plugin_host = None;
-                }
                 ExecutableExtensionKind::ControlSection => {
                     self.plugin_control_section_hosts
                         .insert(id.to_owned(), (priority, mode, application));
@@ -4985,6 +4939,7 @@ impl LiveShell {
                         id.to_owned(),
                         (target_plugin, target_slot, priority, mode, application),
                     );
+                    self.application_menu_plugin_host = None;
                 }
             }
             Ok(())
@@ -6265,59 +6220,15 @@ impl LiveShell {
                     self.apply_application_menu_action(ApplicationMenuAction::CloseAll);
                     changed = true;
                 }
-                crate::plugin_panel::PluginEffect::InvokeTaskbarExtensionAction {
-                    plugin_id,
-                    id,
-                    application_id,
-                } => {
-                    if self.plugin_taskbar_host.is_none() {
-                        continue;
-                    }
-                    let Some(target) = self.application_menu_target.as_ref() else {
-                        continue;
-                    };
-                    let target_id = target.application_id.as_ref().map(|id| id.as_str());
-                    if target_id != application_id.as_deref() {
-                        continue;
-                    }
-                    let visible =
-                        compose_taskbar_actions(&self.plugin_taskbar_action_hosts, target_id)
-                            .iter()
-                            .any(|action| {
-                                action["pluginId"].as_str() == Some(plugin_id.as_str())
-                                    && action["id"].as_str() == Some(id.as_str())
-                            });
-                    if !visible {
-                        continue;
-                    }
-                    let Some((_, _, extension)) =
-                        self.plugin_taskbar_action_hosts.get_mut(&plugin_id)
-                    else {
-                        continue;
-                    };
-                    let handled = extension.activate_taskbar_action(&id, target_id.unwrap_or(""));
-                    let extension_effects = extension.take_effects();
-                    let retained_bytes = extension.retained_contribution_bytes();
-                    if handled {
-                        let _ = self.plugin_registry.record_memory(
-                            &plugin_id,
-                            nickel_core::plugins::PluginMemory {
-                                native_ui_bytes: Some(retained_bytes),
-                                ..Default::default()
-                            },
-                        );
-                        changed = true;
-                        changed |= self.apply_plugin_effects(extension_effects);
-                    }
-                }
                 crate::plugin_panel::PluginEffect::InvokePluginSlotAction {
                     target_plugin,
                     slot_id,
                     plugin_id,
                     id,
+                    item,
                 } => {
                     if !self
-                        .plugin_panels()
+                        .shell_panel_surfaces()
                         .iter()
                         .any(|(key, _)| key.plugin_id == target_plugin)
                     {
@@ -6337,6 +6248,9 @@ impl LiveShell {
                                     == Some(plugin_id.as_str())
                                     && action.get("id").and_then(serde_json::Value::as_str)
                                         == Some(id.as_str())
+                                    && action["item"]
+                                        .as_str()
+                                        .is_none_or(|target| Some(target) == item.as_deref())
                             })
                         });
                     if !visible {
@@ -6350,7 +6264,8 @@ impl LiveShell {
                     if target != &target_plugin || slot != &slot_id {
                         continue;
                     }
-                    let handled = extension.activate_taskbar_action(&id, "");
+                    let handled =
+                        extension.activate_taskbar_action(&id, item.as_deref().unwrap_or(""));
                     let extension_effects = extension.take_effects();
                     let retained_bytes = extension.retained_contribution_bytes();
                     if handled {
@@ -8177,9 +8092,11 @@ impl LiveShell {
                 .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
             let rows = application_menu_entries(target, pinned).len();
             return if self.plugin_taskbar_host.is_some() {
-                let actions = compose_taskbar_actions(
-                    &self.plugin_taskbar_action_hosts,
+                let actions = self.slot_actions_for_item(
+                    &crate::plugin_panel::taskbar_manifest().id,
+                    "task-action",
                     target.application_id.as_ref().map(|id| id.as_str()),
+                    4,
                 );
                 16 + 48 * (rows + actions.len()) as i32
             } else {
@@ -10788,15 +10705,18 @@ impl LiveShell {
             .as_ref()
             .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
         if self.plugin_taskbar_host.is_some() {
-            let actions = compose_taskbar_actions(
-                &self.plugin_taskbar_action_hosts,
+            let actions = self.slot_actions_for_item(
+                &crate::plugin_panel::taskbar_manifest().id,
+                "task-action",
                 target.application_id.as_ref().map(|id| id.as_str()),
+                4,
             );
             let height = (16
                 + 48 * (application_menu_entries(&target, pinned).len() + actions.len()))
                 as u32;
             let data = serde_json::json!({
                 "applicationId": target.application_id.as_ref().map(|id| id.as_str()),
+                "slotContext": {"item": target.application_id.as_ref().map(|id| id.as_str())},
                 "pinned": pinned,
                 "closeAll": target.all_closeable,
                 "slots": {"task-action": actions},

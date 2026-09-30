@@ -7,6 +7,7 @@ function App() {
         h(Column, null,
             menu.applicationId ? h(Button, { id: "taskbar-menu-pin", className: "taskbar-menu-button", onClick: () => nickel.request({ type: "applications.togglePin", id: menu.applicationId }) }, menu.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar") : null,
             menu.closeAll ? h(Button, { id: "taskbar-menu-close-all", className: "taskbar-menu-button", onClick: () => nickel.request({ type: "taskbar-menu-close-all" }) }, "Close all windows") : null,
-            actions.map((action, index) => h(Button, { key: `${action.pluginId}:${action.id}`, id: `taskbar-extension-${index}`, className: "taskbar-menu-button", onClick: () => nickel.request({ type: "taskbar-extension-action",
-                    plugin: action.pluginId, id: action.id, applicationId: menu.applicationId }) }, action.label))));
+            actions.map((action, index) => h(Button, { key: `${action.pluginId}:${action.id}`, id: `taskbar-extension-${index}`, className: "taskbar-menu-button", onClick: () => nickel.request({ type: "invoke-plugin-slot-action",
+                    slot: "task-action", pluginId: action.pluginId, id: action.id,
+                    item: menu.applicationId }) }, action.label))));
 }
