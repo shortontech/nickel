@@ -31,13 +31,18 @@ pub(super) struct SettingsShell {
 }
 
 impl SettingsShell {
+    #[cfg(test)]
     pub(super) fn new() -> Result<Self, String> {
+        Self::new_with_page(JsxPage::new(
+            crate::settings_package::source(crate::settings_package::Script::Shell)?,
+            crate::settings_package::manifest()?.clone(),
+            Some("main".into()),
+        )?)
+    }
+
+    pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page: JsxPage::new(
-                crate::settings_package::source(crate::settings_package::Script::Shell)?,
-                crate::settings_package::manifest()?.clone(),
-                Some("main".into()),
-            )?,
+            page,
             stylesheet: StyleSheet::default(),
             last_theme: None,
             last_data: None,
@@ -81,7 +86,7 @@ impl SettingsShell {
         if self.last_navigation_data.as_deref() != Some(&serialized) {
             (self.destinations, self.search) = self.page.evaluate_with_data(
                 &data,
-                "__nickelRender(SettingsNavigation)",
+                "__nickelRender(__nickelActiveEntry().navigation)",
                 crate::navigation::parse_tree,
             )?;
             self.last_navigation_data = Some(serialized);

@@ -67,6 +67,7 @@ const __surfaceApps = new Map();
 function __nickelRegisterSurfaceApp(id, component) {
     if (typeof id !== 'string' || !id.length || typeof component !== 'function')
         throw Error('invalid surface entry');
+    if (__surfaceApps.has(id)) throw Error('surface entry is already registered');
     __surfaceApps.set(id, component);
 }
 
@@ -287,7 +288,11 @@ function __nickelAcceptEvent() {
     __pendingEvent = null;
 }
 
-function __nickelRender(component = __surfaceApps.get(__activeSurface) || App) {
+function __nickelActiveEntry() {
+    return __surfaceApps.get(__activeSurface) || App;
+}
+
+function __nickelRender(component = __nickelActiveEntry()) {
     if (__pendingRender !== null) throw Error('previous render was not finalized');
     const previousHandlers = __handlers;
     const olderHandlers = __previousHandlers;

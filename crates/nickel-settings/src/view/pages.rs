@@ -152,7 +152,10 @@ impl SettingsApp {
         let list = if self.settings_jsx_enabled {
             self.plugin_list
                 .borrow_mut()
-                .get_or_insert_with(crate::plugin_list::PluginList::new)
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::Plugins)
+                        .and_then(crate::plugin_list::PluginList::new_with_page)
+                })
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|list| list.render(&projection, theme))
@@ -231,7 +234,12 @@ impl SettingsApp {
         let plugin_view = if self.settings_jsx_enabled {
             self.optional_features_page
                 .borrow_mut()
-                .get_or_insert_with(crate::optional_features_plugin::OptionalFeaturesPage::new)
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::OptionalFeatures)
+                        .and_then(
+                            crate::optional_features_plugin::OptionalFeaturesPage::new_with_page,
+                        )
+                })
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, theme))
@@ -429,7 +437,10 @@ impl SettingsApp {
             let data = crate::default_apps_plugin::projection_for_targets(self, &matching_targets);
             self.default_apps_page
                 .borrow_mut()
-                .get_or_insert_with(crate::default_apps_plugin::DefaultAppsPage::new)
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::DefaultApps)
+                        .and_then(crate::default_apps_plugin::DefaultAppsPage::new_with_page)
+                })
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, theme))
@@ -690,9 +701,7 @@ impl SettingsApp {
                     );
                     self.default_app_picker_page
                         .borrow_mut()
-                        .get_or_insert_with(
-                            crate::default_app_picker_plugin::DefaultAppPickerPage::new,
-                        )
+                        .get_or_insert_with(|| self.shared_settings_page(crate::settings_package::Script::DefaultAppPicker).and_then(crate::default_app_picker_plugin::DefaultAppPickerPage::new_with_page))
                         .as_mut()
                         .map_err(|error| error.clone())
                         .and_then(|page| page.render(&data, theme))
@@ -989,7 +998,10 @@ impl SettingsApp {
             let data = crate::display_plugin::projection(self);
             self.display_page
                 .borrow_mut()
-                .get_or_insert_with(crate::display_plugin::DisplayPage::new)
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::Display)
+                        .and_then(crate::display_plugin::DisplayPage::new_with_page)
+                })
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, theme))
@@ -1195,7 +1207,10 @@ impl SettingsApp {
         let plugin_view = if self.settings_jsx_enabled {
             self.network_page
                 .borrow_mut()
-                .get_or_insert_with(crate::network_plugin::NetworkPage::new)
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::Network)
+                        .and_then(crate::network_plugin::NetworkPage::new_with_page)
+                })
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, self.ui_theme()))
@@ -1353,7 +1368,10 @@ impl SettingsApp {
             let rendered = self
                 .bluetooth_page
                 .borrow_mut()
-                .get_or_insert_with(crate::bluetooth_plugin::BluetoothPage::new)
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::Bluetooth)
+                        .and_then(crate::bluetooth_plugin::BluetoothPage::new_with_page)
+                })
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, self.ui_theme()));
@@ -1624,7 +1642,10 @@ impl SettingsApp {
         let result = self
             .bar_page
             .borrow_mut()
-            .get_or_insert_with(crate::bar_plugin::BarPage::new)
+            .get_or_insert_with(|| {
+                self.shared_settings_page(crate::settings_package::Script::Bar)
+                    .and_then(crate::bar_plugin::BarPage::new_with_page)
+            })
             .as_mut()
             .map_err(|error| error.clone())
             .and_then(|page| page.render(&data, self.ui_theme(), self.palette()));
@@ -1748,7 +1769,10 @@ impl SettingsApp {
             let plugin_view = self
                 .appearance_page
                 .borrow_mut()
-                .get_or_insert_with(crate::appearance_plugin::AppearancePage::new)
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::Appearance)
+                        .and_then(crate::appearance_plugin::AppearancePage::new_with_page)
+                })
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, theme, self.wallpaper_preview.as_ref()))
@@ -2154,7 +2178,10 @@ impl SettingsApp {
         let page = self
             .ordinary_pages
             .borrow_mut()
-            .get_or_insert_with(crate::settings_plugin::OrdinaryPages::new)
+            .get_or_insert_with(|| {
+                self.shared_settings_page(crate::settings_package::Script::OrdinaryPages)
+                    .and_then(crate::settings_plugin::OrdinaryPages::new_with_page)
+            })
             .as_mut()
             .map_err(|error| error.clone())
             .and_then(|pages| pages.render_keyboard(&self.localizer, self.ui_theme()));
@@ -2193,7 +2220,10 @@ impl SettingsApp {
         let page = self
             .ordinary_pages
             .borrow_mut()
-            .get_or_insert_with(crate::settings_plugin::OrdinaryPages::new)
+            .get_or_insert_with(|| {
+                self.shared_settings_page(crate::settings_package::Script::OrdinaryPages)
+                    .and_then(crate::settings_plugin::OrdinaryPages::new_with_page)
+            })
             .as_mut()
             .map_err(|error| error.clone())
             .and_then(|pages| pages.render_about(&self.localizer, self.ui_theme()));

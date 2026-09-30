@@ -2,7 +2,10 @@
 
 use std::sync::OnceLock;
 
+use crate::SettingsApp;
 use nickel_core::plugins::{PluginCapability, PluginManifest, PluginSurfaceKind};
+use nickel_plugin_presentation::page::JsxPage;
+use nickel_plugin_runtime::JsxRuntime;
 use nickel_session_protocol::{
     PluginMemorySnapshot, PluginRuntimeHealth, PluginStatus, PluginStatusSnapshot,
 };
@@ -34,6 +37,47 @@ pub(super) enum Script {
     DefaultApps,
     DefaultAppPicker,
     Display,
+}
+
+pub(super) fn shared_page(
+    script: Script,
+    runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
+) -> Result<JsxPage, String> {
+    let scope = match script {
+        Script::Shell => "settings-shell",
+        Script::Plugins => "settings-plugins",
+        Script::OrdinaryPages => "settings-ordinary-pages",
+        Script::Bar => "settings-bar",
+        Script::OptionalFeatures => "settings-optional-features",
+        Script::Network => "settings-network",
+        Script::Bluetooth => "settings-bluetooth",
+        Script::Appearance => "settings-appearance",
+        Script::DefaultApps => "settings-default-apps",
+        Script::DefaultAppPicker => "settings-default-app-picker",
+        Script::Display => "settings-display",
+    };
+    JsxPage::new_with_shared_runtime(
+        source(script)?,
+        manifest()?.clone(),
+        (scope == "settings-shell").then(|| "main".into()),
+        scope,
+        runtime,
+    )
+}
+
+impl SettingsApp {
+    pub(super) fn shared_settings_page(&self, script: Script) -> Result<JsxPage, String> {
+        let runtime = {
+            let mut slot = self.settings_page_runtime.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new(
+                    "", None,
+                )?)));
+            }
+            slot.as_ref().unwrap().clone()
+        };
+        shared_page(script, runtime)
+    }
 }
 
 pub(super) fn manifest() -> Result<&'static PluginManifest, String> {

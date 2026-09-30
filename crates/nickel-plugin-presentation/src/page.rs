@@ -3,13 +3,15 @@
 use nickel_core::plugins::PluginManifest;
 use nickel_plugin_runtime::JsxRuntime;
 use serde_json::Value;
+use std::{cell::RefCell, rc::Rc};
 
 use crate::components::{PanelNode, render_panel};
 
 pub const STALE_DATA: &str = "JSX page data changed; refresh before handling input";
 
 pub struct JsxPage {
-    runtime: JsxRuntime,
+    runtime: Rc<RefCell<JsxRuntime>>,
+    runtime_scope: Option<String>,
     manifest: PluginManifest,
     surface_id: Option<String>,
     data: Option<String>,
@@ -23,12 +25,41 @@ impl JsxPage {
         surface_id: Option<String>,
     ) -> Result<Self, String> {
         Ok(Self {
-            runtime: JsxRuntime::new(source, None)?,
+            runtime: Rc::new(RefCell::new(JsxRuntime::new(source, None)?)),
+            runtime_scope: None,
             manifest,
             surface_id,
             data: None,
             node: None,
         })
+    }
+
+    pub fn new_with_shared_runtime(
+        source: &str,
+        manifest: PluginManifest,
+        surface_id: Option<String>,
+        runtime_scope: &str,
+        runtime: Rc<RefCell<JsxRuntime>>,
+    ) -> Result<Self, String> {
+        runtime
+            .borrow_mut()
+            .register_surface_entry(runtime_scope, source)?;
+        Ok(Self {
+            runtime,
+            runtime_scope: Some(runtime_scope.to_owned()),
+            manifest,
+            surface_id,
+            data: None,
+            node: None,
+        })
+    }
+
+    fn select_runtime(&self) -> Result<std::cell::RefMut<'_, JsxRuntime>, String> {
+        let mut runtime = self.runtime.borrow_mut();
+        if let Some(scope) = &self.runtime_scope {
+            runtime.select_surface(scope)?;
+        }
+        Ok(runtime)
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -54,20 +85,24 @@ impl JsxPage {
         self.data = None;
         self.node = None;
         let serialized = serde_json::to_string(data).map_err(|error| error.to_string())?;
-        self.runtime.set_data(&serialized)?;
-        self.runtime.render(expression, parse)
+        let mut runtime = self.select_runtime()?;
+        runtime.set_data(&serialized)?;
+        runtime.render(expression, parse)
     }
 
     pub fn render(&mut self, data: &Value) -> Result<&PanelNode, String> {
         let serialized = serde_json::to_string(data).map_err(|error| error.to_string())?;
         if self.data.as_deref() != Some(&serialized) {
-            self.runtime.set_data(&serialized)?;
-            let node = render_panel(
-                &mut self.runtime,
-                &self.manifest,
-                self.surface_id.as_deref(),
-                "__nickelRender()",
-            )?;
+            let node = {
+                let mut runtime = self.select_runtime()?;
+                runtime.set_data(&serialized)?;
+                render_panel(
+                    &mut runtime,
+                    &self.manifest,
+                    self.surface_id.as_deref(),
+                    "__nickelRender()",
+                )?
+            };
             self.node = Some(node);
             self.data = Some(serialized);
         }
@@ -87,14 +122,15 @@ impl JsxPage {
         if self.data.as_deref() != Some(&serialized) {
             return Err(STALE_DATA.into());
         }
+        let mut runtime = self.select_runtime()?;
         let rendered = render_panel(
-            &mut self.runtime,
+            &mut runtime,
             &self.manifest,
             self.surface_id.as_deref(),
             &format!("__nickelDispatch({action},{value})"),
         );
         let effects = if rendered.is_ok() {
-            self.runtime.take_effects()
+            runtime.take_effects()
         } else {
             Ok(Vec::new())
         };
@@ -106,10 +142,21 @@ impl JsxPage {
             }
             Ok((node, validate(effects.remove(0))?))
         })();
-        self.runtime.finish_event(result.is_ok())?;
+        runtime.finish_event(result.is_ok())?;
+        drop(runtime);
         let (node, output) = result?;
         self.node = Some(node);
         Ok(output)
+    }
+}
+
+impl Drop for JsxPage {
+    fn drop(&mut self) {
+        if let Some(scope) = &self.runtime_scope {
+            if let Ok(mut runtime) = self.runtime.try_borrow_mut() {
+                let _ = runtime.drop_surface(scope);
+            }
+        }
     }
 }
 
@@ -162,6 +209,80 @@ mod tests {
             panic!("expected ordinary div root")
         };
         assert!(matches!(&children[0], PanelNode::Button { label, .. } if label == "1"));
+    }
+
+    #[test]
+    fn scoped_pages_share_one_runtime_without_mixing_handlers_or_state() {
+        let manifest =
+            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
+                .unwrap();
+        let runtime = Rc::new(RefCell::new(JsxRuntime::new("", None).unwrap()));
+        let source = |name: &str| {
+            format!(
+                "function App() {{ const [count, setCount] = useState(0); return h(Button, {{id: 'advance', onClick: () => {{ setCount(count + 1); nickel.request({{type: '{name}'}}); }} }}, '{name} ' + count); }}"
+            )
+        };
+        let mut first = JsxPage::new_with_shared_runtime(
+            &source("first"),
+            manifest.clone(),
+            None,
+            "first",
+            runtime.clone(),
+        )
+        .unwrap();
+        let mut second = JsxPage::new_with_shared_runtime(
+            &source("second"),
+            manifest,
+            None,
+            "second",
+            runtime.clone(),
+        )
+        .unwrap();
+        let data = json!({});
+        let first_action = first
+            .render(&data)
+            .unwrap()
+            .button_action("advance")
+            .unwrap();
+        let second_action = second
+            .render(&data)
+            .unwrap()
+            .button_action("advance")
+            .unwrap();
+        assert_eq!(
+            first
+                .dispatch(first_action, &Value::Null, &data, Ok::<_, String>)
+                .unwrap(),
+            json!({"type": "first"})
+        );
+        assert!(
+            matches!(first.node(), Some(PanelNode::Button { label, .. }) if label == "first 1")
+        );
+        assert!(
+            matches!(second.node(), Some(PanelNode::Button { label, .. }) if label == "second 0")
+        );
+        assert_eq!(
+            second
+                .dispatch(second_action, &Value::Null, &data, Ok::<_, String>)
+                .unwrap(),
+            json!({"type": "second"})
+        );
+        drop(first);
+        assert!(
+            !runtime
+                .borrow_mut()
+                .eval_json::<bool>("__surfaceApps.has('first')")
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .borrow_mut()
+                .eval_json::<bool>("__surfaceApps.has('second')")
+                .unwrap()
+        );
+        assert!(
+            matches!(second.node(), Some(PanelNode::Button { label, .. }) if label == "second 1")
+        );
     }
 
     #[test]

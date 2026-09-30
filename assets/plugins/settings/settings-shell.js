@@ -56,3 +56,4 @@ function App() {
                         data.subtitle ? h(Text, { className: "settings-subtitle", wrap: true }, data.subtitle) : null)),
                 h(Slot, { id: "settings-content", className: "settings-content" })) : null));
 }
+App.navigation = SettingsNavigation;

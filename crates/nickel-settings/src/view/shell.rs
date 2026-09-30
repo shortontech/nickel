@@ -60,7 +60,10 @@ impl SettingsApp {
         let content = self.settings_detail(self.page, width);
         let mut shell = self.settings_shell.borrow_mut();
         shell
-            .get_or_insert_with(crate::settings_shell::SettingsShell::new)
+            .get_or_insert_with(|| {
+                self.shared_settings_page(crate::settings_package::Script::Shell)
+                    .and_then(crate::settings_shell::SettingsShell::new_with_page)
+            })
             .as_mut()
             .map_err(|error| error.clone())?
             .render(&data, self.ui_theme(), content)

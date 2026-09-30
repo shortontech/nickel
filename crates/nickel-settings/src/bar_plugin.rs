@@ -56,13 +56,18 @@ impl BarPage {
         self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
     }
 
+    #[cfg(test)]
     pub(super) fn new() -> Result<Self, String> {
+        Self::new_with_page(JsxPage::new(
+            crate::settings_package::source(crate::settings_package::Script::Bar)?,
+            crate::settings_package::manifest()?.clone(),
+            None,
+        )?)
+    }
+
+    pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page: JsxPage::new(
-                crate::settings_package::source(crate::settings_package::Script::Bar)?,
-                crate::settings_package::manifest()?.clone(),
-                None,
-            )?,
+            page,
             stylesheet: StyleSheet::default(),
             last_theme: None,
         })

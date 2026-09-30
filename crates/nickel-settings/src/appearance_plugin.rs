@@ -33,13 +33,9 @@ pub(super) struct AppearancePage {
 }
 
 impl AppearancePage {
-    pub(super) fn new() -> Result<Self, String> {
+    pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page: JsxPage::new(
-                crate::settings_package::source(crate::settings_package::Script::Appearance)?,
-                crate::settings_package::manifest()?.clone(),
-                None,
-            )?,
+            page,
             stylesheet: StyleSheet::default(),
             last_theme: None,
             images: PluginImages::new(),

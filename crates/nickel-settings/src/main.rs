@@ -1089,9 +1089,15 @@ impl SettingsApp {
         if self.settings_jsx_enabled == enabled {
             return;
         }
-        let shell = if enabled {
-            match settings_shell::SettingsShell::new() {
-                Ok(shell) => Some(shell),
+        let (shell, new_runtime) = if enabled {
+            let prepared = nickel_plugin_runtime::JsxRuntime::new("", None).and_then(|runtime| {
+                let runtime = std::rc::Rc::new(std::cell::RefCell::new(runtime));
+                settings_package::shared_page(settings_package::Script::Shell, runtime.clone())
+                    .and_then(settings_shell::SettingsShell::new_with_page)
+                    .map(|shell| (shell, runtime))
+            });
+            match prepared {
+                Ok((shell, runtime)) => (Some(shell), Some(runtime)),
                 Err(error) => {
                     self.plugin_notice = Some(format!("Could not start Settings plugin: {error}"));
                     self.request_redraw();
@@ -1099,7 +1105,7 @@ impl SettingsApp {
                 }
             }
         } else {
-            None
+            (None, None)
         };
         if persist
             && self.persistence_enabled
@@ -1127,6 +1133,8 @@ impl SettingsApp {
         self.default_apps_page.get_mut().take();
         self.default_app_picker_page.get_mut().take();
         self.display_page.get_mut().take();
+        self.settings_page_runtime.get_mut().take();
+        *self.settings_page_runtime.get_mut() = new_runtime;
         self.default_app_picker_row.set(None);
         if self.custom_hue_open {
             self.pending_transient_dismissal = Some(OverlayId::new("appearance-custom-hue-dialog"));
@@ -3783,6 +3791,51 @@ mod tests {
                 .native_ui_bytes
                 .is_some_and(|bytes| bytes > 0)
         );
+    }
+
+    #[test]
+    fn settings_pages_share_runtime_and_retire_scopes_on_disable() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::About);
+        app.persistence_enabled = false;
+        let _ = app.build_ui(1100.0, 800.0);
+        let runtime = app.settings_page_runtime.borrow().as_ref().unwrap().clone();
+        assert!(
+            app.settings_shell
+                .borrow()
+                .as_ref()
+                .is_some_and(Result::is_ok),
+            "Settings shell failed: {:?}",
+            app.settings_shell
+                .borrow()
+                .as_ref()
+                .and_then(|shell| shell.as_ref().err())
+        );
+        assert!(
+            runtime
+                .borrow_mut()
+                .eval_json::<bool>("__surfaceApps.has('settings-shell') && __surfaceApps.has('settings-ordinary-pages')")
+                .unwrap()
+        );
+
+        app.page = SettingsPage::Plugins;
+        let _ = app.build_ui(1100.0, 800.0);
+        assert!(
+            runtime
+                .borrow_mut()
+                .eval_json::<bool>("__surfaceApps.has('settings-plugins')")
+                .unwrap()
+        );
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            app.settings_page_runtime.borrow().as_ref().unwrap()
+        ));
+
+        app.set_settings_jsx_enabled(false);
+        assert!(app.settings_page_runtime.borrow().is_none());
+        assert!(!runtime
+            .borrow_mut()
+            .eval_json::<bool>("__surfaceApps.has('settings-shell') || __surfaceApps.has('settings-ordinary-pages') || __surfaceApps.has('settings-plugins')")
+            .unwrap());
     }
 
     #[test]

@@ -210,6 +210,11 @@ mod tests {
                 "function App() { const [count, setCount] = useState(0); return h(Window, {}, h(Button, {onClick: () => setCount(count + 1)}, `Menu ${count}`)); }",
             )
             .unwrap();
+        assert!(
+            runtime
+                .register_surface_entry("menu", "function App() { return h(Window, {}); }")
+                .is_err()
+        );
         runtime.select_surface("menu").unwrap();
         let menu = runtime
             .render("__nickelRender()", |node| Ok(node.clone()))

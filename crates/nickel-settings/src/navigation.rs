@@ -268,7 +268,10 @@ impl SettingsApp {
         }
         self.settings_shell
             .borrow_mut()
-            .get_or_insert_with(crate::settings_shell::SettingsShell::new)
+            .get_or_insert_with(|| {
+                self.shared_settings_page(crate::settings_package::Script::Shell)
+                    .and_then(crate::settings_shell::SettingsShell::new_with_page)
+            })
             .as_mut()
             .map_err(|error| error.clone())
             .and_then(|shell| shell.navigation(&self.localizer))
