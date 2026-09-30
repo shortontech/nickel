@@ -38,7 +38,7 @@ function App() {
     const showNavigation = !pairing && (wide || !data.active);
     const showContent = pairing || wide || data.active;
     const request = (type, fields) => nickel.request(Object.assign({ type }, fields || {}));
-    return h(Window, { id: "main", title: pairing ? "Pair Bluetooth devices" : "Nickel Settings", width: "100%", height: "100%", className: "settings-window" },
+    return h(Window, { title: pairing ? "Pair Bluetooth devices" : "Nickel Settings", className: "settings-window" },
         h("div", { className: pairing ? "settings-shell pairing" : wide ? "settings-shell wide" : "settings-shell narrow" },
             showNavigation ? h("div", { className: wide ? "settings-sidebar" : "settings-sidebar narrow" },
                 h(TextField, { id: "settings-sidebar-search", className: "settings-search", value: data.query || "", placeholder: data.searchPlaceholder || "Search Settings", onChange: value => request("search", { value }) }),

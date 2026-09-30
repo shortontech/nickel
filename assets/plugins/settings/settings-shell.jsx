@@ -53,7 +53,7 @@ function App() {
     const showNavigation = !pairing && (wide || !data.active);
     const showContent = pairing || wide || data.active;
     const request = (type, fields) => nickel.request(Object.assign({type}, fields || {}));
-    return <Window id="main" title={pairing ? "Pair Bluetooth devices" : "Nickel Settings"} width="100%" height="100%"
+    return <Window title={pairing ? "Pair Bluetooth devices" : "Nickel Settings"}
         className="settings-window">
         <div className={pairing ? "settings-shell pairing" : wide ? "settings-shell wide" : "settings-shell narrow"}>
             {showNavigation ? <div className={wide ? "settings-sidebar" : "settings-sidebar narrow"}>
