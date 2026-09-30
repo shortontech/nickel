@@ -3561,23 +3561,29 @@ mod tests {
             )
             .unwrap();
             assert_eq!(application.images.len(), 2);
+            let shared = application.shared_composition_runtime().unwrap();
+            let asset = |id: &str| {
+                let host = shared.borrow();
+                let owner = host
+                    .participating_owners()
+                    .find(|owner| owner.id == id)
+                    .unwrap();
+                host.asset_key(owner, "shared").unwrap().to_owned()
+            };
+            let base_asset = asset("base-shell");
+            let child_asset = asset("derived-shell");
+            assert_ne!(base_asset, child_asset);
             assert_eq!(
-                application.images["composition.asset.1"]
-                    .1
-                    .get_pixel(0, 0)
-                    .0,
+                application.images[&base_asset].1.get_pixel(0, 0).0,
                 [255, 0, 0, 255]
             );
             assert_eq!(
-                application.images["composition.asset.2"]
-                    .1
-                    .get_pixel(0, 0)
-                    .0,
+                application.images[&child_asset].1.get_pixel(0, 0).0,
                 [0, 0, 255, 255]
             );
             let native_tree = format!("{:?}", application.node);
-            assert!(native_tree.contains("composition.asset.1"));
-            assert!(native_tree.contains("composition.asset.2"));
+            assert!(native_tree.contains(&base_asset));
+            assert!(native_tree.contains(&child_asset));
             let windows = serde_json::json!([{"id":"observed"}]);
             assert!(
                 application
