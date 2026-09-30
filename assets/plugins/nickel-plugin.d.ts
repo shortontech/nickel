@@ -382,7 +382,12 @@ interface NickelApplicationScaleSnapshot extends NickelAvailability {
 }
 interface NickelApplication { id:string;name:string;icon:string;pinned:boolean;pinOrder:number|null;recentOrder:number|null;kind:"place"|"application";launchClass:"graphical"|"terminal" }
 interface NickelApplicationSearch extends NickelAvailability {query:string;results:ReadonlyArray<Readonly<NickelApplication>>;total:number;truncated?:boolean;catalogTruncated?:boolean;nativeProjectsAvailable?:boolean;status?:string|null;pinSaveFailed?:boolean}
-interface NickelNativeWindow {id:string;applicationId:string|null;title:string;active:boolean;minimized:boolean;workspace:number|null;output:string|null;canActivate:boolean;canClose:boolean}
+interface NickelNativeWindow {
+    id:string;applicationId:string|null;title:string;active:boolean;
+    minimized:boolean;maximized:boolean;fullscreen:boolean;workspace:string|null;output:string|null;
+    canActivate:boolean;canClose:boolean;canMinimize:boolean;canMaximize:boolean;
+    canFullscreen:boolean;canSnap:boolean;canMoveToWorkspace:boolean;canMoveToOutput:boolean;
+}
 interface NickelTrayItem {id:string;title:string;icon:boolean}
 interface NickelNotification {id:number;appName:string;summary:string;body:string;actions:ReadonlyArray<Readonly<{key:string;label:string}>>}
 interface NickelNotificationSnapshot {notification:Readonly<NickelNotification>|null;history:ReadonlyArray<Readonly<NickelNotification>>}
@@ -395,10 +400,10 @@ interface NickelPreferences {
     idleDimSeconds:number|null;idleLockSeconds:number|null;idleSuspendSeconds:number|null;
 }
 interface NickelPreferencesSnapshot extends NickelWritable {configured?:Readonly<NickelPreferences>;applications?:ReadonlyArray<Readonly<{id:string}>>;iconThemes?:ReadonlyArray<string>;unavailableSelections?:Readonly<{preferredTerminal:boolean;preferredFileManager:boolean;fileIconTheme:boolean}>}
-interface NickelWifiNetwork {id:string;name:string;signalPercent:number;connected:boolean;saved:boolean;canConnect:boolean}
-interface NickelWifiSnapshot extends NickelAvailability {revision?:string;enabled?:boolean;connected?:boolean;networks:ReadonlyArray<Readonly<NickelWifiNetwork>>;operations:Readonly<{setEnabled?:boolean;connect?:boolean}>}
-interface NickelBluetoothDevice {id:string;name:string;paired:boolean;connected:boolean}
-interface NickelBluetoothSnapshot extends NickelAvailability {revision?:string;powered?:boolean;discovering?:boolean;devices:ReadonlyArray<Readonly<NickelBluetoothDevice>>;operations:Readonly<{setPowered?:boolean;setDiscovery?:boolean;connect?:boolean;disconnect?:boolean;pair?:boolean}>}
+interface NickelWifiNetwork {id:string;name:string;signalPercent:number;connected:boolean;saved:boolean;canConnect:boolean;canDisconnect:boolean}
+interface NickelWifiSnapshot extends NickelWritable {enabled:boolean;adaptersAvailable:boolean;adapters:ReadonlyArray<Readonly<{name:string;description:string;connected:boolean;speedBitsPerSecond:number|null}>>;networks:ReadonlyArray<Readonly<NickelWifiNetwork>>;operations:Readonly<{setEnabled?:boolean;connect?:boolean;disconnect?:boolean}>}
+interface NickelBluetoothDevice {id:string;name:string;paired:boolean;connected:boolean;batteryPercent:number|null;kind:string|null;signalDbm:number|null}
+interface NickelBluetoothSnapshot extends NickelWritable {adapterName:string;powered:boolean;discovering:boolean;devices:ReadonlyArray<Readonly<NickelBluetoothDevice>>;operations:Readonly<{setPowered?:boolean;setDiscovery?:boolean;connect?:boolean;disconnect?:boolean;pair?:boolean}>}
 interface NickelAssociationHandler {id:string;name:string;icon:string|null;source:string;protected:boolean}
 interface NickelAssociationTarget {id:string;family:string;capability:"directUserChange"|"nativeConsent"|"readOnly"|"unsupported";scope:"user"|"system"|"policy";detail:string;protected:boolean;effectiveHandlerId:string|null;canSetDefault:boolean;handlersTruncated:boolean;handlers:ReadonlyArray<Readonly<NickelAssociationHandler>>}
 interface NickelAssociationsSnapshot extends NickelWritable {targets:ReadonlyArray<Readonly<NickelAssociationTarget>>;truncated?:boolean;operations:Readonly<{setDefault?:boolean;openSystemSettings?:boolean}>;lastResult?:Readonly<{status:string;revision?:string;targetId?:string;handlerId?:string|null;detail?:string}>|null}
@@ -485,7 +490,17 @@ declare const nickel: Readonly<{
         close(id:string,revision:string):void;
         openMenu(id:string,revision:string):void;
     }>;
-    windows:Readonly<{list():ReadonlyArray<Readonly<NickelNativeWindow>>;activate(id:string):void;close(id:string):void}>;
+    windows:Readonly<{
+        list():ReadonlyArray<Readonly<NickelNativeWindow>>;
+        activate(id:string):void;close(id:string):void;
+        menu():Readonly<{targetId:string|null;generation?:string}>;
+        showMenu(id:string):void;dismissMenu(options?:Readonly<{restoreFocus?:boolean}>):void;
+        minimize(id:string):void;maximize(id:string):void;restore(id:string):void;
+        toggleMaximize(id:string):void;toggleFullscreen(id:string):void;
+        snapLeading(id:string):void;snapTrailing(id:string):void;
+        destinations():Readonly<{workspaces:ReadonlyArray<Readonly<{id:string;name:string}>>;outputs:ReadonlyArray<string>}>;
+        moveToWorkspace(id:string,workspace:string):void;moveToOutput(id:string,output:string):void;
+    }>;
     /** Requires applications-read; launch requires applications-launch; pin operations require applications-pin. */
     applications:Readonly<{list():ReadonlyArray<Readonly<NickelApplication>>;search(query:string):void;searchResults():NickelApplicationSearch;launch(id:string):void;togglePin(id:string):void;movePin(id:string,direction:-1|1):void;retryPinSave():void}>;
     /** Requires audio-read; native controls require audio-control. */
@@ -499,17 +514,21 @@ declare const nickel: Readonly<{
     workspaces:Readonly<{get():NickelWorkspaceSnapshot;switch(id:string):void;create():void;remove(id:string):void}>;
     /** Check operations before toggling native show-desktop; requires desktop-control. */
     desktop:Readonly<{get():NickelAvailability & {operations:Readonly<{toggleShowDesktop?:boolean}>};toggleShowDesktop():void}>;
-    /** Requires projects-menu-show. */
+    /** Requires run-command. */
     run:Readonly<{get():Readonly<{available:boolean;revision?:string;status:string|null}>;execute(command:string,expectedRevision?:string):void}>;
+    /** Requires projects-menu-show. */
     projects:Readonly<{show():void;toggle():void}>;
     /** Requires on-screen-keyboard-show. */
-    keyboard:Readonly<{toggle():void}>;
+    keyboard:Readonly<{
+        get():Readonly<{available:boolean;generation:number;recipientAvailable:boolean;height?:number;dockTop?:boolean;rows:ReadonlyArray<ReadonlyArray<Readonly<{id:string;label:string;enabled:boolean;quarters:number}>>>;operations:Readonly<{press?:boolean;hide?:boolean;toggleDock?:boolean;holdModifiers?:boolean;resize?:boolean}>}>;
+        toggle():void;press(id:string):void;hide():void;toggleDock():void;holdModifiers():void;resize(delta:-32|32):void;
+    }>;
     /** Native wall-clock snapshot updates each minute. Format its values in JSX. */
     clock:Readonly<{get():Readonly<NickelClockSnapshot>}>;
     /** Requires preferences-read; set requires preferences-control. Unavailable choices are preserved until explicitly changed. */
     preferences:Readonly<{get():NickelPreferencesSnapshot;set(patch:Partial<NickelPreferences>):void}>;
     /** Requires network-read; controls require network-control and an available operation. */
-    wifi:Readonly<{get():NickelWifiSnapshot;listNetworks():ReadonlyArray<Readonly<NickelWifiNetwork>>;setEnabled(enabled:boolean):void;connect(id:string):void}>;
+    wifi:Readonly<{get():NickelWifiSnapshot;listNetworks():ReadonlyArray<Readonly<NickelWifiNetwork>>;setEnabled(enabled:boolean):void;connect(id:string):void;disconnect(id:string):void}>;
     /** Requires bluetooth-read; controls require bluetooth-control and an available operation. */
     bluetooth:Readonly<{get():NickelBluetoothSnapshot;listDevices():ReadonlyArray<Readonly<NickelBluetoothDevice>>;setPowered(powered:boolean):void;setDiscovery(discovering:boolean):void;connect(id:string):void;disconnect(id:string):void;pair(id:string):void}>;
     /** Requires associations-read; controls require associations-control and explicit current revision. */
@@ -532,23 +551,7 @@ declare const nickel: Readonly<{
     shortcuts: Readonly<{
         get(): Readonly<{available: boolean; editable: false; reason?: string; globalAvailable?: boolean; globalReason?: string | null; shortcuts: ReadonlyArray<Readonly<{id: string; action: string; keys: string; scope: string; available: boolean}>>}>;
     }>;
-    /** Copied native feature snapshot; controls require features-control and capture its current revision. */
-    wifi: Readonly<{
-        get():Readonly<{available:boolean;writable?:boolean;reason?:string;revision?:string;enabled:boolean;adaptersAvailable:boolean;adapters:ReadonlyArray<{name:string;description:string;connected:boolean;speedBitsPerSecond:number|null}>;networks:ReadonlyArray<{id:string;name:string;signalPercent:number;connected:boolean;saved:boolean;canConnect:boolean;canDisconnect:boolean}>;operations:Readonly<Record<string,boolean>>}>;
-        listNetworks():ReadonlyArray<{id:string;name:string;signalPercent:number;connected:boolean;saved:boolean;canConnect:boolean;canDisconnect:boolean}>;
-        setEnabled(value:boolean):void;
-        connect(id:string):void;
-        disconnect(id:string):void;
-    }>;
-    bluetooth: Readonly<{
-        get():Readonly<{available:boolean;writable?:boolean;reason?:string;revision?:string;adapterName:string;powered:boolean;discovering:boolean;devices:ReadonlyArray<{id:string;name:string;paired:boolean;connected:boolean;batteryPercent:number|null;kind:string|null;signalDbm:number|null}>;operations:Readonly<Record<string,boolean>>}>;
-        listDevices():ReadonlyArray<{id:string;name:string;paired:boolean;connected:boolean;batteryPercent:number|null;kind:string|null;signalDbm:number|null}>;
-        setPowered(value:boolean):void;
-        setDiscovery(value:boolean):void;
-        connect(id:string):void;
-        disconnect(id:string):void;
-        pair(id:string):void;
-    }>;
+    /** Copied native feature snapshot; controls require features-control and its current revision. */
     features: Readonly<{
         get(): Readonly<{available: boolean; revision?: string; reason?: string; operations: Readonly<{setKeyboardMode?: boolean; setCodexEnabled?: boolean; retryCodex?: boolean}>; keyboard: Readonly<{mode?: "automatic" | "enabled" | "disabled"; generation?: number; environmentOverride?: boolean; runtimeAvailable?: boolean; enabled?: boolean | null; touchscreenPresent?: boolean | null}>; codex: Readonly<{configuredEnabled?: boolean; requestedEnabled?: boolean; generation?: number; acknowledgedGeneration?: number; state?: string; policy?: string; support?: string; installation?: string; health?: string; source?: string; diagnostic?: string | null; disableConfirmationRequired?: boolean; runtimeCountersAvailable?: boolean; activeWindows?: number | null; backgroundWorkers?: number | null; subscriptions?: number | null; warmSurfaces?: number | null; cacheEntries?: number | null}>; lastResult?: Readonly<{status: string; detail: string}> | null}>;
         setKeyboardMode(mode: "automatic" | "enabled" | "disabled"): void;
