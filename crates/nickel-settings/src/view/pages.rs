@@ -1,26 +1,8 @@
 use super::*;
 use nickel_ui::{
     Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
-    Grid, Layer, NavigationScope, Point, RadioGroup, RadioOption, Row, SettingsListCard, Text,
-    Track,
+    Grid, Layer, NavigationScope, Point, RadioGroup, RadioOption, Row, Text, Track,
 };
-
-fn bluetooth_kind_icon(kind: &str) -> Option<String> {
-    let icon = match kind {
-        "audio-card" | "audio-headphones" | "audio-headset" => "🎧",
-        "input-keyboard" => "⌨",
-        "input-mouse" => "🖱",
-        "input-gaming" => "🎮",
-        "phone" => "📱",
-        "computer" => "💻",
-        _ => return None,
-    };
-    Some(icon.to_owned())
-}
-
-fn bluetooth_signal_label(signal_dbm: i16) -> String {
-    format!("{signal_dbm} dBm")
-}
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
     let available = state.capability.support == FeatureSupport::Supported
@@ -1231,10 +1213,9 @@ impl SettingsApp {
     }
 
     pub(super) fn bluetooth_components(&self) -> AnyView<SettingsMessage> {
-        if self.settings_jsx_enabled {
+        let rendered = if self.settings_jsx_enabled {
             let data = crate::bluetooth_plugin::projection(self);
-            let rendered = self
-                .bluetooth_page
+            self.bluetooth_page
                 .borrow_mut()
                 .get_or_insert_with(|| {
                     self.shared_settings_page(crate::settings_package::Script::Bluetooth)
@@ -1242,241 +1223,20 @@ impl SettingsApp {
                 })
                 .as_mut()
                 .map_err(|error| error.clone())
-                .and_then(|page| page.render(&data, self.ui_theme()));
-            if let Ok(view) = rendered {
-                return view;
-            }
-        }
-        self.native_bluetooth_components()
-    }
-
-    fn native_bluetooth_components(&self) -> AnyView<SettingsMessage> {
-        let palette = self.palette();
-        let theme = self.ui_theme();
-        let pairing = self.page == SettingsPage::BluetoothPair;
-        let operation_pending = self.bluetooth_operation_rx.is_some();
-        let device_list = self
-            .bluetooth
-            .devices
-            .iter()
-            .enumerate()
-            .filter(|(_, device)| {
-                if pairing {
-                    !device.paired && !device.connected
-                } else {
-                    device.paired || device.connected
-                }
-            })
-            .fold(SettingsListCard::new(theme), |list, (index, device)| {
-                let status = if device.connected {
-                    self.localizer.text("settings-bluetooth-connected")
-                } else if device.paired {
-                    self.localizer.text("settings-bluetooth-paired")
-                } else {
-                    self.localizer.text("settings-bluetooth-available")
-                };
-                let detail = if pairing {
-                    let kind = device.kind.as_deref().and_then(bluetooth_kind_icon);
-                    let signal = device.signal_dbm.map(bluetooth_signal_label);
-                    [kind, signal]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join(" · ")
-                } else {
-                    device
-                        .battery_percent
-                        .map(|percent| format!("{percent}%"))
-                        .unwrap_or_default()
-                };
-                let supporting = if detail.is_empty() {
-                    status
-                } else {
-                    format!("{status} · {detail}")
-                };
-                let available =
-                    self.bluetooth.available && self.bluetooth.powered && !operation_pending;
-                let action = if device.connected {
-                    self.localizer.text("settings-bluetooth-disconnect")
-                } else if !device.paired {
-                    self.localizer.text("settings-bluetooth-pair")
-                } else {
-                    self.localizer.text("settings-bluetooth-connect")
-                };
-                list.row(
-                    SettingsRow::new(theme, &device.name, supporting)
-                        .id(format!("bluetooth-device-{index}"))
-                        .trailing(
-                            Button::semantic(
-                                theme,
-                                SettingsMessage::BluetoothDevice(index),
-                                action,
-                                if available {
-                                    ButtonPresentation::Secondary
-                                } else {
-                                    ButtonPresentation::Disabled
-                                },
-                            )
-                            .id(format!("bluetooth-device-{index}-action")),
-                        ),
-                )
-            });
-
-        let adapter_status = if let Some(operation) = &self.bluetooth_operation {
-            match operation {
-                BluetoothOperation::SetPower(true) => {
-                    self.localizer.text("settings-bluetooth-powering-on")
-                }
-                BluetoothOperation::SetPower(false) => {
-                    self.localizer.text("settings-bluetooth-powering-off")
-                }
-                BluetoothOperation::SetDiscovery(true) => {
-                    self.localizer.text("settings-bluetooth-discovery-starting")
-                }
-                BluetoothOperation::SetDiscovery(false) => {
-                    self.localizer.text("settings-bluetooth-discovery-stopping")
-                }
-                BluetoothOperation::ToggleDevice(device) => {
-                    let name = self
-                        .bluetooth
-                        .devices
-                        .iter()
-                        .find(|candidate| candidate.id == *device)
-                        .map(|candidate| candidate.name.as_str())
-                        .unwrap_or("device");
-                    self.localizer
-                        .value("settings-bluetooth-device-updating", "device", name)
-                }
-            }
-        } else if let Some(error) = &self.bluetooth_status {
-            error.clone()
-        } else if !self.bluetooth.available {
-            self.localizer
-                .text("settings-bluetooth-service-unavailable")
-        } else if self.bluetooth.powered {
-            self.localizer.text("settings-bluetooth-on")
+                .and_then(|page| page.render(&data, self.ui_theme()))
         } else {
-            self.localizer.text("settings-bluetooth-off")
+            Err("Settings plugin is disabled".into())
         };
-        let discoverability = if pairing && self.bluetooth.discovering {
-            self.localizer.text("settings-bluetooth-discovery-stop")
-        } else if pairing {
-            self.localizer.text("settings-bluetooth-discovery-start")
-        } else {
-            self.localizer.text("settings-bluetooth-pair-devices")
-        };
-        let discovery_available =
-            self.bluetooth.available && self.bluetooth.powered && !operation_pending;
-        let discovery_button = Button::semantic(
-            self.ui_theme(),
-            if pairing {
-                SettingsMessage::BluetoothDiscovery
-            } else {
-                SettingsMessage::OpenBluetoothPairing
-            },
-            discoverability,
-            if discovery_available {
-                ButtonPresentation::Secondary
-            } else {
-                ButtonPresentation::Disabled
-            },
-        )
-        .width(150.0);
-        let visible_device_count = self
-            .bluetooth
-            .devices
-            .iter()
-            .filter(|device| {
-                if pairing {
-                    !device.paired && !device.connected
-                } else {
-                    device.paired || device.connected
-                }
-            })
-            .count();
-        let device_list = if visible_device_count == 0 {
+        rendered.unwrap_or_else(|error| {
             AnyView::new(
-                ui! { <Column><Text color={palette.muted}>{if self.bluetooth.available {
-                    self.localizer.text("settings-bluetooth-no-devices")
-                } else {
-                    self.localizer
-                        .text("settings-bluetooth-service-unavailable")
-                }}</Text></Column> },
+                SettingsCard::titled(self.ui_theme(), "Bluetooth settings are unavailable", error)
+                    .child(Button::semantic(
+                        self.ui_theme(),
+                        SettingsMessage::Navigate(SettingsPage::Plugins),
+                        "Manage plugins",
+                        ButtonPresentation::Primary,
+                    )),
             )
-        } else {
-            AnyView::new(device_list.id("bluetooth-devices"))
-        };
-        let bluetooth_switch_state = if !self.bluetooth.available || operation_pending {
-            if self.bluetooth.powered {
-                SwitchState::DisabledOn
-            } else {
-                SwitchState::DisabledOff
-            }
-        } else if self.bluetooth.powered {
-            SwitchState::On
-        } else {
-            SwitchState::Off
-        };
-        let bluetooth_label = self.localizer.text("settings-bluetooth-enabled");
-        let bluetooth_power = SettingsRow::new(
-            theme,
-            bluetooth_label.clone(),
-            if self.bluetooth.adapter_name.is_empty() {
-                self.localizer.text("settings-bluetooth-adapter-unnamed")
-            } else {
-                self.bluetooth.adapter_name.clone()
-            },
-        )
-        .trailing(
-            Switch::with_state(
-                bluetooth_switch_state,
-                (self.bluetooth.available && !operation_pending)
-                    .then_some(bluetooth_power_message as fn(bool) -> SettingsMessage),
-                theme,
-            )
-            .id("bluetooth-power")
-            .accessibility_label(bluetooth_label),
-        );
-        let content = if pairing {
-            AnyView::new(ui! {
-                <Column gap={12.0}>
-                    <Text scale={1.0} color={palette.muted}>{adapter_status}</Text>
-                    <Row height={36.0}>
-                        <Text color={palette.text} grow={1.0}>{self.localizer.text("settings-bluetooth-nearby-devices")}</Text>
-                        {discovery_button}
-                    </Row>
-                    {device_list}
-                </Column>
-            })
-        } else {
-            AnyView::new(ui! {
-                <Column gap={12.0}>
-                    {bluetooth_power}
-                    <Text scale={1.0} color={palette.muted}>{adapter_status}</Text>
-                    <Row height={36.0}>
-                        <Text width={390.0} color={palette.text}>{self.localizer.text("settings-bluetooth-devices")}</Text>
-                        {discovery_button}
-                    </Row>
-                    {device_list}
-                </Column>
-            })
-        };
-
-        let content_padding = if pairing {
-            Insets::all(0.0)
-        } else {
-            Insets {
-                top: 20.0,
-                right: 40.0,
-                bottom: 20.0,
-                left: 20.0,
-            }
-        };
-        AnyView::new(ui! {
-            <Column grow={1.0} padding={content_padding}>
-                <VerticalScroll id={"bluetooth-list"} on_scroll={SettingsMessage::BluetoothScroll}
-                    offset={0.0} theme={theme}>{content}</VerticalScroll>
-            </Column>
         })
     }
 

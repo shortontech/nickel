@@ -689,10 +689,6 @@ fn reduce_transparency_message(value: bool) -> SettingsMessage {
     SettingsMessage::SetReduceTransparency(value)
 }
 
-fn bluetooth_power_message(value: bool) -> SettingsMessage {
-    SettingsMessage::SetBluetoothPower(value)
-}
-
 fn sidebar_search_message(value: String) -> SettingsMessage {
     SettingsMessage::SidebarSearchChanged(value)
 }
@@ -3858,22 +3854,30 @@ mod tests {
     }
 
     #[test]
-    fn failed_bluetooth_jsx_keeps_native_power_and_pairing_controls_available() {
+    fn failed_bluetooth_jsx_offers_plugin_recovery_without_native_controls() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
         app.bluetooth.available = true;
         app.bluetooth.powered = true;
         *app.bluetooth_page.borrow_mut() = Some(Err("JSX failed".into()));
-        let host = UiHost::new(app, 850, 580);
-        assert_eq!(
+        let mut host = UiHost::new(app, 850, 580);
+        assert!(
             host.semantic_targets_for_message(&SettingsMessage::SetBluetoothPower(false))
-                .len(),
-            1
+                .is_empty()
         );
-        assert_eq!(
+        assert!(
             host.semantic_targets_for_message(&SettingsMessage::OpenBluetoothPairing)
-                .len(),
-            1
+                .is_empty()
         );
+        let recovery = host
+            .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
+            .into_iter()
+            .next()
+            .expect("Bluetooth recovery opens plugin management");
+        host.perform_semantic_action(
+            recovery.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(host.application().page, SettingsPage::Plugins);
     }
 
     #[test]

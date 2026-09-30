@@ -285,6 +285,64 @@ mod tests {
     use crate::BluetoothDevice;
 
     #[test]
+    fn shared_bluetooth_and_pairing_pages_render() {
+        fn save(host: &nickel_ui::UiHost<SettingsApp>, name: &str, width: u32, height: u32) {
+            let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(width, height, 1.0);
+            host.render_software(&mut renderer);
+            let image =
+                image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(width, height, |x, y| {
+                    let pixel = renderer.pixels()[(y * width + x) as usize];
+                    image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+                });
+            let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/nickel-ui-snapshots")
+                .join(name);
+            std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+            image.save(output).unwrap();
+        }
+
+        fn fixture(page: SettingsPage) -> SettingsApp {
+            let mut app = SettingsApp::with_initial_page(page);
+            app.bluetooth.available = true;
+            app.bluetooth.powered = true;
+            app.bluetooth.adapter_name = "Built-in Bluetooth".into();
+            app.bluetooth.devices = vec![
+                BluetoothDevice {
+                    id: "paired-headphones".into(),
+                    name: "Desk headphones".into(),
+                    paired: true,
+                    connected: true,
+                    battery_percent: Some(80),
+                    kind: Some("audio-headphones".into()),
+                    signal_dbm: Some(-30),
+                },
+                BluetoothDevice {
+                    id: "available-keyboard".into(),
+                    name: "Studio keyboard".into(),
+                    paired: false,
+                    connected: false,
+                    battery_percent: None,
+                    kind: Some("input-keyboard".into()),
+                    signal_dbm: Some(-42),
+                },
+            ];
+            app
+        }
+
+        for (page, label, width, height) in [
+            (SettingsPage::Bluetooth, "bluetooth", 850, 580),
+            (SettingsPage::BluetoothPair, "bluetooth-pair", 620, 520),
+        ] {
+            save(
+                &nickel_ui::UiHost::new(fixture(page), width, height),
+                &format!("settings-{label}-shared.png"),
+                width,
+                height,
+            );
+        }
+    }
+
+    #[test]
     fn bluetooth_jsx_actions_require_current_adapter_and_device_identity() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Bluetooth);
         app.bluetooth.available = true;

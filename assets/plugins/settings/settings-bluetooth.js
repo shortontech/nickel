@@ -20,7 +20,7 @@ function App() {
         h("div", { className: "bluetooth-card" },
             h(Text, { className: "bluetooth-title" }, data.devicesLabel),
             h("div", { className: "bluetooth-row" },
-                h(Text, { className: "bluetooth-detail" }, data.discoveryLabel),
+                h("div", { className: "bluetooth-row-spacer" }),
                 data.discoveryEditable
                     ? h(Button, { id: "bluetooth-discovery-action", className: "bluetooth-action", onClick: () => request(data.pairing ? 'discovery' : 'open-pairing') }, data.discoveryLabel)
                     : h(Text, { className: "bluetooth-detail" }, data.discoveryLabel)),

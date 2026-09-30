@@ -58,7 +58,7 @@ native `ResponsiveNavigation` remains for controller presentation.
 `settings-bar.jsx` uses the shared `div`, `Text`, `Button`, and `Slider` components
 with `settings-bar.css`. Its callbacks request typed changes that the Settings
 host checks against the current topology projection before using the existing
-reducers. The native Bar view remains available if JSX fails. Regenerate its
+reducers. If JSX fails, Settings links to plugin management. Regenerate its
 shipped JS with the same build command, using `settings-bar.jsx` as the source.
 
 `settings-optional-features.jsx` uses shared components and
@@ -74,14 +74,14 @@ its shipped JS with the same command and its source filename.
 the Network page's Wi-Fi switch, discovered network list, and adapter summary.
 Requests carry the observed network index and
 profile; the host checks the current projection before invoking the existing
-platform path. The native Network view remains available if JSX fails. Build
+platform path. If JSX fails, Settings links to plugin management. Build
 it with the same command and its source filename.
 
 `settings-bluetooth.jsx` uses shared controls and `settings-bluetooth.css` for
 the Bluetooth and pairing page layout. Its
 requests carry the observed device index and ID; the host checks the current
 adapter state and device identity before using the existing Bluetooth handlers.
-The native Bluetooth view remains available if JSX fails. Build it with the
+If JSX fails, Settings links to plugin management. Build it with the
 same command and its source filename.
 
 `settings-appearance.jsx` and `settings-appearance.css` define the Appearance

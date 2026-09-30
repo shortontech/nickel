@@ -36,6 +36,10 @@ div.bluetooth-label {
     gap: 4px;
 }
 
+div.bluetooth-row-spacer {
+    flex-grow: 1;
+}
+
 text.bluetooth-title,
 text.bluetooth-name {
     height: auto;

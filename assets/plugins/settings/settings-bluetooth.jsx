@@ -27,7 +27,7 @@ function App() {
         <div className="bluetooth-card">
             <Text className="bluetooth-title">{data.devicesLabel}</Text>
             <div className="bluetooth-row">
-                <Text className="bluetooth-detail">{data.discoveryLabel}</Text>
+                <div className="bluetooth-row-spacer" />
                 {data.discoveryEditable
                     ? <Button id="bluetooth-discovery-action" className="bluetooth-action"
                         onClick={() => request(data.pairing ? 'discovery' : 'open-pairing')}>{data.discoveryLabel}</Button>
