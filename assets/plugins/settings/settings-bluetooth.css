@@ -55,15 +55,15 @@ text.bluetooth-detail {
     line-height: 18px;
 }
 
-switch.bluetooth-switch {
+switch-track.bluetooth-switch {
     background: @border@;
     border: 1px solid @border@;
     border-radius: 12px;
     color: @primary@;
 }
 
-switch.bluetooth-switch.on,
-switch.bluetooth-switch.disabled-on {
+switch-track.bluetooth-switch-track.on,
+switch-track.bluetooth-switch-track.disabled-on {
     background: @accent-soft@;
     border: 1px solid @accent@;
 }

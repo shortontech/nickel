@@ -71,16 +71,16 @@ text.plugin-detail-value.detail-value {
     width: 58%;
 }
 
-switch.plugin-switch {
+switch-track.plugin-switch {
     background: @border@;
     border: 1px solid @border@;
     border-radius: 12px;
     color: @primary@;
 }
 
-switch.plugin-switch.on,
-switch.plugin-switch.mixed,
-switch.plugin-switch.disabled-on {
+switch-track.plugin-switch-track.on,
+switch-track.plugin-switch-track.mixed,
+switch-track.plugin-switch-track.disabled-on {
     background: @accent-soft@;
     border: 1px solid @accent@;
 }

@@ -521,51 +521,71 @@ pub(super) fn emit_element<Message: Clone>(
             fill,
             thumb,
             thumb_border,
+            geometry,
         } => {
+            let [
+                track_height,
+                track_radius,
+                thumb_width,
+                thumb_height,
+                thumb_radius,
+                border_width,
+            ] = *geometry;
+            let thumb_width = thumb_width.min(rect.size.width);
+            let thumb_height = thumb_height.min(rect.size.height);
+            let border_width = border_width.min(thumb_width.min(thumb_height) / 2.0);
             let track_rect = Rect::new(
                 rect.origin.x,
-                rect.origin.y + rect.size.height / 2.0 - 3.0,
+                rect.origin.y + rect.size.height / 2.0 - track_height / 2.0,
                 rect.size.width,
-                6.0,
+                track_height,
             );
             let fill_width = track_rect.size.width * value.clamp(0.0, 1.0);
-            tree.commands.push(PaintCommand::RoundedFill {
-                rect: track_rect,
-                color: *track,
-                radius: 3.0,
-            });
-            tree.commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(
-                    track_rect.origin.x,
-                    track_rect.origin.y,
-                    fill_width,
-                    track_rect.size.height,
-                ),
-                color: *fill,
-                radius: 3.0,
-            });
+            if *track != 0 {
+                tree.commands.push(PaintCommand::RoundedFill {
+                    rect: track_rect,
+                    color: *track,
+                    radius: track_radius,
+                });
+            }
+            if *fill != 0 {
+                tree.commands.push(PaintCommand::RoundedFill {
+                    rect: Rect::new(
+                        track_rect.origin.x,
+                        track_rect.origin.y,
+                        fill_width,
+                        track_rect.size.height,
+                    ),
+                    color: *fill,
+                    radius: track_radius,
+                });
+            }
             let thumb_rect = Rect::new(
-                (track_rect.origin.x + fill_width - 10.0)
-                    .clamp(rect.origin.x, rect.origin.x + rect.size.width - 20.0),
-                rect.origin.y + rect.size.height / 2.0 - 10.0,
-                20.0,
-                20.0,
+                (track_rect.origin.x + fill_width - thumb_width / 2.0)
+                    .clamp(rect.origin.x, rect.origin.x + rect.size.width - thumb_width),
+                rect.origin.y + rect.size.height / 2.0 - thumb_height / 2.0,
+                thumb_width,
+                thumb_height,
             );
-            tree.commands.push(PaintCommand::RoundedFill {
-                rect: thumb_rect,
-                color: *thumb_border,
-                radius: 10.0,
-            });
-            tree.commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(
-                    thumb_rect.origin.x + 1.0,
-                    thumb_rect.origin.y + 1.0,
-                    thumb_rect.size.width - 2.0,
-                    thumb_rect.size.height - 2.0,
-                ),
-                color: *thumb,
-                radius: 9.0,
-            });
+            if *thumb_border != 0 {
+                tree.commands.push(PaintCommand::RoundedFill {
+                    rect: thumb_rect,
+                    color: *thumb_border,
+                    radius: thumb_radius,
+                });
+            }
+            if *thumb != 0 {
+                tree.commands.push(PaintCommand::RoundedFill {
+                    rect: Rect::new(
+                        thumb_rect.origin.x + border_width,
+                        thumb_rect.origin.y + border_width,
+                        thumb_rect.size.width - 2.0 * border_width,
+                        thumb_rect.size.height - 2.0 * border_width,
+                    ),
+                    color: *thumb,
+                    radius: (thumb_radius - border_width).max(0.0),
+                });
+            }
         }
         Kind::Dropdown {
             selected,

@@ -93,16 +93,16 @@ div.codex-control-row {
     justify-content: space-between;
 }
 
-switch.codex-switch {
+switch-track.codex-switch {
     background: @border@;
     border: 1px solid @border@;
     border-radius: 12px;
     color: @primary@;
 }
 
-switch.codex-switch.on,
-switch.codex-switch.mixed,
-switch.codex-switch.disabled-on {
+switch-track.codex-switch-track.on,
+switch-track.codex-switch-track.mixed,
+switch-track.codex-switch-track.disabled-on {
     background: @accent-soft@;
     border: 1px solid @accent@;
 }

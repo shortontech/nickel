@@ -1111,6 +1111,7 @@ enum Kind {
         fill: Color,
         thumb: Color,
         thumb_border: Color,
+        geometry: [f32; 6],
     },
     Dropdown {
         selected: String,

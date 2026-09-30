@@ -49,15 +49,15 @@ text.network-detail {
     line-height: 18px;
 }
 
-switch.network-switch {
+switch-track.network-switch {
     background: @border@;
     border: 1px solid @border@;
     border-radius: 12px;
     color: @primary@;
 }
 
-switch.network-switch.on,
-switch.network-switch.disabled-on {
+switch-track.network-switch-track.on,
+switch-track.network-switch-track.disabled-on {
     background: @accent-soft@;
     border: 1px solid @accent@;
 }

@@ -67,10 +67,10 @@ button.bar-option.selected {
 slider.bar-slider {
     width: 100%;
     height: 36px;
-    background: @border@;
-    color: @accent@;
-    border-color: @primary@;
 }
+slider-track.bar-slider { background: @border@; }
+slider-fill.bar-slider { background: @accent@; }
+slider-thumb.bar-slider { background: @primary@; border-color: @accent@; }
 
 div.bar-desktop {
     width: 64px;

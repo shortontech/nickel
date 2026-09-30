@@ -9,8 +9,8 @@ use nickel_core::plugins::{PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, DropGesture, Dropdown, Grid,
-    Image, ImageFit, Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Shortcut,
-    Slider, Spacer, Text, TextField as UiTextField, VerticalScroll,
+    Image, ImageFit, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Slider,
+    Spacer, Text, TextField as UiTextField, VerticalScroll,
 };
 use serde_json::Value;
 
@@ -2453,36 +2453,22 @@ impl PanelNode {
                 height,
             } => {
                 let style = inherited.resolve(stylesheet, "progress", None, class_name.as_deref());
-                let mut fill = Container::new()
-                    .width(*width as f32 * f32::from(*percent) / 100.0)
-                    .height(*height as f32);
-                if let Some(radius) = style.radius {
-                    fill = fill.radius(radius);
-                }
-                if let Some(color) = style.color {
-                    fill = if color == 0 {
-                        fill.clear_background()
-                    } else {
-                        fill.background(color)
-                    };
-                }
-                let mut track = Container::new()
-                    .semantic_role(SemanticRole::Status)
-                    .accessibility_label(format!("{percent}%"))
-                    .width(*width as f32)
-                    .height(*height as f32)
-                    .align_items(nickel_ui::Align::Start)
-                    .child(fill);
-                if let Some(radius) = style.radius {
-                    track = track.radius(radius);
-                }
-                if let Some(background) = style.background {
-                    track = if background == 0 {
-                        track.clear_background()
-                    } else {
-                        track.background(background)
-                    };
-                }
+                let parts = inherited.extend(&style);
+                let fill_style =
+                    parts.resolve(stylesheet, "progress-fill", None, class_name.as_deref());
+                let fill = apply_container_style(Container::new(), &fill_style)
+                    .width_length(Length::Percent(f32::from(*percent) / 100.0))
+                    .fill_height();
+                let track = apply_container_style(
+                    Container::new()
+                        .semantic_role(SemanticRole::Status)
+                        .accessibility_label(format!("{percent}%"))
+                        .width(*width as f32)
+                        .height(*height as f32)
+                        .align_items(nickel_ui::Align::Start)
+                        .child(fill),
+                    &style,
+                );
                 with_margin(AnyView::new(track), &style)
             }
             Self::Spacer { class_name } => {
@@ -2519,17 +2505,38 @@ impl PanelNode {
             } => {
                 let style =
                     inherited.resolve(stylesheet, "slider", Some(id), class_name.as_deref());
+                let parts = inherited.extend(&style);
+                let track_style =
+                    parts.resolve(stylesheet, "slider-track", Some(id), class_name.as_deref());
+                let fill_style =
+                    parts.resolve(stylesheet, "slider-fill", Some(id), class_name.as_deref());
+                let thumb_style =
+                    parts.resolve(stylesheet, "slider-thumb", Some(id), class_name.as_deref());
+                let pixels = |length: Option<Length>| match length {
+                    Some(Length::Px(value)) => value,
+                    _ => 0.0,
+                };
                 let slider = Slider::on_change_with(
                     Message::from_plugin_scoped(PluginMessage::Value(*action, *value), scope),
                     Message::value,
                     *value,
                 )
                 .id(id.clone())
+                .height_length(style.height.unwrap_or(Length::Px(0.0)))
+                .geometry(
+                    pixels(track_style.height),
+                    track_style.radius.unwrap_or(0.0),
+                    pixels(thumb_style.width),
+                    pixels(thumb_style.height),
+                    thumb_style.radius.unwrap_or(0.0),
+                    thumb_style.border_width.unwrap_or(0.0),
+                )
                 .colors(
-                    style.background.unwrap_or(0x354158),
-                    style.color.unwrap_or(0x68b8ff),
-                    style.border_color.unwrap_or(0xf4f7ff),
-                );
+                    track_style.background.unwrap_or(0),
+                    fill_style.background.unwrap_or(0),
+                    thumb_style.background.unwrap_or(0),
+                )
+                .thumb_border(thumb_style.border_color.unwrap_or(0));
                 let slider = match style.width {
                     Some(Length::Px(width)) => slider.width(width),
                     Some(Length::Percent(1.0)) => slider.grow(1.0),
@@ -2555,46 +2562,31 @@ impl PanelNode {
                 label,
                 action,
             } => {
+                let state_classes = format!("{} {state}", class_name.as_deref().unwrap_or(""));
+                let class_name = Some(state_classes);
                 let style =
                     inherited.resolve(stylesheet, "switch", Some(id), class_name.as_deref());
                 let on = matches!(state.as_str(), "on" | "mixed" | "disabled-on");
                 let mixed = matches!(state.as_str(), "mixed" | "mixed-unavailable");
-                let track = Container::new()
-                    .width(42.0)
-                    .height(24.0)
-                    .radius(style.radius.unwrap_or(12.0))
-                    .border(
-                        style.border_color.unwrap_or(0xff646b76),
-                        style.border_width.unwrap_or(1.0),
-                    )
-                    .background(style.background.unwrap_or(if on {
-                        0xff456888
-                    } else {
-                        0xff414958
-                    }))
-                    .padding(Insets::all(3.0))
-                    .child(
-                        Row::new()
-                            .fill_width()
-                            .justify_content(if mixed {
-                                nickel_ui::Justify::Center
-                            } else if on {
-                                nickel_ui::Justify::End
-                            } else {
-                                nickel_ui::Justify::Start
-                            })
-                            .child(
-                                Container::new()
-                                    .width(18.0)
-                                    .height(18.0)
-                                    .radius(9.0)
-                                    .background(style.color.unwrap_or(0xfff4f6fa)),
-                            ),
-                    );
-                let mut control = Container::new()
+                let parts = inherited.extend(&style);
+                let track_style =
+                    parts.resolve(stylesheet, "switch-track", Some(id), class_name.as_deref());
+                let thumb_style =
+                    parts.resolve(stylesheet, "switch-thumb", Some(id), class_name.as_deref());
+                let track = apply_container_style(Container::new(), &track_style).child(
+                    Row::new()
+                        .fill_width()
+                        .justify_content(if mixed {
+                            nickel_ui::Justify::Center
+                        } else if on {
+                            nickel_ui::Justify::End
+                        } else {
+                            nickel_ui::Justify::Start
+                        })
+                        .child(apply_container_style(Container::new(), &thumb_style)),
+                );
+                let mut control = apply_container_style(Container::new(), &style)
                     .id(id.clone())
-                    .width(44.0)
-                    .height(44.0)
                     .semantic_role(SemanticRole::Switch)
                     .accessibility_label(label.clone())
                     .accessibility_state(match state.as_str() {
@@ -2603,8 +2595,6 @@ impl PanelNode {
                         "mixed-unavailable" => "mixed unavailable",
                         other => other,
                     })
-                    .align_items(nickel_ui::Align::Center)
-                    .justify_content(nickel_ui::Justify::Center)
                     .child(track);
                 if let Some(action) = action {
                     control = control.message(Message::from_plugin_scoped(
@@ -2658,41 +2648,44 @@ impl PanelNode {
                 label,
                 action,
             } => {
+                let state_classes = format!(
+                    "{} {}",
+                    class_name.as_deref().unwrap_or(""),
+                    if *selected { "selected" } else { "unselected" }
+                );
+                let class_name = Some(state_classes);
                 let style =
                     inherited.resolve(stylesheet, "color-swatch", Some(id), class_name.as_deref());
+                let parts = inherited.extend(&style);
                 let inner = if let Some(color) = color {
-                    let mut fill = Container::new().width(32.0).height(32.0).radius(16.0);
-                    fill = if *color == 0 {
+                    let fill_style = parts.resolve(
+                        stylesheet,
+                        "color-swatch-fill",
+                        Some(id),
+                        class_name.as_deref(),
+                    );
+                    let fill = apply_container_style(Container::new(), &fill_style);
+                    // The swatch color is semantic data, like an image source.
+                    AnyView::new(if *color == 0 {
                         fill.clear_background()
                     } else {
                         fill.background(*color)
-                    };
-                    AnyView::new(fill)
+                    })
                 } else {
+                    let label_style = parts.apply(parts.resolve(
+                        stylesheet,
+                        "color-swatch-label",
+                        Some(id),
+                        class_name.as_deref(),
+                    ));
                     AnyView::new(
                         Text::new("+")
-                            .font_size(24.0)
-                            .color(style.color.unwrap_or(0xff777777)),
+                            .font_size(label_style.font_size.unwrap_or(14.0))
+                            .color(label_style.color.unwrap_or(0)),
                     )
                 };
                 let control = Container::new()
                     .id(id.clone())
-                    .width(42.0)
-                    .height(42.0)
-                    .radius(21.0)
-                    .padding(Insets::all(4.0))
-                    .border(
-                        style.border_color.unwrap_or(if *selected {
-                            0xfff0f0f0
-                        } else {
-                            0xff777777
-                        }),
-                        style
-                            .border_width
-                            .unwrap_or(if *selected { 2.0 } else { 1.0 }),
-                    )
-                    .align_items(nickel_ui::Align::Center)
-                    .justify_content(nickel_ui::Justify::Center)
                     .semantic_role(if color.is_some() {
                         SemanticRole::Radio
                     } else {
@@ -3503,4 +3496,106 @@ fn child_text(children: &[Value]) -> Result<String, String> {
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod compound_css_tests {
+    use super::*;
+    use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
+
+    #[test]
+    fn slider_parts_compile_into_native_paint_geometry() {
+        let node = PanelNode::Slider {
+            id: "level".into(),
+            class_name: None,
+            value: 0.5,
+            label: "Level".into(),
+            action: 2,
+        };
+        let sheet = StyleSheet::compile(
+            "slider { width: 200px; height: 40px; }
+            slider-track { height: 8px; border-radius: 0px; background: #123456; }
+            slider-fill { background: #abcdef; }
+            slider-thumb { width: 16px; height: 24px; border-radius: 4px; background: #fedcba; }",
+        )
+        .unwrap();
+        let frame = UiFrame::layout(
+            Column::new()
+                .align_items(nickel_ui::Align::Start)
+                .child(node.view(&PluginImages::new(), &sheet)),
+            Rect::new(0.0, 0.0, 400.0, 100.0),
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command,
+            PaintCommand::RoundedFill { rect, color, radius } if *color == 0xfffedcba && rect.size.width == 16.0 && rect.size.height == 24.0 && *radius == 4.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command,
+            PaintCommand::RoundedFill { rect, color, .. } if *color == 0xffabcdef && rect.size.width == 100.0 && rect.size.height == 8.0)));
+    }
+
+    #[test]
+    fn stock_compound_controls_are_external_css() {
+        let sheet = StyleSheet::compile(include_str!(
+            "../../../assets/plugins/settings/settings-controls.css"
+        ))
+        .unwrap();
+        assert_eq!(
+            sheet.resolve("switch-thumb", None, None).width,
+            Some(Length::Px(18.0))
+        );
+        assert!(
+            sheet
+                .resolve("progress-fill", None, None)
+                .background
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn progress_css_sizes_track_and_percentage_fill() {
+        let node = PanelNode::Progress {
+            class_name: Some("custom".into()),
+            percent: 25,
+            width: 120,
+            height: 8,
+        };
+        let sheet = StyleSheet::compile(
+            "progress.custom { width: 200px; height: 20px; background: #123456; }
+             progress-fill.custom { background: #abcdef; border-radius: 2px; }",
+        )
+        .unwrap();
+        let frame = UiFrame::layout(
+            Column::new()
+                .align_items(nickel_ui::Align::Start)
+                .child(node.view(&PluginImages::new(), &sheet)),
+            Rect::new(0.0, 0.0, 400.0, 100.0),
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command,
+            PaintCommand::Fill { rect, color } if *color == 0xff123456 && rect.size.width == 200.0 && rect.size.height == 20.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command,
+            PaintCommand::RoundedFill { rect, color, radius } if *color == 0xffabcdef && rect.size.width == 50.0 && rect.size.height == 20.0 && *radius == 2.0)));
+    }
+
+    #[test]
+    fn switch_parts_inherit_custom_properties_and_paint_css_dimensions() {
+        let node = PanelNode::Switch {
+            id: "toggle".into(),
+            class_name: None,
+            state: "on".into(),
+            label: "Toggle".into(),
+            action: Some(7),
+        };
+        let sheet = StyleSheet::compile(
+            "switch { --part-color: #abcdef; width: 80px; height: 40px; }
+             switch-track { width: 70px; height: 30px; background: #123456; }
+             switch-thumb { width: 12px; height: 10px; background: var(--part-color); }",
+        )
+        .unwrap();
+        let frame = UiFrame::layout(
+            Column::new()
+                .align_items(nickel_ui::Align::Start)
+                .child(node.view(&PluginImages::new(), &sheet)),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command,
+            PaintCommand::Fill { rect, color } if *color == 0xffabcdef && rect.size.width == 12.0 && rect.size.height == 10.0)));
+    }
 }

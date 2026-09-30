@@ -3034,6 +3034,7 @@ impl<Message> Slider<Message> {
                 fill: 0x68b8ff,
                 thumb: 0xf4f7ff,
                 thumb_border: 0x8868b8ff,
+                geometry: [6.0, 3.0, 20.0, 20.0, 10.0, 1.0],
             },
             style: Style::default(),
             message: Some(message),
@@ -3085,6 +3086,36 @@ impl<Message> Slider<Message> {
         self
     }
 
+    /// Explicit native slider part geometry, supplied by a presentation compiler.
+    pub fn geometry(
+        mut self,
+        track_height: f32,
+        track_radius: f32,
+        thumb_width: f32,
+        thumb_height: f32,
+        thumb_radius: f32,
+        border_width: f32,
+    ) -> Self {
+        if let Kind::Slider { geometry, .. } = &mut self.0.kind {
+            *geometry = [
+                track_height,
+                track_radius,
+                thumb_width,
+                thumb_height,
+                thumb_radius,
+                border_width,
+            ]
+            .map(|value| {
+                if value.is_finite() {
+                    value.clamp(0.0, 4096.0)
+                } else {
+                    0.0
+                }
+            });
+        }
+        self
+    }
+
     pub fn thumb_border(mut self, color: Color) -> Self {
         if let Kind::Slider { thumb_border, .. } = &mut self.0.kind {
             *thumb_border = color;
@@ -3103,6 +3134,11 @@ impl<Message> Slider<Message> {
 
     pub fn width(mut self, width: f32) -> Self {
         self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.0.style.height = height;
         self
     }
 
