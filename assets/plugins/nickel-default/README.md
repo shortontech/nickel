@@ -40,6 +40,13 @@ renders `nickel.contributions("system.controls")`. Each entry exposes `id`,
 The native host resolves and invokes that component in its owning package
 context, retaining its callbacks and validating effects against its own grants.
 
+Public component data props cross package contexts as snapshots. Callable event
+props such as `onChange` return no value and invoke the original owner's
+handler through a native callback grant. Each effect uses the grant and identity
+of the code that produced it. Values needed during rendering are passed as data;
+Settings evaluates its value getter before invoking a replacement control.
+Components selected from the same package keep their local JavaScript values.
+
 ## Application search
 
 `nickel.applications.search(query)` requests native fuzzy search for the calling

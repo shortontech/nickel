@@ -22,6 +22,7 @@ pub struct JsxModuleGraph {
     public_exports: BTreeMap<String, (String, String)>,
     component_bridge: bool,
     contribution_catalog: serde_json::Value,
+    local_components: serde_json::Value,
 }
 
 impl JsxModuleGraph {
@@ -58,6 +59,7 @@ impl JsxModuleGraph {
             public_exports: BTreeMap::new(),
             component_bridge: false,
             contribution_catalog: serde_json::json!({}),
+            local_components: serde_json::json!({}),
         };
         graph.validate_reachable()?;
         Ok(graph)
@@ -65,8 +67,13 @@ impl JsxModuleGraph {
 
     /// Public component lookups become declarative host mount requests. The
     /// host resolves the contract outside JavaScript and invokes its owner.
-    pub(crate) fn with_component_bridge(mut self, contributions: serde_json::Value) -> Self {
+    pub(crate) fn with_component_bridge(
+        mut self,
+        contributions: serde_json::Value,
+        local: serde_json::Value,
+    ) -> Self {
         self.contribution_catalog = contributions;
+        self.local_components = local;
         self.component_bridge = true;
         self
     }
@@ -152,21 +159,45 @@ impl JsxModuleGraph {
                 "const __nickelContributionCatalog = {};\n",
                 self.contribution_catalog
             ));
+            output.push_str(&format!(
+                "const __nickelLocalComponents = {};\n",
+                self.local_components
+            ));
             output.push_str(r#"
 function __nickelComponentProxy(selection) {
+    const local = __nickelLocalComponents[selection.contract ? 'export:' + selection.contract : 'contribution:' + selection.contribution];
+    if (local) return __nickelPublicComponents.get(local);
     return function HostComponent(props) {
-        function check(value) {
-            if (typeof value === 'function' || typeof value === 'symbol')
-                throw TypeError('cross-package executable props require opaque callback transport');
+        function encode(value) {
+            if (typeof value === 'function') return {__callbackAction: __handlers.push(args => { value(...args); __effects.push({type:'__compositionCallbackBoundary'}); }) - 1};
+            if (typeof value === 'symbol') throw TypeError('cross-package symbol prop is unsupported');
+            if (Array.isArray(value)) return value.map(encode);
             if (value && typeof value === 'object') {
                 if (value.kind && Object.keys(value).some(key => key === 'action' || key.endsWith('Action')))
                     throw TypeError('cross-package rendered children require owned callback transport');
-                for (const item of Object.values(value)) check(item);
+                if (Object.keys(value).some(key => key.startsWith('__host') || key === '__callbackAction'))
+                    throw TypeError('reserved component transport prop');
+                return Object.fromEntries(Object.entries(value).map(([key,item]) => [key,encode(item)]));
             }
+            return value;
         }
-        check(props);
+        props = encode(props);
         return {kind:'__packageComponent', ...selection, props};
     };
+}
+function __nickelHydrateComponentProps(value) {
+    if (Array.isArray(value)) return value.map(__nickelHydrateComponentProps);
+    if (value && typeof value === 'object') {
+        if (Object.keys(value).length === 1 && Object.prototype.hasOwnProperty.call(value, '__hostCallback')) {
+            const callback = value.__hostCallback;
+            return (...args) => {
+                if (__pendingRender !== null) throw Error('component callbacks cannot run during render');
+                __effects.push({type:'__compositionCallback', callback, args});
+            };
+        }
+        return Object.fromEntries(Object.entries(value).map(([key,item]) => [key,__nickelHydrateComponentProps(item)]));
+    }
+    return value;
 }
 const __nickelCompositionClient = Object.freeze({...nickel, get data() { return nickel.data; },
     component(contract) {

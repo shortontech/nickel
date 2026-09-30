@@ -19,7 +19,7 @@ export function SettingControl(props) {
             field.description ? h(Text, { wrap: true }, field.description) : null,
             h(Control, { controlId: controlId + "/" + field.id, setting: { ...field,
                     providerPackage: setting.providerPackage,
-                    value: () => values[field.id] === undefined ? field.defaultValue : values[field.id],
+                    value: values[field.id] === undefined ? field.defaultValue : values[field.id],
                     onChange: next => change({ ...values, [field.id]: next }) } }))));
     }
     if (setting.type === "repeated") {
@@ -99,7 +99,10 @@ export function Settings() {
     const SettingsNavigation = nickel.component("shell.settings.navigation");
     const SettingControl = nickel.component("shell.settings.controls");
     const settings = readPluginSettings().settings;
-    const pages = readPluginSettingsPages().pages;
+    const pages = [...readPluginSettingsPages().pages, ...nickel.contributions("settings.pages").map(entry => ({
+            id: "contribution/" + entry.id, providerPackage: entry.provider, label: entry.id,
+            group: "Extensions", component: entry.component
+        }))];
     const entries = [...settings, ...pages];
     const navigation = nickel.data.navigation || {};
     const revision = String(navigation.revision || "");
@@ -121,7 +124,10 @@ export function Settings() {
         h("div", { className: "settings-shell wide" },
             h("div", { className: "settings-sidebar" },
                 h(ScrollView, { id: "settings-sidebar-scroll", height: 736 },
-                    h(SettingsNavigation, { groups: groups, activeId: active && active.providerPackage + "/" + active.id, onSelect: setActiveId }))),
+                    h(SettingsNavigation, { groups: groups.map(group => ({ ...group, entries: group.entries.map(entry => ({
+                                id: entry.id, providerPackage: entry.providerPackage, label: entry.label,
+                                description: entry.description, group: entry.group
+                            })) })), activeId: active && active.providerPackage + "/" + active.id, onSelect: setActiveId }))),
             h("div", { className: "settings-detail" },
                 h(Row, { className: "settings-heading" },
                     h(Column, null,
@@ -132,5 +138,5 @@ export function Settings() {
                     active && active.component && !ActivePage ? h(Text, null, "Settings page component is not resolved.") : null,
                     ActivePage ? h(ActivePage, null) : active && !active.component ? h(Column, { className: "settings-registered-control" },
                         h(Text, null, active.label),
-                        h(SettingControl, { setting: active })) : null))));
+                        h(SettingControl, { setting: { ...active, value: settingValue(active) } })) : null))));
 }

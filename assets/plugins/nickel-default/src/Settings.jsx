@@ -23,7 +23,7 @@ export function SettingControl(props) {
                 {field.description ? <Text wrap={true}>{field.description}</Text> : null}
                 <Control controlId={controlId + "/" + field.id} setting={{...field,
                     providerPackage:setting.providerPackage,
-                    value:() => values[field.id] === undefined ? field.defaultValue : values[field.id],
+                    value:values[field.id] === undefined ? field.defaultValue : values[field.id],
                     onChange:next => change({...values, [field.id]:next})}} />
             </Column>)}
         </Column>;
@@ -128,7 +128,10 @@ export function Settings() {
     const SettingsNavigation = nickel.component("shell.settings.navigation");
     const SettingControl = nickel.component("shell.settings.controls");
     const settings = readPluginSettings().settings;
-    const pages = readPluginSettingsPages().pages;
+    const pages = [...readPluginSettingsPages().pages, ...nickel.contributions("settings.pages").map(entry => ({
+        id:"contribution/" + entry.id, providerPackage:entry.provider, label:entry.id,
+        group:"Extensions", component:entry.component
+    }))];
     const entries = [...settings, ...pages];
     const navigation = nickel.data.navigation || {};
     const revision = String(navigation.revision || "");
@@ -152,7 +155,10 @@ export function Settings() {
         <div className="settings-shell wide">
             <div className="settings-sidebar">
                 <ScrollView id="settings-sidebar-scroll" height={736}>
-                    <SettingsNavigation groups={groups} activeId={active && active.providerPackage + "/" + active.id}
+                    <SettingsNavigation groups={groups.map(group => ({...group, entries:group.entries.map(entry => ({
+                        id:entry.id, providerPackage:entry.providerPackage, label:entry.label,
+                        description:entry.description, group:entry.group
+                    }))}))} activeId={active && active.providerPackage + "/" + active.id}
                         onSelect={setActiveId} />
                 </ScrollView>
             </div>
@@ -168,7 +174,7 @@ export function Settings() {
                     {active && active.component && !ActivePage ? <Text>Settings page component is not resolved.</Text> : null}
                     {ActivePage ? <ActivePage /> : active && !active.component ? <Column className="settings-registered-control">
                         <Text>{active.label}</Text>
-                        <SettingControl setting={active} />
+                        <SettingControl setting={{...active, value:settingValue(active)}} />
                     </Column> : null}
                 </ScrollView>
             </div>

@@ -80,6 +80,12 @@ struct ExpansionState {
     visited: std::collections::BTreeSet<String>,
 }
 
+struct CallbackGrant {
+    receiver: u64,
+    generation: u64,
+    source: ComponentEventHandle,
+}
+
 struct PackageRuntime {
     runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
     data: Value,
@@ -102,6 +108,9 @@ pub struct ShellCompositionRuntime {
     next_mount: u64,
     effects: Vec<OwnedComponentEffect>,
     nested_mounts: BTreeMap<(u64, String), ComponentMount>,
+    callbacks: BTreeMap<u64, CallbackGrant>,
+    next_callback: u64,
+    callback_depth: usize,
 }
 
 impl ShellCompositionRuntime {
@@ -136,6 +145,9 @@ impl ShellCompositionRuntime {
             next_mount: 0,
             effects: Vec::new(),
             nested_mounts: BTreeMap::new(),
+            callbacks: BTreeMap::new(),
+            next_callback: 0,
+            callback_depth: 0,
         };
         let contribution_catalog = host
             .resolution
@@ -198,6 +210,30 @@ impl ShellCompositionRuntime {
             }
             exports.extend(composition.exports.clone());
             exports.extend(composition.replaces.clone());
+            let mut local_components = host
+                .resolution
+                .exports
+                .iter()
+                .filter(|(_, entry)| entry.implemented_by == owner)
+                .map(|(contract, entry)| {
+                    (
+                        format!("export:{contract}"),
+                        Value::String(export_keys[&entry.implementation].clone()),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            for entry in host
+                .resolution
+                .contributions
+                .values()
+                .flatten()
+                .filter(|entry| entry.contributed_by == owner)
+            {
+                local_components.insert(
+                    format!("contribution:{}", Self::contribution_key(entry)),
+                    Value::String(export_keys[&entry.implementation].clone()),
+                );
+            }
             // Only local modules enter this context. Cross-package reuse is
             // mediated by Rust references below, never by copying foreign code.
             let graph = JsxModuleGraph::new(
@@ -216,7 +252,10 @@ impl ShellCompositionRuntime {
                     })),
             )?
             .with_public_exports(&exports)?
-            .with_component_bridge(Value::Object(contribution_catalog.clone()));
+            .with_component_bridge(
+                Value::Object(contribution_catalog.clone()),
+                Value::Object(local_components),
+            );
             let data = snapshots
                 .get(&owner)
                 .cloned()
@@ -237,7 +276,7 @@ impl ShellCompositionRuntime {
                     exports: export_keys,
                 },
             );
-            host.drain_effects(&owner)?;
+            host.drain_effects(&owner, 0, 0, false)?;
         }
         Ok(host)
     }
@@ -326,7 +365,7 @@ impl ShellCompositionRuntime {
         )
         .unwrap();
         package.runtime.borrow_mut().register_surface_entry(&surface(id), &format!(
-            "function App() {{ const {{children, ...props}} = nickel.data.__componentProps; return h(nickel.component({implementation}), props, ...(children ?? [])); }}"))?;
+            "function App() {{ const {{children, ...props}} = __nickelHydrateComponentProps(nickel.data.__componentProps); return h(nickel.component({implementation}), props, ...(children ?? [])); }}"))?;
         self.mounts.insert(
             id,
             MountState {
@@ -400,12 +439,16 @@ impl ShellCompositionRuntime {
         {
             return Err("foreign or stale component event".into());
         }
-        self.render_mount(handle.mount, Some((handle.action, value)), validate)
+        self.render_mount(
+            handle.mount,
+            Some(serde_json::json!([[handle.action, value]])),
+            validate,
+        )
     }
 
     /// Expand public component mount requests through their owning contexts.
-    /// Data props cross as bounded snapshots; executable props are rejected
-    /// explicitly until an opaque callback prop transport is available.
+    /// Data props cross as bounded snapshots. Void callable props are routed
+    /// through Rust-owned grants back to their originating surface/owner.
     pub fn render_expanded(
         &mut self,
         mount: &ComponentMount,
@@ -435,9 +478,18 @@ impl ShellCompositionRuntime {
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
         self.validate_mount(root)?;
-        self.dispatch(handle, value)?;
-        let props = self.mounts[&root.id].props.clone();
-        self.render_expanded(root, &props, validate)
+        let result = (|| {
+            self.dispatch(handle, value)?;
+            let props = self.mounts[&root.id].props.clone();
+            self.render_expanded(root, &props, validate)
+        })();
+        if result.is_err() {
+            let owners = self.packages.keys().cloned().collect::<Vec<_>>();
+            for owner in owners {
+                self.retire(&owner);
+            }
+        }
+        result
     }
 
     fn expand_rendered(
@@ -511,7 +563,9 @@ impl ShellCompositionRuntime {
                 mount
             };
             let props = node.get("props").ok_or("missing public component props")?;
-            let rendered = self.render(&mount, props)?;
+            self.callbacks.retain(|_, grant| grant.receiver != mount.id);
+            let props = self.transport_callback_props(props, source_events, &mount, depth)?;
+            let rendered = self.render(&mount, &props)?;
             return self.expand_node(&key, rendered.node, &rendered.events, expansion, depth + 1);
         }
         match &mut node {
@@ -563,6 +617,81 @@ impl ShellCompositionRuntime {
         Ok(node)
     }
 
+    fn transport_callback_props(
+        &mut self,
+        value: &Value,
+        source_events: &BTreeMap<u64, ComponentEventHandle>,
+        receiver: &ComponentMount,
+        depth: usize,
+    ) -> Result<Value, String> {
+        if depth > 64 {
+            return Err("component prop depth exceeds limit".into());
+        }
+        match value {
+            Value::Object(object) if object.contains_key("__callbackAction") => {
+                if object.len() != 1 {
+                    return Err("invalid callback prop".into());
+                }
+                let source = source_events
+                    .get(
+                        &object["__callbackAction"]
+                            .as_u64()
+                            .ok_or("invalid callback action")?,
+                    )
+                    .ok_or("unknown callback action")?
+                    .clone();
+                if self.callbacks.len() >= MAX_NODES {
+                    return Err("too many component callback props".into());
+                }
+                self.next_callback = self
+                    .next_callback
+                    .checked_add(1)
+                    .ok_or("callback identity exhausted")?;
+                let token = self.next_callback;
+                self.callbacks.insert(
+                    token,
+                    CallbackGrant {
+                        receiver: receiver.id,
+                        generation: self.mounts[&receiver.id]
+                            .generation
+                            .checked_add(1)
+                            .ok_or("component generation exhausted")?,
+                        source,
+                    },
+                );
+                Ok(serde_json::json!({"__hostCallback":token}))
+            }
+            Value::Object(object) => {
+                if object.keys().any(|key| key.starts_with("__host")) {
+                    return Err("forged callback prop".into());
+                }
+                object
+                    .iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            key.clone(),
+                            self.transport_callback_props(
+                                value,
+                                source_events,
+                                receiver,
+                                depth + 1,
+                            )?,
+                        ))
+                    })
+                    .collect::<Result<serde_json::Map<_, _>, String>>()
+                    .map(Value::Object)
+            }
+            Value::Array(values) => values
+                .iter()
+                .map(|value| {
+                    self.transport_callback_props(value, source_events, receiver, depth + 1)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array),
+            _ => Ok(value.clone()),
+        }
+    }
+
     /// Return the host-owned data projection for an exact, live package owner.
     pub fn snapshot(&self, owner: &PackageIdentity) -> Result<&Value, String> {
         self.packages
@@ -605,6 +734,8 @@ impl ShellCompositionRuntime {
             self.unmount(&child)?;
         }
         let state = self.mounts.remove(&mount.id).unwrap();
+        self.callbacks
+            .retain(|_, grant| grant.receiver != mount.id && grant.source.mount != mount.id);
         self.packages
             .get_mut(&state.reference.owner)
             .unwrap()
@@ -619,6 +750,9 @@ impl ShellCompositionRuntime {
         self.mounts
             .retain(|_, mount| &mount.reference.owner != owner);
         self.packages.remove(owner);
+        self.callbacks.retain(|_, grant| {
+            &grant.source.owner != owner && self.mounts.contains_key(&grant.receiver)
+        });
         self.nested_mounts
             .retain(|_, mount| self.mounts.contains_key(&mount.id));
         self.effects.retain(|effect| &effect.owner != owner);
@@ -638,11 +772,12 @@ impl ShellCompositionRuntime {
     fn render_mount(
         &mut self,
         id: u64,
-        event: Option<(u64, &Value)>,
+        event: Option<Value>,
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
         let state = &self.mounts[&id];
         let owner = state.reference.owner.clone();
+        let previous_generation = state.generation;
         let generation = state
             .generation
             .checked_add(1)
@@ -659,9 +794,9 @@ impl ShellCompositionRuntime {
             .ok_or("package snapshot must be an object")?;
         object.insert("__componentProps".into(), state.props.clone());
         runtime.set_data(&data.to_string())?;
-        let expression = event.map_or_else(
+        let expression = event.as_ref().map_or_else(
             || "__nickelRender()".into(),
-            |(action, value)| format!("__nickelDispatch({action},{value})"),
+            |events| format!("__nickelDispatchBatch({events})"),
         );
         let result = runtime.render(&expression, |value| {
             bounded_json(value)?;
@@ -685,14 +820,20 @@ impl ShellCompositionRuntime {
         let rendered = result?;
         drop(runtime);
         self.mounts.get_mut(&id).unwrap().generation = generation;
-        if let Err(error) = self.drain_effects(&owner) {
+        if let Err(error) = self.drain_effects(&owner, id, previous_generation, event.is_some()) {
             self.retire(&owner);
             return Err(error);
         }
         Ok(rendered)
     }
 
-    fn drain_effects(&mut self, owner: &PackageIdentity) -> Result<(), String> {
+    fn drain_effects(
+        &mut self,
+        owner: &PackageIdentity,
+        receiver: u64,
+        generation: u64,
+        from_event: bool,
+    ) -> Result<(), String> {
         let effects = self
             .packages
             .get_mut(owner)
@@ -720,14 +861,116 @@ impl ShellCompositionRuntime {
                 return Err("composition effect queue exceeds size limit".into());
             }
         }
-        for value in effects {
-            self.effects.push(OwnedComponentEffect {
-                runtime: self.id,
-                owner: owner.clone(),
-                value,
-            });
+        let mut invocations: BTreeMap<u64, (ComponentEventHandle, Vec<Value>)> = BTreeMap::new();
+        for value in &effects {
+            if value.get("type").and_then(Value::as_str) == Some("__compositionCallback") {
+                if !from_event {
+                    return Err("component callback invoked outside an event".into());
+                }
+                let token = value
+                    .get("callback")
+                    .and_then(Value::as_u64)
+                    .ok_or("invalid callback token")?;
+                let grant = self
+                    .callbacks
+                    .get(&token)
+                    .ok_or("stale component callback")?;
+                if grant.receiver != receiver || grant.generation != generation {
+                    return Err("foreign component callback".into());
+                }
+                let args = value
+                    .get("args")
+                    .filter(|args| args.is_array())
+                    .ok_or("invalid callback arguments")?;
+                let source = &grant.source;
+                let mount = self
+                    .mounts
+                    .get(&source.mount)
+                    .ok_or("retired callback owner")?;
+                if mount.generation != source.generation || mount.reference.owner != source.owner {
+                    return Err("stale callback owner".into());
+                }
+                let group = invocations
+                    .entry(source.mount)
+                    .or_insert_with(|| (source.clone(), Vec::new()));
+                group.1.push(serde_json::json!([source.action, args]));
+            }
         }
-        Ok(())
+        if effects.iter().any(|value| {
+            value.get("type").and_then(Value::as_str) == Some("__compositionCallbackBoundary")
+        }) && self.callback_depth == 0
+        {
+            return Err("unexpected component callback boundary".into());
+        }
+        if self.callback_depth >= 32 {
+            return Err("component callback cycle exceeds limit".into());
+        }
+        self.callback_depth += 1;
+        let result = (|| {
+            let mut produced = BTreeMap::new();
+            for (mount, (handle, events)) in invocations {
+                if self
+                    .mounts
+                    .get(&mount)
+                    .is_none_or(|state| state.generation != handle.generation)
+                {
+                    return Err("callback owner changed during invocation".into());
+                }
+                let count = events.len();
+                let start = self.effects.len();
+                self.render_mount(mount, Some(Value::Array(events)), |_| Ok(()))?;
+                let generated = self.effects.split_off(start);
+                let mut groups = Vec::new();
+                let mut current = Vec::new();
+                for effect in generated {
+                    if effect.value.get("type").and_then(Value::as_str)
+                        == Some("__compositionCallbackBoundary")
+                    {
+                        groups.push(std::mem::take(&mut current));
+                    } else {
+                        current.push(effect);
+                    }
+                }
+                if groups.len() != count {
+                    return Err("invalid component callback boundaries".into());
+                }
+                if let Some(last) = groups.last_mut() {
+                    last.extend(current);
+                }
+                produced.insert(mount, std::collections::VecDeque::from(groups));
+            }
+            for value in effects {
+                if value.get("type").and_then(Value::as_str) == Some("__compositionCallback") {
+                    let token = value["callback"].as_u64().unwrap();
+                    let source_mount = self.callbacks[&token].source.mount;
+                    self.effects.extend(
+                        produced
+                            .get_mut(&source_mount)
+                            .and_then(|groups| groups.pop_front())
+                            .ok_or("missing component callback effects")?,
+                    );
+                } else {
+                    self.effects.push(OwnedComponentEffect {
+                        runtime: self.id,
+                        owner: owner.clone(),
+                        value,
+                    });
+                }
+            }
+            if self.effects.len() > MAX_EFFECTS
+                || self
+                    .effects
+                    .iter()
+                    .map(|effect| effect.value.to_string().len())
+                    .sum::<usize>()
+                    > 4 * 1024 * 1024
+            {
+                return Err("composition callback effects exceed queue limit".into());
+            }
+            Ok(())
+        })();
+        self.callback_depth -= 1;
+        result
     }
 }
 
@@ -735,6 +978,7 @@ fn is_action(key: &str) -> bool {
     matches!(
         key,
         "action"
+            | "__callbackAction"
             | "contextAction"
             | "dragAction"
             | "dropAction"
@@ -917,10 +1161,10 @@ mod tests {
     }
 
     #[test]
-    fn executable_props_are_rejected_without_lossy_serialization() {
+    fn callable_props_route_to_the_original_owner_and_preserve_arguments() {
         let mut base = package(
             "base",
-            "export function Shell() { return h(nickel.component('shell.taskbar'), {onChange:()=>nickel.windows.activate('base')}); }\nexport function Taskbar() {}\nexport function QuickSettings() {}\nexport default Shell;",
+            "export function Shell() { const [value,setValue]=useState('initial'); return h(Column,null,h(Text,null,value),h(nickel.component('shell.taskbar'), {onChange:(value)=>{setValue(value);nickel.windows.activate(value);}})); }\nexport function Taskbar() {}\nexport function QuickSettings() {}\nexport default Shell;",
             None,
         );
         base.manifest
@@ -931,7 +1175,7 @@ mod tests {
             .insert("shell".into(), "./main.js#Shell".into());
         let child = package(
             "child",
-            "export function Taskbar() { return h(Text,null,'child'); }\nexport default Taskbar;",
+            "export function Taskbar(props) { return h(Button,{onClick:()=>{if (props.onChange) {props.onChange('first');nickel.windows.activate('middle');props.onChange('second');} else {nickel.request({type:'__compositionCallback',callback:props.token,args:['forged']});}}},'foreign control'); }\nexport default Taskbar;",
             Some("base"),
         );
         let mut host = ShellCompositionRuntime::new(
@@ -942,12 +1186,43 @@ mod tests {
         .unwrap();
         let reference = host.component("shell").unwrap();
         let mount = host.mount(&reference).unwrap();
-        let error = host
+        let tree = host
             .render_expanded(&mount, &serde_json::json!({}), |_| Ok(()))
-            .err()
             .unwrap();
-        assert!(error.contains("opaque callback transport"));
+        assert!(tree.node.to_string().contains("initial"));
+        assert_eq!(tree.events[&0].owner().id, "child");
+        let tree = host
+            .dispatch_expanded(&mount, &tree.events[&0], &Value::Null, |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("second"));
+        let effects = host.take_effects();
+        assert_eq!(effects.len(), 3);
+        assert_eq!(
+            effects
+                .iter()
+                .map(|effect| effect.owner().id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["base", "child", "base"]
+        );
+        assert_eq!(effects[0].value()["id"], "first");
+        assert_eq!(effects[1].value()["id"], "middle");
+        assert_eq!(effects[2].value()["id"], "second");
+        let token = *host.callbacks.keys().next().unwrap();
+        let foreign = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let foreign_tree = host
+            .render(&foreign, &serde_json::json!({"token":token}))
+            .unwrap();
+        assert!(
+            host.dispatch(&foreign_tree.events[&0], &Value::Null)
+                .err()
+                .unwrap()
+                .contains("foreign component callback")
+        );
         assert!(host.take_effects().is_empty());
+        host.unmount(&mount).unwrap();
+        assert!(host.callbacks.is_empty());
     }
 
     #[test]

@@ -3915,7 +3915,7 @@ mod tests {
         for granted in [true, false] {
             let base = package(
                 "base-shell",
-                "globalThis.origin = 'base';\nexport function Shell() { return h(Window, {id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'}, h(nickel.component('shell.taskbar'), null), nickel.contributions('taskbar.items').map(entry => h(entry.component, {key:entry.key}))); }\nexport function Taskbar() { return h(Button, {id:'base',onClick:()=>nickel.request('show-launcher')}, origin); }\nexport default Shell;",
+                "globalThis.origin = 'base';\nexport function Shell() { return h(Window, {id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'}, h(nickel.component('shell.taskbar'), {onChange:()=>nickel.request('show-launcher')}), nickel.contributions('taskbar.items').map(entry => h(entry.component, {key:entry.key}))); }\nexport function Taskbar() { return h(Button, {id:'base',onClick:()=>nickel.request('show-launcher')}, origin); }\nexport default Shell;",
                 None,
                 vec![
                     PluginCapability::LauncherShow,
@@ -3924,7 +3924,7 @@ mod tests {
             );
             let mut child = package(
                 "derived-shell",
-                "globalThis.origin = 'derived';\nexport function Taskbar() { const [count,setCount] = useState(0); return h(Button, {id:'replacement',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count); }\nexport function Widget() { return h(Button, {id:'contribution',onClick:()=>nickel.request('show-launcher')}, 'Owned contribution'); }\nexport default Taskbar;",
+                "globalThis.origin = 'derived';\nexport function Taskbar(props) { const [count,setCount] = useState(0); return h(Column,null,h(Button,{id:'callback-control',onClick:()=>props.onChange('changed')},'Callback'),h(Button, {id:'replacement',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count)); }\nexport function Widget() { return h(Button, {id:'contribution',onClick:()=>nickel.request('show-launcher')}, 'Owned contribution'); }\nexport default Taskbar;",
                 Some("base-shell"),
                 if granted {
                     vec![PluginCapability::LauncherShow]
@@ -3993,6 +3993,10 @@ mod tests {
                     .is_err()
             );
             assert!(application.button_message("base").is_none());
+            application.update(application.button_message("callback-control").unwrap());
+            assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
+            assert!(application.last_error().is_none());
+
             let event = application.button_message("replacement").unwrap();
             application.update(event);
             if granted {
