@@ -1838,59 +1838,68 @@ mod tests {
 
     #[test]
     fn audio_service_feedback_mounts_and_retires_an_ordinary_selected_surface() {
-        let mut coordinator = coordinator();
-        let outputs = [InternalOutput {
-            name: "test".into(),
-            x: 0,
-            y: 0,
-            width: 1280,
-            height: 800,
-            scale: 1.0,
-        }];
-        coordinator.set_outputs(&outputs);
-        assert!(!coordinator.plugin_surface_topology_changed());
-        let audio = |percent| {
-            crate::platform::SystemStatusUpdate::Audio(crate::platform::AudioStatus {
-                available: true,
-                volume_percent: percent,
-                muted: false,
-                devices: Vec::new(),
+        // The stock package evaluates its complete module graph; use the same
+        // stack budget as the other full-package runtime acceptance tests.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let mut coordinator = coordinator();
+                let outputs = [InternalOutput {
+                    name: "test".into(),
+                    x: 0,
+                    y: 0,
+                    width: 1280,
+                    height: 800,
+                    scale: 1.0,
+                }];
+                coordinator.set_outputs(&outputs);
+                assert!(!coordinator.plugin_surface_topology_changed());
+                let audio = |percent| {
+                    crate::platform::SystemStatusUpdate::Audio(crate::platform::AudioStatus {
+                        available: true,
+                        volume_percent: percent,
+                        muted: false,
+                        devices: Vec::new(),
+                    })
+                };
+                coordinator.apply_system_status_update(audio(20));
+                coordinator.apply_system_status_update(audio(40));
+                assert!(coordinator.plugin_surface_topology_changed());
+                coordinator.set_outputs(&outputs);
+                assert!(!coordinator.plugin_surface_topology_changed());
+                let surface = coordinator
+                    .surfaces()
+                    .iter()
+                    .find(|surface| {
+                        surface.plugin.as_ref().is_some_and(|key| {
+                            key.plugin_id == "nickel-default" && key.surface_id == "volume-osd"
+                        })
+                    })
+                    .expect("ordinary volume surface")
+                    .clone();
+                assert_eq!(surface.role, SurfaceRole::Panel);
+                assert!(coordinator.visible(surface.id));
+                assert!(!coordinator.scene(surface.id).unwrap().is_empty());
+                coordinator.apply_system_status_update(crate::platform::SystemStatusUpdate::Audio(
+                    crate::platform::AudioStatus {
+                        available: false,
+                        volume_percent: 0,
+                        muted: false,
+                        devices: Vec::new(),
+                    },
+                ));
+                assert!(coordinator.plugin_surface_topology_changed());
+                coordinator.set_outputs(&outputs);
+                assert!(
+                    coordinator
+                        .surfaces()
+                        .iter()
+                        .all(|current| current.id != surface.id)
+                );
             })
-        };
-        coordinator.apply_system_status_update(audio(20));
-        coordinator.apply_system_status_update(audio(40));
-        assert!(coordinator.plugin_surface_topology_changed());
-        coordinator.set_outputs(&outputs);
-        assert!(!coordinator.plugin_surface_topology_changed());
-        let surface = coordinator
-            .surfaces()
-            .iter()
-            .find(|surface| {
-                surface.plugin.as_ref().is_some_and(|key| {
-                    key.plugin_id == "nickel-default" && key.surface_id == "volume-osd"
-                })
-            })
-            .expect("ordinary volume surface")
-            .clone();
-        assert_eq!(surface.role, SurfaceRole::Panel);
-        assert!(coordinator.visible(surface.id));
-        assert!(!coordinator.scene(surface.id).unwrap().is_empty());
-        coordinator.apply_system_status_update(crate::platform::SystemStatusUpdate::Audio(
-            crate::platform::AudioStatus {
-                available: false,
-                volume_percent: 0,
-                muted: false,
-                devices: Vec::new(),
-            },
-        ));
-        assert!(coordinator.plugin_surface_topology_changed());
-        coordinator.set_outputs(&outputs);
-        assert!(
-            coordinator
-                .surfaces()
-                .iter()
-                .all(|current| current.id != surface.id)
-        );
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     fn coordinator() -> InternalShellCoordinator {
