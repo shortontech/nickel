@@ -105,7 +105,7 @@ function App() {
                 const selection = data.cards.find(item => item.connector === card.name);
                 const label = selection ? selection.name : (card.model || card.name);
                 return h(Box, { key: card.name, x: card.x, y: card.y, width: card.width, height: card.height, className: "display-card-box" },
-                    h(Button, { id: `display-card-${selection ? selection.index : card.name}`, className: card.primary ? 'display-card-button primary' : 'display-card-button', width: card.width, height: card.height, accessibilityLabel: `${label} display, ${card.name}`, onDrag: gesture => onDrag(card, gesture), onClick: () => selection && request('select-display', { index: selection.index, connector: card.name }) }, `${label}${card.primary ? ' · ' + data.cardPrimaryLabel : ''}${!card.enabled ? ' · ' + data.disabledLabel : ''}`));
+                    h(Button, { id: `display-card-${selection ? selection.index : card.name}`, className: card.primary ? 'display-card-button primary' : 'display-card-button', width: card.width, height: card.height, accessibilityLabel: `${label} display, ${card.name}`, state: card.name === selectedName ? 'selected' : 'not selected', onDrag: gesture => onDrag(card, gesture), onClick: () => selection && request('select-display', { index: selection.index, connector: card.name }) }, `${label}${card.primary ? ' · ' + data.cardPrimaryLabel : ''}${!card.enabled ? ' · ' + data.disabledLabel : ''}`));
             }))),
         h("div", { className: "display-selected" },
             h(Text, null, data.selectedName),

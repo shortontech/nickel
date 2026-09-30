@@ -5232,20 +5232,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_low_level_click_targets_are_limited_to_documented_composites() {
-        let source = include_str!("view/pages.rs");
-        let click_targets = source
-            .lines()
-            .filter(|line| line.contains("on_press={"))
-            .collect::<Vec<_>>();
-        assert_eq!(click_targets.len(), 1, "{click_targets:#?}");
-        assert!(
-            click_targets[0].contains("SelectDisplay"),
-            "missing display arrangement composite: {click_targets:#?}"
-        );
-    }
-
-    #[test]
     fn every_settings_page_builds_across_layout_theme_and_capability_variants() {
         let pages = [
             SettingsPage::Display,

@@ -99,6 +99,7 @@ function App() {
                             className={card.primary ? 'display-card-button primary' : 'display-card-button'}
                             width={card.width} height={card.height}
                             accessibilityLabel={`${label} display, ${card.name}`}
+                            state={card.name === selectedName ? 'selected' : 'not selected'}
                             onDrag={gesture => onDrag(card, gesture)}
                             onClick={() => selection && request('select-display', {index: selection.index, connector: card.name})}>
                             {`${label}${card.primary ? ' · ' + data.cardPrimaryLabel : ''}${!card.enabled ? ' · ' + data.disabledLabel : ''}`}
