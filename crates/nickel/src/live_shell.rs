@@ -702,6 +702,7 @@ pub struct LiveShell {
         String,
         std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
     >,
+    active_shell_package_id: String,
     package_runtimes: std::collections::BTreeMap<String, RetainedPackageRuntime>,
     package_settings_generation: u64,
     package_settings_values: nickel_plugin_runtime::settings::SettingsValueSnapshot,
@@ -1710,6 +1711,7 @@ impl LiveShell {
             plugin_registry,
             package_settings_registry: Default::default(),
             package_settings_runtimes: Default::default(),
+            active_shell_package_id: "nickel-default".into(),
             package_runtimes: Default::default(),
             package_settings_generation: 0,
             package_settings_values: Default::default(),
@@ -1900,6 +1902,16 @@ impl LiveShell {
                 if let Err(error) = shell.set_plugin_enabled(&id, true) {
                     tracing::warn!(plugin = %id, %error, "installed plugin could not start");
                 }
+            }
+        }
+        #[cfg(not(test))]
+        if !safe_mode
+            && let Some(selected) = plugin_activation.selected_shell()
+            && selected != "nickel-default"
+            && shell.package_runtimes.contains_key(selected)
+        {
+            if let Err(error) = shell.select_shell_package(selected) {
+                tracing::warn!(%error, "selected shell could not start");
             }
         }
         shell.maybe_publish_plugin_status();
@@ -3209,7 +3221,7 @@ impl LiveShell {
     }
 
     pub(crate) fn taskbar_surface_key(&self) -> Option<nickel_core::plugins::PluginSurfaceKey> {
-        let key = Self::default_shell_surface_key("taskbar");
+        let key = self.active_shell_surface_key("taskbar");
         self.plugin_surface_hosts.contains_key(&key).then_some(key)
     }
 
@@ -3220,16 +3232,145 @@ impl LiveShell {
         }
     }
 
+    fn active_shell_surface_key(&self, surface: &str) -> nickel_core::plugins::PluginSurfaceKey {
+        nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: self.active_shell_package_id.clone(),
+            surface_id: surface.into(),
+        }
+    }
+
+    pub(crate) fn is_shell_package(&self, id: &str) -> bool {
+        let mut current = Some(id.to_owned());
+        for _ in 0..nickel_core::package_composition::MAX_COMPOSITION_DEPTH {
+            let Some(id) = current else {
+                return false;
+            };
+            let Some(composition) = self
+                .plugin_registry
+                .get(&id)
+                .and_then(|entry| entry.manifest.composition.as_ref())
+            else {
+                return false;
+            };
+            if composition.exports.contains_key("shell") {
+                return true;
+            }
+            current = composition.extends.clone();
+        }
+        false
+    }
+
+    pub(crate) fn shell_package_selected(&self, id: &str) -> bool {
+        self.active_shell_package_id == id
+    }
+
+    pub fn select_shell_package(&mut self, id: &str) -> Result<bool, String> {
+        if !self.is_shell_package(id) {
+            return Err("package does not export a shell".into());
+        }
+        if self.active_shell_package_id == id && self.package_runtimes.contains_key(id) {
+            return Ok(false);
+        }
+        // Construct and validate the requested runtime before retiring the visible shell.
+        self.set_plugin_enabled(id, true)?;
+        if !self.package_runtimes.contains_key(id) {
+            return Err("shell runtime is unavailable".into());
+        }
+        let old = std::mem::replace(&mut self.active_shell_package_id, id.into());
+        let initial = self
+            .external_plugin_packages
+            .get(id)
+            .ok_or("shell package is unavailable")?
+            .manifest
+            .surfaces
+            .iter()
+            .filter(|surface| {
+                surface.initially_open
+                    && matches!(
+                        surface.kind,
+                        nickel_core::plugins::PluginSurfaceKind::Panel
+                            | nickel_core::plugins::PluginSurfaceKind::Dock
+                            | nickel_core::plugins::PluginSurfaceKind::Window
+                    )
+            })
+            .map(|surface| surface.id.clone())
+            .collect::<Vec<_>>();
+        let transition = (|| -> Result<(), String> {
+            for surface in initial {
+                self.show_plugin_window(id, &surface)?;
+            }
+            #[cfg(not(test))]
+            nickel_core::plugins::PluginActivationSettings::select_shell_default(id)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        if let Err(error) = transition {
+            self.plugin_surface_hosts
+                .retain(|key, _| key.plugin_id != id);
+            self.active_shell_package_id = old;
+            return Err(error);
+        }
+        if old != id {
+            for (key, (_, host)) in &self.plugin_surface_hosts {
+                if key.plugin_id == old
+                    && let Err(error) = host.application().retire_surface()
+                {
+                    tracing::warn!(plugin = old, %error, "old shell surface could not unmount");
+                }
+            }
+            self.plugin_surface_hosts
+                .retain(|key, _| key.plugin_id != old);
+            self.plugin_window_placement_overrides
+                .retain(|key, _| key.plugin_id != old);
+        }
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        Ok(true)
+    }
+
+    fn shell_surface_effect_owner(&self, owner: &str) -> String {
+        let mut current = Some(self.active_shell_package_id.clone());
+        for _ in 0..nickel_core::package_composition::MAX_COMPOSITION_DEPTH {
+            let Some(id) = current else {
+                break;
+            };
+            if id == owner {
+                return self.active_shell_package_id.clone();
+            }
+            current = self
+                .plugin_registry
+                .get(&id)
+                .and_then(|entry| entry.manifest.composition.as_ref())
+                .and_then(|composition| composition.extends.clone());
+        }
+        owner.into()
+    }
+
+    fn active_shell_declares(&self, surface: &str) -> bool {
+        self.package_runtimes
+            .contains_key(&self.active_shell_package_id)
+            && self
+                .external_plugin_packages
+                .get(&self.active_shell_package_id)
+                .is_some_and(|source| {
+                    source
+                        .manifest
+                        .surfaces
+                        .iter()
+                        .any(|declaration| declaration.id == surface)
+                })
+    }
+
     fn default_shell_surface_visible(&self, surface: &str) -> bool {
         self.plugin_surface_hosts
-            .contains_key(&Self::default_shell_surface_key(surface))
+            .contains_key(&self.active_shell_surface_key(surface))
     }
 
     fn set_default_shell_surface_visible(&mut self, surface: &str, visible: bool) -> bool {
         let result = if visible {
-            self.show_plugin_window("nickel-default", surface)
+            self.show_plugin_window(&self.active_shell_package_id.clone(), surface)
         } else {
-            self.close_plugin_window(&Self::default_shell_surface_key(surface))
+            self.close_plugin_window(&self.active_shell_surface_key(surface))
         };
         match result {
             Ok(changed) => changed,
@@ -3247,7 +3388,7 @@ impl LiveShell {
             self.run_host_ref()?;
             Some(crate::plugin_panel::run_surface_key())
         } else {
-            let key = Self::default_shell_surface_key("launcher");
+            let key = self.active_shell_surface_key("launcher");
             self.plugin_surface_hosts.contains_key(&key).then_some(key)
         }
     }
@@ -3296,9 +3437,7 @@ impl LiveShell {
         panels
     }
 
-    /// Active panel declarations for compositor-owned output surfaces. The
-    /// public package panel list excludes the bundled taskbar because its
-    /// activation is managed with the other first-party shell plugins.
+    /// Active ordinary package declarations for compositor-owned output surfaces.
     pub(crate) fn shell_panel_surfaces(
         &self,
     ) -> Vec<(
@@ -3890,14 +4029,23 @@ impl LiveShell {
             .capabilities
             .contains(&PluginCapability::PluginsRead)
             .then(|| {
-                crate::plugins_capabilities::snapshot(
+                let mut snapshot = crate::plugins_capabilities::snapshot(
                     &self.plugin_status_snapshot(),
                     manifest
                         .capabilities
                         .contains(&PluginCapability::PluginsControl)
                         && !self.locked,
                     self.plugins_results.get(plugin_id),
-                )
+                );
+                if let Some(plugins) = snapshot["plugins"].as_array_mut() {
+                    for plugin in plugins {
+                        let id = plugin["id"].as_str().unwrap_or("").to_owned();
+                        plugin["shell"] = serde_json::json!(self.is_shell_package(&id));
+                        plugin["selected"] = serde_json::json!(id == self.active_shell_package_id);
+                    }
+                }
+                snapshot["selectedShell"] = serde_json::json!(self.active_shell_package_id);
+                snapshot
             })
     }
 
@@ -4605,6 +4753,9 @@ impl LiveShell {
         id: &str,
         surface_id: &str,
     ) -> Result<bool, String> {
+        if self.is_shell_package(id) && !self.shell_package_selected(id) {
+            return Err("shell package is not selected".into());
+        }
         let entry = self
             .plugin_registry
             .get(id)
@@ -4624,7 +4775,9 @@ impl LiveShell {
                 surface.id == surface_id
                     && matches!(
                         surface.kind,
-                        nickel_core::plugins::PluginSurfaceKind::Window
+                        nickel_core::plugins::PluginSurfaceKind::Panel
+                            | nickel_core::plugins::PluginSurfaceKind::Dock
+                            | nickel_core::plugins::PluginSurfaceKind::Window
                             | nickel_core::plugins::PluginSurfaceKind::Dialog
                             | nickel_core::plugins::PluginSurfaceKind::Overlay
                     )
@@ -5665,13 +5818,13 @@ impl LiveShell {
                         })
                     {
                         descriptor.load().and_then(|package| {
-                            if package.manifest.composition.as_ref().is_some_and(|composition| composition.extends.is_some()) {
+                            if package.manifest.composition.as_ref().is_some_and(|composition| composition.extends.is_some() || composition.exports.contains_key("shell")) {
                                 let catalog = self.composition_catalog(id, &package)?;
                                 let first = surfaces.iter().find(|surface| !matches!(surface.kind, nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)).ok_or("composed package has no ordinary surface")?;
                                 let snapshots = self.composition_snapshots(&catalog, first);
                                 let shared = std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new(&catalog, id, &snapshots)?));
                                 let mut applications = Vec::new();
-                                for surface in surfaces.iter().filter(|surface| surface.initially_open && !matches!(surface.kind,
+                                for surface in surfaces.iter().filter(|surface| surface.initially_open && (!self.is_shell_package(id) || self.shell_package_selected(id)) && !matches!(surface.kind,
                                     nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)) {
                                     let snapshots = self.composition_snapshots(&catalog, surface);
                                     let application = crate::plugin_panel::PluginPanelApplication::from_composed_surface(&catalog, id, &snapshots, surface, Some(shared.clone()))?;
@@ -5705,7 +5858,7 @@ impl LiveShell {
                             let panels = surfaces
                                 .iter()
                                 .filter(|surface| {
-                                    surface.initially_open && !matches!(
+                                    surface.initially_open && (!self.is_shell_package(id) || self.shell_package_selected(id)) && !matches!(
                                         surface.kind,
                                         nickel_core::plugins::PluginSurfaceKind::Dialog
                                             | nickel_core::plugins::PluginSurfaceKind::Overlay
@@ -5823,6 +5976,9 @@ impl LiveShell {
             external_panel.map(|(runtime, panels)| {
                 self.package_runtimes.insert(id.to_owned(), runtime);
                 for (application, surface) in panels {
+                    if self.is_shell_package(id) && !self.shell_package_selected(id) {
+                        continue;
+                    }
                     let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
                     let key = nickel_core::plugins::PluginSurfaceKey {
                         plugin_id: id.to_owned(),
@@ -6853,7 +7009,9 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::ShowPluginSurface {
                     plugin_id,
                     surface_id,
-                } => match self.show_plugin_window(&plugin_id, &surface_id) {
+                } => match self
+                    .show_plugin_window(&self.shell_surface_effect_owner(&plugin_id), &surface_id)
+                {
                     Ok(shown) => changed |= shown,
                     Err(error) => {
                         tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin window request failed");
@@ -6864,7 +7022,7 @@ impl LiveShell {
                     surface_id,
                 } => {
                     let key = nickel_core::plugins::PluginSurfaceKey {
-                        plugin_id,
+                        plugin_id: self.shell_surface_effect_owner(&plugin_id),
                         surface_id,
                     };
                     match self.close_plugin_window(&key) {
@@ -6877,7 +7035,9 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::FocusPluginSurface {
                     plugin_id,
                     surface_id,
-                } => match self.focus_plugin_window(&plugin_id, &surface_id) {
+                } => match self
+                    .focus_plugin_window(&self.shell_surface_effect_owner(&plugin_id), &surface_id)
+                {
                     Ok(focused) => changed |= focused,
                     Err(error) => {
                         tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin surface focus request failed");
@@ -6890,7 +7050,7 @@ impl LiveShell {
                     offset_x,
                     offset_y,
                 } => match self.set_plugin_window_placement(
-                    &plugin_id,
+                    &self.shell_surface_effect_owner(&plugin_id),
                     &surface_id,
                     anchor,
                     offset_x,
@@ -7434,6 +7594,29 @@ impl LiveShell {
                             .request_effect(NotificationEffect::CloseHistory);
                         changed |= self.apply_notification_effects();
                     }
+                }
+                crate::plugin_panel::PluginEffect::ShellSelection { plugin_id, effect } => {
+                    let result = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| {
+                            entry.desired_enabled
+                                && entry.health == nickel_core::plugins::PluginHealth::Running
+                        })
+                        .and_then(|_| self.plugin_management(&plugin_id))
+                        .ok_or("shell selection grant is unavailable".to_owned())
+                        .and_then(|snapshot| effect.validate(&snapshot))
+                        .and_then(|()| self.select_shell_package(&effect.id));
+                    self.plugins_results.insert(
+                        plugin_id,
+                        match result {
+                            Ok(_) => {
+                                serde_json::json!({"status":"applied","selectedShell":effect.id})
+                            }
+                            Err(error) => serde_json::json!({"status":"rejected","detail":error}),
+                        },
+                    );
+                    changed = true;
                 }
                 crate::plugin_panel::PluginEffect::Plugins { plugin_id, effect } => {
                     let result = self
@@ -9826,7 +10009,7 @@ impl LiveShell {
     }
 
     pub(crate) fn can_show_launcher(&self) -> bool {
-        self.package_runtimes.contains_key("nickel-default")
+        self.active_shell_declares("launcher")
             || (self.run_visible && self.run_host_ref().is_some())
     }
 
@@ -11883,7 +12066,7 @@ impl LiveShell {
     }
 
     pub(crate) fn control_surface_available(&self) -> bool {
-        self.package_runtimes.contains_key("nickel-default")
+        self.active_shell_declares("quick-settings")
             || self.control_host.application().view_state().projection_only
     }
 

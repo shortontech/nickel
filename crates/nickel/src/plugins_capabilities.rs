@@ -142,3 +142,43 @@ mod tests {
         );
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellSelectionEffect {
+    pub id: String,
+    pub revision: u64,
+}
+impl ShellSelectionEffect {
+    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
+        let id = value["id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
+            .ok_or("invalid shell identity")?
+            .to_owned();
+        let revision = value["revision"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or("invalid plugin inventory revision")?;
+        Ok(Self { id, revision })
+    }
+    pub(crate) fn validate(&self, snapshot: &Value) -> Result<(), String> {
+        if snapshot["available"] != true || snapshot["writable"] != true {
+            return Err("shell selection is unavailable".into());
+        }
+        if snapshot["revision"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            != Some(self.revision)
+        {
+            return Err("plugin inventory is stale".into());
+        }
+        if !snapshot["plugins"].as_array().is_some_and(|plugins| {
+            plugins
+                .iter()
+                .any(|plugin| plugin["id"] == self.id && plugin["shell"] == true)
+        }) {
+            return Err("shell package is unavailable".into());
+        }
+        Ok(())
+    }
+}

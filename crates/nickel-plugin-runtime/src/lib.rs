@@ -324,6 +324,34 @@ mod tests {
     }
 
     #[test]
+    fn shell_selection_client_checks_declared_shell_and_inventory_revision() {
+        let mut runtime = super::JsxRuntime::new("", Some(r#"{"plugins":{"available":true,"writable":true,"revision":"8","plugins":[{"id":"theme","shell":true},{"id":"tool","shell":false}]}}"#)).unwrap();
+        runtime
+            .eval("nickel.plugins.selectShell('theme','8')")
+            .unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![serde_json::json!({"type":"plugins.selectShell","id":"theme","revision":"8"})]
+        );
+        assert!(
+            runtime
+                .eval("nickel.plugins.selectShell('tool','8')")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("nickel.plugins.selectShell('theme','7')")
+                .is_err()
+        );
+        let mut denied = super::JsxRuntime::new("", None).unwrap();
+        assert!(
+            denied
+                .eval("nickel.plugins.selectShell('theme','8')")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn plugins_clients_copy_inventory_and_emit_guarded_lifecycle_requests() {
         let mut runtime = super::JsxRuntime::new("", Some(r#"{"plugins":{"available":true,"writable":true,"revision":"9007199254740993","plugins":[{"id":"example","enabled":true,"memory":{"jsHeapBytes":null}}]}}"#)).unwrap();
         runtime.eval("nickel.plugins.list()[0].enabled=false; nickel.plugins.disable('example','9007199254740993');").unwrap();

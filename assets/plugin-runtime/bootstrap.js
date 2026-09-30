@@ -371,6 +371,14 @@ const nickel = Object.freeze({
         list() { return this.get().plugins; },
         enable(id, revision) { this.setEnabled(id, true, revision); },
         disable(id, revision) { this.setEnabled(id, false, revision); },
+        selectShell(id, revision) {
+            id = __nickelIdentity(id);
+            const snapshot = this.get();
+            const plugin = snapshot.plugins.find(plugin => plugin.id === id);
+            if (!snapshot.available || !snapshot.writable || !plugin || !plugin.shell) throw Error('shell selection is unavailable');
+            if (typeof revision !== 'string' || revision !== snapshot.revision) throw Error('plugin inventory is stale');
+            __effects.push({type:'plugins.selectShell',id,revision});
+        },
         setEnabled(id, enabled, revision) {
             id = __nickelIdentity(id);
             const snapshot = this.get();

@@ -288,7 +288,8 @@ fn stock_shell_package_handles_semantic_taskbar_input_and_global_surface_intents
             .plugin_panel_host_for(&taskbar)
             .unwrap()
             .application()
-            .shared_runtime();
+            .shared_composition_runtime()
+            .unwrap();
         shell.plugin_panel_scene(&taskbar, 1280, 56).unwrap();
         let button = shell
             .plugin_panel_host_for(&taskbar)
@@ -313,7 +314,8 @@ fn stock_shell_package_handles_semantic_taskbar_input_and_global_surface_intents
                 .plugin_panel_host_for(&launcher)
                 .unwrap()
                 .application()
-                .shared_runtime()
+                .shared_composition_runtime()
+                .unwrap()
         ));
         shell.global_shortcut(crate::platform::GlobalShortcut::HideLauncher);
         assert!(!shell.launcher_intent_visible());
@@ -334,7 +336,8 @@ fn stock_shell_package_handles_semantic_taskbar_input_and_global_surface_intents
                     .plugin_panel_host_for(&key)
                     .unwrap()
                     .application()
-                    .shared_runtime()
+                    .shared_composition_runtime()
+                    .unwrap()
             ));
         }
         shell.set_plugin_enabled("nickel-default", false).unwrap();
@@ -3675,5 +3678,89 @@ fn plugin_management_rechecks_grants_and_retires_disabled_package_resources() {
             effect: restore,
         }]);
         assert!(!shell.plugin_registry.get(&id).unwrap().desired_enabled);
+    });
+}
+
+#[test]
+fn inherited_shell_selection_hides_base_roots_and_honors_omitted_settings() {
+    with_package_runtime_stack(|| {
+        use nickel_core::plugins::{PluginPackage, PluginPackageSource, PluginSurfaceKey};
+        let package = PluginPackage::from_embedded(&[
+            ("plugin.json", br#"{"api_version":1,"id":"example-theme","name":"Theme","version":"1.0.0","entry":"main.js","composition":{"api_version":1,"id":"example-theme","version":"1.0.0","extends":"nickel-default","requires":{"nickel-default":"^0.2.0"},"replaces":{"shell":"./main.js#Shell"}},"surfaces":[{"id":"taskbar","kind":"panel","width":800,"height":42,"reserve_work_area":true},{"id":"launcher","kind":"window","width":400,"height":240,"initially_open":false}]}"#),
+            ("main.js", b"export function Shell(){const s=nickel.data.surface;return h(s.id==='taskbar'?FixedWindow:Window,{id:s.id,width:s.id==='taskbar'?800:400,height:s.id==='taskbar'?42:240,edge:s.id==='taskbar'?'bottom':undefined},h(Text,{},'Theme'));}\nexport default Shell;")
+        ]).unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell.external_plugin_packages.insert(
+            "example-theme".into(),
+            PluginPackageSource::embedded(package),
+        );
+        shell.set_plugin_enabled("example-theme", true).unwrap();
+        assert!(
+            !shell
+                .plugin_surface_hosts
+                .keys()
+                .any(|key| key.plugin_id == "example-theme")
+        );
+        let inventory = shell.plugin_management("nickel-default").unwrap();
+        let selection = crate::plugins_capabilities::ShellSelectionEffect::parse(
+            &serde_json::json!({"id":"example-theme","revision":inventory["revision"]}),
+        )
+        .unwrap();
+        assert!(shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::ShellSelection {
+                plugin_id: "nickel-default".into(),
+                effect: selection
+            }
+        ]));
+        assert_eq!(shell.plugins_results["nickel-default"]["status"], "applied");
+        assert!(shell.package_runtimes.contains_key("nickel-default"));
+        assert!(
+            !shell
+                .plugin_surface_hosts
+                .keys()
+                .any(|key| key.plugin_id == "nickel-default")
+        );
+        assert_eq!(
+            shell.taskbar_surface_key(),
+            Some(PluginSurfaceKey {
+                plugin_id: "example-theme".into(),
+                surface_id: "taskbar".into()
+            })
+        );
+        assert_eq!(shell.taskbar_reservation_height(), 42);
+        assert_eq!(
+            shell.shell_surface_effect_owner("nickel-default"),
+            "example-theme"
+        );
+        shell
+            .show_plugin_window("example-theme", "launcher")
+            .unwrap();
+        assert!(shell.default_shell_surface_visible("launcher"));
+        shell.global_shortcut(crate::platform::GlobalShortcut::OpenSettings);
+        assert!(!shell.default_shell_surface_visible("settings"));
+        assert!(
+            shell
+                .show_plugin_window("nickel-default", "settings")
+                .is_err()
+        );
+        shell.set_plugin_enabled("example-theme", false).unwrap();
+        assert!(!shell.can_show_launcher());
+        assert!(shell.select_shell_package("example-theme").unwrap());
+        assert_eq!(shell.taskbar_reservation_height(), 42);
+        assert!(shell.select_shell_package("nickel-default").unwrap());
+        assert_eq!(shell.taskbar_reservation_height(), 56);
+        let inventory = shell.plugin_management("nickel-default").unwrap();
+        let effect = crate::plugins_capabilities::ShellSelectionEffect::parse(
+            &serde_json::json!({"id":"example-theme","revision":inventory["revision"]}),
+        )
+        .unwrap();
+        assert!(effect.validate(&inventory).is_ok());
+        let mut stale = inventory.clone();
+        stale["revision"] = serde_json::json!("0");
+        assert!(effect.validate(&stale).is_err());
     });
 }

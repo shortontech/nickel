@@ -96,8 +96,8 @@ declared surface with one shared `JsxRuntime`. Additional surface construction
 does not initialize registration modules again. Live visual validation remains.
 Complete capability snapshots,
 remaining legacy request dispatch, and inherited shell composition still need
-integration. Derived shell selection and optional Settings ownership are the
-next composition integration step.
+integration. Active shell selection and optional Settings ownership use the ordinary
+package lifecycle described below.
 
 ## Public component lookup
 
@@ -197,3 +197,16 @@ surfaces/composition and existing package memory counters. Missing counters are
 `null`, not zero. Tracked peaks are estimates of tracked resources; per component
 and total process memory are unavailable. Enabling an installed package remains
 subject to its existing package validation and approval requirements.
+
+## Active shell selection
+
+`nickel.plugins.selectShell(id, revision)` selects a shell package from the public
+plugin inventory. Shell inventory entries expose `shell` and `selected`; the
+inventory also exposes `selectedShell`. Selection uses the ordinary package
+activation lifecycle and persists alongside package activation settings.
+
+Only the selected shell installs visible roots. Enabled base packages keep their
+runtime and Settings registrations for dependency authority. Global launcher,
+Quick Settings, and Settings requests use the selected package's declared
+surfaces; an omitted surface is unavailable. Authorized surface actions from
+inherited shell components address the selected package's corresponding surface.

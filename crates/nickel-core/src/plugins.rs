@@ -455,6 +455,8 @@ impl PluginPackage {
 #[serde(deny_unknown_fields)]
 pub struct PluginActivationSettings {
     version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_shell: Option<String>,
     enabled: BTreeMap<String, bool>,
     #[serde(default)]
     approved: BTreeMap<String, String>,
@@ -507,6 +509,7 @@ impl Default for PluginActivationSettings {
     fn default() -> Self {
         Self {
             version: 1,
+            selected_shell: None,
             enabled: BTreeMap::new(),
             approved: BTreeMap::new(),
         }
@@ -524,7 +527,11 @@ impl PluginActivationSettings {
                 .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
         let settings: Self = serde_json::from_slice(&bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if settings.version != 1
+        if settings
+            .selected_shell
+            .as_deref()
+            .is_some_and(|id| !valid_identifier(id))
+            || settings.version != 1
             || settings.enabled.len() > 64
             || settings.enabled.keys().any(|id| !valid_identifier(id))
             || settings.approved.len() > 64
@@ -539,6 +546,39 @@ impl PluginActivationSettings {
             ));
         }
         Ok(settings)
+    }
+
+    pub fn selected_shell(&self) -> Option<&str> {
+        self.selected_shell.as_deref()
+    }
+
+    pub fn select_shell_default(id: &str) -> io::Result<()> {
+        Self::select_shell(nickel_storage::config_path("plugin-activation.json")?, id)
+    }
+
+    pub fn select_shell(path: impl AsRef<Path>, id: &str) -> io::Result<()> {
+        if !valid_identifier(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid shell identity",
+            ));
+        }
+        let path = path.as_ref();
+        let _lock = nickel_storage::TransactionLock::try_acquire(path)?;
+        let mut settings = match Self::load(&path) {
+            Ok(settings) => settings,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
+            Err(error) => return Err(error),
+        };
+        settings.selected_shell = Some(id.into());
+        let bytes = serde_json::to_vec(&settings).map_err(io::Error::other)?;
+        if bytes.len() > MAX_ACTIVATION_SETTINGS_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "plugin activation settings exceed limit",
+            ));
+        }
+        nickel_storage::stage_write(&path, bytes)?.commit(|| Ok(()))
     }
 
     pub fn desired_enabled(&self, id: &str, bundled_default: bool) -> bool {
@@ -2367,5 +2407,21 @@ mod tests {
         assert_eq!(registry.get(&id).unwrap().memory, PluginMemory::default());
         assert_eq!(registry.get(&id).unwrap().tracked_peak_bytes, None);
         assert!(registry.mark_running(&id).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shell_selection_persistence_tests {
+    use super::PluginActivationSettings;
+    #[test]
+    fn selected_shell_round_trips_without_changing_package_enable_state() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("activation.json");
+        PluginActivationSettings::update(&path, "theme", true).unwrap();
+        PluginActivationSettings::select_shell(&path, "theme").unwrap();
+        let settings = PluginActivationSettings::load(&path).unwrap();
+        assert_eq!(settings.selected_shell(), Some("theme"));
+        assert!(settings.desired_enabled("theme", false));
+        assert!(PluginActivationSettings::select_shell(&path, "../invalid").is_err());
     }
 }
