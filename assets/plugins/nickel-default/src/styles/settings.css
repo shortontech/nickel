@@ -142,3 +142,12 @@ button.settings-option {
 button.settings-option.active {
     border-color: var(--nickel-accent);
 }
+
+column.settings-collection { gap: 12px; }
+column.settings-collection-row {
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--nickel-border);
+    border-radius: var(--nickel-radius-control);
+}
+column.settings-group, column.settings-group-field { gap: 8px; }

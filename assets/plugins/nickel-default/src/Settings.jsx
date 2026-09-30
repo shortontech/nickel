@@ -1,5 +1,6 @@
 // @jsx h
 import "./styles/settings.css";
+import { SettingsCollection } from "./SettingsCollection.js";
 
 function settingValue(setting) {
     const value = typeof setting.value === "function" ? setting.value() : setting.value;
@@ -25,6 +26,9 @@ export function SettingControl(props) {
                     onChange:next => change({...values, [field.id]:next})}} />
             </Column>)}
         </Column>;
+    }
+    if (setting.type === "repeated") {
+        return <SettingsCollection setting={setting} value={value} controlId={controlId} onChange={change} />;
     }
     if (setting.type === "switch") {
         return <Switch id={controlId} state={value ? "on" : "off"}

@@ -1,5 +1,6 @@
 // @jsx h
 import "./styles/settings.css";
+import { SettingsCollection } from "./SettingsCollection.js";
 function settingValue(setting) {
     const value = typeof setting.value === "function" ? setting.value() : setting.value;
     return value === undefined ? setting.defaultValue : value;
@@ -19,6 +20,9 @@ export function SettingControl(props) {
                     providerPackage: setting.providerPackage,
                     value: () => values[field.id] === undefined ? field.defaultValue : values[field.id],
                     onChange: next => change({ ...values, [field.id]: next }) } }))));
+    }
+    if (setting.type === "repeated") {
+        return h(SettingsCollection, { setting: setting, value: value, controlId: controlId, onChange: change });
     }
     if (setting.type === "switch") {
         return h(Switch, { id: controlId, state: value ? "on" : "off", accessibilityLabel: setting.label, onClick: () => change(!value) });
