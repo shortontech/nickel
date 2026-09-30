@@ -429,9 +429,10 @@
         );
 
         shell.apply_preview_action(crate::window_preview::PreviewAction::OpenMenu(WindowId(71)));
-        let first = shell.window_menu_anchor_x.expect("first card anchor");
+        let key=shell.active_shell_surface_key("window-menu");
+        let first=shell.plugin_surface_hosts.get(&key).unwrap().0.offset_x;
         shell.apply_preview_action(crate::window_preview::PreviewAction::OpenMenu(WindowId(72)));
-        let second = shell.window_menu_anchor_x.expect("second card anchor");
+        let second=shell.plugin_surface_hosts.get(&key).unwrap().0.offset_x;
 
         assert!(second > first + 200, "each card must retain its own anchor");
 
@@ -449,7 +450,8 @@
             None,
         );
         assert_eq!(shell.window_menu, Some(WindowId(71)));
-        assert_eq!(shell.window_menu_anchor_x, Some(first));
+        assert_eq!(shell.plugin_surface_hosts.get(&key).unwrap().0.offset_x,first);
+        assert!(shell.default_shell_surface_visible("window-menu"));
     }
 
     #[test]
@@ -475,25 +477,21 @@
     }
 
     #[test]
-    fn successful_window_command_consumes_and_dismisses_the_preview_menu() {
-        let mut shell = LiveShell::new().unwrap();
-        let window = OpenWindow {
-            id: WindowId(73),
-            application_id: Some(ApplicationId::new("org.example.Editor")),
-            active: true,
-            title: "Document".into(),
-            state: crate::model::WindowState::default(),
-        };
-        shell.windows = vec![window.clone()];
-        shell.preview_group = Some(0);
-        shell.window_menu = Some(window.id);
-        shell.window_menu_snapshot = Some(window.clone());
-
-        shell.apply_window_menu_action(crate::window_preview::MenuAction::Close(window.id));
-
+    fn public_jsx_window_close_consumes_and_dismisses_the_preview_menu() {
+        let host=Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
+        let mut shell=LiveShell::new_with_session_host(host.clone()).unwrap();
+        let window=OpenWindow{id:WindowId(73),application_id:Some(ApplicationId::new("org.example.Editor")),active:true,title:"Document".into(),state:Default::default()};
+        shell.windows=vec![window.clone()];
+        assert!(shell.open_window_menu_at(window.id.0,120,200));
+        let key=shell.active_shell_surface_key("window-menu");
+        shell.plugin_panel_scene(&key,320,400);
+        let target=shell.plugin_panel_host_ref(&key).unwrap().query_unique(&nickel_ui::SemanticSelector::RoleAndName{role:nickel_ui::SemanticRole::Button,name:"Close window".into()}).unwrap();
+        host.take_commands();
+        shell.plugin_surface_host_event(&key,HostEvent::Ui(UiEvent::AccessibilityActivate(target.id)),(320,400),None,None);
         assert!(shell.window_menu.is_none());
         assert!(shell.window_menu_snapshot.is_none());
-        assert!(shell.preview_group.is_none());
+        assert!(!shell.default_shell_surface_visible("window-menu"));
+        assert!(host.take_commands().iter().any(|command|matches!(command,crate::platform::ShellCommand::WindowAction{window:WindowId(73),action:crate::platform::WindowAction::Close})));
     }
 
     #[test]

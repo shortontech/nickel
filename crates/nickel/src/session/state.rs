@@ -7342,7 +7342,6 @@ impl NickelSession {
                 resized = shell.set_surface_size(surface.id, surface.size);
             }
             let transient_geometry = match surface.role {
-                crate::winit_shell::SurfaceRole::WindowContextMenu => shell.window_menu_geometry(),
                 crate::winit_shell::SurfaceRole::WindowPreview => shell.preview_geometry(),
                 _ => None,
             };

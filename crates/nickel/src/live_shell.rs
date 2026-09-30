@@ -132,10 +132,7 @@ use crate::{
     screenshot::ScreenshotTool,
     session_host::{SessionHost, default_session_host},
     window_preview::{
-        ApplicationMenuAction, ApplicationMenuTarget, MENU_WIDTH, MenuAction, PreviewAction,
-        application_menu_entries, menu_height, menu_height_for_rows, preview_dimensions,
-        semantic_theme_from_palette, task_switcher_dimensions, validated_application_close_targets,
-        window_menu_action_is_current, window_menu_max_rows,
+        PreviewAction, preview_dimensions, semantic_theme_from_palette, task_switcher_dimensions,
     },
     winit_shell::SurfaceRole,
 };
@@ -726,9 +723,6 @@ pub struct LiveShell {
     window_menu: Option<crate::model::WindowId>,
     window_menu_snapshot: Option<OpenWindow>,
     window_menu_generation: u64,
-    window_menu_anchor_x: Option<i32>,
-    window_menu_anchor_y: Option<i32>,
-    application_menu_target: Option<ApplicationMenuTarget>,
     notification_host: NotificationHost,
     panel_origin_x: i32,
     panel_origin_y: i32,
@@ -1451,9 +1445,6 @@ impl LiveShell {
             window_menu: None,
             window_menu_snapshot: None,
             window_menu_generation: 0,
-            window_menu_anchor_x: None,
-            window_menu_anchor_y: None,
-            application_menu_target: None,
             notification_host,
             panel_origin_x: 0,
             panel_origin_y: 0,
@@ -1702,16 +1693,6 @@ impl LiveShell {
                 self.close_window_preview();
                 changed = true;
             }
-            if self.application_menu_target.as_ref().is_some_and(|target| {
-                let canonical_item_available = target
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|application| self.launcher.is_pinned(application.as_str()));
-                !target.survives(&self.windows, canonical_item_available)
-            }) {
-                self.close_window_preview();
-                changed = true;
-            }
             if let Some(snapshot) = self.window_menu_snapshot.as_mut()
                 && let Some(window) = self.windows.iter().find(|window| window.id == snapshot.id)
                 && window != snapshot
@@ -1753,7 +1734,7 @@ impl LiveShell {
                     .find(|workspace| workspace.active)
                     .map(|workspace| workspace.id),
             );
-            if self.window_menu.is_none() && self.application_menu_target.is_none() {
+            if self.window_menu.is_none() {
                 self.close_window_preview();
             }
             redraw.extend([
@@ -6480,17 +6461,7 @@ impl LiveShell {
                                 .is_some_and(|application| application.as_str() == id)
                         })
                     {
-                        let dismiss_menu =
-                            self.application_menu_target.as_ref().is_some_and(|target| {
-                                target
-                                    .application_id
-                                    .as_ref()
-                                    .is_some_and(|application| application.as_str() == id)
-                            });
                         self.toggle_application_pin(&id);
-                        if dismiss_menu {
-                            self.dismiss_window_menu();
-                        }
                         changed = true;
                     }
                 }
@@ -7514,30 +7485,7 @@ impl LiveShell {
                         Some(preview_origin + card.origin.x.round() as i32)
                     })
                     .unwrap_or(self.panel_origin_x);
-                self.application_menu_target = None;
-
-                self.window_menu_generation = self.window_menu_generation.saturating_add(1);
-                self.window_menu = Some(window);
-                self.window_menu_snapshot = self
-                    .windows
-                    .iter()
-                    .find(|candidate| candidate.id == window)
-                    .cloned();
-
-                self.window_menu_anchor_x = Some(x);
-                self.window_menu_anchor_y = Some(self.panel_origin_y);
-                let _ = self.send_session_command(
-                    "show-context-menu",
-                    ShellCommand::ShowContextMenu {
-                        x,
-                        y: self.panel_origin_y,
-                        width: MENU_WIDTH as i32,
-                        height: self.window_context_menu_height(),
-                    },
-                );
-                #[cfg(target_os = "linux")]
-                let _ =
-                    self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
+                self.open_window_menu_at(window.0, x, self.panel_origin_y);
             }
         }
     }
@@ -7725,90 +7673,6 @@ impl LiveShell {
         }
     }
 
-    fn apply_window_menu_action(&mut self, action: MenuAction) {
-        if !matches!(
-            action,
-            MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back
-        ) {
-            let Some(captured) = self.window_menu_snapshot.as_ref() else {
-                return;
-            };
-            let Some(current) = self.windows.iter().find(|window| window.id == captured.id) else {
-                return;
-            };
-            if !window_menu_action_is_current(captured, current, &action) {
-                return;
-            }
-        }
-        let dispatched = match action {
-            MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => return,
-            MenuAction::Activate(window) => {
-                self.try_send_window_action(window, WindowAction::Activate)
-            }
-            MenuAction::Close(window) => self.try_send_window_action(window, WindowAction::Close),
-            MenuAction::MaximizeRestore(window) => {
-                self.try_send_window_action(window, WindowAction::Maximize)
-            }
-            MenuAction::Minimize(window) => {
-                self.try_send_window_action(window, WindowAction::Minimize)
-            }
-            MenuAction::FullscreenRestore(window) => {
-                self.try_send_window_action(window, WindowAction::Fullscreen)
-            }
-            MenuAction::SnapLeading(window) => {
-                self.try_send_window_action(window, WindowAction::SnapLeading)
-            }
-            MenuAction::SnapTrailing(window) => {
-                self.try_send_window_action(window, WindowAction::SnapTrailing)
-            }
-            MenuAction::MoveToWorkspace(window, workspace) => self.send_session_command(
-                "move-window-to-workspace",
-                ShellCommand::MoveWindowToWorkspace { window, workspace },
-            ),
-            MenuAction::MoveToDisplay(window, output) => self.send_session_command(
-                "move-window-to-display",
-                ShellCommand::MoveWindowToDisplay { window, output },
-            ),
-        };
-        if dispatched {
-            self.dismiss_window_menu();
-        }
-    }
-
-    fn apply_application_menu_action(&mut self, action: ApplicationMenuAction) {
-        match action {
-            ApplicationMenuAction::TogglePin(application) => {
-                let Some(target) = self.application_menu_target.as_ref() else {
-                    return;
-                };
-                let canonical_item_available = target
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-                if target.application_id.as_ref() != Some(&application)
-                    || !target.survives(&self.windows, canonical_item_available)
-                {
-                    return;
-                }
-                self.toggle_application_pin(application.as_str());
-                self.dismiss_window_menu();
-            }
-            ApplicationMenuAction::CloseAll => {
-                let Some(target) = self.application_menu_target.as_ref() else {
-                    return;
-                };
-                let targets = validated_application_close_targets(target, &self.windows);
-                let mut dispatched = false;
-                for window in targets {
-                    dispatched |= self.try_send_window_action(window, WindowAction::Close);
-                }
-                if dispatched {
-                    self.dismiss_window_menu();
-                }
-            }
-        }
-    }
-
     pub fn sync_transient_overlays(&mut self) {
         if let Some(group) = &self.task_switcher_group {
             let windows = group
@@ -7868,26 +7732,6 @@ impl LiveShell {
         self.panel_origin_x - (width / 2) as i32
     }
 
-    fn window_context_menu_height(&self) -> i32 {
-        if let Some(target) = &self.application_menu_target {
-            let pinned = target
-                .application_id
-                .as_ref()
-                .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-            let rows = application_menu_entries(target, pinned).len();
-            return menu_height_for_rows(rows) as i32;
-        }
-        let Some(window) = self.window_menu_snapshot.as_ref().or_else(|| {
-            self.window_menu
-                .and_then(|id| self.windows.iter().find(|candidate| candidate.id == id))
-        }) else {
-            return menu_height(&self.workspaces) as i32;
-        };
-        let outputs = self.window_feed.outputs();
-        let rows = window_menu_max_rows(window, &self.workspaces, &outputs);
-        menu_height_for_rows(rows) as i32
-    }
-
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
         let _ = self.try_send_window_action(window, action);
     }
@@ -7926,10 +7770,6 @@ impl LiveShell {
         self.preview_hovered = None;
         self.window_menu = None;
         self.window_menu_snapshot = None;
-        self.window_menu_anchor_x = None;
-        self.window_menu_anchor_y = None;
-
-        self.application_menu_target = None;
     }
 
     #[cfg(target_os = "linux")]
@@ -8000,14 +7840,9 @@ impl LiveShell {
         self.clear_preview_plugin_payload();
         self.window_menu = None;
         self.window_menu_snapshot = None;
-        self.window_menu_anchor_x = None;
-        self.window_menu_anchor_y = None;
-
-        self.application_menu_target = None;
 
         let _ =
             self.send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
-        let _ = self.send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
     }
 
     fn clear_preview_plugin_payload(&mut self) {
@@ -8018,7 +7853,7 @@ impl LiveShell {
 
     fn dismiss_window_menu(&mut self) {
         self.set_default_shell_surface_visible("window-menu", false);
-        let focused_menu = self.window_menu.is_some() || self.application_menu_target.is_some();
+        let focused_menu = self.window_menu.is_some();
         self.close_window_preview();
         if focused_menu {
             #[cfg(target_os = "linux")]
@@ -8880,7 +8715,7 @@ impl LiveShell {
                 std::mem::replace(&mut self.codex_project_menu_visible, false)
             }
             SurfaceRole::WindowContextMenu => {
-                let visible = self.window_menu.is_some() || self.application_menu_target.is_some();
+                let visible = self.window_menu.is_some();
                 if visible {
                     self.close_window_preview();
                 }
@@ -9013,17 +8848,6 @@ impl LiveShell {
         true
     }
 
-    pub(crate) fn window_menu_geometry(&self) -> Option<(i32, i32, u32, u32)> {
-        (self.window_menu.is_some() || self.application_menu_target.is_some()).then(|| {
-            (
-                self.window_menu_anchor_x.unwrap_or(self.panel_origin_x),
-                self.window_menu_anchor_y.unwrap_or(self.panel_origin_y),
-                MENU_WIDTH.ceil() as u32,
-                self.window_context_menu_height().max(1) as u32,
-            )
-        })
-    }
-
     pub(crate) fn preview_geometry(&mut self) -> Option<(i32, i32, u32, u32)> {
         let index = self.preview_group?;
         let groups = self.panel_groups();
@@ -9069,8 +8893,6 @@ impl LiveShell {
         self.window_menu_generation = self.window_menu_generation.saturating_add(1);
         self.window_menu = Some(snapshot.id);
         self.window_menu_snapshot = Some(snapshot);
-        self.window_menu_anchor_x = Some(x);
-        self.window_menu_anchor_y = Some(y);
         let owner = self.active_shell_package_id.clone();
         let _ = self.set_plugin_window_placement(
             &owner,
@@ -10265,7 +10087,7 @@ impl LiveShell {
             || self.control_host.application().view_state().projection_only
     }
 
-    fn plugin_surface_host_event(
+    pub(crate) fn plugin_surface_host_event(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
         event: HostEvent,

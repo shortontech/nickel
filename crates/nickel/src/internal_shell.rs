@@ -337,11 +337,6 @@ impl InternalShellCoordinator {
                 if role == SurfaceRole::Launcher {
                     continue;
                 }
-                if role == SurfaceRole::WindowContextMenu
-                    && self.shell.taskbar_surface_key().is_none()
-                {
-                    continue;
-                }
                 if role == SurfaceRole::OnScreenKeyboard {
                     continue;
                 }
@@ -1059,8 +1054,7 @@ impl InternalShellCoordinator {
                     }
                     SurfaceRole::ControlCenter => dependent_roles
                         .extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard]),
-                    SurfaceRole::WindowPreview => dependent_roles
-                        .extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu]),
+                    SurfaceRole::WindowPreview => dependent_roles.extend([SurfaceRole::Taskbar]),
 
                     _ => {}
                 }
@@ -1199,8 +1193,7 @@ impl InternalShellCoordinator {
                             .lock_host_input(input, entry.size.0, entry.size.1);
                     }
                     SurfaceRole::WindowPreview => {
-                        dependent_roles
-                            .extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu]);
+                        dependent_roles.extend([SurfaceRole::Taskbar]);
                         changed |= self
                             .shell
                             .preview_host_event_authorized(event, normalized_authority)
@@ -1220,12 +1213,25 @@ impl InternalShellCoordinator {
                 continue;
             }
             if let nickel_ui::HostEvent::Shortcut(shortcut) = event {
-                changed |= self.shell.shell_role_host_shortcut(
-                    entry.role,
-                    shortcut,
-                    entry.size.0,
-                    entry.size.1,
-                );
+                if let Some(key) = entry.plugin.as_ref() {
+                    changed |= self
+                        .shell
+                        .plugin_surface_host_event(
+                            key,
+                            nickel_ui::HostEvent::Shortcut(shortcut),
+                            entry.size,
+                            batch.clipboard_text_limit,
+                            None,
+                        )
+                        .changed;
+                } else {
+                    changed |= self.shell.shell_role_host_shortcut(
+                        entry.role,
+                        shortcut,
+                        entry.size.0,
+                        entry.size.1,
+                    );
+                }
                 continue;
             }
             let nickel_ui::HostEvent::Ui(event) = event else {
@@ -1256,9 +1262,7 @@ impl InternalShellCoordinator {
                 SurfaceRole::ControlCenter => {
                     dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard])
                 }
-                SurfaceRole::WindowPreview => {
-                    dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu])
-                }
+                SurfaceRole::WindowPreview => dependent_roles.extend([SurfaceRole::Taskbar]),
 
                 SurfaceRole::Launcher if action => dependent_roles.push(SurfaceRole::Taskbar),
                 _ => {}
@@ -1419,10 +1423,6 @@ impl InternalShellCoordinator {
 
     pub(crate) fn retire_window_menu(&mut self, generation: u64) -> bool {
         self.shell.retire_window_menu(generation)
-    }
-
-    pub(crate) fn window_menu_geometry(&self) -> Option<(i32, i32, u32, u32)> {
-        self.shell.window_menu_geometry()
     }
 
     pub(crate) fn preview_geometry(&mut self) -> Option<(i32, i32, u32, u32)> {
@@ -1654,9 +1654,8 @@ fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) 
         SurfaceRole::Notification => (420.min(width), 180.min(height)),
         SurfaceRole::VolumeOsd => (0, 0),
         SurfaceRole::WindowPreview => (760.min(width), 520.min(height)),
-        SurfaceRole::WindowContextMenu | SurfaceRole::CodexProjectMenu => {
-            (360.min(width), 480.min(height))
-        }
+        SurfaceRole::WindowContextMenu => (0, 0),
+        SurfaceRole::CodexProjectMenu => (360.min(width), 480.min(height)),
         SurfaceRole::Screenshot => (width, height),
         SurfaceRole::OnScreenKeyboard => (width, (height / 3).max(240).min(height)),
         SurfaceRole::CodexChat => (width.min(1120), height.min(760)),
@@ -2364,14 +2363,15 @@ mod tests {
     #[test]
     fn remote_accessibility_menu_retirement_cannot_hide_a_replacement() {
         let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
+        let outputs = [InternalOutput {
             x: 0,
             y: 0,
             name: "nested".into(),
             width: 800,
             height: 600,
             scale: 1.0,
-        }]);
+        }];
+        coordinator.set_outputs(&outputs);
         coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
             windows: vec![nickel_session_protocol::WindowSnapshot {
                 id: nickel_session_protocol::WindowId(41),
@@ -2393,39 +2393,15 @@ mod tests {
         assert!(replacement > old);
         assert!(!coordinator.retire_window_menu(old));
         assert_eq!(coordinator.window_menu_generation(), Some(replacement));
+        coordinator.set_outputs(&outputs);
+        let key = coordinator.shell.active_shell_surface_key("window-menu");
         let menu = coordinator
-            .surface(SurfaceRole::WindowContextMenu, None)
+            .surfaces()
+            .iter()
+            .find(|surface| surface.plugin.as_ref() == Some(&key))
             .unwrap()
             .id;
-        coordinator.step_slot_changes(
-            menu,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::ControllerBack)],
-                ..HostBatch::default()
-            },
-        );
-        assert_eq!(coordinator.window_menu_generation(), None);
-        assert!(coordinator.open_window_menu_at(41, 70, 80));
-        coordinator.step_slot_changes(
-            menu,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::KeyboardNavigateBack,
-                )],
-                ..HostBatch::default()
-            },
-        );
-        assert_eq!(coordinator.window_menu_generation(), None);
-        assert!(coordinator.open_window_menu_at(41, 70, 80));
-        let replacement = coordinator.window_menu_generation().unwrap();
-        assert!(coordinator.retire_window_menu(replacement));
-        assert_eq!(coordinator.window_menu_generation(), None);
-        assert!(coordinator.open_window_menu_at(41, 20, 30));
-        let menu = coordinator
-            .surface(SurfaceRole::WindowContextMenu, None)
-            .unwrap()
-            .id;
-        coordinator.scene(menu).unwrap();
+        assert!(coordinator.scene(menu).is_some());
         coordinator.step_slot(
             menu,
             HostBatch {
@@ -2434,42 +2410,9 @@ mod tests {
             },
         );
         assert_eq!(coordinator.window_menu_generation(), None);
-    }
-
-    #[test]
-    fn window_context_menu_is_ephemeral_on_focus_loss() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
-            windows: vec![nickel_session_protocol::WindowSnapshot {
-                id: nickel_session_protocol::WindowId(41),
-                application_id: "owned-test".into(),
-                title: "Owned test".into(),
-                active: true,
-                minimized: false,
-                maximized: false,
-                fullscreen: false,
-                geometry: None,
-                workspace: nickel_session_protocol::WorkspaceId(1),
-            }],
-            ..Default::default()
-        });
         assert!(coordinator.open_window_menu_at(41, 70, 80));
-        let menu = coordinator
-            .surface(SurfaceRole::WindowContextMenu, None)
-            .unwrap()
-            .id;
-        assert!(coordinator.visible(menu));
-
-        assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::WindowContextMenu));
-        assert!(!coordinator.visible(menu));
+        let replacement = coordinator.window_menu_generation().unwrap();
+        assert!(coordinator.retire_window_menu(replacement));
         assert_eq!(coordinator.window_menu_generation(), None);
     }
 

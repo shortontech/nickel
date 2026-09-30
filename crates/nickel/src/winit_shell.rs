@@ -48,7 +48,6 @@ pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
 pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
-pub const WINDOW_CONTEXT_MENU_TITLE: &str = "Nickel Window Menu";
 pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
 pub const LOCK_TITLE: &str = "Nickel Lock";
 pub const SCREENSHOT_TITLE: &str = "Nickel Screenshot";
@@ -1106,7 +1105,6 @@ impl WinitShell {
         for role in [
             SurfaceRole::Launcher,
             SurfaceRole::WindowPreview,
-            SurfaceRole::WindowContextMenu,
             SurfaceRole::Screenshot,
         ] {
             if (role == SurfaceRole::Launcher && launcher_available
@@ -2883,11 +2881,6 @@ impl WinitShell {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
-            SurfaceRole::WindowContextMenu => {
-                if !crate::platform::configure_context_menu_window(&window) {
-                    tracing::warn!(?role, "failed to configure Windows shell window");
-                }
-            }
 
             _ => {}
         }
@@ -3226,14 +3219,7 @@ fn surface_geometry(
             220.min(geometry.height),
             true,
         ),
-        SurfaceRole::WindowContextMenu => (
-            WINDOW_CONTEXT_MENU_TITLE,
-            geometry.x,
-            geometry.y,
-            220.min(geometry.width),
-            156.min(geometry.height),
-            true,
-        ),
+        SurfaceRole::WindowContextMenu => ("Retired window menu surface", 0, 0, 0, 0, true),
         SurfaceRole::CodexProjectMenu => (
             CODEX_PROJECT_MENU_TITLE,
             geometry.x + geometry.width.saturating_sub(464) as i32,
@@ -3488,7 +3474,6 @@ mod tests {
         for role in [
             SurfaceRole::Notification,
             SurfaceRole::WindowPreview,
-            SurfaceRole::WindowContextMenu,
             SurfaceRole::CodexProjectMenu,
             SurfaceRole::Screenshot,
         ] {
