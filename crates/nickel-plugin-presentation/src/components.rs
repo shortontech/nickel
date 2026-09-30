@@ -517,6 +517,7 @@ struct InheritedTextStyle {
     font_size: Option<f32>,
     line_height: Option<f32>,
     custom_properties: std::collections::HashMap<String, String>,
+    ancestors: Vec<(String, Option<String>, Option<String>)>,
 }
 
 impl InheritedTextStyle {
@@ -526,6 +527,7 @@ impl InheritedTextStyle {
             font_size: style.font_size.or(self.font_size),
             line_height: style.line_height.or(self.line_height),
             custom_properties: style.custom_properties.clone(),
+            ancestors: style.ancestors.clone(),
         }
     }
 
@@ -543,7 +545,13 @@ impl InheritedTextStyle {
         id: Option<&str>,
         class_name: Option<&str>,
     ) -> ControlStyle {
-        stylesheet.resolve_with_custom_properties(kind, id, class_name, &self.custom_properties)
+        stylesheet.resolve_with_ancestors(
+            kind,
+            id,
+            class_name,
+            &self.custom_properties,
+            &self.ancestors,
+        )
     }
 }
 
@@ -2770,6 +2778,7 @@ impl PanelNode {
                     class_name.as_deref(),
                     InteractionState::Focus,
                     &style.custom_properties,
+                    &style.ancestors[..style.ancestors.len().saturating_sub(1)],
                 ) {
                     field = field.focus_background(background);
                 }
@@ -2880,6 +2889,7 @@ impl PanelNode {
                     class_name.as_deref(),
                     InteractionState::Hover,
                     &style.custom_properties,
+                    &style.ancestors[..style.ancestors.len().saturating_sub(1)],
                 ) {
                     container = container.hover_background(background);
                 }
@@ -2889,6 +2899,7 @@ impl PanelNode {
                     class_name.as_deref(),
                     InteractionState::Active,
                     &style.custom_properties,
+                    &style.ancestors[..style.ancestors.len().saturating_sub(1)],
                 ) {
                     container = container.pressed_background(background);
                 }
@@ -2898,6 +2909,7 @@ impl PanelNode {
                     class_name.as_deref(),
                     InteractionState::Focus,
                     &style.custom_properties,
+                    &style.ancestors[..style.ancestors.len().saturating_sub(1)],
                 ) {
                     container = container.focus_background(background);
                 }

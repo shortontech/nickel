@@ -53,10 +53,12 @@ pub struct ControlStyle {
     pub bottom: Option<f32>,
     pub top: Option<f32>,
     pub(crate) custom_properties: HashMap<String, String>,
+    pub(crate) ancestors: Vec<(String, Option<String>, Option<String>)>,
 }
 
 #[derive(Clone, Debug)]
 struct Selector {
+    ancestors: Vec<Selector>,
     root: bool,
     kind: Option<String>,
     id: Option<String>,
@@ -73,8 +75,21 @@ pub enum InteractionState {
 
 impl Selector {
     fn parse(source: &str) -> Result<Self, String> {
+        let parts = source.split_ascii_whitespace().collect::<Vec<_>>();
+        if parts.len() > 8 {
+            return Err("CSS descendant selector exceeds eight parts".into());
+        }
+        if parts.len() > 1 {
+            let mut selector = Self::parse(parts.last().unwrap())?;
+            selector.ancestors = parts[..parts.len() - 1]
+                .iter()
+                .map(|part| Self::parse(part))
+                .collect::<Result<_, _>>()?;
+            return Ok(selector);
+        }
         let mut parser = Parser::new(source);
         let mut selector = Self {
+            ancestors: Vec::new(),
             root: false,
             kind: None,
             id: None,
@@ -139,7 +154,17 @@ impl Selector {
         id: Option<&str>,
         class_name: Option<&str>,
         state: Option<InteractionState>,
+        ancestors: &[(String, Option<String>, Option<String>)],
     ) -> bool {
+        let mut remaining = ancestors;
+        for required in self.ancestors.iter().rev() {
+            let Some(index) = remaining.iter().rposition(|(kind, id, classes)| {
+                required.matches(kind, id.as_deref(), classes.as_deref(), None, &[])
+            }) else {
+                return false;
+            };
+            remaining = &remaining[..index];
+        }
         !self.root
             && self.state == state
             && self.kind.as_deref().is_none_or(|selector| selector == kind)
@@ -933,7 +958,24 @@ impl StyleSheet {
         class_name: Option<&str>,
         inherited: &HashMap<String, String>,
     ) -> ControlStyle {
+        self.resolve_with_ancestors(kind, id, class_name, inherited, &[])
+    }
+
+    pub(crate) fn resolve_with_ancestors(
+        &self,
+        kind: &str,
+        id: Option<&str>,
+        class_name: Option<&str>,
+        inherited: &HashMap<String, String>,
+        ancestors: &[(String, Option<String>, Option<String>)],
+    ) -> ControlStyle {
         let mut style = ControlStyle::default();
+        style.ancestors = ancestors.to_vec();
+        style.ancestors.push((
+            kind.into(),
+            id.map(str::to_owned),
+            class_name.map(str::to_owned),
+        ));
         let mut properties = palette_properties(
             self.palette
                 .unwrap_or_else(|| ThemePalette::from_appearance(Appearance::default())),
@@ -952,7 +994,7 @@ impl StyleSheet {
             if rule
                 .selectors
                 .iter()
-                .any(|selector| selector.matches(kind, id, class_name, None))
+                .any(|selector| selector.matches(kind, id, class_name, None, ancestors))
             {
                 for declaration in &rule.declarations {
                     if let ParsedDeclaration::Custom(name, value) = declaration {
@@ -965,7 +1007,7 @@ impl StyleSheet {
             if rule
                 .selectors
                 .iter()
-                .any(|selector| selector.matches(kind, id, class_name, None))
+                .any(|selector| selector.matches(kind, id, class_name, None, ancestors))
             {
                 for parsed in &rule.declarations {
                     if let ParsedDeclaration::Property(name, value) = parsed
@@ -1001,6 +1043,7 @@ impl StyleSheet {
             class_name,
             state,
             &self.resolve(kind, id, class_name).custom_properties,
+            &[],
         )
     }
 
@@ -1011,13 +1054,14 @@ impl StyleSheet {
         class_name: Option<&str>,
         state: InteractionState,
         properties: &HashMap<String, String>,
+        ancestors: &[(String, Option<String>, Option<String>)],
     ) -> Option<u32> {
         let mut background = None;
         for rule in &self.rules {
             if rule
                 .selectors
                 .iter()
-                .any(|selector| selector.matches(kind, id, class_name, Some(state)))
+                .any(|selector| selector.matches(kind, id, class_name, Some(state), ancestors))
             {
                 for parsed in &rule.declarations {
                     if let ParsedDeclaration::Property(name, value) = parsed
@@ -1059,6 +1103,26 @@ impl StyleSheet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn descendant_rules_match_ordered_ancestors_without_leaking() {
+        let css = super::StyleSheet::compile("window.launcher button { background: #123456; } window.settings button { background: #abcdef; }").unwrap();
+        let launcher = vec![
+            ("window".into(), None, Some("launcher".into())),
+            ("div".into(), None, None),
+        ];
+        let settings = vec![("window".into(), None, Some("settings".into()))];
+        assert_eq!(
+            css.resolve_with_ancestors("button", None, None, &Default::default(), &launcher)
+                .background,
+            Some(0xff123456)
+        );
+        assert_eq!(
+            css.resolve_with_ancestors("button", None, None, &Default::default(), &settings)
+                .background,
+            Some(0xffabcdef)
+        );
+        assert_eq!(css.resolve("button", None, None).background, None);
+    }
     use super::*;
 
     #[test]
@@ -1168,6 +1232,7 @@ mod tests {
                 None,
                 InteractionState::Hover,
                 &child.custom_properties,
+                &[],
             ),
             Some(0xff11_2233)
         );
