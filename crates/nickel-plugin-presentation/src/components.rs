@@ -106,6 +106,15 @@ impl WindowRequest {
             .iter()
             .find(|surface| surface.id == self.id)
             .ok_or_else(|| format!("window {:?} is not declared by the plugin", self.id))?;
+        self.validate_against_surface(surface, width, height)
+    }
+
+    fn validate_against_surface(
+        &self,
+        surface: &PluginSurface,
+        width: Length,
+        height: Length,
+    ) -> Result<(), String> {
         let bounded_size = matches!(
             surface.kind,
             PluginSurfaceKind::Window
@@ -547,6 +556,8 @@ impl PanelNode {
             return Ok(None);
         };
         let style = stylesheet.resolve("window", id.as_deref(), class_name.as_deref());
+        let width = style.width.unwrap_or(*width);
+        let height = style.height.unwrap_or(*height);
         let (css_bottom, css_top) = (style.bottom, style.top);
         if css_bottom.is_some() && css_top.is_some() {
             return Err("window CSS cannot set both top and bottom".into());
@@ -560,14 +571,15 @@ impl PanelNode {
         if request.id != grant.id {
             return Ok(None);
         }
+        request.validate_against_surface(grant, width, height)?;
         let dimension = |length, bound| match length {
-            Length::Px(value) => value as u32,
+            Length::Px(value) => value.ceil() as u32,
             Length::Percent(1.0) => bound,
             _ => bound,
         };
         let mut surface = grant.clone();
-        surface.width = dimension(*width, grant.width);
-        surface.height = dimension(*height, grant.height);
+        surface.width = dimension(width, grant.width);
+        surface.height = dimension(height, grant.height);
         if request.output.as_deref() == Some("primary") {
             surface.output = nickel_core::plugins::PluginOutputScope::Primary;
         }
@@ -1041,6 +1053,7 @@ impl PanelNode {
                         .map(|size| Length::Px(size as f32))
                         .ok_or_else(|| format!("{kind} {name} must be 1 to 8192")),
                     Some(Value::String(percent)) if percent == "100%" => Ok(Length::Percent(1.0)),
+                    None | Some(Value::Null) => Ok(Length::Percent(1.0)),
                     _ => Err(format!("{kind} {name} must be 1 to 8192 or 100%")),
                 };
                 let id = value
@@ -2013,7 +2026,9 @@ impl PanelNode {
                 ..
             } => {
                 let style = stylesheet.resolve("window", id.as_deref(), class_name.as_deref());
-                let mut layer = Layer::new().width_length(*width).height_length(*height);
+                let width = style.width.unwrap_or(*width);
+                let height = style.height.unwrap_or(*height);
+                let mut layer = Layer::new().width_length(width).height_length(height);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
                         layer = layer.child(child.view_as_scoped_with_slots::<Message>(
@@ -2022,8 +2037,8 @@ impl PanelNode {
                     }
                 }
                 let mut container = Container::new()
-                    .width_length(*width)
-                    .height_length(*height)
+                    .width_length(width)
+                    .height_length(height)
                     .child(layer);
                 container = if *background == 0 {
                     container.clear_background()

@@ -1,4 +1,6 @@
 window.taskbar {
+    width: 100%;
+    height: 56px;
     background: #222730f2;
     border-width: 1px;
     border-color: #ffffff1f;

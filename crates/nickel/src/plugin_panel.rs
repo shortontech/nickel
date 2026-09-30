@@ -4526,6 +4526,28 @@ mod tests {
         package.source = source.replace("id: 'main', ", "");
         assert!(PluginPanelApplication::from_package(&package).is_ok());
 
+        package.source = source.replace("width: '100%', height: 56, ", "");
+        package.stylesheet =
+            "window.bar { width: 100%; height: 56px; background: rgba(20, 30, 40, 0.8); }".into();
+        let css_sized = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(
+            css_sized
+                .resolved_surface(&package.manifest.surfaces[0])
+                .unwrap()
+                .height,
+            56
+        );
+        let css_host = nickel_ui::UiHost::new(css_sized, 1366, 100);
+        let snapshot = css_host.layout_snapshot();
+        assert!(
+            snapshot.contains("allocated=0.00,0.00,1366.00,56.00"),
+            "{snapshot}"
+        );
+        package.stylesheet = "window.bar { width: 100%; height: 64px; }".into();
+        assert!(PluginPanelApplication::from_package(&package).is_err());
+        package.stylesheet =
+            "window.bar { width: 100%; background: rgba(20, 30, 40, 0.8); }".into();
+
         package.source = source.replace("reserveWorkArea: true", "reserveWorkArea: false");
         let app = PluginPanelApplication::from_package(&package).unwrap();
         assert!(
@@ -4558,6 +4580,23 @@ mod tests {
         package.source = "function App() { return h(Window, {id: 'main', width: 520, height: 340}, h(Button, {id: 'save', onClick: () => {}}, 'Save')); }".into();
         assert!(PluginPanelApplication::from_package(&package).is_ok());
         let ordinary_source = package.source.clone();
+        package.source = "function App() { return h(Window, {className: 'settings'}, h(Button, {id: 'save', onClick: () => {}}, 'Save')); }".into();
+        package.stylesheet = "window.settings { width: 520px; height: 340px; }".into();
+        let css_sized = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(
+            css_sized
+                .resolved_surface(&package.manifest.surfaces[0])
+                .unwrap()
+                .width,
+            520
+        );
+        let css_host = nickel_ui::UiHost::new(css_sized, 600, 400);
+        let snapshot = css_host.layout_snapshot();
+        assert!(snapshot.contains("preferred=520.00,340.00"), "{snapshot}");
+        package.stylesheet = "window.settings { width: 520px; height: 360px; }".into();
+        assert!(PluginPanelApplication::from_package(&package).is_err());
+        package.stylesheet =
+            "window.bar { width: 100%; background: rgba(20, 30, 40, 0.8); }".into();
         for invalid in [
             ordinary_source.replace("height: 340", "height: 340, output: 'all'"),
             ordinary_source.replace("height: 340", "height: 340, reserveWorkArea: true"),

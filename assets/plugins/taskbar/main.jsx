@@ -59,7 +59,7 @@ function App() {
     const items = data.items || [];
     const tray = data.tray || [];
     const badges = (data.slots && data.slots["task-badge"]) || [];
-    return <FixedWindow width="100%" height={56} output="all" edge="bottom"
+    return <FixedWindow output="all" edge="bottom"
         reserveWorkArea={true} className="taskbar">
         <div className="taskbar-content">
             <Button id="taskbar-launcher" className="launcher-button" icon="logo" accessibilityLabel="Open Nickel Start"

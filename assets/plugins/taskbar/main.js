@@ -45,7 +45,7 @@ function App() {
     const items = data.items || [];
     const tray = data.tray || [];
     const badges = (data.slots && data.slots["task-badge"]) || [];
-    return h(FixedWindow, { width: "100%", height: 56, output: "all", edge: "bottom", reserveWorkArea: true, className: "taskbar" },
+    return h(FixedWindow, { output: "all", edge: "bottom", reserveWorkArea: true, className: "taskbar" },
         h("div", { className: "taskbar-content" },
             h(Button, { id: "taskbar-launcher", className: "launcher-button", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.request({ type: "toggle-launcher" }) }, "Nickel"),
             items.flatMap(item => [
