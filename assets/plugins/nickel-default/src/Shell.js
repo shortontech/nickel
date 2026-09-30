@@ -30,7 +30,7 @@ export function Shell(props) {
     return h(Fragment, null,
         visible.taskbar ? h(Taskbar, { data: snapshots.taskbar }) : null,
         visible.launcher ? h(Launcher, { data: snapshots.launcher }) : null,
-        visible.quickSettings ? h(QuickSettings, { data: snapshots.quickSettings }) : null,
+        visible.quickSettings ? h(QuickSettings, null) : null,
         visible.notifications ? h(Notifications, { data: snapshots.notifications }) : null,
         visible.settings ? h(Settings, null) : null);
 }

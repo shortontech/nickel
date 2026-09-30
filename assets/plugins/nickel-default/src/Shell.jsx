@@ -32,7 +32,7 @@ export function Shell(props) {
     return <>
         {visible.taskbar ? <Taskbar data={snapshots.taskbar} /> : null}
         {visible.launcher ? <Launcher data={snapshots.launcher} /> : null}
-        {visible.quickSettings ? <QuickSettings data={snapshots.quickSettings} /> : null}
+        {visible.quickSettings ? <QuickSettings /> : null}
         {visible.notifications ? <Notifications data={snapshots.notifications} /> : null}
         {visible.settings ? <Settings /> : null}
     </>;
