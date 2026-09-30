@@ -27,6 +27,7 @@ struct Pending {
     owner: String,
     plan: RecoveryPlan,
     deadline: Instant,
+    confirmable: bool,
 }
 
 #[derive(Default)]
@@ -38,6 +39,43 @@ struct State {
 fn state() -> &'static Arc<Mutex<State>> {
     static STATE: OnceLock<Arc<Mutex<State>>> = OnceLock::new();
     STATE.get_or_init(|| Arc::new(Mutex::new(State::default())))
+}
+
+fn arm_recovery_watchdog() {
+    let shared = Arc::clone(state());
+    std::thread::spawn(move || {
+        std::thread::sleep(RECOVERY_WINDOW);
+        if let Ok(mut guard) = shared.lock()
+            && guard
+                .pending
+                .as_ref()
+                .is_some_and(|pending| Instant::now() >= pending.deadline)
+            && let Some(pending) = guard.pending.take()
+        {
+            match pending.plan.restore() {
+                Ok(()) => guard.recovery_error = None,
+                Err(error) => {
+                    guard.recovery_error = Some(error);
+                    // Keep native recovery state for a later explicit retry.
+                    guard.pending = Some(Pending {
+                        confirmable: false,
+                        ..pending
+                    });
+                }
+            }
+        }
+    });
+}
+
+fn retain_failed_recovery(guard: &mut State, owner: &str, plan: RecoveryPlan, error: String) {
+    guard.recovery_error = Some(error);
+    guard.pending = Some(Pending {
+        owner: owner.into(),
+        plan,
+        deadline: Instant::now() + RECOVERY_WINDOW,
+        confirmable: false,
+    });
+    arm_recovery_watchdog();
 }
 
 fn current_mode(name: &str) -> Result<(OutputMode, OutputTransform), String> {
@@ -260,27 +298,29 @@ pub(crate) fn set_layout(owner: &str, requested: &OutputLayout) -> Result<(), St
             .unwrap_or_else(|| "Windows display topology is unavailable".into()));
     }
     let layout = requested_layout(requested, &observed, &snapshots)?;
-    let plan = topology::apply_position_change(
+    let plan = match topology::apply_position_change(
         &observed,
         &observed.layout,
         &layout,
         observed.topology_generation,
         || Ok(()),
-    )
-    .map_err(|failure| {
-        if let Some(plan) = failure.recovery {
-            if let Err(error) = plan.restore() {
-                state_guard.recovery_error = Some(error);
+    ) {
+        Ok(plan) => plan,
+        Err(failure) => {
+            if let Some(plan) = failure.recovery {
+                if let Err(error) = plan.restore() {
+                    retain_failed_recovery(&mut state_guard, owner, *plan, error);
+                }
             }
+            return Err(failure.reason);
         }
-        failure.reason
-    })?;
+    };
     let verified = inventory()
         .and_then(|(inventory, _)| topology::observe(&inventory))
         .is_ok_and(|actual| topology::matches_physical_layout(&actual.layout, &layout));
     if !verified {
         if let Err(error) = plan.restore() {
-            state_guard.recovery_error = Some(error.clone());
+            retain_failed_recovery(&mut state_guard, owner, plan, error.clone());
             return Err(format!(
                 "Windows display readback did not match; recovery failed: {error}"
             ));
@@ -292,22 +332,10 @@ pub(crate) fn set_layout(owner: &str, requested: &OutputLayout) -> Result<(), St
         owner: owner.into(),
         plan,
         deadline,
+        confirmable: true,
     });
     drop(state_guard);
-    let shared = Arc::clone(state());
-    std::thread::spawn(move || {
-        std::thread::sleep(RECOVERY_WINDOW);
-        if let Ok(mut guard) = shared.lock()
-            && guard
-                .pending
-                .as_ref()
-                .is_some_and(|pending| Instant::now() >= pending.deadline)
-            && let Some(pending) = guard.pending.take()
-            && let Err(error) = pending.plan.restore()
-        {
-            guard.recovery_error = Some(error);
-        }
-    });
+    arm_recovery_watchdog();
     Ok(())
 }
 
@@ -321,6 +349,9 @@ pub(crate) fn confirm(owner: &str) -> Result<(), String> {
         .ok_or("No Windows display change awaits confirmation")?;
     if pending.owner != owner {
         return Err("Another plugin owns the pending display change".into());
+    }
+    if !pending.confirmable {
+        return Err("Windows display recovery must be retried before another change".into());
     }
     if Instant::now() >= pending.deadline {
         return Err("Windows display confirmation window expired".into());
@@ -341,7 +372,11 @@ pub(crate) fn revert(owner: &str) -> Result<(), String> {
     if pending.owner != owner {
         return Err("Another plugin owns the pending display change".into());
     }
-    pending.plan.restore()?;
+    if let Err(error) = pending.plan.restore() {
+        guard.recovery_error = Some(error.clone());
+        return Err(error);
+    }
     guard.pending = None;
+    guard.recovery_error = None;
     Ok(())
 }
