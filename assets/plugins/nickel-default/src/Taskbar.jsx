@@ -4,6 +4,9 @@ import "./styles/taskbar.css";
 // The package groups public application/window snapshots and requests native actions.
 function Task(props) {
     const item = props.item;
+    const [menuOpen, setMenuOpen] = useState(false);
+    const buttonId = "taskbar-item-" + item.id;
+    const menuId = "taskbar-menu-" + item.id;
     const label = (item.active ? "●" : "") + (item.name.charAt(0).toUpperCase() || "?");
     const pendingDrag = useRef(0);
     const suppressClick = useRef(false);
@@ -29,12 +32,15 @@ function Task(props) {
             }
         }
     };
-    return <Button id={"taskbar-item-" + item.id}
+    return <div className="taskbar-item"><Button id={buttonId}
         className={item.active ? "task-button is-active" : "task-button"}
         accessibilityLabel={item.name}
         icon={item.icon ? "task:" + item.index : null}
         onDrag={onDrag}
-        onContextMenu={() => nickel.request({type: "taskbar-context-item", index: item.index, id: item.id})}
+        onContextMenu={() => {
+            if (item.capabilityModel) { setMenuOpen(true); nickel.openMenu(menuId); }
+            else nickel.request({type: "taskbar-context-item", index: item.index, id: item.id});
+        }}
         onClick={() => {
             if (suppressClick.current) {
                 suppressClick.current = false;
@@ -44,7 +50,21 @@ function Task(props) {
             else nickel.request({type: "taskbar-activate-item", index: item.index, id: item.id});
         }}>
         {label}
-    </Button>;
+    </Button>
+    {menuOpen ? <Menu id={menuId} anchor={buttonId} open={true} onClose={() => setMenuOpen(false)}>
+        {item.windows.map(window => <MenuItem key={window.id} id={"activate-" + window.id}
+            disabled={window.canActivate === false} onClick={() => { nickel.windows.activate(window.id); setMenuOpen(false); }}>
+            {window.title || item.name}
+        </MenuItem>)}
+        {item.windows.filter(window => window.canClose).map(window => <MenuItem key={"close-" + window.id} id={"close-" + window.id}
+            onClick={() => { nickel.windows.close(window.id); setMenuOpen(false); }}>
+            {"Close " + (window.title || item.name)}
+        </MenuItem>)}
+        {!item.id.startsWith('window:') ? <MenuItem id="toggle-pin" onClick={() => { nickel.applications.togglePin(item.id); setMenuOpen(false); }}>
+            {item.pinned ? 'Unpin' : 'Pin'}
+        </MenuItem> : null}
+    </Menu> : null}
+    </div>;
 }
 function TrayItem(props) {
     const item = props.item;
