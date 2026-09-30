@@ -214,7 +214,7 @@
         let id = &crate::plugin_panel::notification_manifest().id;
         shell.set_plugin_enabled(id, false).unwrap();
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_notification_host.is_some());
+        assert!(shell.notification_plugin_host_ref().is_some());
         shell.scene(super::SurfaceRole::Notification, 420, 180);
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         shell.notification_feed.notify_internal(NotificationRequest {
@@ -237,7 +237,7 @@
             .is_some());
         assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.plugin_notification_host.is_none());
+        assert!(shell.notification_plugin_host_ref().is_none());
         assert!(!shell.surface_visible(SurfaceRole::Notification));
         assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
         assert!(!shell.plugin_surface_matches(&key));
@@ -258,10 +258,14 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_notification_host = Some(nickel_ui::UiHost::new(application, 420, 180));
-        let target = shell
-            .plugin_notification_host
-            .as_ref()
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::notification_surface_key(),
+            (
+                crate::plugin_panel::notification_surface().clone(),
+                nickel_ui::UiHost::new(application, 420, 180),
+            ),
+        );
+        let target = shell.notification_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -283,7 +287,7 @@
         assert!(shell.scene(SurfaceRole::Notification, 420, 180).is_empty());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_notification_host.is_some());
+        assert!(shell.notification_plugin_host_ref().is_some());
     }
 
     #[test]
@@ -295,7 +299,13 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_notification_host = Some(nickel_ui::UiHost::new(application, 420, 180));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::notification_surface_key(),
+            (
+                crate::plugin_panel::notification_surface().clone(),
+                nickel_ui::UiHost::new(application, 420, 180),
+            ),
+        );
         shell.notification_feed.notify_internal(NotificationRequest {
             app_name: "Test".into(),
             summary: "Ready".into(),
@@ -344,7 +354,7 @@
         };
 
         let mut shell = LiveShell::new().unwrap();
-        assert!(shell.plugin_notification_host.is_some());
+        assert!(shell.notification_plugin_host_ref().is_some());
         shell.sync_remote_lease_notifications_from(vec![RemotePendingLease {
             pending_generation: 1,
             client_id: "test-client".into(),
@@ -379,9 +389,9 @@
             .plugin_surface_change_token(&crate::plugin_panel::notification_surface_key())
             .is_none());
         assert!(shell.notification_plugin_projection().notification.is_none());
-        let plugin_frame = shell.plugin_notification_host.as_ref().unwrap().inspect().frame_generation;
+        let plugin_frame = shell.notification_plugin_host_ref().unwrap().inspect().frame_generation;
         assert!(!shell.scene(SurfaceRole::Notification, 420, 180).is_empty());
-        assert_eq!(shell.plugin_notification_host.as_ref().unwrap().inspect().frame_generation, plugin_frame);
+        assert_eq!(shell.notification_plugin_host_ref().unwrap().inspect().frame_generation, plugin_frame);
         let trusted_token = shell.scene_change_token(SurfaceRole::Notification).unwrap();
         let approve = shell.notification_host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
             role: nickel_ui::SemanticRole::Button,
@@ -404,11 +414,17 @@
     fn notification_plugin_secure_field_protects_its_surface() {
         let mut shell = LiveShell::new().unwrap();
         let source = "function App() { return h(Panel, {}, h(TextField, {id: 'private', value: 'secret', secure: true, onChange: value => {}})); }";
-        shell.plugin_notification_host = Some(nickel_ui::UiHost::new(
-            crate::plugin_panel::PluginPanelApplication::new(source).unwrap(),
-            420,
-            180,
-        ));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::notification_surface_key(),
+            (
+                crate::plugin_panel::notification_surface().clone(),
+                nickel_ui::UiHost::new(
+                    crate::plugin_panel::PluginPanelApplication::new(source).unwrap(),
+                    420,
+                    180,
+                ),
+            ),
+        );
         assert!(shell.surface_remote_access_protected(SurfaceRole::Notification));
     }
 
@@ -1185,9 +1201,7 @@
         });
         shell.notification = shell.notification_feed.snapshot();
         shell.scene(SurfaceRole::Notification, 420, 180);
-        let target = shell
-            .plugin_notification_host
-            .as_ref()
+        let target = shell.notification_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -1229,9 +1243,7 @@
         shell.set_plugin_enabled(id, true).unwrap();
         shell.notification_history_visible = true;
         shell.scene(SurfaceRole::Notification, 420, 180);
-        let target = shell
-            .plugin_notification_host
-            .as_ref()
+        let target = shell.notification_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,

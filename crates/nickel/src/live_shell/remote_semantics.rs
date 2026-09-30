@@ -200,7 +200,7 @@ impl LiveShell {
                     Ok(observe_only(project(&self.notification_host, |_| {
                         RemoteActionDisposition::Unavailable
                     })?))
-                } else if let Some(host) = self.plugin_notification_host.as_ref() {
+                } else if let Some(host) = self.notification_plugin_host_ref() {
                     Ok(observe_only(plugin_projection(host, |_, _| false)?))
                 } else {
                     Err("Notification plugin is unavailable".into())

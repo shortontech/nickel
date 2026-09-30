@@ -523,8 +523,6 @@ pub struct LiveShell {
     >,
     plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_slot_hosts: std::collections::BTreeMap<String, PluginSlotHost>,
-    plugin_notification_host:
-        Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_hosts:
         HashMap<Option<String>, nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_memory: HashMap<Option<String>, u64>,
@@ -1602,7 +1600,6 @@ impl LiveShell {
             plugin_window_placement_overrides: std::collections::BTreeMap::new(),
             plugin_taskbar_host,
             plugin_slot_hosts: std::collections::BTreeMap::new(),
-            plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
             plugin_taskbar_memory: HashMap::new(),
             plugin_taskbar_menu_memory: 0,
@@ -1703,6 +1700,12 @@ impl LiveShell {
             shell.plugin_panel_extra_hosts.insert(
                 crate::plugin_panel::launcher_surface_key(),
                 (crate::plugin_panel::launcher_surface().clone(), host),
+            );
+        }
+        if let Some(host) = plugin_notification_host {
+            shell.plugin_panel_extra_hosts.insert(
+                crate::plugin_panel::notification_surface_key(),
+                (crate::plugin_panel::notification_surface().clone(), host),
             );
         }
         if plugin_activation
@@ -2459,7 +2462,7 @@ impl LiveShell {
                 }),
             SurfaceRole::Notification => {
                 self.trusted_notification_visible()
-                    || self.plugin_notification_host.as_ref().map_or_else(
+                    || self.notification_plugin_host_ref().map_or_else(
                         || self.notification_host.remote_access_protected(),
                         |host| host.remote_access_protected(),
                     )
@@ -2525,8 +2528,7 @@ impl LiveShell {
                 .map(|host| host.layout_snapshot())
                 .or_else(|| Some(self.control_host.layout_snapshot())),
             SurfaceRole::Notification => self
-                .plugin_notification_host
-                .as_ref()
+                .notification_plugin_host_ref()
                 .map(|host| host.layout_snapshot())
                 .or_else(|| Some(self.notification_host.layout_snapshot())),
             SurfaceRole::VolumeOsd => self
@@ -2586,13 +2588,12 @@ impl LiveShell {
                     self.sync_notification_host(width, height);
                     self.notification_host.commands().to_vec()
                 } else if self.notification_plugin_active() {
-                    self.step_notification_plugin(HostBatch {
-                        surface_size: Some((width, height)),
-                        ..HostBatch::default()
-                    });
-                    self.plugin_notification_host
-                        .as_ref()
-                        .map_or_else(Vec::new, |host| host.commands().to_vec())
+                    self.plugin_panel_scene(
+                        &crate::plugin_panel::notification_surface_key(),
+                        width,
+                        height,
+                    )
+                    .unwrap_or_default()
                 } else {
                     Vec::new()
                 }
@@ -3071,14 +3072,14 @@ impl LiveShell {
                 self.plugin_taskbar_host.is_some()
                     || self.plugin_panel_host.is_some()
                     || !self.plugin_panel_extra_hosts.is_empty()
-                    || self.plugin_notification_host.is_some()
+                    || self.notification_plugin_host_ref().is_some()
                     || self.control_plugin_host_ref().is_some()
             }
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible && self.control_surface_available(),
             SurfaceRole::Notification => {
                 (self.notification.is_some() || self.notification_history_visible)
-                    && (self.plugin_notification_host.is_some()
+                    && (self.notification_plugin_host_ref().is_some()
                         || self.trusted_notification_visible())
             }
             SurfaceRole::VolumeOsd => {
@@ -3234,6 +3235,7 @@ impl LiveShell {
                         && **key != crate::plugin_panel::run_surface_key()
                         && **key != crate::plugin_panel::launcher_surface_key()
                         && **key != crate::plugin_panel::control_center_surface_key()
+                        && **key != crate::plugin_panel::notification_surface_key()
                 })
                 .map(|(key, (surface, _))| (key.clone(), surface.clone())),
         );
@@ -3270,7 +3272,7 @@ impl LiveShell {
         if let Some((surface, _)) = self.plugin_panel_extra_hosts.get(&keyboard_key) {
             panels.push((keyboard_key, surface.clone()));
         }
-        if self.plugin_notification_host.is_some() {
+        if self.notification_plugin_host_ref().is_some() {
             panels.push((
                 crate::plugin_panel::notification_surface_key(),
                 crate::plugin_panel::notification_surface().clone(),
@@ -3407,7 +3409,7 @@ impl LiveShell {
             if !self.notification_plugin_active() {
                 return None;
             }
-            let inspection = self.plugin_notification_host.as_ref()?.inspect();
+            let inspection = self.notification_plugin_host_ref()?.inspect();
             return Some(HostChangeToken {
                 frame_generation: inspection
                     .frame_generation
@@ -3760,6 +3762,8 @@ impl LiveShell {
         };
         let control_data = (*key == crate::plugin_panel::control_center_surface_key())
             .then(|| self.control_plugin_data(height));
+        let notification_data = (*key == crate::plugin_panel::notification_surface_key())
+            .then(|| self.notification_plugin_projection().to_json());
         let slots = self.plugin_slot_projection(&key.plugin_id);
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
@@ -3773,6 +3777,11 @@ impl LiveShell {
                 let control_changed = control_data
                     .as_ref()
                     .map(|data| host.application_mut().sync_data(data))
+                    .transpose()?
+                    .unwrap_or(false);
+                let notification_changed = notification_data
+                    .as_ref()
+                    .map(|data| host.application_mut().sync_serialized_data(data.clone()))
                     .transpose()?
                     .unwrap_or(false);
                 let keyboard_changed = keyboard_data
@@ -3791,7 +3800,7 @@ impl LiveShell {
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
                 .collect::<Vec<_>>();
                 let resource_changed = host.application_mut().sync_host_data_fields(&fields)?;
-                Ok(control_changed || keyboard_changed || resource_changed)
+                Ok(control_changed || notification_changed || keyboard_changed || resource_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
@@ -4614,6 +4623,8 @@ impl LiveShell {
             Self::retire_launcher_plugin_state
         } else if id == crate::plugin_panel::control_center_manifest().id {
             Self::retire_control_plugin_state
+        } else if id == crate::plugin_panel::notification_manifest().id {
+            Self::retire_notification_plugin_state
         } else {
             return self.fail_installed_plugin_runtime(id, error);
         };
@@ -4670,7 +4681,7 @@ impl LiveShell {
     }
 
     fn retire_notification_plugin_state(&mut self) {
-        self.plugin_notification_host = None;
+        self.retire_extra_panel_plugin_state(&crate::plugin_panel::notification_manifest().id);
         if !self.trusted_notification_visible() {
             self.notification = None;
             self.notification_history_visible = false;
@@ -5009,7 +5020,14 @@ impl LiveShell {
                 projection.to_json(),
             )
             .map(|application| {
-                self.plugin_notification_host = Some(nickel_ui::UiHost::new(application, 420, 180));
+                let surface = crate::plugin_panel::notification_surface().clone();
+                self.plugin_panel_extra_hosts.insert(
+                    crate::plugin_panel::notification_surface_key(),
+                    (
+                        surface.clone(),
+                        nickel_ui::UiHost::new(application, surface.width, surface.height),
+                    ),
+                );
             })
         } else if id == crate::plugin_panel::volume_osd_manifest().id {
             let data = serde_json::json!({"audio": self.audio_plugin_data()});
@@ -5240,8 +5258,7 @@ impl LiveShell {
                 let inspection = if trusted {
                     self.notification_host.inspect()
                 } else {
-                    self.plugin_notification_host
-                        .as_ref()
+                    self.notification_plugin_host_ref()
                         .map_or_else(|| self.notification_host.inspect(), |host| host.inspect())
                 };
                 let mut token = host_token(inspection);
@@ -5650,7 +5667,7 @@ impl LiveShell {
             return false;
         }
         if self.notification_plugin_active() {
-            let host = self.plugin_notification_host.as_ref().unwrap();
+            let host = self.notification_plugin_host_ref().unwrap();
             let (ingress, authority) =
                 internal_normalized_ingress(input, None, "notification", host.inspect(), None);
             return self.notification_host_event_authorized(
@@ -5837,6 +5854,18 @@ impl LiveShell {
         &mut self,
     ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_panel_host_for(&crate::plugin_panel::control_center_surface_key())
+    }
+
+    fn notification_plugin_host_ref(
+        &self,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_panel_host_ref(&crate::plugin_panel::notification_surface_key())
+    }
+
+    fn notification_plugin_host_mut(
+        &mut self,
+    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_panel_host_for(&crate::plugin_panel::notification_surface_key())
     }
 
     fn reconcile_plugin_surface_root(
@@ -8504,7 +8533,9 @@ impl LiveShell {
                 true
             }
             platform::GlobalShortcut::ShowNotifications => {
-                if self.plugin_notification_host.is_none() && !self.trusted_notification_visible() {
+                if self.notification_plugin_host_ref().is_none()
+                    && !self.trusted_notification_visible()
+                {
                     return false;
                 }
                 let history = self.notification_feed.history();
@@ -8757,8 +8788,7 @@ impl LiveShell {
                 .is_some_and(|host| host.pointer_interaction_active())
             || self.notification_host.pointer_interaction_active()
             || self
-                .plugin_notification_host
-                .as_ref()
+                .notification_plugin_host_ref()
                 .is_some_and(|host| host.pointer_interaction_active())
             || self.control_host.pointer_interaction_active()
             || self
@@ -9824,7 +9854,7 @@ impl LiveShell {
     }
 
     fn notification_plugin_active(&self) -> bool {
-        self.plugin_notification_host.is_some() && !self.trusted_notification_visible()
+        self.notification_plugin_host_ref().is_some() && !self.trusted_notification_visible()
     }
 
     fn notification_plugin_projection(&self) -> crate::plugin_panel::NotificationPluginProjection {
@@ -9851,7 +9881,7 @@ impl LiveShell {
         batch: HostBatch,
     ) -> Option<nickel_ui::HostEventOutcome> {
         let projection = self.notification_plugin_projection();
-        let host = self.plugin_notification_host.as_mut()?;
+        let host = self.notification_plugin_host_mut()?;
         let (mut outcome, retained_bytes) =
             match step_plugin_host(host, Some(projection.to_json()), batch) {
                 Ok(result) => result,
@@ -9861,15 +9891,11 @@ impl LiveShell {
                 }
             };
         let effects = host.application_mut().take_effects();
-        let _ = self.plugin_registry.record_memory(
-            &crate::plugin_panel::notification_manifest().id,
-            nickel_core::plugins::PluginMemory {
-                native_ui_bytes: Some(retained_bytes),
-                ..nickel_core::plugins::PluginMemory::default()
-            },
+        self.record_plugin_panel_memory(
+            &crate::plugin_panel::notification_surface_key(),
+            retained_bytes,
         );
         outcome.changed |= self.apply_plugin_effects(effects);
-        self.maybe_publish_plugin_status();
         Some(outcome)
     }
 
