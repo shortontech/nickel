@@ -4960,42 +4960,56 @@ impl LiveShell {
     // package application so callback requests retain manifest effect validation.
     // No native host or visible surface is installed for this evaluation.
     fn invoke_hidden_package_setting(
-        &self,
+        &mut self,
         provider: &str,
         id: &str,
         value: &serde_json::Value,
     ) -> Result<Vec<crate::plugin_panel::PluginEffect>, String> {
-        let package = self
-            .external_plugin_packages
+        let manifest = self
+            .plugin_registry
             .get(provider)
-            .ok_or("Settings provider source is unavailable")?
-            .load()?;
-        let runtime = self
-            .package_runtimes
-            .values()
-            .find_map(|runtime| runtime.contexts(provider).remove(provider))
-            .ok_or("Settings provider runtime is unavailable")?;
-        let surface = package
+            .filter(|entry| entry.desired_enabled)
+            .ok_or("Settings provider is unavailable")?
             .manifest
-            .surfaces
-            .first()
-            .ok_or("Settings provider has no declared surface")?;
-        let settings = self
-            .plugin_settings
+            .clone();
+        let runtime = self
+            .package_settings_runtimes
             .get(provider)
             .cloned()
-            .unwrap_or_default();
-        let mut application =
-            crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
-                &package,
-                &settings,
-                surface,
-                crate::plugin_panel::package_images(&package)?,
-                Some(runtime),
-            )?;
-        let result = application.invoke_registered_setting(id, value);
-        application.retire_surface()?;
-        result
+            .ok_or("Settings provider runtime is unavailable")?;
+        let fields = self.plugin_owner_resource_fields(provider);
+        let mut data: serde_json::Value = runtime
+            .borrow_mut()
+            .eval_json("JSON.stringify(nickel.data)")?;
+        let object = data
+            .as_object_mut()
+            .ok_or("provider snapshot must be an object")?;
+        object.remove("__componentProps");
+        for (name, value) in fields {
+            object.insert(name.into(), value);
+        }
+        runtime.borrow_mut().set_data(&data.to_string())?;
+        if let Some(RetainedPackageRuntime::Composed(host)) =
+            self.package_runtimes.get(&self.active_shell_package_id)
+        {
+            let mut host = host.borrow_mut();
+            let owner = host
+                .resolution()
+                .inheritance_chain
+                .iter()
+                .find(|owner| owner.id == provider)
+                .cloned();
+            if let Some(owner) = owner {
+                if std::rc::Rc::ptr_eq(&runtime, &host.shared_owner_runtime(&owner)?) {
+                    host.update_snapshot(&owner, &data)?;
+                }
+            }
+        }
+        runtime.borrow_mut().invoke_setting(provider, id, value)?;
+        let effects = runtime.borrow_mut().take_effects()?;
+        crate::plugin_panel::PluginPanelApplication::validate_provider_effects(
+            &manifest, runtime, effects,
+        )
     }
 
     fn refresh_package_settings(&mut self) {
@@ -5025,6 +5039,11 @@ impl LiveShell {
             runtimes
                 .entry(id.clone())
                 .or_insert_with(|| host.application.shared_runtime());
+        }
+        // The selected shell's contexts own its provider registrations. An
+        // inactive shell's duplicate dependency instance cannot replace them.
+        if let Some(retained) = self.package_runtimes.get(&self.active_shell_package_id) {
+            runtimes.extend(retained.contexts(&self.active_shell_package_id));
         }
         let retired = self
             .package_settings_runtimes
@@ -6939,24 +6958,7 @@ impl LiveShell {
                     if !granted || !valid || self.package_settings_invoking {
                         continue;
                     }
-                    let result = self
-                        .plugin_surface_hosts
-                        .iter_mut()
-                        .find(|(key, _)| key.plugin_id == provider)
-                        .map(|(_, (_, host))| {
-                            host.application_mut()
-                                .invoke_registered_setting(&id, &value)
-                        })
-                        .or_else(|| {
-                            self.plugin_slot_hosts
-                                .get_mut(&provider)
-                                .map(|host| host.application.invoke_registered_setting(&id, &value))
-                        })
-                        .or_else(|| {
-                            self.package_runtimes
-                                .contains_key(&provider)
-                                .then(|| self.invoke_hidden_package_setting(&provider, &id, &value))
-                        });
+                    let result = Some(self.invoke_hidden_package_setting(&provider, &id, &value));
                     if let Some(Ok(effects)) = result {
                         self.package_settings_invoking = true;
                         changed |= self.apply_plugin_effects(effects);

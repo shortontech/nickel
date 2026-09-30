@@ -865,26 +865,6 @@ fn package_stylesheet(package: &PluginPackage) -> Result<StyleSheet, String> {
 }
 
 impl PluginPanelApplication {
-    pub(crate) fn invoke_registered_setting(
-        &mut self,
-        id: &str,
-        value: &Value,
-    ) -> Result<Vec<PluginEffect>, String> {
-        let provider =
-            serde_json::to_string(&self.manifest.id).map_err(|error| error.to_string())?;
-        let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
-        let action: usize = {
-            let mut runtime = self.runtime.borrow_mut();
-            runtime.select_surface(&self.runtime_surface_id)?;
-            runtime.eval_json(&format!("JSON.stringify(__handlers.push(() => __nickelInvokeSetting({provider}, {id}, {value})) - 1)"))?
-        };
-        nickel_ui::Application::update(self, PluginMessage::Click(action));
-        if let Some(error) = &self.last_error {
-            return Err(error.clone());
-        }
-        Ok(self.take_effects())
-    }
-
     pub fn resolved_surface(&self, grant: &PluginSurface) -> Result<PluginSurface, String> {
         self.node
             .requested_surface(grant, &self.stylesheet)
@@ -1856,228 +1836,12 @@ impl PluginPanelApplication {
         Ok(changed)
     }
 
-    pub fn set_overlay_open(&mut self, open: bool) {
-        self.overlay_open = open;
-    }
-
-    pub fn rendered_taskbar_item_matches(&self, index: usize, id: &str) -> bool {
-        self.projection_data
-            .as_deref()
-            .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
-            .is_some_and(|data| {
-                data.get("items")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|items| {
-                        items.iter().any(|item| {
-                            item.get("index").and_then(serde_json::Value::as_u64)
-                                == u64::try_from(index).ok()
-                                && item.get("id").and_then(serde_json::Value::as_str) == Some(id)
-                        })
-                    })
-            })
-    }
-
-    pub fn take_effects(&mut self) -> Vec<PluginEffect> {
-        std::mem::take(&mut self.effects)
-    }
-
-    pub fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
-    }
-
-    pub fn take_runtime_failure(&mut self) -> Option<String> {
-        self.runtime_failure.take()
-    }
-}
-
-impl nickel_ui::Application for PluginPanelApplication {
-    type Message = PluginMessage;
-
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
-        if self.overlay_open && shortcut == Shortcut::Escape {
-            return nickel_ui::ShortcutOutcome::from_changed(false);
-        }
-        if self.overlay_open && shortcut == Shortcut::Submit {
-            return nickel_ui::ShortcutOutcome::from_changed(false);
-        }
-        if let Some(action) = self.node.window_shortcut_action(shortcut) {
-            self.update(PluginMessage::Click(action));
-            return nickel_ui::ShortcutOutcome::handled(true);
-        }
-        nickel_ui::ShortcutOutcome::from_changed(false)
-    }
-
-    fn update(&mut self, message: Self::Message) {
-        self.update_messages(vec![message]);
-    }
-
-    fn update_removed_focus(&mut self, message: Self::Message) {
-        self.dispatch_removed_focus = true;
-        self.update_messages(vec![message]);
-        self.dispatch_removed_focus = false;
-    }
-
-    fn update_messages(&mut self, messages: Vec<Self::Message>) {
-        let events = messages
-            .into_iter()
-            .filter_map(|message| match message {
-                PluginMessage::Click(action)
-                | PluginMessage::Button { click: action, .. }
-                | PluginMessage::Context(action) => Some(serde_json::json!([action])),
-                PluginMessage::Text(action, value) => Some(serde_json::json!([action, value])),
-                PluginMessage::Value(action, value) => Some(serde_json::json!([action, value])),
-                PluginMessage::Drag(action, gesture) => {
-                    let phase = match gesture.phase {
-                        DragPhase::Started => "start",
-                        DragPhase::Moved => "move",
-                        DragPhase::Ended => "end",
-                        DragPhase::Cancelled => "cancel",
-                    };
-                    Some(serde_json::json!([action, {
-                        "phase": phase,
-                        "x": gesture.position.x,
-                        "y": gesture.position.y,
-                        "bounds": {
-                            "x": gesture.bounds.origin.x,
-                            "y": gesture.bounds.origin.y,
-                            "width": gesture.bounds.size.width,
-                            "height": gesture.bounds.size.height,
-                        },
-                    }]))
-                }
-                PluginMessage::Drop(action, gesture) => {
-                    let bounds = |rect: nickel_ui::Rect| {
-                        serde_json::json!({
-                            "x": rect.origin.x,
-                            "y": rect.origin.y,
-                            "width": rect.size.width,
-                            "height": rect.size.height,
-                        })
-                    };
-                    Some(serde_json::json!([action, {
-                        "x": gesture.position.x,
-                        "y": gesture.position.y,
-                        "sourceId": gesture.source_id.as_str(),
-                        "sourceBounds": bounds(gesture.source_bounds),
-                        "targetId": gesture.target_id.as_str(),
-                        "targetBounds": bounds(gesture.target_bounds),
-                    }]))
-                }
-                PluginMessage::Scroll => None,
-            })
-            .collect::<Vec<_>>();
-        if events.is_empty() {
-            return;
-        }
-        let composition_previous_events =
-            self.composition.as_ref().map(|state| state.events.clone());
-        let composition_previous_native = self.composition.as_ref().map(|_| {
-            (
-                self.node.clone(),
-                self.effects.clone(),
-                self.pending_transient.clone(),
-            )
-        });
-        let mut validation_rejected = false;
-        let (rendered, effects) = if let Some(state) = &mut self.composition {
-            let result = (|| {
-                if events.len() != 1 {
-                    return Err(
-                        "composed surface event batches require owner-safe batch dispatch"
-                            .to_owned(),
-                    );
-                }
-                let event = &events[0];
-                let handle = state
-                    .events
-                    .get(&event[0].as_u64().ok_or("invalid host action")?)
-                    .ok_or("stale host action")?
-                    .clone();
-                let mut host = state.host.borrow_mut();
-
-                let rendered = host.dispatch_expanded_pending(
-                    &state.mount,
-                    &handle,
-                    event.get(1).unwrap_or(&Value::Null),
-                    |value| {
-                        let node = parse_panel_for_manifest(
-                            value,
-                            &self.manifest,
-                            self.expected_surface_id.as_deref(),
-                        )?;
-                        if let Some(id) = &self.expected_surface_id {
-                            let surface = self
-                                .manifest
-                                .surfaces
-                                .iter()
-                                .find(|surface| &surface.id == id)
-                                .ok_or("composed surface grant is missing")?;
-                            node.requested_surface(surface, &self.stylesheet)?;
-                        }
-                        Ok(())
-                    },
-                )?;
-                let node = parse_panel_for_manifest(
-                    &rendered.node,
-                    &self.manifest,
-                    self.expected_surface_id.as_deref(),
-                )?;
-                state.events = rendered.events;
-                let effects = host
-                    .take_effects()
-                    .into_iter()
-                    .map(|effect| {
-                        host.validate_effect(&effect)?;
-                        let manifest = state
-                            .manifests
-                            .get(effect.owner())
-                            .ok_or("effect owner is not installed")?
-                            .clone();
-                        Ok((manifest, effect.value().clone()))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                Ok((node, effects))
-            })();
-            match result {
-                Ok((node, effects)) => (Ok(node), Ok(effects)),
-                Err(error) => (Err(error), Ok(Vec::new())),
-            }
-        } else {
-            let expression = if self.dispatch_removed_focus {
-                format!("__nickelDispatchRemovedFocus({})", events[0][0])
-            } else {
-                format!(
-                    "__nickelDispatchBatch({})",
-                    serde_json::Value::Array(events)
-                )
-            };
-            {
-                let mut runtime = self.runtime.borrow_mut();
-                if let Err(error) = runtime.select_surface(&self.runtime_surface_id) {
-                    self.runtime_failure = Some(error.clone());
-                    self.last_error = Some(error);
-                    return;
-                }
-                let rendered = render_panel_validated(
-                    &mut runtime,
-                    &self.manifest,
-                    self.expected_surface_id.as_deref(),
-                    &expression,
-                    &self.stylesheet,
-                    &mut validation_rejected,
-                );
-                let effects = runtime.take_effects();
-                (
-                    rendered,
-                    effects.map(|effects| {
-                        effects
-                            .into_iter()
-                            .map(|effect| (self.manifest.clone(), effect))
-                            .collect::<Vec<_>>()
-                    }),
-                )
-            }
-        };
+    fn apply_rendered_effects(
+        &mut self,
+        rendered: Result<PanelNode, String>,
+        effects: Result<Vec<(PluginManifest, Value)>, String>,
+        validation_rejected: bool,
+    ) {
         (|| match (rendered, effects) {
             (Ok(node), Ok(effects)) => {
                 let mut approved = Vec::new();
@@ -3467,6 +3231,274 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = Some(error);
             }
         })();
+    }
+
+    /// Validate callback effects without evaluating an entry, creating a surface
+    /// or installing a UI host. The runtime is the registry's existing owner.
+    pub(crate) fn validate_provider_effects(
+        manifest: &PluginManifest,
+        runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
+        effects: Vec<Value>,
+    ) -> Result<Vec<PluginEffect>, String> {
+        let node = parse_panel_for_manifest(
+            &serde_json::json!({"kind":"column","children":[]}),
+            manifest,
+            None,
+        )?;
+        let mut scope = Self {
+            runtime,
+            node: node.clone(),
+            manifest: manifest.clone(),
+            effects: Vec::new(),
+            pending_transient: None,
+            last_error: None,
+            runtime_failure: None,
+            expected_surface_id: None,
+            runtime_surface_id: String::new(),
+            projection_data: None,
+            overlay_open: false,
+            dispatch_removed_focus: false,
+            images: PluginImages::new(),
+            stylesheet: StyleSheet::compile("")?,
+            composition: None,
+        };
+        scope.apply_rendered_effects(
+            Ok(node),
+            Ok(effects
+                .into_iter()
+                .map(|value| (manifest.clone(), value))
+                .collect()),
+            false,
+        );
+        if let Some(error) = scope.last_error {
+            return Err(error);
+        }
+        Ok(scope.effects)
+    }
+
+    pub fn set_overlay_open(&mut self, open: bool) {
+        self.overlay_open = open;
+    }
+
+    pub fn rendered_taskbar_item_matches(&self, index: usize, id: &str) -> bool {
+        self.projection_data
+            .as_deref()
+            .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .is_some_and(|data| {
+                data.get("items")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("index").and_then(serde_json::Value::as_u64)
+                                == u64::try_from(index).ok()
+                                && item.get("id").and_then(serde_json::Value::as_str) == Some(id)
+                        })
+                    })
+            })
+    }
+
+    pub fn take_effects(&mut self) -> Vec<PluginEffect> {
+        std::mem::take(&mut self.effects)
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    pub fn take_runtime_failure(&mut self) -> Option<String> {
+        self.runtime_failure.take()
+    }
+}
+
+impl nickel_ui::Application for PluginPanelApplication {
+    type Message = PluginMessage;
+
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
+        if self.overlay_open && shortcut == Shortcut::Escape {
+            return nickel_ui::ShortcutOutcome::from_changed(false);
+        }
+        if self.overlay_open && shortcut == Shortcut::Submit {
+            return nickel_ui::ShortcutOutcome::from_changed(false);
+        }
+        if let Some(action) = self.node.window_shortcut_action(shortcut) {
+            self.update(PluginMessage::Click(action));
+            return nickel_ui::ShortcutOutcome::handled(true);
+        }
+        nickel_ui::ShortcutOutcome::from_changed(false)
+    }
+
+    fn update(&mut self, message: Self::Message) {
+        self.update_messages(vec![message]);
+    }
+
+    fn update_removed_focus(&mut self, message: Self::Message) {
+        self.dispatch_removed_focus = true;
+        self.update_messages(vec![message]);
+        self.dispatch_removed_focus = false;
+    }
+
+    fn update_messages(&mut self, messages: Vec<Self::Message>) {
+        let events = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                PluginMessage::Click(action)
+                | PluginMessage::Button { click: action, .. }
+                | PluginMessage::Context(action) => Some(serde_json::json!([action])),
+                PluginMessage::Text(action, value) => Some(serde_json::json!([action, value])),
+                PluginMessage::Value(action, value) => Some(serde_json::json!([action, value])),
+                PluginMessage::Drag(action, gesture) => {
+                    let phase = match gesture.phase {
+                        DragPhase::Started => "start",
+                        DragPhase::Moved => "move",
+                        DragPhase::Ended => "end",
+                        DragPhase::Cancelled => "cancel",
+                    };
+                    Some(serde_json::json!([action, {
+                        "phase": phase,
+                        "x": gesture.position.x,
+                        "y": gesture.position.y,
+                        "bounds": {
+                            "x": gesture.bounds.origin.x,
+                            "y": gesture.bounds.origin.y,
+                            "width": gesture.bounds.size.width,
+                            "height": gesture.bounds.size.height,
+                        },
+                    }]))
+                }
+                PluginMessage::Drop(action, gesture) => {
+                    let bounds = |rect: nickel_ui::Rect| {
+                        serde_json::json!({
+                            "x": rect.origin.x,
+                            "y": rect.origin.y,
+                            "width": rect.size.width,
+                            "height": rect.size.height,
+                        })
+                    };
+                    Some(serde_json::json!([action, {
+                        "x": gesture.position.x,
+                        "y": gesture.position.y,
+                        "sourceId": gesture.source_id.as_str(),
+                        "sourceBounds": bounds(gesture.source_bounds),
+                        "targetId": gesture.target_id.as_str(),
+                        "targetBounds": bounds(gesture.target_bounds),
+                    }]))
+                }
+                PluginMessage::Scroll => None,
+            })
+            .collect::<Vec<_>>();
+        if events.is_empty() {
+            return;
+        }
+        let composition_previous_events =
+            self.composition.as_ref().map(|state| state.events.clone());
+        let composition_previous_native = self.composition.as_ref().map(|_| {
+            (
+                self.node.clone(),
+                self.effects.clone(),
+                self.pending_transient.clone(),
+            )
+        });
+        let mut validation_rejected = false;
+        let (rendered, effects) = if let Some(state) = &mut self.composition {
+            let result = (|| {
+                if events.len() != 1 {
+                    return Err(
+                        "composed surface event batches require owner-safe batch dispatch"
+                            .to_owned(),
+                    );
+                }
+                let event = &events[0];
+                let handle = state
+                    .events
+                    .get(&event[0].as_u64().ok_or("invalid host action")?)
+                    .ok_or("stale host action")?
+                    .clone();
+                let mut host = state.host.borrow_mut();
+
+                let rendered = host.dispatch_expanded_pending(
+                    &state.mount,
+                    &handle,
+                    event.get(1).unwrap_or(&Value::Null),
+                    |value| {
+                        let node = parse_panel_for_manifest(
+                            value,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                        )?;
+                        if let Some(id) = &self.expected_surface_id {
+                            let surface = self
+                                .manifest
+                                .surfaces
+                                .iter()
+                                .find(|surface| &surface.id == id)
+                                .ok_or("composed surface grant is missing")?;
+                            node.requested_surface(surface, &self.stylesheet)?;
+                        }
+                        Ok(())
+                    },
+                )?;
+                let node = parse_panel_for_manifest(
+                    &rendered.node,
+                    &self.manifest,
+                    self.expected_surface_id.as_deref(),
+                )?;
+                state.events = rendered.events;
+                let effects = host
+                    .take_effects()
+                    .into_iter()
+                    .map(|effect| {
+                        host.validate_effect(&effect)?;
+                        let manifest = state
+                            .manifests
+                            .get(effect.owner())
+                            .ok_or("effect owner is not installed")?
+                            .clone();
+                        Ok((manifest, effect.value().clone()))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok((node, effects))
+            })();
+            match result {
+                Ok((node, effects)) => (Ok(node), Ok(effects)),
+                Err(error) => (Err(error), Ok(Vec::new())),
+            }
+        } else {
+            let expression = if self.dispatch_removed_focus {
+                format!("__nickelDispatchRemovedFocus({})", events[0][0])
+            } else {
+                format!(
+                    "__nickelDispatchBatch({})",
+                    serde_json::Value::Array(events)
+                )
+            };
+            {
+                let mut runtime = self.runtime.borrow_mut();
+                if let Err(error) = runtime.select_surface(&self.runtime_surface_id) {
+                    self.runtime_failure = Some(error.clone());
+                    self.last_error = Some(error);
+                    return;
+                }
+                let rendered = render_panel_validated(
+                    &mut runtime,
+                    &self.manifest,
+                    self.expected_surface_id.as_deref(),
+                    &expression,
+                    &self.stylesheet,
+                    &mut validation_rejected,
+                );
+                let effects = runtime.take_effects();
+                (
+                    rendered,
+                    effects.map(|effects| {
+                        effects
+                            .into_iter()
+                            .map(|effect| (self.manifest.clone(), effect))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+            }
+        };
+        self.apply_rendered_effects(rendered, effects, validation_rejected);
         if let Some(state) = &mut self.composition {
             let accepted = self.last_error.is_none();
             let mut host = state.host.borrow_mut();
@@ -3752,6 +3784,45 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn hidden_registered_setting_effects_use_existing_owner_without_rendering_an_entry() {
+        let mut manifest = super::manifest().clone();
+        manifest.capabilities = vec![PluginCapability::LauncherShow];
+        let runtime=std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new(
+            "registerSetting({id:'toggle',group:'Test',label:'Toggle',type:'switch',defaultValue:false,onChange:()=>nickel.request('show-launcher')}); function App(){throw Error('hidden entry must not be evaluated');}",None).unwrap()));
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        runtime
+            .borrow_mut()
+            .publish_settings(&mut registry, &manifest.id)
+            .unwrap();
+        runtime
+            .borrow_mut()
+            .invoke_setting(&manifest.id, "toggle", &Value::Bool(true))
+            .unwrap();
+        let effects = runtime.borrow_mut().take_effects().unwrap();
+        assert_eq!(
+            PluginPanelApplication::validate_provider_effects(&manifest, runtime.clone(), effects)
+                .unwrap(),
+            vec![PluginEffect::ShowLauncher]
+        );
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<usize>("JSON.stringify(__surfaceApps.size)")
+                .unwrap(),
+            0
+        );
+        manifest.capabilities.clear();
+        runtime
+            .borrow_mut()
+            .invoke_setting(&manifest.id, "toggle", &Value::Bool(false))
+            .unwrap();
+        let effects = runtime.borrow_mut().take_effects().unwrap();
+        assert!(
+            PluginPanelApplication::validate_provider_effects(&manifest, runtime, effects).is_err()
+        );
     }
 
     #[test]
