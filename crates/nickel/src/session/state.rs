@@ -10739,9 +10739,6 @@ impl NickelSession {
             if changed {
                 self.sync_internal_shell();
                 if let Some(key) = match action {
-                    nickel_session_protocol::ShortcutAction::ShowNotifications => {
-                        Some(crate::plugin_panel::notification_surface_key())
-                    }
                     nickel_session_protocol::ShortcutAction::ShowControlCenter => {
                         Some(crate::plugin_panel::control_center_surface_key())
                     }

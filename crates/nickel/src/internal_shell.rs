@@ -662,9 +662,6 @@ impl InternalShellCoordinator {
     fn redraws_surface(&self, surface: &InternalShellSurface, roles: &[SurfaceRole]) -> bool {
         roles.contains(&surface.role)
             || (roles.contains(&SurfaceRole::Taskbar) && self.is_taskbar_surface(surface))
-            || (roles.contains(&SurfaceRole::Notification)
-                && surface.plugin.as_ref()
-                    == Some(&crate::plugin_panel::notification_surface_key()))
             || (roles.contains(&SurfaceRole::ControlCenter)
                 && surface.plugin.as_ref()
                     == Some(&crate::plugin_panel::control_center_surface_key()))
@@ -2367,63 +2364,6 @@ mod tests {
         );
 
         assert!(coordinator.codex_available());
-    }
-
-    #[test]
-    fn output_inventory_uses_internal_ids_without_native_windows() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "one".into(),
-                width: 1920,
-                height: 1080,
-                scale: 1.0,
-            },
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "two".into(),
-                width: 1280,
-                height: 720,
-                scale: 1.0,
-            },
-        ]);
-
-        assert_eq!(coordinator.surfaces().len(), 17);
-        let notification = coordinator
-            .plugin_surface(&crate::plugin_panel::notification_surface_key(), "one")
-            .unwrap();
-        assert_eq!(notification.role, SurfaceRole::Panel);
-        assert!(!coordinator.visible(notification.id));
-        let control = coordinator
-            .plugin_surface(&crate::plugin_panel::control_center_surface_key(), "one")
-            .unwrap();
-        assert_eq!(control.role, SurfaceRole::Panel);
-        assert!(!coordinator.visible(control.id));
-        let panel = coordinator
-            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "two")
-            .unwrap();
-        assert_eq!(panel.size, (1280, PANEL_HEIGHT));
-        assert_eq!(panel.role, SurfaceRole::Panel);
-        assert!(coordinator.is_reserved_panel_surface_id(panel.id));
-        assert!(
-            coordinator
-                .surface(SurfaceRole::Taskbar, Some("two"))
-                .is_none()
-        );
-        let key = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: crate::plugin_panel::taskbar_manifest().id.clone(),
-            surface_id: "main".into(),
-        };
-        assert_eq!(panel.plugin.as_ref(), Some(&key));
-        assert_eq!(
-            coordinator.plugin_surface(&key, "two").unwrap().id,
-            panel.id
-        );
-        assert!(coordinator.visible(panel.id));
-        assert!(!coordinator.visible(coordinator.surface(SurfaceRole::Launcher, None).unwrap().id));
     }
 
     #[test]

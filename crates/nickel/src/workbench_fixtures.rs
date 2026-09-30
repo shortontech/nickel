@@ -13,11 +13,10 @@ use nickel_codex_ui::ChatApplication;
 use crate::{
     control_view::ControlCenterApp,
     live_shell::{DesktopApplication, LockApplication},
-    notification::{DesktopNotification, NotificationAction},
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
     plugin_panel::{
-        NotificationPluginProjection, PluginImages, PluginPanelApplication, TaskbarPluginItem,
-        TaskbarPluginProjection, TaskbarPluginTrayItem,
+        PluginImages, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
+        TaskbarPluginTrayItem,
     },
     screenshot::ScreenshotApp,
 };
@@ -55,11 +54,6 @@ const PANEL_VARIANTS: &[FixtureVariant] = &[
         1200,
         56,
     ),
-];
-const NOTIFICATION_VARIANTS: &[FixtureVariant] = &[
-    variant("no-actions", "No actions", 420, 180),
-    variant("actions", "Actions", 420, 180),
-    variant("long-body", "Long body", 420, 240),
 ];
 const LOCK_VARIANTS: &[FixtureVariant] = &[
     variant("empty", "Empty", 960, 540),
@@ -151,20 +145,6 @@ metadata!(
     &["shell", "panel", "controller"]
 );
 metadata!(
-    NOTIFICATION_METADATA,
-    "shell.notification",
-    "Notification",
-    "Bundled JSX notification presentation",
-    NOTIFICATION_VARIANTS,
-    &[
-        "shell",
-        "notification",
-        "dialog",
-        "jsx",
-        "variant-interactive"
-    ]
-);
-metadata!(
     LOCK_METADATA,
     "shell.lock",
     "Lock screen",
@@ -212,7 +192,7 @@ fn palette() -> ThemePalette {
 pub struct RuntimeFixture;
 pub struct DesktopFixture;
 pub struct PanelFixture;
-pub struct NotificationFixture;
+
 pub struct LockFixture;
 pub struct ScreenshotFixture;
 pub struct WindowPreviewFixture;
@@ -372,46 +352,6 @@ impl Fixture for PanelFixture {
             SemanticRole::Button,
             "Open Nickel Start",
         ))
-    }
-}
-
-impl Fixture for NotificationFixture {
-    type App = PluginPanelApplication;
-    fn metadata() -> &'static FixtureMetadata {
-        &NOTIFICATION_METADATA
-    }
-    fn create() -> Self::App {
-        Self::create_variant(&NOTIFICATION_VARIANTS[0])
-    }
-    fn create_variant(v: &FixtureVariant) -> Self::App {
-        let actions = if v.id == "no-actions" {
-            vec![]
-        } else {
-            vec![NotificationAction {
-                key: "open".into(),
-                label: "Open".into(),
-            }]
-        };
-        let body = if v.id == "long-body" {
-            "A deterministic notification body that wraps across several lines without invoking the native notification transport.".repeat(2)
-        } else {
-            "The fixture is ready.".into()
-        };
-        let notification =
-            DesktopNotification::fixture(1, "Nickel", "Workbench notification", body, actions);
-        let projection = NotificationPluginProjection::from_feed(Some(&notification), &[], false);
-        PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::notification_manifest(),
-            "main.js",
-            projection.to_json(),
-        )
-        .expect("bundled notification fixture must compile")
-    }
-    fn surface_size() -> (u32, u32) {
-        (420, 180)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(SemanticRole::Button, "Dismiss"))
     }
 }
 
@@ -593,7 +533,6 @@ impl FixtureProvider for ShellFixtureProvider {
         registry.register::<RuntimeFixture>()?;
         registry.register::<DesktopFixture>()?;
         registry.register::<PanelFixture>()?;
-        registry.register::<NotificationFixture>()?;
         registry.register::<LockFixture>()?;
         registry.register::<ScreenshotFixture>()?;
         registry.register::<WindowPreviewFixture>()?;
@@ -623,7 +562,6 @@ mod tests {
                 "shell.control-center",
                 "shell.desktop",
                 "shell.lock",
-                "shell.notification",
                 "shell.panel",
                 "shell.runtime",
                 "shell.screenshot",

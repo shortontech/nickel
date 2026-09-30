@@ -3256,17 +3256,16 @@ fn surface_geometry(
             true,
         ),
         SurfaceRole::Notification => {
-            let notification = crate::plugin_panel::notification_surface();
-            let size = (
-                notification.width.min(geometry.width),
-                notification.height.min(geometry.height),
-            );
-            let (x, y) = notification.anchor.position(
-                (geometry.x, geometry.y, geometry.width, geometry.height),
-                size,
-                (notification.offset_x, notification.offset_y),
-            );
-            (NOTIFICATION_TITLE, x, y, size.0, size.1, true)
+            let width = 420.min(geometry.width);
+            let height = 180.min(geometry.height);
+            (
+                NOTIFICATION_TITLE,
+                geometry.x + geometry.width.saturating_sub(width + 18) as i32,
+                geometry.y + 24,
+                width,
+                height,
+                true,
+            )
         }
         SurfaceRole::VolumeOsd => (
             VOLUME_OSD_TITLE,
@@ -3896,36 +3895,6 @@ mod tests {
         );
         assert_eq!((x, y, width, height), (1482, 224, 520, 340));
         assert!(hidden);
-    }
-
-    #[test]
-    fn bundled_notification_placement_comes_from_its_surface_declaration() {
-        let geometry = DisplayGeometry {
-            x: 100,
-            y: 200,
-            width: 1920,
-            height: 1080,
-            scale: 1.0,
-        };
-        let (_, x, y, width, height, _) = super::surface_geometry_for_panel(
-            SurfaceRole::Notification,
-            geometry,
-            PanelEdge::Bottom,
-            crate::plugin_panel::notification_surface(),
-        );
-        assert_eq!((x, y, width, height), (1582, 224, 420, 180));
-        let small = DisplayGeometry {
-            width: 300,
-            height: 120,
-            ..geometry
-        };
-        let (_, x, y, width, height, _) = super::surface_geometry_for_panel(
-            SurfaceRole::Notification,
-            small,
-            PanelEdge::Bottom,
-            crate::plugin_panel::notification_surface(),
-        );
-        assert_eq!((x, y, width, height), (100, 200, 300, 120));
     }
 
     #[test]

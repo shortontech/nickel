@@ -44,7 +44,6 @@ use nickel_core::display_projection::ProjectionMode;
 use nickel_plugin_presentation::css::StyleSheet;
 
 use crate::launcher::TaskbarApplication;
-use crate::notification::DesktopNotification;
 use crate::window_preview::PreviewAction;
 
 pub fn manifest() -> &'static PluginManifest {
@@ -94,32 +93,6 @@ pub fn taskbar_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     nickel_core::plugins::PluginSurfaceKey {
         plugin_id: manifest.id.clone(),
         surface_id: taskbar_surface().id.clone(),
-    }
-}
-
-pub fn notification_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!(
-            "../../../assets/plugins/notification/plugin.json"
-        ))
-        .expect("bundled notification plugin manifest must be valid")
-    })
-}
-
-pub fn notification_surface() -> &'static PluginSurface {
-    let surface = notification_manifest()
-        .surfaces
-        .first()
-        .expect("bundled notifications need a surface");
-    assert_eq!(surface.kind, PluginSurfaceKind::Overlay);
-    surface
-}
-
-pub fn notification_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: notification_manifest().id.clone(),
-        surface_id: notification_surface().id.clone(),
     }
 }
 
@@ -308,10 +281,6 @@ fn bundled_stylesheet(
 }
 
 pub fn run_enabled() -> bool {
-    true
-}
-
-pub fn notification_enabled() -> bool {
     true
 }
 
@@ -776,77 +745,6 @@ impl TaskbarWindowMenuPluginProjection {
             "root": entries(&self.root),
             "workspaces": entries(&self.workspaces),
             "displays": entries(&self.displays),
-        })
-        .to_string()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NotificationPluginAction {
-    pub key: String,
-    pub label: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NotificationPluginItem {
-    pub id: u32,
-    pub app_name: String,
-    pub summary: String,
-    pub body: String,
-    pub actions: Vec<NotificationPluginAction>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NotificationPluginProjection {
-    pub notification: Option<NotificationPluginItem>,
-    pub history: Vec<NotificationPluginItem>,
-    pub history_visible: bool,
-}
-
-impl NotificationPluginProjection {
-    pub fn from_feed(
-        notification: Option<&DesktopNotification>,
-        history: &[DesktopNotification],
-        history_visible: bool,
-    ) -> Self {
-        let item = |notification: &DesktopNotification| NotificationPluginItem {
-            id: notification.id,
-            app_name: notification.app_name.clone(),
-            summary: notification.summary.clone(),
-            body: notification.body.clone(),
-            actions: notification
-                .actions
-                .iter()
-                .take(crate::notification::MAX_NOTIFICATION_ACTIONS)
-                .map(|action| NotificationPluginAction {
-                    key: action.key.clone(),
-                    label: action.label.clone(),
-                })
-                .collect(),
-        };
-        Self {
-            notification: notification.map(item),
-            history: if history_visible {
-                history.iter().take(12).map(item).collect()
-            } else {
-                Vec::new()
-            },
-            history_visible,
-        }
-    }
-
-    pub(crate) fn to_json(&self) -> String {
-        let item = |item: &NotificationPluginItem| {
-            serde_json::json!({"id": item.id, "appName": item.app_name,
-                "summary": item.summary, "body": item.body,
-                "actions": item.actions.iter().map(|action| serde_json::json!({
-                    "key": action.key, "label": action.label
-                })).collect::<Vec<_>>()})
-        };
-        serde_json::json!({
-            "notification": self.notification.as_ref().map(item),
-            "history": self.history.iter().map(item).collect::<Vec<_>>(),
-            "historyVisible": self.history_visible,
         })
         .to_string()
     }
@@ -1505,14 +1403,6 @@ impl PluginPanelApplication {
         projection: &TaskbarPluginProjection,
     ) -> Result<Self, String> {
         Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn notification_with_test_source(
-        source: &str,
-        projection: &NotificationPluginProjection,
-    ) -> Result<Self, String> {
-        Self::new_with_manifest(source, notification_manifest(), Some(projection.to_json()))
     }
 
     #[cfg(test)]
@@ -8042,58 +7932,6 @@ mod tests {
             plugin.take_effects(),
             vec![PluginEffect::KeyboardHide { generation: 8 }]
         );
-    }
-
-    #[test]
-    fn notification_plugin_uses_styled_window_root() {
-        let item = NotificationPluginItem {
-            id: 7,
-            app_name: "Mail".into(),
-            summary: "New message".into(),
-            body: "The body".into(),
-            actions: vec![NotificationPluginAction {
-                key: "open".into(),
-                label: "Open".into(),
-            }],
-        };
-        for projection in [
-            NotificationPluginProjection {
-                notification: None,
-                history: Vec::new(),
-                history_visible: false,
-            },
-            NotificationPluginProjection {
-                notification: Some(item.clone()),
-                history: Vec::new(),
-                history_visible: false,
-            },
-            NotificationPluginProjection {
-                notification: Some(item.clone()),
-                history: vec![item.clone()],
-                history_visible: true,
-            },
-        ] {
-            let panel = PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::notification_manifest(),
-                "main.js",
-                projection.to_json(),
-            )
-            .unwrap();
-            assert!(matches!(
-                &panel.node,
-                PanelNode::Surface {
-                    window_request: Some(_),
-                    ..
-                }
-            ));
-            assert_eq!(
-                panel
-                    .stylesheet
-                    .resolve("window", Some("main"), Some("notification-window"))
-                    .background,
-                Some(0xf22b303c)
-            );
-        }
     }
 
     #[test]

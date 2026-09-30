@@ -3124,9 +3124,6 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
         decisions: Mutex::new(Vec::new()),
     });
     let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
-    shell
-        .set_plugin_enabled(&crate::plugin_panel::notification_manifest().id, false)
-        .unwrap();
 
     shell.sync_remote_lease_notifications_from(host.pending.lock().unwrap().clone());
 

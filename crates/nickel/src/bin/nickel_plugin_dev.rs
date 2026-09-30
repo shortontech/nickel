@@ -176,15 +176,14 @@ mod platform {
     };
     use nickel_shell::plugin_panel::{
         PluginPanelApplication, codex_projects_manifest, control_center_manifest, manifest,
-        notification_manifest, on_screen_keyboard_manifest, run_manifest, taskbar_manifest,
-        volume_osd_manifest, window_preview_manifest,
+        on_screen_keyboard_manifest, run_manifest, taskbar_manifest, volume_osd_manifest,
+        window_preview_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
         [
             manifest(),
             taskbar_manifest(),
-            notification_manifest(),
             run_manifest(),
             control_center_manifest(),
             codex_projects_manifest(),

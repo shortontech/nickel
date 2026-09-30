@@ -1309,8 +1309,6 @@ fn render_role(
         .filter(|surface| {
             surface.role() == wanted
                 || (wanted == SurfaceRole::Taskbar && surface.is_taskbar_plugin())
-                || (wanted == SurfaceRole::Notification
-                    && surface.plugin_key() == Some(&plugin_panel::notification_surface_key()))
                 || (wanted == SurfaceRole::ControlCenter
                     && surface.plugin_key() == Some(&plugin_panel::control_center_surface_key()))
         })
@@ -2877,39 +2875,12 @@ pub fn run() -> Result<(), String> {
                         sync_visibility(&mut shell, &mut state);
                     }
                 }
-                let opening_notification_history =
-                    shortcut == platform::GlobalShortcut::ShowNotifications;
                 if state.global_shortcut(shortcut) {
                     shell.set_plugin_surfaces(
                         state.shell_fixed_surface_keys(),
                         state.shell_panel_surfaces(),
                     )?;
                     sync_visibility(&mut shell, &mut state);
-                    #[cfg(target_os = "linux")]
-                    if opening_notification_history
-                        && state.native_surface_visible(
-                            SurfaceRole::Panel,
-                            Some(&plugin_panel::notification_surface_key()),
-                        )
-                    {
-                        let _ = state.dispatch_session_command(
-                            "focus-notification-history",
-                            platform::ShellCommand::FocusPluginSurface {
-                                key: plugin_panel::notification_surface_key(),
-                            },
-                        );
-                    }
-                    #[cfg(target_os = "windows")]
-                    if opening_notification_history
-                        && state.native_surface_visible(
-                            SurfaceRole::Panel,
-                            Some(&plugin_panel::notification_surface_key()),
-                        )
-                    {
-                        // Passive arrival must not interrupt typing. This user-invoked
-                        // history action is the explicit transition into keyboard focus.
-                        shell.raise_plugin_surface(&plugin_panel::notification_surface_key());
-                    }
                     state.sync_transient_overlays();
                     focus_visible_overlay(&mut shell, &state);
                     render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;

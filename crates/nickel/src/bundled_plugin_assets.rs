@@ -18,10 +18,6 @@ pub(crate) fn resolve(
             include_str!("../../../assets/plugins/taskbar/window-menu.js"),
             include_str!("../../../assets/plugins/taskbar/ui.css"),
         ),
-        ("org.nickel.notification", "main.js") => (
-            include_str!("../../../assets/plugins/notification/main.js"),
-            include_str!("../../../assets/plugins/notification/ui.css"),
-        ),
         ("org.nickel.volume-osd", "main.js") => (
             include_str!("../../../assets/plugins/volume-osd/main.js"),
             include_str!("../../../assets/plugins/volume-osd/ui.css"),

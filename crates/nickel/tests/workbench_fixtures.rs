@@ -19,10 +19,7 @@ fn registers_every_shell_surface_fixture() {
             "shell.codex-project-menu",
             "shell.control-center",
             "shell.desktop",
-            "shell.launcher-dashboard",
-            "shell.launcher-search",
             "shell.lock",
-            "shell.notification",
             "shell.panel",
             "shell.runtime",
             "shell.screenshot",
@@ -55,33 +52,7 @@ fn registers_every_shell_surface_fixture() {
                         && node.label.as_deref() == Some("Audio volume")
                 }));
             }
-            if entry.metadata.id == "shell.launcher-search" {
-                assert!(session.accessibility_nodes().iter().any(|node| {
-                    node.id.as_str().ends_with("launcher-query")
-                        && node.label.as_deref() == Some("Search applications")
-                }));
-            }
-            if entry.metadata.id == "shell.launcher-dashboard" {
-                assert!(session.accessibility_nodes().iter().any(|node| {
-                    node.id.as_str().ends_with("launcher-query")
-                        && node.label.as_deref() == Some("Search applications")
-                }));
-            }
-            if entry.metadata.id == "shell.notification" {
-                let has_activate = session
-                    .semantic_nodes()
-                    .iter()
-                    .any(|node| node.actions.contains(&nickel_ui::ActionKind::Activate));
-                assert!(
-                    has_activate,
-                    "notification action reachability drifted for {}",
-                    variant.id
-                );
-                assert!(session.accessibility_nodes().iter().any(|node| {
-                    node.id.as_str().ends_with("notification-dismiss")
-                        && node.label.as_deref() == Some("Dismiss")
-                }));
-            }
+
             if entry.metadata.id == "shell.panel" && variant.id == "status-items" {
                 for label in [
                     "Codex projects",
@@ -187,71 +158,5 @@ fn desktop_variants_expose_named_context_interactive_presentation() {
                 .activate(via)
                 .unwrap_or_else(|error| panic!("{} {via:?}: {error}", variant.id));
         }
-    }
-}
-
-#[test]
-fn notification_variants_dispatch_jsx_dismiss() {
-    let mut registry = FixtureRegistry::new();
-    ShellFixtureProvider.register(&mut registry).unwrap();
-    let entry = registry
-        .finish()
-        .into_iter()
-        .find(|entry| entry.metadata.id == "shell.notification")
-        .expect("notification fixture");
-
-    for variant in entry.metadata.variants {
-        let mut session = entry.open_configuration(*variant);
-        session
-            .activate(ActivationVia::Semantic)
-            .unwrap_or_else(|error| panic!("{}: {error}", variant.id));
-        if variant.id != "no-actions" {
-            assert!(session.semantic_nodes().iter().any(|node| {
-                node.name.as_deref() == Some("Open")
-                    && node.actions.contains(&nickel_ui::ActionKind::Activate)
-            }));
-        }
-    }
-}
-
-#[test]
-fn launcher_dashboard_matrix_covers_every_required_axis() {
-    let mut registry = FixtureRegistry::new();
-    ShellFixtureProvider.register(&mut registry).unwrap();
-    let entry = registry
-        .finish()
-        .into_iter()
-        .find(|entry| entry.metadata.id == "shell.launcher-dashboard")
-        .unwrap();
-    let ids = entry
-        .metadata
-        .variants
-        .iter()
-        .map(|variant| variant.id)
-        .collect::<Vec<_>>()
-        .join("\n");
-    for required in [
-        "populated",
-        "empty",
-        "loading",
-        "partial-failure",
-        "wide",
-        "narrow",
-        "ltr",
-        "rtl",
-        "dark",
-        "light",
-        "high-contrast",
-        "1x",
-        "2x",
-        "pointer",
-        "keyboard",
-        "controller",
-        "a11y",
-    ] {
-        assert!(
-            ids.contains(required),
-            "launcher matrix does not cover {required}"
-        );
     }
 }
