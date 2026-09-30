@@ -521,9 +521,11 @@ pub struct LiveShell {
     plugin_launcher_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_run_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
-    plugin_taskbar_badge_hosts: std::collections::BTreeMap<
+    plugin_badge_slot_hosts: std::collections::BTreeMap<
         String,
         (
+            String,
+            String,
             i16,
             nickel_core::plugins::PluginContributionMode,
             crate::plugin_panel::PluginPanelApplication,
@@ -817,7 +819,7 @@ fn taskbar_plugin_data(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutableExtensionKind {
-    TaskbarBadge,
+    PluginBadge,
     ControlSection,
     PluginWidget,
     PluginAction,
@@ -847,9 +849,7 @@ fn executable_extension_priority(
         contribution.target_slot.as_str(),
         contribution.contract,
     ) {
-        ("org.nickel.taskbar", "task-badge", PluginSlotContract::Badge) => {
-            ExecutableExtensionKind::TaskbarBadge
-        }
+        (_, _, PluginSlotContract::Badge) => ExecutableExtensionKind::PluginBadge,
         ("org.nickel.control-center", "control-section", PluginSlotContract::Section) => {
             ExecutableExtensionKind::ControlSection
         }
@@ -887,61 +887,6 @@ fn external_plugin_settings(
     let stored = nickel_core::plugins::PluginPreferences::load_default(manifest)
         .map_err(|error| format!("could not load plugin settings: {error}"))?;
     Ok(stored.effective(manifest))
-}
-
-fn compose_badge_slot(
-    items: &[crate::plugin_panel::TaskbarPluginItem],
-    extensions: &std::collections::BTreeMap<
-        String,
-        (
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
-) -> Vec<serde_json::Value> {
-    use nickel_core::plugins::PluginContributionMode;
-    let mut ordered = extensions.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
-    let replacement = ordered
-        .iter()
-        .rev()
-        .find(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace);
-    let mut badges = Vec::new();
-    if let Some((id, (_, _, application))) = replacement {
-        append_badge_slot(&mut badges, items, id, application);
-    }
-    for (id, (_, mode, application)) in ordered {
-        if *mode == PluginContributionMode::Add {
-            append_badge_slot(&mut badges, items, id, application);
-        }
-    }
-    badges
-}
-
-fn append_badge_slot(
-    badges: &mut Vec<serde_json::Value>,
-    items: &[crate::plugin_panel::TaskbarPluginItem],
-    plugin_id: &str,
-    application: &crate::plugin_panel::PluginPanelApplication,
-) {
-    if let Ok(contributions) = application.taskbar_badges() {
-        for (item, label, count, color) in contributions {
-            if count > 0
-                && items.iter().any(|candidate| candidate.id == item)
-                && badges
-                    .iter()
-                    .filter(|badge| badge["item"].as_str() == Some(item.as_str()))
-                    .count()
-                    < 3
-            {
-                badges.push(serde_json::json!({
-                    "pluginId": plugin_id, "item": item, "label": label,
-                    "count": count, "color": color,
-                }));
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1689,7 +1634,7 @@ impl LiveShell {
             plugin_launcher_host,
             plugin_run_host,
             plugin_taskbar_host,
-            plugin_taskbar_badge_hosts: std::collections::BTreeMap::new(),
+            plugin_badge_slot_hosts: std::collections::BTreeMap::new(),
             plugin_control_section_hosts: std::collections::BTreeMap::new(),
             plugin_widget_slot_hosts: std::collections::BTreeMap::new(),
             plugin_action_slot_hosts: std::collections::BTreeMap::new(),
@@ -3692,30 +3637,33 @@ impl LiveShell {
     }
 
     fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
-        self.plugin_slot_projection_with_item(target_id, None)
+        self.plugin_slot_projection_with_context(target_id, None, None)
     }
 
-    /// `Some(item)` limits action contributions to entries applicable to that
-    /// item before the bounded projection is built. `None` projects every item.
-    fn plugin_slot_projection_with_item(
+    /// Filters item-scoped contributions before applying the projection limits.
+    fn plugin_slot_projection_with_context(
         &self,
         target_id: &str,
         item_filter: Option<Option<&str>>,
+        visible_badge_items: Option<&HashSet<String>>,
     ) -> Option<serde_json::Value> {
         use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
 
         let target = self.plugin_registry.get(target_id)?;
         let mut slots = serde_json::Map::new();
         for slot in &target.manifest.provides_slots {
-            let limit = if slot.contract == PluginSlotContract::Action {
-                32
-            } else {
-                8
+            let limit = match slot.contract {
+                PluginSlotContract::Badge if visible_badge_items.is_some() => 36,
+                PluginSlotContract::Badge => 128,
+                PluginSlotContract::Action => 32,
+                PluginSlotContract::Widget => 8,
+                PluginSlotContract::Section => continue,
             };
             let hosts = match slot.contract {
+                PluginSlotContract::Badge => &self.plugin_badge_slot_hosts,
                 PluginSlotContract::Widget => &self.plugin_widget_slot_hosts,
                 PluginSlotContract::Action => &self.plugin_action_slot_hosts,
-                _ => continue,
+                PluginSlotContract::Section => unreachable!(),
             };
             let mut contributors = hosts
                 .iter()
@@ -3733,9 +3681,39 @@ impl LiveShell {
                     .into_iter()
                     .filter(|(_, (_, _, _, mode, _))| *mode == PluginContributionMode::Add),
             );
-            let mut items = Vec::new();
+            let mut items: Vec<serde_json::Value> = Vec::new();
             for (id, (_, _, _, _, application)) in ordered {
                 match slot.contract {
+                    PluginSlotContract::Badge => {
+                        if let Ok(badges) = application.badge_contributions() {
+                            for (item, label, count, color) in badges {
+                                if count == 0
+                                    || visible_badge_items
+                                        .is_some_and(|visible| !visible.contains(&item))
+                                    || visible_badge_items.is_some()
+                                        && items
+                                            .iter()
+                                            .filter(|badge| {
+                                                badge["item"].as_str() == Some(item.as_str())
+                                            })
+                                            .count()
+                                            >= 3
+                                {
+                                    continue;
+                                }
+                                items.push(serde_json::json!({
+                                    "pluginId": id,
+                                    "item": item,
+                                    "label": label,
+                                    "count": count,
+                                    "color": color,
+                                }));
+                                if items.len() == limit {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     PluginSlotContract::Widget => {
                         if let Ok(widgets) = application.desktop_widgets() {
                             for widget in widgets.into_iter().take(limit - items.len()) {
@@ -3772,7 +3750,7 @@ impl LiveShell {
                             }
                         }
                     }
-                    _ => unreachable!(),
+                    PluginSlotContract::Section => unreachable!(),
                 }
                 if items.len() == limit {
                     break;
@@ -3790,7 +3768,7 @@ impl LiveShell {
         item: Option<&str>,
         limit: usize,
     ) -> Vec<serde_json::Value> {
-        self.plugin_slot_projection_with_item(target_id, Some(item))
+        self.plugin_slot_projection_with_context(target_id, Some(item), None)
             .and_then(|slots| {
                 slots
                     .get(slot_id)
@@ -4155,12 +4133,6 @@ impl LiveShell {
             PluginStatus, PluginStatusSnapshot,
         };
 
-        let badge_replacement = self
-            .plugin_taskbar_badge_hosts
-            .iter()
-            .filter(|(_, (_, mode, _))| *mode == PluginContributionMode::Replace)
-            .max_by_key(|(id, (priority, _, _))| (*priority, id.as_str()))
-            .map(|(id, _)| id.as_str());
         let section_replacement = self
             .plugin_control_section_hosts
             .iter()
@@ -4243,20 +4215,14 @@ impl LiveShell {
                                     if entry.desired_enabled
                                         && contribution.mode == PluginContributionMode::Replace
                                         && ((contribution.target_plugin
-                                            == crate::plugin_panel::taskbar_manifest().id
-                                            && contribution.target_slot == "task-badge"
-                                            && badge_replacement
+                                            == crate::plugin_panel::control_center_manifest().id
+                                            && contribution.target_slot == "control-section"
+                                            && section_replacement
                                                 .is_some_and(|winner| winner != entry.manifest.id))
-                                            || (contribution.target_plugin
-                                                == crate::plugin_panel::control_center_manifest()
-                                                    .id
-                                                && contribution.target_slot == "control-section"
-                                                && section_replacement.is_some_and(|winner| {
-                                                    winner != entry.manifest.id
-                                                }))
                                             || self
-                                                .plugin_widget_slot_hosts
+                                                .plugin_badge_slot_hosts
                                                 .iter()
+                                                .chain(self.plugin_widget_slot_hosts.iter())
                                                 .chain(self.plugin_action_slot_hosts.iter())
                                                 .filter(|(_, (target, slot, _, mode, _))| {
                                                     target == &contribution.target_plugin
@@ -4453,7 +4419,8 @@ impl LiveShell {
                             );
                         }
                     }
-                } else if let Some((_, _, current)) = self.plugin_taskbar_badge_hosts.get_mut(id) {
+                } else if let Some((_, _, _, _, current)) = self.plugin_badge_slot_hosts.get_mut(id)
+                {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     *current = application;
                 } else if let Some((_, _, _, _, current)) =
@@ -4496,6 +4463,10 @@ impl LiveShell {
         }
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
+        if let Some((target, _, _, _, _)) = self.plugin_badge_slot_hosts.get(id) {
+            let target = target.clone();
+            self.refresh_plugin_slot_hosts(&target);
+        }
         if let Some((target, _, _, _, _)) = self.plugin_widget_slot_hosts.get(id) {
             let target = target.clone();
             self.refresh_plugin_slot_hosts(&target);
@@ -4534,7 +4505,7 @@ impl LiveShell {
             .map(|contribution| contribution.target_plugin.clone());
         tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
-        self.plugin_taskbar_badge_hosts.remove(id);
+        self.plugin_badge_slot_hosts.remove(id);
         self.plugin_widget_slot_hosts.remove(id);
         if self.plugin_action_slot_hosts.remove(id).is_some() {
             self.application_menu_plugin_host = None;
@@ -4870,7 +4841,7 @@ impl LiveShell {
             return Ok(true);
         }
         if !enabled {
-            self.plugin_taskbar_badge_hosts.remove(id);
+            self.plugin_badge_slot_hosts.remove(id);
             self.plugin_widget_slot_hosts.remove(id);
             if self.plugin_action_slot_hosts.remove(id).is_some() {
                 self.application_menu_plugin_host = None;
@@ -4914,9 +4885,14 @@ impl LiveShell {
             .map(|(_, _, _, application)| application.retained_contribution_bytes());
         let started = if let Some((kind, priority, mode, application)) = external_extension {
             match kind {
-                ExecutableExtensionKind::TaskbarBadge => {
-                    self.plugin_taskbar_badge_hosts
-                        .insert(id.to_owned(), (priority, mode, application));
+                ExecutableExtensionKind::PluginBadge => {
+                    let (target_plugin, target_slot) = extension_target
+                        .clone()
+                        .expect("validated extension has a target");
+                    self.plugin_badge_slot_hosts.insert(
+                        id.to_owned(),
+                        (target_plugin, target_slot, priority, mode, application),
+                    );
                 }
                 ExecutableExtensionKind::ControlSection => {
                     self.plugin_control_section_hosts
@@ -11100,9 +11076,18 @@ impl LiveShell {
         let (projection, images) = self.taskbar_plugin_projection(clock);
         let mut data: serde_json::Value =
             serde_json::from_str(&projection.to_json()).expect("taskbar projection produces JSON");
-        data["slots"] = serde_json::json!({
-            "task-badge": compose_badge_slot(&projection.items, &self.plugin_taskbar_badge_hosts),
-        });
+        let visible_items = projection
+            .items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<HashSet<_>>();
+        data["slots"] = self
+            .plugin_slot_projection_with_context(
+                &crate::plugin_panel::taskbar_manifest().id,
+                None,
+                Some(&visible_items),
+            )
+            .unwrap_or_else(|| serde_json::json!({}));
         (data.to_string(), images)
     }
 }

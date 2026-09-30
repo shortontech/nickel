@@ -209,7 +209,7 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .set_plugin_enabled("org.example.priority-badge", true)
             .unwrap()
     );
-    assert_eq!(shell.plugin_taskbar_badge_hosts.len(), 2);
+    assert_eq!(shell.plugin_badge_slot_hosts.len(), 2);
 
     shell.windows = vec![crate::model::OpenWindow {
         id: crate::model::WindowId(71),
@@ -225,33 +225,22 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
         "org.example.mail"
     );
     assert_eq!(live_data["slots"]["task-badge"][0]["count"], 2);
-
-    let mut projection = crate::plugin_panel::TaskbarPluginProjection::from_groups(&[], "12:00");
-    projection
-        .items
-        .push(crate::plugin_panel::TaskbarPluginItem {
-            index: 0,
-            id: "org.example.mail".into(),
-            name: "Mail".into(),
-            active: false,
-            pinned: true,
-            icon: false,
-        });
-    let badges = super::compose_badge_slot(&projection.items, &shell.plugin_taskbar_badge_hosts);
-    assert_eq!(
-        badges
+    let badge_counts = |shell: &mut LiveShell| {
+        let (data, _) = shell.taskbar_plugin_render_data("12:00");
+        let data: serde_json::Value = serde_json::from_str(&data).unwrap();
+        data["slots"]["task-badge"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|badge| badge["count"].as_u64().unwrap())
-            .collect::<Vec<_>>(),
-        [2, 7]
-    );
-    let mut taskbar_data: serde_json::Value = serde_json::from_str(&projection.to_json()).unwrap();
-    taskbar_data["slots"] = serde_json::json!({"task-badge": badges});
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(badge_counts(&mut shell), [2, 7]);
     let host = UiHost::new(
         crate::plugin_panel::PluginPanelApplication::bundled_with_data(
             crate::plugin_panel::taskbar_manifest(),
             "main.js",
-            taskbar_data.to_string(),
+            live_data.to_string(),
         )
         .unwrap(),
         800,
@@ -296,38 +285,15 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .composition[0]
             .contains("superseded")
     );
-    let replaced = super::compose_badge_slot(&projection.items, &shell.plugin_taskbar_badge_hosts);
-    assert_eq!(
-        replaced
-            .iter()
-            .map(|badge| badge["count"].as_u64().unwrap())
-            .collect::<Vec<_>>(),
-        [23, 2, 7]
-    );
+    assert_eq!(badge_counts(&mut shell), [23, 2, 7]);
     shell
         .set_plugin_enabled("org.example.replace-tie", false)
         .unwrap();
-    let high_priority =
-        super::compose_badge_slot(&projection.items, &shell.plugin_taskbar_badge_hosts);
-    assert_eq!(
-        high_priority
-            .iter()
-            .map(|badge| badge["count"].as_u64().unwrap())
-            .collect::<Vec<_>>(),
-        [19, 2, 7]
-    );
+    assert_eq!(badge_counts(&mut shell), [19, 2, 7]);
     shell
         .set_plugin_enabled("org.example.replace-high", false)
         .unwrap();
-    let lower_priority =
-        super::compose_badge_slot(&projection.items, &shell.plugin_taskbar_badge_hosts);
-    assert_eq!(
-        lower_priority
-            .iter()
-            .map(|badge| badge["count"].as_u64().unwrap())
-            .collect::<Vec<_>>(),
-        [11, 2, 7]
-    );
+    assert_eq!(badge_counts(&mut shell), [11, 2, 7]);
     shell
         .set_plugin_enabled("org.example.replace-low", false)
         .unwrap();
@@ -354,13 +320,13 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .set_plugin_enabled("org.example.mail-badge", false)
             .unwrap()
     );
-    assert_eq!(shell.plugin_taskbar_badge_hosts.len(), 1);
+    assert_eq!(shell.plugin_badge_slot_hosts.len(), 1);
     assert!(
         shell
             .set_plugin_enabled("org.example.priority-badge", false)
             .unwrap()
     );
-    assert!(shell.plugin_taskbar_badge_hosts.is_empty());
+    assert!(shell.plugin_badge_slot_hosts.is_empty());
     assert_eq!(
         shell
             .plugin_registry
@@ -368,6 +334,74 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .unwrap()
             .memory,
         nickel_core::plugins::PluginMemory::default()
+    );
+}
+
+#[test]
+fn badge_slot_can_target_an_installed_window_plugin() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = root.path().join("org.example.badge-host");
+    std::fs::create_dir(&provider).unwrap();
+    std::fs::write(
+        provider.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.badge-host","name":"Badge host",
+            "entry":"main.js","surfaces":[{"id":"main","kind":"window","width":320,"height":180}],
+            "provides_slots":[{"id":"status","contract":"badge","replaceable":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        provider.join("main.js"),
+        "function App() { return h(Window, {width: 320, height: 180}, h(Text, {}, 'Host')); }",
+    )
+    .unwrap();
+    let contributor = root.path().join("org.example.status-badge");
+    std::fs::create_dir(&contributor).unwrap();
+    std::fs::write(
+        contributor.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.status-badge","name":"Status badge",
+            "entry":"main.js","contributes":[{"target_plugin":"org.example.badge-host",
+            "target_slot":"status","contract":"badge","mode":"add"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        contributor.join("main.js"),
+        "function App() { return h(Badge, {item: 'mail', label: 'Unread', count: 4}); }",
+    )
+    .unwrap();
+
+    let mut shell = LiveShell::new().unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    assert!(catalog.failures.is_empty());
+    for (_, descriptor) in std::mem::take(&mut catalog.packages) {
+        shell
+            .plugin_registry
+            .register(descriptor.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(descriptor.manifest.id.clone(), descriptor);
+    }
+    shell
+        .set_plugin_enabled("org.example.badge-host", true)
+        .unwrap();
+    shell
+        .set_plugin_enabled("org.example.status-badge", true)
+        .unwrap();
+    let slots = shell
+        .plugin_slot_projection("org.example.badge-host")
+        .unwrap();
+    assert_eq!(slots["status"][0]["item"], "mail");
+    assert_eq!(slots["status"][0]["count"], 4);
+    shell
+        .set_plugin_enabled("org.example.status-badge", false)
+        .unwrap();
+    assert!(
+        shell
+            .plugin_slot_projection("org.example.badge-host")
+            .unwrap()["status"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
 }
 

@@ -2733,7 +2733,7 @@ impl PanelNode {
         }
     }
 
-    pub fn collect_taskbar_badges(
+    pub fn collect_badges(
         &self,
         badges: &mut Vec<(String, String, u16, u32)>,
     ) -> Result<(), String> {
@@ -2753,12 +2753,11 @@ impl PanelNode {
             _ => {
                 let Some(children) = self.container_children() else {
                     return Err(
-                        "taskbar badge extension must return badges in a supported container"
-                            .into(),
+                        "badge extension must return badges in a supported container".into(),
                     );
                 };
                 for child in children {
-                    child.collect_taskbar_badges(badges)?;
+                    child.collect_badges(badges)?;
                 }
                 Ok(())
             }

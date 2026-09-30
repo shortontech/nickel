@@ -370,11 +370,12 @@ Manifests may declare typed composition relationships. A target declares a
 contract, and whether replacement is allowed. An extension declares a
 `contributes` entry with `target_plugin`, `target_slot`, matching `contract`,
 and `mode` (`add` or `replace`). Nickel validates these declarations and shows
-them in Settings' enable review. The first executable slot is the taskbar's
-`task-badge` slot: a package with no surface can declare one `badge`
-contribution targeting `org.nickel.taskbar/task-badge`. Its `App` returns
-`h(Badge, { item: "application-id", label: "Unread mail", count: 3 })`; Nickel
-places the badge beside the matching task. Contribution nodes may also sit
+them in Settings' enable review. Any provider can declare a `badge` slot and
+read its contributions from `nickel.data.slots[slotId]` as bounded
+`{pluginId, item, label, count, color}` objects. A surface-free extension's
+`App` returns `h(Badge, { item: "application-id", label: "Unread mail", count: 3 })`.
+The bundled taskbar uses its `task-badge` slot to place badges beside matching
+tasks. Contribution nodes may also sit
 inside `Div`, `Box`, `Row`, `Column`, and other generic component containers.
 Their callbacks keep the contributor's own capability checks. Additive badge
 plugins compose in priority and plugin ID order, with a limit of three visible
@@ -400,9 +401,10 @@ nickel-plugin dev assets/plugins/example-widget-host assets/plugins/example-widg
 Saving either package restarts that session. For an installed plugin, Settings
 shows the declared target and slot before enablement.
 An installed provider may also declare an `action` slot. It receives bounded
-`{pluginId, id, label}` entries in `nickel.data.slots[slotId]` and can render
-them as buttons. On click it requests
-`{type: "invoke-plugin-slot-action", slot, pluginId, id}`. Nickel checks that
+`{pluginId, id, label, item}` entries in `nickel.data.slots[slotId]` and can render
+them as buttons. `item` is optional and scopes the action to one resource. On
+click it requests `{type: "invoke-plugin-slot-action", slot, pluginId, id, item}`.
+Nickel checks that
 the action is still projected and dispatches the callback in the contributing
 plugin's own JS instance, where its declared grants apply. The
 [action contributor](../assets/plugins/example-action-contributor/) adds an

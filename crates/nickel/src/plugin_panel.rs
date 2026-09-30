@@ -1239,11 +1239,11 @@ impl PluginPanelApplication {
         Ok(())
     }
 
-    pub fn taskbar_badges(&self) -> Result<Vec<(String, String, u16, u32)>, String> {
+    pub fn badge_contributions(&self) -> Result<Vec<(String, String, u16, u32)>, String> {
         let mut badges = Vec::new();
-        self.node.collect_taskbar_badges(&mut badges)?;
+        self.node.collect_badges(&mut badges)?;
         if badges.is_empty() {
-            return Err("taskbar badge extension did not return a badge".into());
+            return Err("badge extension did not return a badge".into());
         }
         Ok(badges)
     }
@@ -1339,7 +1339,7 @@ impl PluginPanelApplication {
             return Err("extension needs exactly one contribution".into());
         };
         match contribution.contract {
-            PluginSlotContract::Badge => self.taskbar_badges().map(|_| ()),
+            PluginSlotContract::Badge => self.badge_contributions().map(|_| ()),
             PluginSlotContract::Widget => self.desktop_widgets().map(|_| ()),
             PluginSlotContract::Action => self.taskbar_actions().map(|_| ()),
             PluginSlotContract::Section => self.control_sections().map(|_| ()),
@@ -3356,7 +3356,7 @@ mod tests {
         "#
         .into();
         let application = PluginPanelApplication::from_package(&badge).unwrap();
-        assert_eq!(application.taskbar_badges().unwrap()[0].2, 3);
+        assert_eq!(application.badge_contributions().unwrap()[0].2, 3);
 
         let mut widget = PluginPackage::load(format!("{root}/example-widget-contributor")).unwrap();
         widget.source = r#"
