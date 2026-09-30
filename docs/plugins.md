@@ -8,12 +8,13 @@ default. Set `anchor` to `top-left`, `top-right`, `bottom-left`, or
 corner. Placement is clamped to the output.
 An overlay can set `passive: true` to appear above ordinary windows without
 activating its native window on Windows.
-They do not replace the built-in taskbar readiness surface.
+Standalone surfaces coexist with the selected shell package.
 
 Nickel loads a compiled JavaScript entry from a directory containing
 `plugin.json`. The [bundled hello panel](../assets/plugins/hello-panel/) is a
-minimal working example. The [taskbar](../assets/plugins/taskbar/) shows how a
-first-party plugin requests host actions.
+minimal working example. The [default shell package](../assets/plugins/nickel-default/)
+shows ordinary taskbar, launcher, Settings, and Quick Settings components using
+public capability clients.
 The [reserved panel example](../assets/plugins/example-reserved-panel/) shows
 how to span each output and reserve work area alongside the taskbar. Remove
 `reserve_work_area` and set `bottom_offset` for a floating dock.
@@ -25,16 +26,16 @@ in Settings to reopen it. For a package with several surfaces, closing one
 window retires that surface and leaves its siblings running. Disable and
 re-enable the package to reopen all its declared surfaces. A running sibling
 can reopen one declared window with
-`nickel.request({ type: "show-plugin-surface", surfaceId: "details" })`. The
+`nickel.surfaces.show("details")`. The
 host accepts only a window, dialog, or overlay ID from that plugin's own manifest and
 ignores a request for a surface that is already open. The
 [two-window example](../assets/plugins/example-two-windows/) shows the request
 in a working package. A window can request
-`nickel.request({ type: "hide-plugin-surface", surfaceId: "details" })` to close
+`nickel.surfaces.hide("details")` to close
 itself or a declared sibling; closing its last ordinary surface disables the
 package.
 An open ordinary window can request a new position on its current output with
-`nickel.request({ type: "surface.setPlacement", surfaceId: "details", anchor: "top-right", offsetX: -24, offsetY: 24 })`.
+`nickel.surfaces.setPlacement("details", {anchor: "top-right", offsetX: -24, offsetY: 24})`.
 Only a window declared by the requesting plugin can be moved. Offsets are
 logical pixels within ±8192; Nickel clamps the result to the output. The
 window manager still handles normal user movement and resizing.
@@ -42,15 +43,15 @@ The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
 The [separate dialog example](../assets/plugins/example-surface-dialog/) declares
 an initially closed `dialog` surface beside a home window. It opens the dialog
-with `show-plugin-surface` and dismisses it with
-`nickel.request({ type: "hide-plugin-surface", surfaceId: "confirm" })`.
+with `nickel.surfaces.show("confirm")` and dismisses it with
+`nickel.surfaces.hide("confirm")`.
 The dialog's optional `owner` field names a declared window on the same output
 scope. An owned dialog can open only while that window is live; closing the
 owner also closes its dialog. Windows presents it as a native owned window and
 blocks input to that owner until the dialog closes.
 Closing the package's last ordinary window also retires its open dialogs.
 The [overlay example](../assets/plugins/example-overlay/) uses the same
-`show-plugin-surface` and `hide-plugin-surface` requests for a centered,
+`nickel.surfaces.show` and `nickel.surfaces.hide` functions for a centered,
 translucent overlay. Overlays start closed, can be dismissed independently,
 and are retired with the package's last ordinary surface.
 
@@ -95,50 +96,29 @@ temporary Nickel profile, and launches the test shell. Saving `plugin.json`,
 a declared image or stylesheet, the JavaScript entry, or its sibling `.jsx`/`.tsx` source validates
 and restarts the test shell. An invalid edit prints its error and leaves
 the previous session running. Press Ctrl+C to stop and remove the temporary
-profile. For first-party shell plugins, pass a bundled directory such as
-`assets/plugins/launcher` or `assets/plugins/taskbar`.
-The developer command runs edited JavaScript in the isolated shell without
-installing a second copy of that plugin. Keep its shipped `plugin.json`
-unchanged while developing it. Saving a sibling `.js` source such as the
-taskbar's `menu.js` also restarts the session. For external plugins, the
-developer command supports up to 16 panel, dock, window, dialog, or overlay surfaces in one package, or
-one surface-free taskbar badge, taskbar action, Control
-Center section, or installed-plugin widget/action contribution;
-`nickel-plugin validate <directory>` runs the same
-source compilation and checks without launching a shell.
-If a surface needs data to render its initial JSX tree, add a
+profile. To edit shell components, use `assets/plugins/nickel-default`.
+Saving a sibling JavaScript module such as `src/Taskbar.js` also restarts the
+session. The developer command supports up to 16 declared surfaces per package
+and ordinary surface-free public composition providers. You can pass several
+package directories to develop dependencies and contributions together.
+`nickel-plugin validate <directory>` runs source compilation and package checks
+without launching a shell.
+
+When a plugin needs initial host data for offline validation, add a
 `"validation_data"` object in `plugin.json` keyed by surface ID. Each value
-must be an object of synthetic sample values. Validation combines it with
-host-owned `settings`, `slots`, and `surface` data for that surface; sample
-data cannot replace those fields. This checks the initial tree and manifest;
-use `dev` to exercise input, requested actions, and live state changes.
-The bundled Run dialog is wholly rendered by its JS plugin. Disabling that
-plugin closes an open Run dialog; its shortcut stays inactive until the plugin
-is enabled again in Settings.
-Disabling the bundled Launcher plugin also closes its surface and leaves its
-Meta shortcut inactive. Run remains available through Super+R, and the
-independent Settings shortcut can re-enable Launcher.
-Disabling the bundled Taskbar plugin retires its visible bar. On nested Linux,
-the desktop reclaims the bar's reserved work area until it is re-enabled.
-Taskbar context menus are JSX views owned by that plugin. Disabling Taskbar
-closes an open menu; menu requests stay unavailable until it is re-enabled.
-Disabling Volume OSD closes that overlay and clears its retained native UI;
-audio changes do not recreate a Rust fallback.
-Disabling Control Center closes ordinary Quick Settings. The trusted display
-projection chooser remains available for recovery.
-The ordinary view uses a plugin overlay; the trusted chooser uses a separate
-host surface. On Linux, opening it from the taskbar places the overlay beside
-that control on its output.
-Disabling Window Preview closes its visible cards and task switcher view;
-hovering a taskbar group no longer creates a Rust preview. Re-enabling the
-plugin restores the JSX preview.
-Disabling Notifications closes ordinary popups and history, releases its UI
-memory, and leaves Super+N inactive until re-enabled. Ordinary notification
-popups and history use the plugin's passive overlay surface. Pending remote
-access and Codex approval requests retain a trusted notification surface so
-users can review and decide them even while the plugin is disabled.
-Super+N focuses the plugin overlay for keyboard navigation; passive arrivals
-leave the current application focused.
+must be synthetic data for that surface. Host-owned resource fields take
+precedence over sample data. Validation checks the initial tree and manifest;
+use `dev` to exercise input, effects, and live resource changes.
+
+The selected shell package owns its taskbar, launcher, Quick Settings,
+notification, and optional Settings surfaces. Replacing an exported component
+uses ordinary package composition. Disabling or selecting a different shell
+retires the old visible surfaces; dependencies keep their own capability
+contexts. Trusted recovery and approval surfaces remain native.
+Bundled companion packages such as Run, Volume OSD, and Window Preview still
+have their own activation lifecycle. Disabling them closes their ordinary
+surfaces without creating a Rust presentation fallback.
+
 For a dock, set the surface `kind` to `"dock"`, choose a logical `width` and
 `height`, and set `bottom_offset` for the gap above the output edge. The
 `FixedWindow` root's ARGB `background` can be translucent. Several installed
@@ -361,18 +341,17 @@ The root `Window` or `FixedWindow` can handle Enter and Escape through
 `onSubmit` and `onEscape` JavaScript callbacks. Their requested desktop actions
 receive the same capability checks as button callbacks.
 For example, a plugin granted `control-center-show` can call
-`nickel.request({type: "toggle-control-center"})` from a button or a root
-shortcut handler.
-The same pattern supports `toggle-launcher` with `launcher-show`,
-`toggle-on-screen-keyboard` with `on-screen-keyboard-show`, and
-`toggle-projects-menu` with `projects-menu-show`.
-`dismiss-launcher` also requires `launcher-show`.
+`nickel.surfaces.show("quick-settings")` from a button or root shortcut handler.
+Use `nickel.surfaces.show`, `hide`, or `focus` for the selected shell's launcher,
+Settings, notification, and Quick Settings surfaces with their corresponding
+grants. `nickel.keyboard.toggle()` requires `on-screen-keyboard-show`, and
+`nickel.projects.toggle()` requires `projects-menu-show`.
 
-`<Slot id="content" />` marks a place where a host can insert its own component
-tree into the JSX layout. The ID names the insertion point; a slot with no
-host-provided content is empty. CSS can style the slot box with `slot#content`
-or a class name. The Settings window uses this to place its active page while
-its window and navigation are authored in JSX.
+`<Slot id="content" />` is a native content insertion point for hosts that
+provide a component tree. An empty insertion point renders nothing. CSS can
+style its box with `slot#content` or a class name. Public package composition
+uses exported components and semantic collections, described below; it does
+not use native slot data projections.
 
 Inside a `<Window>`, `<ScrollView id="items" grow={true}>` takes the remaining
 height and shrinks when the window does. Use `height` for a fixed-size scroll
@@ -393,62 +372,50 @@ also needs an ID, an accessibility label, and an `onClick` handler. A missing
 host asset renders a placeholder without giving the plugin filesystem access.
 `Button` may also handle `onDrag({ phase, x, y, bounds })`; Nickel captures the
 pointer through start, move, end, and cancel events. The callback can request a
-typed effect, as the bundled taskbar does when moving a pinned app.
-Plugins granted `windows-read` receive a bounded `nickel.data.windows` array.
-Each window has a string `id`, title, application ID, active state, and
-`canActivate`/`canClose` flags. A plugin with `windows-focus` may request
-`{ type: "window-action", action: "activate", window: id }`; `windows-context`
-permits `action: "close"`. Nickel checks the current window and its capability
-again when handling the request.
-Plugins granted `applications-read` receive up to 256 entries in
-`nickel.data.applications`, each with a stable ID, display name, and pinned
-state. `applications-launch` permits
-`nickel.request({ type: "applications.launch", id })`; Nickel resolves the ID
-against the current application catalog before launching it.
-`applications-pin` permits
-`nickel.request({ type: "applications.togglePin", id })` for a current
-catalog entry, a running application, or an already pinned application.
-Plugins granted `notifications-read` receive `nickel.data.notifications` with
-the current ordinary notification, up to 12 history entries, and
-`historyVisible`. Items include an ID, app name, summary, body, and bounded
-action list. `notifications-act` permits
-`{ type: "notification-invoke", id, key }`,
-`{ type: "notification-dismiss", id }`, and
-`{ type: "notification-close-history" }`. Nickel checks the live notification
-again before acting. Trusted approval notifications stay in native UI and are
-excluded from plugin data and actions.
+typed effect, as the default shell taskbar does when moving a pinned app.
+Plugins granted `windows-read` can call `nickel.windows.list()` for a copied,
+bounded window inventory. `nickel.windows.activate(id)` requires `windows-focus`;
+`nickel.windows.close(id)` and window menu operations require `windows-context`.
+The host rechecks the current window and grants before native execution.
+
+`nickel.applications.list()` requires `applications-read` and returns up to 256
+entries with stable ID, display name, and pinned state.
+`nickel.applications.launch(id)` requires `applications-launch`;
+`nickel.applications.togglePin(id)` and `movePin(id, direction)` require
+`applications-pin`. Requests resolve against current application identities.
+
+`nickel.notifications.get()` requires `notifications-read`. The bounded snapshot
+contains ordinary notifications and history. `nickel.notifications.invoke(id,key)`
+and `dismiss(id)` require `notifications-act` and recheck live notification
+identity. Trusted approval notifications are excluded from plugin data/actions.
+
 Plugins granted `run-command` may request
 `{ type: "run-submit", command: "..." }`. Nickel trims the command and rejects
 empty commands or those over 4096 characters before calling the platform's
 Run command handler.
-Any plugin granted `windows-focus` or `windows-context` can request
-`{ type: "preview-action", action: "activate" | "close" | "menu", window: id }`
-for a window in the currently open preview. `activate` requires `windows-focus`;
-the other actions require `windows-context`. Nickel checks the live preview
-and window before applying it. Similarly, `control-action` requests use the
-capability for the selected service, such as `audio-control` for
-`{ type: "control-action", action: "audio-volume", value: 25 }`. These actions
-currently require the bundled Control Center to be open and remain subject to
-its live service checks. Neither request depends on the caller's plugin ID.
+Use `nickel.windows` for window actions and `nickel.audio.get/setVolume/setMuted`
+for audio controls; `selectOutput(id)` selects a current output device.
+Audio writes require `audio-control` and current native service authority.
+The host validates them against current grants and native service state.
+
 `Dialog` accepts `onClose`, called when the host dismisses an open dialog by
 Escape, outside input, or focus loss. The handler should clear the state that
 controls `open`; dialog buttons may still update state and request typed effects.
-For example, `{ type: "show-settings" }` opens Nickel Settings when the plugin
-has the `settings-show` capability. Nickel launches its bundled Settings
-executable when installed beside the shell, including from a nested session;
-the application catalog remains a fallback.
-Add `screen: "appearance"` (or another Settings screen name) to open a
-specific page. Unknown screen names are rejected before the request reaches
-the desktop.
-`{ type: "show-control-center" }` opens Quick Settings with the
-`control-center-show` capability.
-Declare a typed setting in `plugin.json` to expose it in Settings and read its
-current value from `nickel.data.settings`. A component may save its own declared
-setting with `nickel.request({ type: "set-plugin-setting", key: "open-count",
-value: 1 })` when the plugin has `settings-write`. The host checks the setting
-name and value against the manifest, persists the change, and refreshes the
-plugin's active surfaces. That refresh starts fresh component state, so keep
-durable values in declared settings rather than `useState`.
+`nickel.surfaces.show("settings")` opens the selected shell's ordinary Settings
+surface with `settings-show`. For a native page navigation intent, the checked
+`show-settings` effect can include `screen: "appearance"` or another supported
+destination; the host forwards navigation to that shell's registered page.
+Settings renders the destination through its ordinary package runtime.
+
+Use `registerSetting` and `registerSettingsPage` to publish ordinary settings
+controls and JSX pages. Registration metadata and callbacks remain owned by the
+providing package; generic Settings controls invoke that package's callback
+through the public registry. Manifest metadata settings remain readable through
+`nickel.data.settings`. The public plugin management client exposes
+`nickel.plugins.setSetting(id,key,value,revision)` with `plugins-read` and
+`plugins-control`; it validates the declared kind, observed prior value, and
+current inventory revision before persisting an edit.
+
 `Menu` contains up to 16 `MenuItem` children. An item can have an `onClick`
 handler, a `disabledReason`, or nested `MenuItem` children with a `label` to
 form a submenu. Items can also declare `shortcut` text and `separatorBefore`.
@@ -462,70 +429,61 @@ capabilities and current shell state before executing a requested effect.
 The desktop, lock screen, screenshot tool, file manager, and Codex use Rust UI.
 Ordinary plugins can still declare their own windows and composition slots.
 
-Manifests may declare typed composition relationships. A target declares a
-`provides_slots` entry with an ID, a `badge`, `widget`, `action`, or `section`
-contract, and whether replacement is allowed. An extension declares a
-`contributes` entry with `target_plugin`, `target_slot`, matching `contract`,
-and `mode` (`add` or `replace`). Nickel validates these declarations and shows
-them in Settings' enable review. Any provider can declare a `badge` slot and
-read its contributions from `nickel.data.slots[slotId]` as bounded
-`{pluginId, item, label, count, color}` objects. A surface-free extension's
-`App` returns `h(Badge, { item: "application-id", label: "Unread mail", count: 3 })`.
-The bundled taskbar uses its `task-badge` slot to place badges beside matching
-tasks. Contribution nodes may also sit
-inside `Div`, `Box`, `Row`, `Column`, and other generic component containers.
-Their callbacks keep the contributor's own capability checks. Additive badge
-plugins compose in priority and plugin ID order, with a limit of three visible
-badges per task.
-A `replace` contribution replaces the slot's base badges; if several are
-enabled, the highest priority wins, with plugin ID breaking ties. Additive
-contributions then follow the winner.
+### Public package composition
 
-Installed plugins can also provide their own `widget` slots. The provider's
-JSX reads `nickel.data.slots[slotId]`, an array of bounded objects with
-`pluginId`, `label`, `value`, `percent`, and `color`. Nickel refreshes this data
-when a contributor is enabled, disabled, or changes a setting. The provider
-chooses where and how to render it. A replacement contribution wins by priority
-and plugin ID; additive contributions follow, with at most eight widgets per
-slot. The [widget host](../assets/plugins/example-widget-host/) and
-[widget contributor](../assets/plugins/example-widget-contributor/) demonstrate
-the relationship. Run both in one isolated session:
+The manifest's versioned `composition` object publishes components with
+`exports`, extends a shell with `extends` and versioned `requires`, replaces
+inherited contracts with `replaces`, or reuses a dependency's public export
+through `uses`. Reuse references name the dependency `package` and `export`;
+private implementation modules are not public imports.
+`nickel.component("shell.taskbar")` returns the selected component for that
+contract. The default shell also exposes contracts such as `shell.settings`,
+`shell.settings.navigation`, and `shell.settings.controls`.
+See the [default package's public exports](../assets/plugins/nickel-default/plugin.json).
 
-```sh
-nickel-plugin dev assets/plugins/example-widget-host assets/plugins/example-widget-contributor
+Semantic `contributions` publish ordinary components to collections such as
+`taskbar.items`, `system.controls`, and `settings.pages`. For example, the
+[control contribution package](../assets/plugins/example-control-section/)
+declares:
+
+```json
+"composition": {
+  "api_version": 1,
+  "id": "org.nickel.example-control-section",
+  "version": "0.2.0",
+  "exports": { "example.controls.applications": "./main.js#ControlSection" },
+  "contributions": [{
+    "collection": "system.controls",
+    "id": "find-apps",
+    "implementation": "./main.js#ControlSection"
+  }]
+}
 ```
 
-Saving either package restarts that session. For an installed plugin, Settings
-shows the declared target and slot before enablement.
-An installed provider may also declare an `action` slot. It receives bounded
-`{pluginId, id, label, item}` entries in `nickel.data.slots[slotId]` and can render
-them as buttons. `item` is optional and scopes the action to one resource. On
-click it requests `{type: "invoke-plugin-slot-action", slot, pluginId, id, item}`.
-Nickel checks that
-the action is still projected and dispatches the callback in the contributing
-plugin's own JS instance, where its declared grants apply. The
-[action contributor](../assets/plugins/example-action-contributor/) adds an
-Open launcher button to the widget host's `commands` slot. Run the host and
-both contributors together with one `nickel-plugin dev` command.
-The taskbar also provides a `task-action` slot with the `action` contract. A
-surface-free extension can return
-`h(Action, { id: "find-apps", item: "org.example.app", label: "Find apps", onClick: applicationId => nickel.request("show-launcher") })`.
-Omit `item` to show the action in every application menu. Nickel renders at
-most four contributed actions in that JSX menu, ordered by replacement winner
-then additive priority and plugin ID. The callback runs in the contributing
-plugin's own JS host; its requested effects still require that plugin's
-declared capabilities and current host validation. The
-[example task action](../assets/plugins/example-task-action/) demonstrates this.
-Any provider can declare a `section` slot and read bounded
-`{pluginId, id, label, value}` entries from `nickel.data.slots[slotId]`.
-Control Center provides the `control-section` slot. An extension can return
-Quick Settings renders ordinary components from the `system.controls`
-composition collection. Each callback runs in its contributor's own package
-context and keeps that package's grants. The
-[example control section](../assets/plugins/example-control-section/) declares
-an ordinary module export and a semantic composition contribution. It uses
-`nickel.surfaces.show("launcher")` through its `launcher-show` grant. Legacy
-`control-section` slots and indexed section callbacks are retired.
+Its exported `ControlSection` is ordinary JSX-compatible JavaScript. Quick
+Settings reads `nickel.contributions("system.controls")` and renders the returned
+components:
+
+```jsx
+const sections = nickel.contributions("system.controls");
+<Column>{sections.map(entry => <entry.component key={entry.key} />)}</Column>
+```
+
+Entries expose stable identity and an actual component reference. Each component
+runs in its producing package's context; nested callback effects retain that
+package's grants. Ordering is deterministic by contribution priority and
+identity. Contribution callbacks use the same ordinary event transaction as
+other package components. Edit the existing contribution with:
+
+```sh
+nickel-plugin dev assets/plugins/example-control-section
+```
+
+Public Settings pages can be published with `registerSettingsPage` or ordinary
+components contributed to `settings.pages`. Settings reads the public registry
+and collection and renders those components through the same runtime. The
+Plugins page's access review displays declared exports, replacements,
+dependencies, and contributions before activation.
 
 Nickel measures the retained native component tree in each extension's own
 account. The target plugin's rendered UI measurement also includes contributed
@@ -552,8 +510,8 @@ Plugins may declare up to 32 bounded settings in `plugin.json`: `boolean`,
 the schema and stores values separately per plugin. An installed plugin reads
 its effective values through `nickel.data.settings`, and the Plugins page
 shows the registered values. Settings provides switches, increment controls,
-choice cycling, and a text editor. Changes are validated against the manifest
-and applied to a running installed panel, badge, or widget without disabling it.
+selects, and a text editor. Changes are validated against the manifest
+and applied to the running package without disabling it.
 The manifest may also declare bounded `author` and `version` strings. Settings
 shows both in the plugin list and in the enable review; missing values are
 labeled unknown or unspecified.

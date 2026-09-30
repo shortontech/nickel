@@ -203,15 +203,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-reserved-panel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-task-action
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-control-section
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-widget-host
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-widget-contributor
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-action-contributor
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test public package settings and retirement contracts
