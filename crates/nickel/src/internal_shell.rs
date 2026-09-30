@@ -327,16 +327,12 @@ impl InternalShellCoordinator {
         }
         if let Some(primary) = outputs.first() {
             for role in [
-                SurfaceRole::Launcher,
                 SurfaceRole::ControlCenter,
                 SurfaceRole::Notification,
                 SurfaceRole::WindowPreview,
                 SurfaceRole::Screenshot,
                 SurfaceRole::OnScreenKeyboard,
             ] {
-                if role == SurfaceRole::Launcher {
-                    continue;
-                }
                 if role == SurfaceRole::OnScreenKeyboard {
                     continue;
                 }
@@ -353,11 +349,7 @@ impl InternalShellCoordinator {
                     continue;
                 }
                 let maximum = role_size(role, primary.width, primary.height, self.panel_edge);
-                let size = if role == SurfaceRole::Launcher {
-                    self.shell.launcher_preferred_surface_size(maximum)
-                } else {
-                    maximum
-                };
+                let size = maximum;
                 desired.push((role, plugin, None, size));
             }
         }
@@ -573,15 +565,7 @@ impl InternalShellCoordinator {
         &self,
         surface: &InternalShellSurface,
     ) -> Option<nickel_core::plugins::PluginSurfaceKey> {
-        surface.plugin.clone().or_else(|| {
-            (surface.role == SurfaceRole::Launcher)
-                .then(|| self.shell.active_launcher_surface_key())
-                .flatten()
-        })
-    }
-
-    pub(crate) fn launcher_preferred_surface_size(&mut self, maximum: (u32, u32)) -> (u32, u32) {
-        self.shell.launcher_preferred_surface_size(maximum)
+        surface.plugin.clone()
     }
 
     /// Keep scene layout and normalized input in the same compositor-owned
@@ -632,9 +616,14 @@ impl InternalShellCoordinator {
             && surface.plugin.is_some()
     }
 
+    fn is_launcher_surface(&self, surface: &InternalShellSurface) -> bool {
+        surface.plugin.as_ref() == Some(&self.shell.active_shell_surface_key("launcher"))
+    }
+
     fn redraws_surface(&self, surface: &InternalShellSurface, roles: &[SurfaceRole]) -> bool {
         roles.contains(&surface.role)
             || (roles.contains(&SurfaceRole::Taskbar) && self.is_taskbar_surface(surface))
+            || (roles.contains(&SurfaceRole::Launcher) && self.is_launcher_surface(surface))
             || (roles.contains(&SurfaceRole::ControlCenter)
                 && surface.plugin.as_ref()
                     == Some(&self.shell.active_shell_surface_key("quick-settings")))
@@ -689,13 +678,8 @@ impl InternalShellCoordinator {
 
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
-        let launcher_key = self
-            .entries
-            .iter()
-            .find(|surface| surface.id == id && surface.role == SurfaceRole::Launcher)
-            .and_then(|_| self.shell.active_launcher_surface_key());
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
-        let commands = if let Some(key) = surface.plugin.as_ref().or(launcher_key.as_ref()) {
+        let commands = if let Some(key) = surface.plugin.as_ref() {
             self.shell.plugin_surface_scene_for_output(
                 key,
                 surface.output.as_deref(),
@@ -774,7 +758,7 @@ impl InternalShellCoordinator {
         }
         self.entries
             .iter()
-            .filter(|surface| surface.role == SurfaceRole::Launcher)
+            .filter(|surface| self.is_launcher_surface(surface))
             .map(|surface| surface.id)
             .collect()
     }
@@ -844,7 +828,7 @@ impl InternalShellCoordinator {
         Ok(self
             .entries
             .iter()
-            .filter(|entry| entry.role == SurfaceRole::Launcher || self.is_taskbar_surface(entry))
+            .filter(|entry| self.is_launcher_surface(entry) || self.is_taskbar_surface(entry))
             .map(|entry| entry.id)
             .collect())
     }
@@ -857,7 +841,7 @@ impl InternalShellCoordinator {
         let changed = self
             .entries
             .iter()
-            .filter(|entry| entry.role == SurfaceRole::Launcher || self.is_taskbar_surface(entry))
+            .filter(|entry| self.is_launcher_surface(entry) || self.is_taskbar_surface(entry))
             .map(|entry| entry.id)
             .collect();
         (changed, applications, partial)
@@ -1070,9 +1054,7 @@ impl InternalShellCoordinator {
                 } else {
                     match entry.role {
                         SurfaceRole::Lock => self.shell.lock_host_controller(action),
-                        SurfaceRole::Launcher => self
-                            .shell
-                            .launcher_host_controller(action, self.controller_family),
+                        SurfaceRole::Launcher => false,
                         SurfaceRole::ControlCenter => {
                             self.shell
                                 .control_controller(action, entry.size.0, entry.size.1)
@@ -1098,31 +1080,20 @@ impl InternalShellCoordinator {
                 );
                 continue;
             }
-            if matches!(
-                entry.role,
-                SurfaceRole::Launcher | SurfaceRole::ControlCenter
-            ) && matches!(
-                &event,
-                nickel_ui::HostEvent::Normalized { .. }
-                    | nickel_ui::HostEvent::NormalizedIngress(_)
-            ) {
-                let mut outcome = if entry.role == SurfaceRole::Launcher {
-                    self.shell.launcher_host_event_with_authority(
-                        event,
-                        entry.size.0,
-                        entry.size.1,
-                        batch.clipboard_text_limit,
-                        normalized_authority,
-                    )
-                } else {
-                    dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard]);
-                    self.shell.control_host_event_authorized(
-                        event,
-                        entry.size,
-                        batch.clipboard_text_limit,
-                        normalized_authority,
-                    )
-                };
+            if entry.role == SurfaceRole::ControlCenter
+                && matches!(
+                    &event,
+                    nickel_ui::HostEvent::Normalized { .. }
+                        | nickel_ui::HostEvent::NormalizedIngress(_)
+                )
+            {
+                dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard]);
+                let mut outcome = self.shell.control_host_event_authorized(
+                    event,
+                    entry.size,
+                    batch.clipboard_text_limit,
+                    normalized_authority,
+                );
                 changed |= outcome.changed;
                 crate::session_host::record_clipboard_outcome(
                     &mut self.clipboard_result,
@@ -1270,12 +1241,6 @@ impl InternalShellCoordinator {
             // Semantic commands and context-menu activation need the same
             // pre-edit admission and ownership transport as normalized keys.
             let outcome = match entry.role {
-                SurfaceRole::Launcher => Some(self.shell.launcher_host_event_with_clipboard_limit(
-                    nickel_ui::HostEvent::Ui(event),
-                    entry.size.0,
-                    entry.size.1,
-                    batch.clipboard_text_limit,
-                )),
                 SurfaceRole::ControlCenter => Some(self.shell.control_host_event(
                     nickel_ui::HostEvent::Ui(event),
                     entry.size,
@@ -1358,8 +1323,12 @@ impl InternalShellCoordinator {
         &self,
         id: InternalSurfaceId,
     ) -> Option<(nickel_ui::UiId, u64)> {
-        let role = self.entries.iter().find(|entry| entry.id == id)?.role;
-        self.shell.shell_field_lease(role)
+        let entry = self.entries.iter().find(|entry| entry.id == id)?;
+        if let Some(key) = &entry.plugin {
+            self.shell.plugin_surface_field_lease(key)
+        } else {
+            self.shell.shell_field_lease(entry.role)
+        }
     }
 
     pub(crate) fn pointer_interaction_active(&self) -> bool {
@@ -1632,10 +1601,6 @@ impl InternalShellCoordinator {
     }
 }
 
-pub(crate) fn launcher_size(width: u32, height: u32) -> (u32, u32) {
-    (width.min(960), height.saturating_sub(PANEL_HEIGHT).min(720))
-}
-
 pub(crate) fn control_center_size(width: u32, height: u32) -> (u32, u32) {
     (420.min(width), height.saturating_sub(PANEL_HEIGHT))
 }
@@ -1649,7 +1614,7 @@ fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) 
             crate::plugin_panel::surface().width.min(width),
             crate::plugin_panel::surface().height.min(height),
         ),
-        SurfaceRole::Launcher => launcher_size(width, height),
+        SurfaceRole::Launcher => (0, 0),
         SurfaceRole::ControlCenter => control_center_size(width, height),
         SurfaceRole::Notification => (420.min(width), 180.min(height)),
         SurfaceRole::VolumeOsd => (0, 0),
@@ -1766,35 +1731,38 @@ mod tests {
     }
 
     #[test]
-    fn ephemeral_focus_loss_hides_launcher_without_restoring_displaced_focus() {
-        #[derive(Default)]
-        struct RecordingHost(std::sync::Mutex<Vec<ShellCommand>>);
-        impl SessionHost for RecordingHost {
-            fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
-                self.0.lock().unwrap().push(command);
-                Ok(())
+    fn reserved_launcher_focus_loss_does_not_dismiss_selected_window() {
+        with_package_runtime_stack(|| {
+            #[derive(Default)]
+            struct RecordingHost(std::sync::Mutex<Vec<ShellCommand>>);
+            impl SessionHost for RecordingHost {
+                fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
+                    self.0.lock().unwrap().push(command);
+                    Ok(())
+                }
             }
-        }
-        let host = Arc::new(RecordingHost::default());
-        let mut coordinator =
-            InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "test".into(),
-            width: 1280,
-            height: 720,
-            scale: 1.0,
-        }]);
-        coordinator.apply_launcher_visibility(true);
-        host.0.lock().unwrap().clear();
+            let host = Arc::new(RecordingHost::default());
+            let mut coordinator =
+                InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "test".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            }]);
+            coordinator.apply_launcher_visibility(true);
+            host.0.lock().unwrap().clear();
 
-        assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher));
-        assert!(coordinator.surface(SurfaceRole::Launcher, None).is_none());
-        assert!(
-            host.0.lock().unwrap().is_empty(),
-            "focus loss must not restore the window displaced by launcher activation"
-        );
+            assert!(!coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher));
+            assert!(coordinator.shell.launcher_intent_visible());
+            assert!(coordinator.surface(SurfaceRole::Launcher, None).is_none());
+            assert!(
+                host.0.lock().unwrap().is_empty(),
+                "focus loss must not restore the window displaced by launcher activation"
+            );
+        });
     }
 
     struct TestHost;
@@ -1885,6 +1853,16 @@ mod tests {
                         .all(|current| current.id != surface.id)
                 );
             })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    // Stock package construction uses the same stack allowance as other package fixtures.
+    fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(test)
             .unwrap()
             .join()
             .unwrap();
@@ -2101,29 +2079,38 @@ mod tests {
 
     #[test]
     fn session_service_transition_refreshes_deadline_driven_shell_immediately() {
-        let state = Arc::new(AtomicU8::new(0));
-        let mut coordinator = InternalShellCoordinator::new(
-            Arc::new(StorageHost(Arc::clone(&state))),
-            PanelEdge::Bottom,
-        )
-        .unwrap();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "one".into(),
-            width: 1920,
-            height: 1080,
-            scale: 1.0,
-        }]);
+        with_package_runtime_stack(|| {
+            let state = Arc::new(AtomicU8::new(0));
+            let mut coordinator = InternalShellCoordinator::new(
+                Arc::new(StorageHost(Arc::clone(&state))),
+                PanelEdge::Bottom,
+            )
+            .unwrap();
+            let outputs = [InternalOutput {
+                x: 0,
+                y: 0,
+                name: "one".into(),
+                width: 1920,
+                height: 1080,
+                scale: 1.0,
+            }];
+            coordinator.set_outputs(&outputs);
 
-        state.store(1, Ordering::Release);
-        let changed = coordinator.refresh_system();
+            assert!(coordinator.toggle_launcher());
+            coordinator.set_outputs(&outputs);
+            let key = coordinator.shell.active_shell_surface_key("launcher");
+            let launcher = coordinator
+                .entries
+                .iter()
+                .find(|entry| entry.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .id;
+            state.store(1, Ordering::Release);
+            let changed = coordinator.refresh_system();
 
-        assert_eq!(
-            changed,
-            [coordinator.surface(SurfaceRole::Launcher, None).unwrap().id]
-        );
-        assert!(coordinator.refresh_system().is_empty());
+            assert_eq!(changed, [launcher]);
+            assert!(coordinator.refresh_system().is_empty());
+        });
     }
 
     #[test]
@@ -2257,45 +2244,62 @@ mod tests {
     }
 
     #[test]
-    fn native_launcher_focus_gain_restores_search_after_scene_creation() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 1280,
-            height: 720,
-            scale: 1.0,
-        }]);
-        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-        coordinator.scene(launcher).unwrap();
-        assert!(coordinator.focused_field_lease(launcher).is_none());
-        coordinator.step_slot(
-            launcher,
-            HostBatch {
-                window_focused: Some(true),
-                ..HostBatch::default()
-            },
-        );
-        assert!(coordinator.focused_field_lease(launcher).is_some());
-        coordinator.step_slot(
-            launcher,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextInput(
-                    "konsole".into(),
-                ))],
-                ..HostBatch::default()
-            },
-        );
-        assert!(
-            coordinator
-                .scene(launcher)
-                .unwrap()
+    fn selected_launcher_focus_gain_preserves_native_search_input() {
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            let outputs = [InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            }];
+            coordinator.set_outputs(&outputs);
+            assert!(coordinator.toggle_launcher());
+            coordinator.set_outputs(&outputs);
+            let key = coordinator.shell.active_shell_surface_key("launcher");
+            let launcher = coordinator
+                .entries
                 .iter()
-                .any(|command| matches!(
-                    command, PaintCommand::Text { text, .. } if text == "konsole"
-                ))
-        );
+                .find(|entry| entry.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .id;
+
+            coordinator.scene(launcher).unwrap();
+            let initial_lease = coordinator
+                .focused_field_lease(launcher)
+                .expect("selected editor lease");
+            coordinator.step_slot(
+                launcher,
+                HostBatch {
+                    window_focused: Some(true),
+                    ..HostBatch::default()
+                },
+            );
+            assert_eq!(
+                coordinator.focused_field_lease(launcher),
+                Some(initial_lease)
+            );
+            coordinator.step_slot(
+                launcher,
+                HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextInput(
+                        "konsole".into(),
+                    ))],
+                    ..HostBatch::default()
+                },
+            );
+            assert!(
+                coordinator
+                    .scene(launcher)
+                    .unwrap()
+                    .iter()
+                    .any(|command| matches!(
+                        command, PaintCommand::Text { text, .. } if text == "konsole"
+                    ))
+            );
+        });
     }
 
     #[test]
@@ -2345,19 +2349,29 @@ mod tests {
 
     #[test]
     fn meta_launcher_toggle_changes_internal_visibility_without_session_transport() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-        assert!(!coordinator.visible(launcher));
-        assert!(coordinator.toggle_launcher());
-        assert!(coordinator.visible(launcher));
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            let outputs = [InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            }];
+            coordinator.set_outputs(&outputs);
+            assert!(!coordinator.shell.launcher_intent_visible());
+            assert!(coordinator.toggle_launcher());
+            coordinator.set_outputs(&outputs);
+            let key = coordinator.shell.active_launcher_surface_key().unwrap();
+            let launcher = coordinator
+                .entries
+                .iter()
+                .find(|entry| entry.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .id;
+            assert!(coordinator.visible(launcher));
+        });
     }
 
     #[test]
@@ -2550,30 +2564,42 @@ mod tests {
     }
 
     #[test]
-    fn native_launcher_routes_controller_actions_through_the_coordinator() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        assert!(coordinator.toggle_launcher());
-        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-        assert!(coordinator.visible(launcher));
-        coordinator.set_controller_family(nickel_ui::ControllerFamily::Xbox);
-        coordinator.step_slot_changes(
-            launcher,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Controller(
-                    nickel_ui::ControllerAction::Cancel,
-                )],
-                ..HostBatch::default()
-            },
-        );
-        assert!(!coordinator.visible(launcher));
+    fn selected_launcher_routes_controller_actions_through_the_coordinator() {
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            let outputs = [InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            }];
+            coordinator.set_outputs(&outputs);
+            assert!(coordinator.toggle_launcher());
+            coordinator.set_outputs(&outputs);
+            let key = coordinator.shell.active_shell_surface_key("launcher");
+            let launcher = coordinator
+                .entries
+                .iter()
+                .find(|entry| entry.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .id;
+
+            assert!(coordinator.visible(launcher));
+            coordinator.set_controller_family(nickel_ui::ControllerFamily::Xbox);
+            coordinator.step_slot_changes(
+                launcher,
+                HostBatch {
+                    window_focused: Some(true),
+                    events: vec![nickel_ui::HostEvent::Controller(
+                        nickel_ui::ControllerAction::Cancel,
+                    )],
+                    ..HostBatch::default()
+                },
+            );
+            assert!(!coordinator.visible(launcher));
+        });
     }
 
     #[test]

@@ -44,7 +44,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
 pub const PANEL_TITLE: &str = "Nickel Taskbar";
-pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
 pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
@@ -226,15 +225,6 @@ fn fixed_plugin_surface_key(
             .find(|key| key.surface_id == "window-preview")
             .cloned(),
         _ => None,
-    }
-}
-
-fn launcher_plugin_surface_available(
-    active: &HashSet<nickel_core::plugins::PluginSurfaceKey>,
-) -> bool {
-    {
-        let _ = active;
-        false
     }
 }
 
@@ -609,8 +599,6 @@ pub struct WinitShell {
         nickel_core::plugins::PluginSurfaceKey,
         nickel_core::plugins::PluginSurface,
     >,
-    #[cfg(target_os = "windows")]
-    launcher_surface_size: Option<(u32, u32)>,
     next_surface_diagnostic_generation: u64,
     #[cfg(target_os = "windows")]
     shortcut_diagnostics: Option<crate::platform::WindowsShortcutDiagnosticSource>,
@@ -677,8 +665,6 @@ impl WinitShell {
             plugin_panel_surface: crate::plugin_panel::surface().clone(),
             plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
             extra_plugin_panels: std::collections::BTreeMap::new(),
-            #[cfg(target_os = "windows")]
-            launcher_surface_size: None,
             next_surface_diagnostic_generation: 0,
             #[cfg(target_os = "windows")]
             shortcut_diagnostics: None,
@@ -857,9 +843,7 @@ impl WinitShell {
         let primary_name = output_names.first().ok_or_else(|| {
             "winit reported no output identity for the primary display".to_string()
         })?;
-        if launcher_plugin_surface_available(&self.active_fixed_plugins) {
-            self.create_surface(SurfaceRole::Launcher, 0, primary, primary_name)?;
-        }
+
         self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
         for role in [SurfaceRole::WindowPreview] {
@@ -944,9 +928,8 @@ impl WinitShell {
         // A settings policy change is authoritative immediately. Missing outputs remain
         // dormant for the retirement grace period so a transient topology snapshot or a
         // quick reconnect can preserve their stable surface identities.
-        let launcher_available = launcher_plugin_surface_available(&self.active_fixed_plugins);
         self.surfaces.retain(|surface| match surface.role {
-            SurfaceRole::Launcher => launcher_available,
+            SurfaceRole::Launcher => false,
             SurfaceRole::OnScreenKeyboard => false,
             SurfaceRole::Screenshot => true,
             SurfaceRole::WindowContextMenu | SurfaceRole::VolumeOsd => false,
@@ -1102,13 +1085,8 @@ impl WinitShell {
         self.rebuild_surface_indices();
         let primary = displays[0];
         let primary_name = &output_names[0];
-        for role in [
-            SurfaceRole::Launcher,
-            SurfaceRole::WindowPreview,
-            SurfaceRole::Screenshot,
-        ] {
-            if (role == SurfaceRole::Launcher && launcher_available
-                || role == SurfaceRole::Screenshot
+        for role in [SurfaceRole::WindowPreview, SurfaceRole::Screenshot] {
+            if (role == SurfaceRole::Screenshot
                 || fixed_plugin_surface_key(role, &self.active_fixed_plugins)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
                 && !self.surfaces.iter().any(|surface| surface.role == role)
@@ -1480,48 +1458,6 @@ impl WinitShell {
         true
     }
 
-    pub fn configure_launcher_surface(&mut self, compact_size: Option<(u32, u32)>) {
-        #[cfg(target_os = "windows")]
-        {
-            self.launcher_surface_size = compact_size;
-        }
-        let launchers = self
-            .surfaces
-            .iter()
-            .enumerate()
-            .filter_map(|(index, surface)| {
-                (surface.display_connected && surface.role == SurfaceRole::Launcher)
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        for index in launchers {
-            if compact_size.is_some() {
-                #[cfg(target_os = "windows")]
-                self.relocate_to_active_output(index);
-                #[cfg(not(target_os = "windows"))]
-                if let Some((width, height)) = compact_size
-                    && self.surfaces[index].window.size() != (width, height)
-                {
-                    let _ = self.surfaces[index]
-                        .window
-                        .request_inner_size(LogicalSize::new(width, height));
-                }
-            } else {
-                self.relocate_to_active_output(index);
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn launcher_maximum_size(&self) -> Option<(u32, u32)> {
-        let index = self.active_output_index()?;
-        let geometry = self.displays.get(index)?.0;
-        Some((
-            620_u32.min(geometry.width),
-            180_u32.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
-        ))
-    }
-
     fn active_output_index(&self) -> Option<usize> {
         preferred_output_index(
             &self.displays,
@@ -1572,7 +1508,7 @@ impl WinitShell {
         if role == SurfaceRole::OnScreenKeyboard {
             return;
         }
-        if !matches!(role, SurfaceRole::Launcher | SurfaceRole::OnScreenKeyboard) {
+        if role != SurfaceRole::OnScreenKeyboard {
             return;
         }
         let (_, x, y, width, height, _) = surface_geometry_for_panel(
@@ -1581,22 +1517,6 @@ impl WinitShell {
             self.options.panel_edge,
             &self.plugin_panel_surface,
         );
-        #[cfg(target_os = "windows")]
-        let (x, y, width, height) = if role == SurfaceRole::Launcher
-            && let Some((preferred_width, preferred_height)) = self.launcher_surface_size
-        {
-            let width = preferred_width.min(width);
-            let height = preferred_height.min(height);
-            let y = match self.options.panel_edge {
-                PanelEdge::Top => geometry.y + PANEL_HEIGHT as i32 + 8,
-                PanelEdge::Bottom => {
-                    geometry.y + geometry.height as i32 - PANEL_HEIGHT as i32 - height as i32 - 8
-                }
-            };
-            (geometry.x + 18, y, width, height)
-        } else {
-            (x, y, width, height)
-        };
         let surface = &mut self.surfaces[index];
         surface.display_index = display_index;
         surface.output_name = output_name;
@@ -1707,10 +1627,6 @@ impl WinitShell {
         let role = surface.diagnostic_role();
         let scene = if let Some(key) = surface.plugin_key() {
             state.plugin_surface_change_token(key)
-        } else if surface.role == SurfaceRole::Launcher {
-            state
-                .active_launcher_surface_key()
-                .and_then(|key| state.plugin_surface_change_token(&key))
         } else {
             state.scene_change_token(role)
         };
@@ -3175,21 +3091,7 @@ fn surface_geometry(
             crate::plugin_panel::surface().height.min(geometry.height),
             true,
         ),
-        SurfaceRole::Launcher => {
-            let height = 180_u32.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8));
-            (
-                LAUNCHER_TITLE,
-                geometry.x + 18,
-                geometry.y
-                    + geometry
-                        .height
-                        .saturating_sub(height.saturating_add(PANEL_HEIGHT + 8))
-                        as i32,
-                620_u32.min(geometry.width),
-                height,
-                cfg!(not(target_os = "linux")),
-            )
-        }
+        SurfaceRole::Launcher => unreachable!("launcher uses an ordinary plugin window"),
         SurfaceRole::ControlCenter => (
             CONTROL_CENTER_TITLE,
             geometry.x + geometry.width.saturating_sub(438) as i32,

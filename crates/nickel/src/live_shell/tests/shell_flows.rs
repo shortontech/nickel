@@ -259,22 +259,6 @@
 
 
     #[test]
-    fn controller_cancel_closes_nested_overlay_before_requesting_launcher_dismissal() {
-        assert!(matches!(
-            super::launcher_controller_host_event(ControllerAction::Cancel, true),
-            HostEvent::Controller(ControllerAction::Cancel)
-        ));
-        assert!(matches!(
-            super::launcher_controller_host_event(ControllerAction::Cancel, false),
-            HostEvent::Shortcut(Shortcut::Escape)
-        ));
-        assert!(matches!(
-            super::launcher_controller_host_event(ControllerAction::Down, false),
-            HostEvent::Controller(ControllerAction::Down)
-        ));
-    }
-
-    #[test]
     fn failed_application_launch_keeps_launcher_open_and_reports_error() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher_visible = true;

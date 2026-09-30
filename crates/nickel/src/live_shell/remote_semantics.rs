@@ -131,16 +131,10 @@ impl LiveShell {
                 }
             }
             SurfaceRole::Taskbar => Err("historical native taskbar surface is unavailable".into()),
-            SurfaceRole::Launcher if self.run_visible => {
-                if let Some(host) = self.run_host_ref() {
-                    plugin_projection(host, |leaf, action| {
-                        leaf == "run-command" && action == nickel_ui::ActionKind::SetValue
-                    })
-                } else {
-                    Err("Run plugin is unavailable".into())
-                }
+
+            SurfaceRole::Launcher => {
+                Err("historical native launcher surface is unavailable".into())
             }
-            SurfaceRole::Launcher => Err("native Run is unavailable".into()),
             SurfaceRole::ControlCenter => {
                 if self.quick_settings_surface_active() {
                     Ok(observe_only(plugin_projection(
@@ -281,20 +275,6 @@ impl LiveShell {
         }
         let mut effects = Vec::new();
         let host = match role {
-            SurfaceRole::Launcher if self.run_visible => {
-                let plugin = self.run_host_mut().ok_or("Run plugin is unavailable")?;
-                let outcome = mutate(plugin, generation, node, action, clipboard_limit);
-                let requested = plugin.application_mut().take_effects();
-                if let Some(error) = plugin.application_mut().take_runtime_failure() {
-                    self.fail_run_plugin_runtime(error);
-                    return Err("Run plugin failed".into());
-                }
-                if !requested.is_empty() {
-                    return Err("run plugin requested an unguarded effect".into());
-                }
-                outcome?
-            }
-
             SurfaceRole::Launcher => return Err("Launcher plugin is unavailable".into()),
             SurfaceRole::ControlCenter => {
                 if self.quick_settings_surface_active() {

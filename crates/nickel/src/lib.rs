@@ -1199,9 +1199,6 @@ fn scene_for_native_surface(
         state.plugin_surface_scene_for_output(key, Some(surface.output_name()), width, height)
     } else if surface.role() == SurfaceRole::Panel {
         return None;
-    } else if surface.role() == SurfaceRole::Launcher {
-        let key = state.active_launcher_surface_key()?;
-        state.plugin_surface_scene_for_output(&key, None, width, height)
     } else {
         Some(state.scene(surface.role(), width, height))
     };
@@ -1223,10 +1220,6 @@ fn scene_change_token_for_native_surface(
 ) -> Option<HostChangeToken> {
     if let Some(key) = shell.surface(id)?.plugin_key() {
         state.plugin_surface_change_token(key)
-    } else if role == SurfaceRole::Launcher {
-        state
-            .active_launcher_surface_key()
-            .and_then(|key| state.plugin_surface_change_token(&key))
     } else {
         state.scene_change_token(role)
     }
@@ -1520,15 +1513,6 @@ fn prewarm_role(
 }
 
 fn sync_visibility(shell: &mut WinitShell, state: &mut LiveShell) {
-    #[cfg(target_os = "windows")]
-    if let Some(maximum) = shell.launcher_maximum_size() {
-        let size = state
-            .launcher_surface_size()
-            .unwrap_or_else(|| state.launcher_preferred_surface_size(maximum));
-        shell.configure_launcher_surface(Some(size));
-    }
-    #[cfg(not(target_os = "windows"))]
-    shell.configure_launcher_surface(state.launcher_surface_size());
     let surfaces = shell
         .surfaces()
         .map(|surface| (surface.id(), surface.role(), surface.plugin_key().cloned()))
@@ -1954,21 +1938,7 @@ fn handle_shell_input(
         }
         return Ok(());
     }
-    if role == SurfaceRole::Launcher {
-        let (width, height) = shell
-            .surface(surface)
-            .map(|entry| entry.window().size())
-            .unwrap_or_default();
-        let outcome = state.launcher_host_input(event, shell.clipboard_text(), width, height);
-        if let Some(text) = outcome.clipboard_text {
-            shell.set_clipboard_text(&text);
-        }
-        if outcome.changed {
-            sync_visibility(shell, state);
-            render_role(shell, state, role)?;
-        }
-        return Ok(());
-    }
+
     if role == SurfaceRole::WindowPreview {
         let outcome = state.preview_host_input(event);
         for failure in &outcome.failures {
@@ -2172,16 +2142,6 @@ fn controller_launcher_shortcut(action: ControllerAction) -> Option<platform::Gl
 }
 
 #[cfg(any(test, target_os = "linux"))]
-fn controller_target_role(
-    launcher_visible: bool,
-    focused_role: Option<SurfaceRole>,
-) -> Option<SurfaceRole> {
-    launcher_visible
-        .then_some(SurfaceRole::Launcher)
-        .or(focused_role)
-}
-
-#[cfg(any(test, target_os = "linux"))]
 fn modal_controller_target(
     screenshot_visible: bool,
     keyboard_visible: bool,
@@ -2201,7 +2161,7 @@ fn handle_controller_action(
     state: &mut LiveShell,
     codex: &mut CodexSurfaces,
     action: ControllerAction,
-    family: nickel_ui::ControllerFamily,
+    _family: nickel_ui::ControllerFamily,
 ) -> Result<(), String> {
     if !state.surface_visible(SurfaceRole::Screenshot)
         && controller_launcher_shortcut(action).is_some()
@@ -2233,17 +2193,6 @@ fn handle_controller_action(
         .surfaces()
         .find(|surface| surface.window().has_input_focus())
         .map(|surface| surface.id());
-    let focused_role =
-        focused_surface.and_then(|surface| shell.surface(surface).map(|entry| entry.role()));
-    if controller_target_role(state.surface_visible(SurfaceRole::Launcher), focused_role)
-        == Some(SurfaceRole::Launcher)
-    {
-        if state.launcher_host_controller(action, family) {
-            sync_visibility(shell, state);
-            render_role(shell, state, SurfaceRole::Launcher)?;
-        }
-        return Ok(());
-    }
     let Some(surface) = focused_surface else {
         return Ok(());
     };
@@ -2251,13 +2200,6 @@ fn handle_controller_action(
         return Ok(());
     };
     let role = entry.role();
-    if role == SurfaceRole::Launcher {
-        if state.launcher_host_controller(action, family) {
-            sync_visibility(shell, state);
-            render_role(shell, state, role)?;
-        }
-        return Ok(());
-    }
     if matches!(role, SurfaceRole::CodexChat | SurfaceRole::CodexProjectMenu) {
         if role == SurfaceRole::CodexProjectMenu {
             codex.project_menu_surface = Some(surface);
@@ -2977,19 +2919,6 @@ pub fn run() -> Result<(), String> {
                 focused: false,
             }) if shell
                 .surface(surface)
-                .is_some_and(|entry| entry.role() == SurfaceRole::Launcher) =>
-            {
-                shell.stop_text_input(surface);
-                if state.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher) {
-                    platform::launcher_visibility_applied(false);
-                    sync_visibility(&mut shell, &mut state);
-                }
-            }
-            Some(ShellEvent::FocusChanged {
-                surface,
-                focused: false,
-            }) if shell
-                .surface(surface)
                 .is_some_and(|entry| entry.role() == SurfaceRole::ControlCenter) =>
             {
                 if state.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter) {
@@ -3020,13 +2949,6 @@ pub fn run() -> Result<(), String> {
                 focused: true,
             }) => {
                 shell.set_active_output_from_surface(surface);
-                if shell
-                    .surface(surface)
-                    .is_some_and(|entry| entry.role() == SurfaceRole::Launcher)
-                {
-                    state.focus_launcher();
-                    shell.start_text_input(surface);
-                }
             }
             Some(ShellEvent::PointerEntered {
                 surface,
@@ -3765,28 +3687,6 @@ mod tests {
             Some(SurfaceRole::OnScreenKeyboard)
         );
         assert_eq!(super::modal_controller_target(false, false), None);
-    }
-
-    #[test]
-    fn visible_launcher_owns_controller_input_without_window_focus() {
-        assert_eq!(
-            super::controller_target_role(true, Some(super::SurfaceRole::Panel)),
-            Some(super::SurfaceRole::Launcher)
-        );
-        assert_eq!(
-            super::controller_target_role(false, Some(super::SurfaceRole::Panel)),
-            Some(super::SurfaceRole::Panel)
-        );
-    }
-
-    #[test]
-    fn unfocused_desktop_never_becomes_the_controller_fallback() {
-        assert_eq!(super::controller_target_role(false, None), None);
-        assert_eq!(
-            super::controller_target_role(true, None),
-            Some(super::SurfaceRole::Launcher),
-            "the explicit global launcher remains available without borrowing desktop focus"
-        );
     }
 
     #[cfg(target_os = "linux")]

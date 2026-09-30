@@ -3768,6 +3768,28 @@ impl<A: Application> UiHost<A> {
         if !self.state.window_focused() {
             return HostEventOutcome::default();
         }
+        // Ordinary windows use their existing Escape callback after native nested
+        // interaction has unwound; a controller Cancel must reach that same callback.
+        if action == ControllerAction::Cancel
+            && self.state.open_overlay_id().is_none()
+            && !self.state.navigation().controller_editing()
+            && self.state.navigation().controller_scope().is_none()
+            && self.touch_owner_target().is_none()
+        {
+            let shortcut = self.application.shortcut_outcome(Shortcut::Escape);
+            if shortcut.disposition != crate::EventDisposition::Unhandled {
+                return HostEventOutcome {
+                    changed: shortcut.changed,
+                    disposition: shortcut.disposition,
+                    invalidation: if shortcut.changed {
+                        Invalidation::Layout
+                    } else {
+                        Invalidation::None
+                    },
+                    ..HostEventOutcome::default()
+                };
+            }
+        }
         if action == ControllerAction::Launcher {
             return HostEventOutcome {
                 global_actions: vec![GlobalAction::ToggleLauncher],
@@ -7289,6 +7311,66 @@ mod tests {
             crate::EventDisposition::Rejected("action unavailable")
         );
         assert_eq!(rejected.semantic_failures.len(), 1);
+    }
+
+    #[test]
+    fn controller_cancel_dismisses_native_menu_before_window_escape_callback() {
+        #[derive(Default)]
+        struct EscapeApplication {
+            escapes: usize,
+        }
+        impl Application for EscapeApplication {
+            type Message = ();
+            fn update(&mut self, (): ()) {}
+            fn view(&self, _context: ViewContext) -> impl crate::View<()> {
+                Button::new((), "Anchor").id("anchor")
+            }
+            fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
+                assert_eq!(shortcut, Shortcut::Escape);
+                self.escapes += 1;
+                ShortcutOutcome::handled(true)
+            }
+            fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<()>> {
+                vec![FrameOverlay::Menu(
+                    crate::OverlayMenu::new(
+                        "menu",
+                        crate::OverlayAnchor::Node(crate::UiId::from("anchor")),
+                    )
+                    .item(crate::OverlayMenuItem::action("entry", "Entry", ())),
+                )]
+            }
+        }
+        let mut host = UiHost::new(EscapeApplication::default(), 320, 200);
+        host.step(HostBatch {
+            window_focused: Some(true),
+            ..HostBatch::default()
+        });
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::Role(SemanticRole::Button))
+            .unwrap()
+            .id;
+        host.perform_semantic_action(anchor, SemanticAction::Invoke(ActionKind::ContextMenu));
+        assert!(host.inspect().open_overlay.is_some());
+        host.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Cancel)],
+            ..HostBatch::default()
+        });
+        assert!(host.inspect().open_overlay.is_none());
+        assert_eq!(host.application().escapes, 0);
+        host.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Cancel)],
+            ..HostBatch::default()
+        });
+        assert_eq!(host.application().escapes, 1);
+        host.step(HostBatch {
+            window_focused: Some(false),
+            ..HostBatch::default()
+        });
+        host.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Cancel)],
+            ..HostBatch::default()
+        });
+        assert_eq!(host.application().escapes, 1);
     }
 
     #[test]

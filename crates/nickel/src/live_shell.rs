@@ -119,7 +119,7 @@ use crate::notification::{NotificationAction, NotificationRequest};
 use crate::{
     control_view::ControlAction,
     file_window_host::{FileWindowHost, default_file_window_host},
-    launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherView},
+    launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher},
     launcher_icon_cache::LauncherIconCache,
     model::{Application, OpenWindow, TrayItem, WindowGroup},
     notification::DesktopNotification,
@@ -180,15 +180,6 @@ pub(crate) enum CodexApprovalOwner {
     #[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
     Internal(InternalSurfaceId),
     Winit(crate::winit_shell::SurfaceId),
-}
-
-#[cfg(any(test, target_os = "linux"))]
-fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) -> HostEvent {
-    if action == ControllerAction::Cancel && !overlay_open {
-        HostEvent::Shortcut(Shortcut::Escape)
-    } else {
-        HostEvent::Controller(action)
-    }
 }
 
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
@@ -659,7 +650,6 @@ pub struct LiveShell {
     settings_navigation_revision: u64,
     volume_osd_until: Option<Instant>,
     launcher_visible: bool,
-    run_visible: bool,
     run_status: HashMap<String, String>,
     locked: bool,
     lock_host: nickel_ui::UiHost<LockApplication>,
@@ -1382,7 +1372,6 @@ impl LiveShell {
             settings_navigation: None,
             settings_navigation_revision: 0,
             launcher_visible: false,
-            run_visible: false,
             run_status: HashMap::new(),
             locked: false,
             lock_host,
@@ -2115,12 +2104,7 @@ impl LiveShell {
             }
             SurfaceRole::Taskbar => true,
 
-            SurfaceRole::Launcher if self.run_visible => self
-                .run_host_ref()
-                .is_none_or(|host| host.remote_access_protected()),
-            SurfaceRole::Launcher => self
-                .run_host_ref()
-                .is_none_or(|host| host.remote_access_protected()),
+            SurfaceRole::Launcher => true,
             SurfaceRole::ControlCenter => self
                 .quick_settings_surface_active()
                 .then(|| {
@@ -2171,10 +2155,7 @@ impl LiveShell {
             SurfaceRole::Panel => plugin
                 .and_then(|key| self.plugin_panel_host_ref(key))
                 .map(|host| host.layout_snapshot()),
-            SurfaceRole::Launcher if self.run_visible => {
-                self.run_host_ref().map(|host| host.layout_snapshot())
-            }
-            SurfaceRole::Launcher => self.run_host_ref().map(|host| host.layout_snapshot()),
+            SurfaceRole::Launcher => None,
             SurfaceRole::ControlCenter => self
                 .plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
                 .map(|host| host.layout_snapshot())
@@ -2200,12 +2181,7 @@ impl LiveShell {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Taskbar => Vec::new(),
             SurfaceRole::Panel => unreachable!("plugin panels render through their surface key"),
-            SurfaceRole::Launcher if self.run_visible => self
-                .plugin_panel_scene(&self.active_shell_surface_key("run"), width, height)
-                .unwrap_or_default(),
-            SurfaceRole::Launcher => self
-                .plugin_panel_scene(&self.active_shell_surface_key("run"), width, height)
-                .unwrap_or_default(),
+            SurfaceRole::Launcher => Vec::new(),
             SurfaceRole::ControlCenter => {
                 if self.quick_settings_surface_active() {
                     self.plugin_panel_scene(
@@ -2694,7 +2670,7 @@ impl LiveShell {
             SurfaceRole::Desktop => true,
             SurfaceRole::Taskbar => false,
             SurfaceRole::Panel => !self.plugin_surface_hosts.is_empty(),
-            SurfaceRole::Launcher => self.run_visible && self.launcher_visible,
+            SurfaceRole::Launcher => false,
             SurfaceRole::ControlCenter => {
                 self.control_visible && self.control_host.application().view_state().projection_only
             }
@@ -2948,13 +2924,8 @@ impl LiveShell {
     pub(crate) fn active_launcher_surface_key(
         &self,
     ) -> Option<nickel_core::plugins::PluginSurfaceKey> {
-        if self.run_visible {
-            self.run_host_ref()?;
-            Some(self.active_shell_surface_key("run"))
-        } else {
-            let key = self.active_shell_surface_key("launcher");
-            self.plugin_surface_hosts.contains_key(&key).then_some(key)
-        }
+        let key = self.active_shell_surface_key("launcher");
+        self.plugin_surface_hosts.contains_key(&key).then_some(key)
     }
 
     pub fn plugin_registry(&self) -> &nickel_core::plugins::PluginRegistry {
@@ -3017,13 +2988,10 @@ impl LiveShell {
     pub(crate) fn shell_fixed_surface_keys(
         &self,
     ) -> HashSet<nickel_core::plugins::PluginSurfaceKey> {
-        [
-            self.active_shell_surface_key("run"),
-            self.active_shell_surface_key("window-preview"),
-        ]
-        .into_iter()
-        .filter(|key| self.plugin_surface_matches(key))
-        .collect()
+        [self.active_shell_surface_key("window-preview")]
+            .into_iter()
+            .filter(|key| self.plugin_surface_matches(key))
+            .collect()
     }
 
     pub(crate) fn plugin_panel_placement(
@@ -3098,28 +3066,7 @@ impl LiveShell {
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Option<HostChangeToken> {
-        let (inspection, surface_salt) = if *key == self.active_shell_surface_key("run") {
-            // Both plugins share one native popup. Distinguish their tokens
-            // even when their host-local frame generations happen to match.
-            (self.run_host_ref()?.inspect(), 1_u64 << 63)
-        } else if *key == self.active_shell_surface_key("window-preview") {
-            if !self.preview_plugin_active() {
-                return None;
-            }
-            (self.preview_plugin_host_ref()?.inspect(), 0)
-        } else {
-            return self.plugin_panel_change_token(key);
-        };
-        Some(HostChangeToken {
-            frame_generation: inspection
-                .frame_generation
-                .wrapping_add(self.plugin_activation_generation.rotate_left(32))
-                .wrapping_add(surface_salt),
-            semantic_generation: inspection
-                .semantic_generation
-                .wrapping_add(self.plugin_activation_generation.rotate_left(32))
-                .wrapping_add(surface_salt),
-        })
+        self.plugin_panel_change_token(key)
     }
 
     fn external_plugin_windows(&self, plugin_id: &str) -> Option<serde_json::Value> {
@@ -4911,11 +4858,6 @@ impl LiveShell {
         true
     }
 
-    fn fail_run_plugin_runtime(&mut self, error: String) {
-        let id = self.active_shell_package_id.clone();
-        self.fail_installed_plugin_runtime(&id, error);
-    }
-
     fn retire_preview_plugin_state(&mut self) {
         let key = self.active_shell_surface_key("window-preview");
         self.plugin_surface_hosts.remove(&key);
@@ -5373,15 +5315,6 @@ impl LiveShell {
         }
     }
 
-    pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
-        None
-    }
-
-    pub(crate) fn launcher_preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
-        let size = self.launcher_surface_size().unwrap_or((620, 180));
-        (size.0.min(maximum.0), size.1.min(maximum.1))
-    }
-
     pub fn next_host_deadline(&self) -> Option<Instant> {
         self.host_deadline_sources()
             .into_iter()
@@ -5450,10 +5383,7 @@ impl LiveShell {
                 .primary_panel_host_ref()
                 .map(|host| host_token(host.inspect())),
             SurfaceRole::Lock => Some(self.lock_change_token),
-            SurfaceRole::Launcher if self.run_visible => {
-                self.run_host_ref().map(|host| host_token(host.inspect()))
-            }
-            SurfaceRole::Launcher => self.run_host_ref().map(|host| host_token(host.inspect())),
+            SurfaceRole::Launcher => None,
             SurfaceRole::ControlCenter => self
                 .quick_settings_surface_active()
                 .then(|| {
@@ -5487,110 +5417,6 @@ impl LiveShell {
             #[cfg(target_os = "windows")]
             SurfaceRole::TrustedControl => None,
         }
-    }
-
-    /// The historical launcher role hosts only native Run; shell launcher input
-    /// follows the ordinary package surface path.
-    pub fn launcher_host_input(
-        &mut self,
-        input: nickel_input::InputEvent,
-        clipboard_text: Option<String>,
-        width: u32,
-        height: u32,
-    ) -> nickel_ui::HostEventOutcome {
-        if !self.run_visible {
-            return nickel_ui::HostEventOutcome::default();
-        }
-        let Some(host) = self.run_host_ref() else {
-            return nickel_ui::HostEventOutcome::default();
-        };
-        let recipient = host.inspect();
-        let (event, authority) =
-            internal_normalized_ingress(input, clipboard_text, "launcher", recipient, None);
-        self.launcher_host_event_with_authority(event, width, height, None, Some(authority))
-    }
-
-    pub(crate) fn launcher_host_event_with_clipboard_limit(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-        limit: Option<usize>,
-    ) -> nickel_ui::HostEventOutcome {
-        self.launcher_host_event_with_authority(event, width, height, limit, None)
-    }
-
-    pub(crate) fn launcher_host_event_with_authority(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-        limit: Option<usize>,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> nickel_ui::HostEventOutcome {
-        if !self.run_visible {
-            return nickel_ui::HostEventOutcome::default();
-        }
-        if self.run_visible {
-            if let Some(host) = self.run_host_mut() {
-                let outcome = host.step(HostBatch {
-                    clipboard_text_limit: limit,
-                    surface_size: Some((width, height)),
-                    events: vec![event],
-                    normalized_authorities: authority.into_iter().collect(),
-                    ..HostBatch::default()
-                });
-                let effects = host.application_mut().take_effects();
-                if let Some(error) = host.application_mut().take_runtime_failure() {
-                    self.fail_run_plugin_runtime(error);
-                    return nickel_ui::HostEventOutcome::default();
-                }
-                self.apply_plugin_effects(effects);
-                self.host_runtime_samples.record(outcome.telemetry);
-                return outcome;
-            }
-            return nickel_ui::HostEventOutcome::default();
-        }
-
-        nickel_ui::HostEventOutcome::default()
-    }
-
-    #[cfg(any(test, target_os = "linux"))]
-    pub fn launcher_host_controller(
-        &mut self,
-        action: ControllerAction,
-        _family: nickel_ui::ControllerFamily,
-    ) -> bool {
-        if !self.run_visible {
-            return false;
-        }
-        if self.run_visible {
-            if let Some(host) = self.run_host_mut() {
-                let event =
-                    launcher_controller_host_event(action, host.inspect().open_overlay.is_some());
-                let outcome = host.step(HostBatch {
-                    events: vec![event],
-                    ..HostBatch::default()
-                });
-                let show_keyboard = action == ControllerAction::Confirm
-                    && outcome.text_input_active
-                    && host.controller_targets_text_input();
-                let effects = host.application_mut().take_effects();
-                if let Some(error) = host.application_mut().take_runtime_failure() {
-                    self.fail_run_plugin_runtime(error);
-                    return false;
-                }
-                if show_keyboard {
-                    self.set_keyboard_visible(true);
-                }
-                self.apply_plugin_effects(effects);
-                self.host_runtime_samples.record(outcome.telemetry);
-                return outcome.changed;
-            }
-            return false;
-        }
-
-        false
     }
 
     pub fn poll_host_deadlines(&mut self, now: Instant) -> Vec<SurfaceRole> {
@@ -5874,18 +5700,6 @@ impl LiveShell {
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_surface_hosts.get(key).map(|(_, host)| host)
-    }
-
-    fn run_host_ref(
-        &self,
-    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_ref(&self.active_shell_surface_key("run"))
-    }
-
-    fn run_host_mut(
-        &mut self,
-    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_for(&self.active_shell_surface_key("run"))
     }
 
     fn preview_plugin_host_ref(
@@ -6809,11 +6623,6 @@ impl LiveShell {
         changed
     }
 
-    pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
-        self.launcher_host_event_with_clipboard_limit(HostEvent::Ui(event), width, height, None)
-            .changed
-    }
-
     pub(crate) fn control_host_event(
         &mut self,
         event: HostEvent,
@@ -6862,10 +6671,20 @@ impl LiveShell {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn plugin_surface_field_lease(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<(nickel_ui::UiId, u64)> {
+        let inspection = self.plugin_panel_host_ref(key)?.inspect();
+        Some((
+            inspection.keyboard_focus?,
+            inspection.keyboard_focus_generation,
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(nickel_ui::UiId, u64)> {
         let inspection = match role {
-            SurfaceRole::Launcher if self.run_visible => self.run_host_ref()?.inspect(),
-            SurfaceRole::Launcher => self.run_host_ref()?.inspect(),
             SurfaceRole::ControlCenter => self
                 .quick_settings_surface_active()
                 .then(|| {
@@ -6903,7 +6722,7 @@ impl LiveShell {
             // Plugin panels always carry a surface key and use
             // `plugin_panel_host_ui_for` at the compositor boundary.
             SurfaceRole::Panel => false,
-            SurfaceRole::Launcher => self.launcher_host_ui(event, width, height),
+            SurfaceRole::Launcher => false,
             SurfaceRole::ControlCenter => {
                 if !self.control_visible || !self.control_surface_available() {
                     return false;
@@ -7007,28 +6826,7 @@ impl LiveShell {
             SurfaceRole::Screenshot => {
                 self.screenshot_host_event(HostEvent::Shortcut(shortcut), width, height)
             }
-            SurfaceRole::Launcher => {
-                let outcome = self.launcher_host_event_with_clipboard_limit(
-                    HostEvent::Shortcut(shortcut),
-                    width,
-                    height,
-                    None,
-                );
-                // Native scene input is queued before this host can report whether
-                // Submit was handled. Perform the activation fallback here, at
-                // the launcher owner, so dashboard rows receive Enter too.
-                if shortcut == Shortcut::Submit && !outcome.changed {
-                    self.launcher_host_event_with_clipboard_limit(
-                        HostEvent::Ui(UiEvent::KeyboardNavigateActivate),
-                        width,
-                        height,
-                        None,
-                    )
-                    .changed
-                } else {
-                    outcome.changed
-                }
-            }
+            SurfaceRole::Launcher => false,
             SurfaceRole::WindowContextMenu => false,
             SurfaceRole::Lock if self.locked => {
                 let outcome = self.lock_host.step(HostBatch {
@@ -8232,29 +8030,9 @@ impl LiveShell {
     /// compositor has already changed visibility. Shell-originated input must instead send the
     /// visibility request to the compositor before mirroring the resulting state.
     pub fn request_launcher_toggle(&mut self) -> bool {
-        if !self.run_visible {
-            let visible = !self.default_shell_surface_visible("launcher");
-            self.set_launcher_visible(visible);
-            return self.default_shell_surface_visible("launcher") == visible;
-        }
-
-        let visible = !self.launcher_visible;
-        if visible && self.run_host_ref().is_none() {
-            return false;
-        }
-        let command = if visible {
-            ShellCommand::ShowFromController
-        } else {
-            ShellCommand::Hide
-        };
-        if !self.send_session_command("controller-launcher-visibility", command) {
-            self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
-            return false;
-        }
-        self.clear_launcher_visibility_error();
-        self.apply_session_launcher_visibility(visible);
-        platform::launcher_visibility_applied(visible);
-        self.launcher_visible == visible
+        let visible = !self.default_shell_surface_visible("launcher");
+        self.set_launcher_visible(visible);
+        self.default_shell_surface_visible("launcher") == visible
     }
 
     pub fn capture_screenshot(&mut self) -> bool {
@@ -8412,10 +8190,6 @@ impl LiveShell {
     }
 
     fn set_launcher_visible(&mut self, visible: bool) {
-        if self.run_visible && !visible {
-            let _ = self.request_launcher_visibility(false);
-            return;
-        }
         if visible {
             self.set_default_shell_surface_visible("quick-settings", false);
         }
@@ -8423,79 +8197,11 @@ impl LiveShell {
     }
 
     pub(crate) fn launcher_intent_visible(&self) -> bool {
-        self.default_shell_surface_visible("launcher")
-            || (self.run_visible && self.launcher_visible)
+        self.active_launcher_surface_key().is_some()
     }
 
     pub(crate) fn can_show_launcher(&self) -> bool {
         self.active_shell_declares("launcher")
-            || (self.run_visible && self.run_host_ref().is_some())
-    }
-
-    fn request_launcher_visibility(&mut self, visible: bool) -> bool {
-        if !self.send_session_command(
-            "launcher-visibility",
-            if visible {
-                ShellCommand::Show
-            } else {
-                ShellCommand::Hide
-            },
-        ) {
-            self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
-            return false;
-        }
-        self.clear_launcher_visibility_error();
-        if self.session_host.stages_effects() {
-            return true;
-        }
-        self.run_visible = false;
-        self.apply_session_launcher_visibility(visible);
-        platform::launcher_visibility_applied(visible);
-        true
-    }
-
-    fn clear_launcher_visibility_error(&mut self) {
-        if self.launcher_status.as_deref() == Some("Nickel could not update the launcher.") {
-            self.launcher_status = None;
-        }
-    }
-
-    fn set_run_visible(&mut self, visible: bool) -> bool {
-        if visible && self.run_host_ref().is_none() {
-            return false;
-        }
-        if !self.request_launcher_visibility(visible)
-            || (!self.session_host.stages_effects() && self.launcher_visible != visible)
-        {
-            return false;
-        }
-        self.run_visible = visible;
-        if visible {
-            if let Some(host) = self.run_host_mut() {
-                if let Err(error) = host
-                    .application_mut()
-                    .sync_data(&serde_json::json!({ "status": null }))
-                {
-                    self.fail_run_plugin_runtime(error);
-                    return false;
-                }
-                host.step(HostBatch {
-                    application_changed: true,
-                    ..HostBatch::default()
-                });
-                if let Some(error) = host.application_mut().take_runtime_failure() {
-                    self.fail_run_plugin_runtime(error);
-                    return false;
-                }
-                if let Ok(field) =
-                    host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-                {
-                    let _ = host.request_focus(field.id);
-                }
-                return true;
-            }
-        }
-        true
     }
 
     fn set_control_visible(&mut self, visible: bool) {
@@ -8546,42 +8252,7 @@ impl LiveShell {
     }
 
     pub(crate) fn apply_session_launcher_visibility(&mut self, visible: bool) {
-        if !self.run_visible {
-            self.set_default_shell_surface_visible("launcher", visible);
-            return;
-        }
-
-        self.launcher_visible = visible;
-        if visible {
-            self.control_visible = false;
-            self.focus_launcher();
-        } else {
-            self.run_visible = false;
-            self.launcher.clear();
-            self.launcher.set_view(LauncherView::Favorites);
-        }
-    }
-
-    pub fn focus_launcher(&mut self) -> bool {
-        if !self.run_visible {
-            return false;
-        }
-        if self.run_visible {
-            if let Some(host) = self.run_host_mut() {
-                let outcome = host.step(HostBatch {
-                    window_focused: Some(true),
-                    ..HostBatch::default()
-                });
-                if let Some(error) = host.application_mut().take_runtime_failure() {
-                    self.fail_run_plugin_runtime(error);
-                    return false;
-                }
-                return outcome.changed;
-            }
-            return false;
-        }
-
-        false
+        self.set_default_shell_surface_visible("launcher", visible);
     }
 
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -8697,16 +8368,6 @@ impl LiveShell {
     /// whichever application was active before this surface opened.
     pub(crate) fn dismiss_ephemeral_on_focus_loss(&mut self, role: SurfaceRole) -> bool {
         match role {
-            SurfaceRole::Launcher => {
-                if !self.launcher_visible {
-                    return false;
-                }
-                // Focus already moved to the destination. Do not use the
-                // explicit Hide command, which restores the pre-launcher
-                // window as though the user had cancelled the launcher.
-                self.apply_session_launcher_visibility(false);
-                true
-            }
             SurfaceRole::ControlCenter => {
                 self.control_host.application_mut().dismiss();
                 std::mem::replace(&mut self.control_visible, false)
@@ -8728,11 +8389,6 @@ impl LiveShell {
     #[allow(dead_code)]
     pub fn hide_overlay(&mut self, role: SurfaceRole) -> bool {
         match role {
-            SurfaceRole::Launcher if self.launcher_visible => {
-                self.apply_session_launcher_visibility(false);
-                let _ = self.send_session_command("hide-launcher", ShellCommand::Hide);
-                true
-            }
             SurfaceRole::ControlCenter if self.control_visible => {
                 self.set_control_visible(false);
                 true

@@ -668,7 +668,7 @@ use nickel_input::KeyCode;
 use nickel_ui::{
     ActionKind, Application as _, ControllerAction, FrameOverlay, HostBatch, HostEvent,
     HostTelemetry, InputModality, Point, Rect, SemanticAction, SemanticRole, SemanticSelector,
-    SemanticValueInput, SemanticValueSnapshot, Shortcut, UiEvent, UiHost, ViewContext,
+    SemanticValueInput, SemanticValueSnapshot, UiEvent, UiHost, ViewContext,
 };
 use nickel_ui_testkit::{Scenario, Selector};
 
@@ -1577,16 +1577,6 @@ fn unchanged_system_feed_events_are_idle_and_do_not_schedule_polling() {
 }
 
 #[test]
-fn launcher_focus_loss_dismisses_the_ephemeral_surface() {
-    let mut shell = LiveShell::new().expect("live shell");
-    shell.apply_session_launcher_visibility(true);
-
-    assert!(shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::Launcher));
-    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
-    assert!(!shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::Launcher));
-}
-
-#[test]
 fn control_center_focus_loss_dismisses_the_ephemeral_surface() {
     let mut shell = LiveShell::new().expect("live shell");
     shell.apply_control_visibility(true);
@@ -1594,45 +1584,6 @@ fn control_center_focus_loss_dismisses_the_ephemeral_surface() {
     assert!(shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::ControlCenter));
     assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::ControlCenter));
     assert!(!shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::ControlCenter));
-}
-
-#[test]
-fn successful_launcher_retry_clears_transient_update_error() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    struct RecoveringHost {
-        reject: AtomicBool,
-    }
-
-    impl crate::session_host::SessionHost for RecoveringHost {
-        fn dispatch(
-            &self,
-            command: crate::platform::ShellCommand,
-        ) -> Result<(), crate::platform::SessionRequestError> {
-            if matches!(command, crate::platform::ShellCommand::ShowFromController)
-                && self.reject.swap(false, Ordering::AcqRel)
-            {
-                Err(crate::platform::SessionRequestError::Send)
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    let mut shell = LiveShell::new_with_session_host(Arc::new(RecoveringHost {
-        reject: AtomicBool::new(true),
-    }))
-    .expect("live shell");
-
-    assert!(!shell.request_launcher_toggle());
-    assert_eq!(
-        shell.launcher_status.as_deref(),
-        Some("Nickel could not update the launcher.")
-    );
-
-    assert!(shell.request_launcher_toggle());
-    assert!(shell.launcher_status.is_none());
-    assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
 }
 
 #[test]
@@ -2697,5 +2648,37 @@ fn stock_window_menu_dismisses_after_native_window_focus_loss() {
         assert!(shell.default_shell_surface_visible("window-menu"));
         assert!(shell.plugin_panel_host_window_focus_for(&key, false, 320, 400));
         assert!(!shell.default_shell_surface_visible("window-menu"));
+    });
+}
+
+#[test]
+fn selected_launcher_and_run_never_use_reserved_launcher_presentation() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().expect("live shell");
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        assert!(shell.launcher_intent_visible());
+        let launcher = shell.active_launcher_surface_key().unwrap();
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowRun);
+        let run = shell.active_shell_surface_key("run");
+        assert_ne!(run, launcher);
+        assert!(shell.plugin_surface_matches(&run));
+        assert!(!shell.shell_fixed_surface_keys().contains(&run));
+        assert!(!shell.plugin_panel_scene(&run, 620, 180).unwrap().is_empty());
+        assert!(shell.plugin_surface_change_token(&run).is_some());
+        assert!(shell.plugin_surface_change_token(&launcher).is_some());
+        let role = SurfaceRole::Launcher;
+        assert!(!shell.surface_visible(role));
+        assert!(shell.scene(role, 800, 600).is_empty());
+        assert!(shell.scene_change_token(role).is_none());
+        assert!(shell.layout_snapshot(role, None, None).is_none());
+        assert!(shell.surface_remote_access_protected(role));
+        assert!(shell.bounded_shell_semantics(role, None).is_err());
+        assert!(!shell.dismiss_ephemeral_on_focus_loss(role));
+        assert!(!shell.hide_overlay(role));
+        assert!(shell.plugin_surface_matches(&launcher));
+        assert!(shell.plugin_surface_matches(&run));
+        shell.global_shortcut(crate::platform::GlobalShortcut::HideLauncher);
+        assert!(!shell.launcher_intent_visible());
+        assert!(shell.plugin_surface_matches(&run));
     });
 }

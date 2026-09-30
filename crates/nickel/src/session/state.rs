@@ -5429,16 +5429,7 @@ impl NickelSession {
                 surface.size = (output.width, output.height);
                 shell.set_surface_size(surface.id, surface.size);
             }
-            if surface.role == crate::winit_shell::SurfaceRole::Launcher
-                && let Some(size) = launcher_surface_size_for_output(
-                    shell,
-                    &outputs,
-                    self.launcher_output_name.as_deref(),
-                )
-            {
-                surface.size = size;
-                shell.set_surface_size(surface.id, size);
-            }
+
             let Some(scene) = shell.scene(surface.id) else {
                 continue;
             };
@@ -7288,15 +7279,7 @@ impl NickelSession {
                 }
                 continue;
             }
-            if surface.role == crate::winit_shell::SurfaceRole::Launcher
-                && let Some(size) = launcher_surface_size_for_output(
-                    &mut shell,
-                    &outputs,
-                    self.launcher_output_name.as_deref(),
-                )
-            {
-                surface.size = size;
-            }
+
             let interaction_output = match surface.role {
                 crate::winit_shell::SurfaceRole::ControlCenter => shell
                     .popover_anchor(nickel_session_protocol::AnchorSide::Above)
@@ -15868,18 +15851,6 @@ fn internal_keyboard_surface_placement(
     );
     placement.geometry = (geometry.x, geometry.y, size.0, size.1);
     Some(placement)
-}
-
-fn launcher_surface_size_for_output(
-    shell: &mut crate::internal_shell::InternalShellCoordinator,
-    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
-    launcher_output: Option<&str>,
-) -> Option<(u32, u32)> {
-    let output = launcher_output
-        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
-        .or_else(|| outputs.first())?;
-    let maximum = crate::internal_shell::launcher_size(output.0.width, output.0.height);
-    Some(shell.launcher_preferred_surface_size(maximum))
 }
 
 fn internal_shell_surface_placement(
