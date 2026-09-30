@@ -1295,6 +1295,11 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
     assert!(both_bytes > 0);
 
     assert!(shell.close_plugin_window(&panels[0].0).unwrap());
+    assert!(
+        shell
+            .focus_plugin_window(id, &panels[0].0.surface_id)
+            .is_err()
+    );
     let remaining = shell.plugin_panels();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].0, panels[1].0);

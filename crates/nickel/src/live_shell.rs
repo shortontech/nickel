@@ -550,6 +550,8 @@ pub struct LiveShell {
         nickel_core::plugins::PluginSurfaceKey,
         (nickel_core::plugins::PluginSurfaceAnchor, i32, i32),
     >,
+    #[cfg(target_os = "windows")]
+    pending_plugin_surface_focus: Option<nickel_core::plugins::PluginSurfaceKey>,
     plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_slot_hosts: std::collections::BTreeMap<String, PluginSlotHost>,
     plugin_taskbar_hosts:
@@ -1621,6 +1623,8 @@ impl LiveShell {
             },
             plugin_panel_memory: std::collections::BTreeMap::new(),
             plugin_window_placement_overrides: std::collections::BTreeMap::new(),
+            #[cfg(target_os = "windows")]
+            pending_plugin_surface_focus: None,
             plugin_taskbar_host,
             plugin_slot_hosts: std::collections::BTreeMap::new(),
             plugin_taskbar_hosts: HashMap::new(),
@@ -3940,6 +3944,57 @@ impl LiveShell {
         Ok(true)
     }
 
+    fn focus_plugin_window(&mut self, id: &str, surface_id: &str) -> Result<bool, String> {
+        let entry = self
+            .plugin_registry
+            .get(id)
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        if !entry.desired_enabled || entry.health != nickel_core::plugins::PluginHealth::Running {
+            return Err(format!("plugin {id:?} is not running"));
+        }
+        let declared = self
+            .external_plugin_packages
+            .get(id)
+            .is_some_and(|package| {
+                package.manifest.surfaces.iter().any(|surface| {
+                    surface.id == surface_id
+                        && !surface.passive
+                        && matches!(
+                            surface.kind,
+                            nickel_core::plugins::PluginSurfaceKind::Window
+                                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                | nickel_core::plugins::PluginSurfaceKind::Overlay
+                        )
+                })
+            });
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.to_owned(),
+            surface_id: surface_id.to_owned(),
+        };
+        if !declared || self.locked || !self.plugin_surface_hosts.contains_key(&key) {
+            return Err(format!(
+                "plugin surface {id:?}/{surface_id:?} is unavailable for focus"
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        return Ok(self.send_session_command(
+            "plugin-surface-focus",
+            ShellCommand::FocusPluginSurface { key },
+        ));
+        #[cfg(target_os = "windows")]
+        {
+            self.pending_plugin_surface_focus = Some(key);
+            Ok(true)
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn take_pending_plugin_surface_focus(
+        &mut self,
+    ) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+        self.pending_plugin_surface_focus.take()
+    }
+
     pub(crate) fn show_plugin_window(
         &mut self,
         id: &str,
@@ -5977,6 +6032,15 @@ impl LiveShell {
                         }
                     }
                 }
+                crate::plugin_panel::PluginEffect::FocusPluginSurface {
+                    plugin_id,
+                    surface_id,
+                } => match self.focus_plugin_window(&plugin_id, &surface_id) {
+                    Ok(focused) => changed |= focused,
+                    Err(error) => {
+                        tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin surface focus request failed");
+                    }
+                },
                 crate::plugin_panel::PluginEffect::SetPluginSurfacePlacement {
                     plugin_id,
                     surface_id,

@@ -11017,17 +11017,6 @@ impl NickelSession {
             plugin_id: plugin_id.to_owned(),
             surface_id: surface_id.to_owned(),
         };
-        if let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
-            shell
-                .surfaces()
-                .iter()
-                .find(|surface| surface.plugin.as_ref() == Some(&key) && shell.visible(surface.id))
-                .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
-        }) {
-            self.pending_shell_focus_role = None;
-            self.pending_plugin_focus = None;
-            return self.focus_internal_surface(runtime);
-        }
         let target = self
             .registered_shell_role_slots
             .iter()
@@ -11048,21 +11037,51 @@ impl NickelSession {
                     })
                     .cloned()
             });
-        let Some(target) = target else {
+        let Some(target) =
+            target.filter(|target| self.space.elements().any(|window| window == target))
+        else {
+            if let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|surface| {
+                        surface.plugin.as_ref() == Some(&key) && shell.visible(surface.id)
+                    })
+                    .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
+            }) {
+                self.pending_shell_focus_role = None;
+                self.pending_plugin_focus = None;
+                if let Some(id) = self.internal_surface_windows.get(&runtime).copied() {
+                    self.internal_ui.raise(runtime);
+                    if !self.focus_internal_surface(runtime) {
+                        return false;
+                    }
+                    self.windows.raise(id);
+                    self.workspaces.focused(&id);
+                    self.notify_protocol_snapshot();
+                    return true;
+                }
+                return self.focus_internal_surface(runtime);
+            }
             return false;
         };
-        if !self.space.elements().any(|window| window == &target) {
-            return false;
-        }
         self.pending_shell_focus_role = None;
         self.pending_plugin_focus = None;
         self.remember_shell_focus_restore_window();
         self.space.raise_element(&target, true);
         self.surrender_internal_focus();
-        self.realize_seat_focus(
+        if !self.realize_seat_focus(
             crate::session::focus::KeyboardFocusTarget::for_window(&target),
             FocusScope::Other(ShellRole::PluginSurface as u64),
-        );
+        ) {
+            return false;
+        }
+        if let Some(id) = target
+            .wl_surface()
+            .and_then(|surface| self.surface_windows.get(&surface.id()).copied())
+        {
+            self.windows.raise(id);
+        }
         self.send_tracked_xdg_configures_for_all_windows();
         true
     }

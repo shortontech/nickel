@@ -119,7 +119,7 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     fs::write(
         windows.join("main.js"),
-        "function App() { const [compact, setCompact] = useState(false); return nickel.data.surface.id === 'first' ? h(Window, {width: compact ? 300 : 360, height: 220}, h(Column, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second'), h(Button, {id: 'move', onClick: () => nickel.request({type: 'surface.setPlacement', surfaceId: 'first', anchor: 'top-left', offsetX: 24, offsetY: 24})}, 'Move first'), h(Button, {id: 'resize', onClick: () => setCompact(true)}, 'Resize first'))) : h(Window, {width: 420, height: 240}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
+        "function App() { const [compact, setCompact] = useState(false); return nickel.data.surface.id === 'first' ? h(Window, {width: compact ? 300 : 360, height: 220}, h(Column, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second'), h(Button, {id: 'focus', onClick: () => nickel.request({type: 'surface.focus', id: 'second'})}, 'Focus second'), h(Button, {id: 'move', onClick: () => nickel.request({type: 'surface.setPlacement', surfaceId: 'first', anchor: 'top-left', offsetX: 24, offsetY: 24})}, 'Move first'), h(Button, {id: 'resize', onClick: () => setCompact(true)}, 'Resize first'))) : h(Window, {width: 420, height: 240}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
     )
     .map_err(|error| error.to_string())?;
     let dialog = runtime
@@ -258,7 +258,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, native screenshot input and lifecycle, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked live component layouts, typed surface hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
+        "PASS: nested compositor ran bundled UI, native screenshot input and lifecycle, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked live component layouts, typed surface focus and hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
     );
     Ok(())
 }
@@ -1689,6 +1689,43 @@ fn verify_sibling_windows(
         .lines()
         .find(|line| line.contains("\torg.example.acceptance-windows\t") && line.ends_with("420x240"))
         .ok_or("reopened plugin window disappeared before typed hide")?;
+    let second_id = second_line
+        .split('\t')
+        .next()
+        .ok_or("reopened plugin window has no ID")?;
+    let focus_bounds = plugin_control_geometry(
+        test_input,
+        environment,
+        "org.example.acceptance-windows/first",
+        "focus",
+    )?;
+    if focus_bounds[0] < 0.0
+        || focus_bounds[1] < 0.0
+        || focus_bounds[0] + focus_bounds[2] > 360.0
+        || focus_bounds[1] + focus_bounds[3] > 220.0
+    {
+        return Err(format!("surface.focus control is outside its window: {focus_bounds:?}"));
+    }
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.acceptance-windows/first",
+        "focus",
+        (x, y),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        if windows.lines().any(|line| {
+            line.starts_with(&format!("{second_id}\t")) && line.split('\t').any(|field| field == "active")
+        }) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("surface.focus did not activate the owned window: {windows}; control={focus_bounds:?}"));
+        }
+        thread::sleep(POLL);
+    }
     let location = second_line
         .rsplit('\t')
         .next()

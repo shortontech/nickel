@@ -404,6 +404,10 @@ pub enum PluginEffect {
         plugin_id: String,
         surface_id: String,
     },
+    FocusPluginSurface {
+        plugin_id: String,
+        surface_id: String,
+    },
     SetPluginSurfacePlacement {
         plugin_id: String,
         surface_id: String,
@@ -2005,6 +2009,36 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::HidePluginSurface {
+                                plugin_id: self.manifest.id.clone(),
+                                surface_id: surface_id.to_owned(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("surface.focus") =>
+                        {
+                            let Some(surface_id) = effect
+                                .get("surfaceId")
+                                .or_else(|| effect.get("id"))
+                                .and_then(Value::as_str)
+                            else {
+                                self.last_error = Some("plugin surface ID is invalid".into());
+                                return;
+                            };
+                            if !self.manifest.surfaces.iter().any(|surface| {
+                                surface.id == surface_id
+                                    && !surface.passive
+                                    && matches!(
+                                        surface.kind,
+                                        nickel_core::plugins::PluginSurfaceKind::Window
+                                            | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                            | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                    )
+                            }) {
+                                self.last_error =
+                                    Some("focusable plugin surface is not declared".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::FocusPluginSurface {
                                 plugin_id: self.manifest.id.clone(),
                                 surface_id: surface_id.to_owned(),
                             });
@@ -5628,6 +5662,25 @@ mod tests {
         assert_eq!(
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowPluginSurface {
+                plugin_id: package.manifest.id.clone(),
+                surface_id: "details".into(),
+            }]
+        );
+        let focus = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Focus details".into(),
+            })
+            .unwrap();
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(focus.id),
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::FocusPluginSurface {
                 plugin_id: package.manifest.id.clone(),
                 surface_id: "details".into(),
             }]

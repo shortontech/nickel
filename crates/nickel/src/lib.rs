@@ -1519,7 +1519,7 @@ fn prewarm_role(
     Ok(())
 }
 
-fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
+fn sync_visibility(shell: &mut WinitShell, state: &mut LiveShell) {
     #[cfg(target_os = "windows")]
     if let Some(maximum) = shell.launcher_maximum_size() {
         let size = state
@@ -1548,6 +1548,10 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
             role,
             state.native_surface_visible(role, plugin.as_ref()),
         );
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(key) = state.take_pending_plugin_surface_focus() {
+        shell.raise_plugin_surface(&key);
     }
 }
 
@@ -2545,7 +2549,7 @@ pub fn run() -> Result<(), String> {
             })
             .map_err(|error| error.to_string())?;
     }
-    sync_visibility(&mut shell, &state);
+    sync_visibility(&mut shell, &mut state);
     render_all(&mut shell, &mut state)?;
     let memory = shell.memory_diagnostics();
     let presenter_roles = shell.presenter_roles();
@@ -2856,7 +2860,7 @@ pub fn run() -> Result<(), String> {
                 if shortcut == platform::GlobalShortcut::ReloadShellSettings {
                     let settings = nickel_core::shell_settings::ShellSettings::load_default();
                     if shell.set_bar_on_all_displays(settings.bar_on_all_displays)? {
-                        sync_visibility(&mut shell, &state);
+                        sync_visibility(&mut shell, &mut state);
                     }
                 }
                 let opening_notification_history =
@@ -2866,7 +2870,7 @@ pub fn run() -> Result<(), String> {
                         state.shell_fixed_surface_keys(),
                         state.shell_panel_surfaces(),
                     )?;
-                    sync_visibility(&mut shell, &state);
+                    sync_visibility(&mut shell, &mut state);
                     #[cfg(target_os = "linux")]
                     if opening_notification_history
                         && state.native_surface_visible(
@@ -2925,7 +2929,7 @@ pub fn run() -> Result<(), String> {
                     .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
             {
                 state.hide_overlay(SurfaceRole::Screenshot);
-                sync_visibility(&mut shell, &state);
+                sync_visibility(&mut shell, &mut state);
             }
             Some(ShellEvent::CloseRequested(surface))
                 if shell.surface(surface).is_some_and(|entry| {
@@ -2955,7 +2959,7 @@ pub fn run() -> Result<(), String> {
                         state.shell_fixed_surface_keys(),
                         state.shell_panel_surfaces(),
                     )?;
-                    sync_visibility(&mut shell, &state);
+                    sync_visibility(&mut shell, &mut state);
                 }
             }
             Some(ShellEvent::CloseRequested(surface)) if shell.surface(surface).is_none() => {}
@@ -2970,7 +2974,7 @@ pub fn run() -> Result<(), String> {
             }
             Some(ShellEvent::Quit | ShellEvent::CloseRequested(_)) => {
                 shell.sync_display_geometry()?;
-                sync_visibility(&mut shell, &state);
+                sync_visibility(&mut shell, &mut state);
             }
             // Winit reports an initial focus loss while a newly shown Wayland
             // surface is waiting for the compositor's focus configure. Hiding
@@ -2986,7 +2990,7 @@ pub fn run() -> Result<(), String> {
                 shell.stop_text_input(surface);
                 if state.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher) {
                     platform::launcher_visibility_applied(false);
-                    sync_visibility(&mut shell, &state);
+                    sync_visibility(&mut shell, &mut state);
                 }
             }
             Some(ShellEvent::FocusChanged {
@@ -2997,7 +3001,7 @@ pub fn run() -> Result<(), String> {
                 .is_some_and(|entry| entry.role() == SurfaceRole::ControlCenter) =>
             {
                 if state.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter) {
-                    sync_visibility(&mut shell, &state);
+                    sync_visibility(&mut shell, &mut state);
                 }
             }
             Some(ShellEvent::FocusChanged { focused: false, .. }) => {}
@@ -3052,7 +3056,7 @@ pub fn run() -> Result<(), String> {
             Some(ShellEvent::PointerEntered { .. }) => {}
             Some(ShellEvent::DisplayTopologyChanged) => {
                 shell.sync_display_geometry()?;
-                sync_visibility(&mut shell, &state);
+                sync_visibility(&mut shell, &mut state);
                 render_all(&mut shell, &mut state)?;
             }
             Some(
@@ -3126,12 +3130,12 @@ pub fn run() -> Result<(), String> {
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             shell.sync_display_geometry()?;
-            sync_visibility(&mut shell, &state);
+            sync_visibility(&mut shell, &mut state);
             render_all(&mut shell, &mut state)?;
         }
         if let Some(project_id) = state.take_requested_codex_project() {
             codex.open_project_by_id(&mut shell, &project_id)?;
-            sync_visibility(&mut shell, &state);
+            sync_visibility(&mut shell, &mut state);
         }
         for request in state.take_codex_menu_requests() {
             match request {
@@ -3143,7 +3147,7 @@ pub fn run() -> Result<(), String> {
                         tracing::warn!(%error, "Codex menu plugin open request rejected");
                     } else {
                         state.hide_overlay(SurfaceRole::CodexProjectMenu);
-                        sync_visibility(&mut shell, &state);
+                        sync_visibility(&mut shell, &mut state);
                     }
                 }
             }
@@ -3155,7 +3159,7 @@ pub fn run() -> Result<(), String> {
             .filter(|(_, deadline)| *deadline <= Instant::now())
             .collect::<Vec<_>>();
         if deadline_outcome.visibility_changed {
-            sync_visibility(&mut shell, &state);
+            sync_visibility(&mut shell, &mut state);
         }
         if deadline_outcome.capture_screenshot {
             let captured = state.capture_screenshot();
@@ -3167,7 +3171,7 @@ pub fn run() -> Result<(), String> {
             if captured {
                 #[cfg(target_os = "windows")]
                 shell.position_screenshot_on_active_output();
-                sync_visibility(&mut shell, &state);
+                sync_visibility(&mut shell, &mut state);
                 focus_visible_overlay(&mut shell, &state);
                 render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
             }
@@ -3261,7 +3265,7 @@ pub fn run() -> Result<(), String> {
                     render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
                 }
                 if availability_changed || menu_changed {
-                    sync_visibility(&mut shell, &state);
+                    sync_visibility(&mut shell, &mut state);
                     render_all(&mut shell, &mut state)?;
                 }
             }
@@ -3269,7 +3273,7 @@ pub fn run() -> Result<(), String> {
             let codex_changed = project_menu_changed;
             let fast_changed = state.refresh_fast();
             if fast_changed {
-                sync_visibility(&mut shell, &state);
+                sync_visibility(&mut shell, &mut state);
                 render_all(&mut shell, &mut state)?;
             }
             let _ = codex
@@ -3310,11 +3314,11 @@ pub fn run() -> Result<(), String> {
                             Some("Codex integration is disabled".into()),
                         ));
                     }
-                    sync_visibility(&mut shell, &state);
+                    sync_visibility(&mut shell, &mut state);
                     render_all(&mut shell, &mut state)?;
                 }
                 if keyboard_changed {
-                    sync_visibility(&mut shell, &state);
+                    sync_visibility(&mut shell, &mut state);
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                     render_role(&mut shell, &mut state, SurfaceRole::OnScreenKeyboard)?;
                 }
@@ -3327,7 +3331,7 @@ pub fn run() -> Result<(), String> {
             let primary_output_changed =
                 shell.set_primary_output_name(state.primary_output_name())?;
             if system_changed || primary_output_changed || codex_theme_changed {
-                sync_visibility(&mut shell, &state);
+                sync_visibility(&mut shell, &mut state);
                 render_all(&mut shell, &mut state)?;
                 if codex_theme_changed {
                     for surface in codex.chats.iter().map(|chat| chat.id).collect::<Vec<_>>() {
