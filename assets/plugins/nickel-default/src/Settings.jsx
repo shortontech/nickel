@@ -12,6 +12,20 @@ export function SettingControl(props) {
     const value = settingValue(setting);
     const change = next => setting.onChange && setting.onChange(next);
 
+    if (setting.type === "group") {
+        const Control = nickel.component("shell.settings.controls");
+        const values = value || {};
+        return <Column className="settings-group">
+            {setting.fields.map(field => <Column key={field.id} className="settings-group-field">
+                <Text>{field.label}</Text>
+                {field.description ? <Text wrap={true}>{field.description}</Text> : null}
+                <Control controlId={controlId + "/" + field.id} setting={{...field,
+                    providerPackage:setting.providerPackage,
+                    value:() => values[field.id] === undefined ? field.defaultValue : values[field.id],
+                    onChange:next => change({...values, [field.id]:next})}} />
+            </Column>)}
+        </Column>;
+    }
     if (setting.type === "switch") {
         return <Switch id={controlId} state={value ? "on" : "off"}
             accessibilityLabel={setting.label} onClick={() => change(!value)} />;
@@ -75,6 +89,8 @@ function groupEntries(settings, pages) {
 }
 
 export function Settings() {
+    const SettingsNavigation = nickel.component("shell.settings.navigation");
+    const SettingControl = nickel.component("shell.settings.controls");
     const settings = readPluginSettings().settings;
     const pages = readPluginSettingsPages().pages;
     const entries = [...settings, ...pages];
