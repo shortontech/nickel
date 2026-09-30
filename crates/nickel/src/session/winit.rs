@@ -703,7 +703,12 @@ pub fn init_winit(
                     // Captures render the compositor's pixels even when the host has withheld
                     // frame callbacks (for example an occluded nested window). They do not swap
                     // host buffers or claim presentation feedback for an unpresented frame.
-                    if !capture_only_frame {
+                    if capture_only_frame {
+                        // The tracker saw a render but the host did not receive a buffer swap.
+                        // Force the next presented frame to repaint instead of preserving damage
+                        // history for a framebuffer that was consumed only by the capture owner.
+                        damage_tracker = OutputDamageTracker::from_output(&output);
+                    } else {
                         let mut presentation_feedback = state.take_output_presentation_feedback(&output, Some(&render_states));
                         backend.submit(Some(&[damage])).unwrap();
                         presentation_sequence = presentation_sequence.wrapping_add(1);
