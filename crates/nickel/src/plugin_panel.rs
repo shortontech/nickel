@@ -3332,8 +3332,8 @@ mod tests {
                 LauncherPluginProjection::from_launcher(&launcher).to_json(),
             )
             .unwrap(),
-            920,
-            680,
+            620,
+            548,
         );
         assert_eq!(host.application().title(), "Nickel Launcher");
         let firefox = host
@@ -3348,12 +3348,12 @@ mod tests {
                 name: "Files".into(),
             })
             .unwrap();
-        assert!(firefox.bounds.size.width >= 64.0);
+        assert!(firefox.bounds.size.width >= 40.0);
         assert!(files.bounds.origin.x > firefox.bounds.origin.x + firefox.bounds.size.width);
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(920, 680, 1.0);
+        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(620, 548, 1.0);
         host.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(920, 680, |x, y| {
-            let pixel = renderer.pixels()[(y * 920 + x) as usize];
+        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(620, 548, |x, y| {
+            let pixel = renderer.pixels()[(y * 620 + x) as usize];
             image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
         });
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -6267,14 +6267,20 @@ mod tests {
         panel.update(panel.button_message("launcher-account").unwrap());
         assert_eq!(panel.take_effects(), vec![PluginEffect::ShowControlCenter]);
         assert!(panel.node.dialog("launcher-logout-dialog").is_some());
-        let host = nickel_ui::UiHost::new(panel, 920, 680);
-        let title = host
+        let host = nickel_ui::UiHost::new(panel, 620, 548);
+        let settings = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Text,
-                name: "Nickel Launcher".into(),
+                role: SemanticRole::Button,
+                name: "Settings".into(),
             })
             .unwrap();
-        assert!(title.bounds.size.height >= 20.0, "{title:?}");
+        let search = host
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .unwrap();
+        assert!(
+            settings.bounds.origin.y > search.bounds.origin.y + search.bounds.size.height,
+            "{settings:?} overlaps {search:?}"
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
   "entry": "main.js",
   "stylesheet": "ui.css",
   "surfaces": [
-    {"id": "main", "kind": "window", "width": 920, "height": 680}
+    {"id": "main", "kind": "window", "width": 620, "height": 548}
   ],
   "validation_data": {
     "main": {

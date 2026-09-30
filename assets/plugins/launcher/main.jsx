@@ -15,10 +15,9 @@ function App() {
         const first = !data.dashboardVisible && data.results[0];
         if (first) nickel.request({type: "launcher-activate-result", index: first.index, id: first.id});
     };
-    return <Window title="Nickel Launcher" width={920} height={680} className="launcher-window"
+    return <Window title="Nickel Launcher" width={620} height={548} className="launcher-window"
         onEscape={escape} onSubmit={!data.dashboardVisible && data.results.length ? submit : undefined}>
       <div className="launcher-content">
-        <Text className="launcher-title">Nickel Launcher</Text>
         {data.status ? <Text className="launcher-status">{data.status}</Text> : null}
         <TextField id="launcher-query" className="launcher-search" value={data.query} placeholder="Search applications"
             onChange={query => nickel.request({type: "launcher-set-query", query})} />
@@ -72,11 +71,6 @@ function App() {
                     {app.name.charAt(0).toUpperCase()}
                 </Button>
                 <Text className="launcher-app-name" wrap={true}>{app.name}</Text>
-                <Button id={"launcher-pin-dashboard-" + app.index} className="launcher-card-pin"
-                    accessibilityLabel={(app.pinned ? "Unpin " : "Pin ") + app.name}
-                    onClick={() => nickel.request({type: "applications.togglePin", id: app.id})}>
-                    {app.pinned ? "Unpin" : "Pin"}
-                </Button>
             </div>)}
             </div>
             {data.dashboardPageCount > 1 ? <Row>
@@ -88,16 +82,6 @@ function App() {
                     Next
                 </Button> : null}
             </Row> : null}
-            <Button id="launcher-account" className="launcher-footer-button" onClick={() => nickel.request({type: "show-control-center"})}>
-                {data.accountName}
-            </Button>
-            <Button id="launcher-settings" className="launcher-footer-button" onClick={() => nickel.request({type: "show-settings", screen: "appearance"})}>
-                Settings
-            </Button>
-            {data.logoutAvailable ? <Button id="launcher-logout" className="launcher-footer-button" onClick={() => {
-                setLogoutOpen(true);
-                nickel.openDialog("launcher-logout-dialog");
-            }}>Log out</Button> : null}
         </ScrollView> : null}
         {!data.dashboardVisible ?
         <ScrollView id="launcher-search-scroll" className="launcher-scroll" grow={true}>
@@ -126,6 +110,18 @@ function App() {
                 </Button> : null}
             </Row> : null}
         </ScrollView> : null}
+        <Row className="launcher-footer">
+            <Button id="launcher-account" className="launcher-account-button" onClick={() => nickel.request({type: "show-control-center"})}>
+                {data.accountName}
+            </Button>
+            {data.logoutAvailable ? <Button id="launcher-logout" className="launcher-footer-button" onClick={() => {
+                setLogoutOpen(true);
+                nickel.openDialog("launcher-logout-dialog");
+            }}>Log out</Button> : null}
+            <Button id="launcher-settings" className="launcher-footer-button" onClick={() => nickel.request({type: "show-settings", screen: "appearance"})}>
+                Settings
+            </Button>
+        </Row>
         <Dialog id="launcher-logout-dialog" anchor="launcher-logout" open={logoutOpen} onClose={() => setLogoutOpen(false)} width={320} height={160}>
             <Column>
                 <Text>Log out of this session?</Text>

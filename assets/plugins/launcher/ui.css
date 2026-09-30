@@ -1,16 +1,17 @@
 window.launcher-window {
-    background: var(--nickel-raised);
+    background: var(--nickel-panel);
     border: 1px solid var(--nickel-border);
-    border-radius: 12px;
+    border-radius: 10px;
 }
 
 div.launcher-content {
     display: flex;
     flex-direction: column;
+    justify-content: space-between;
     width: 100%;
     height: 100%;
-    padding: 20px;
-    gap: 12px;
+    padding: 12px;
+    gap: 8px;
 }
 
 text {
@@ -19,16 +20,10 @@ text {
     font-size: 14px;
 }
 
-text.launcher-title {
-    height: 32px;
-    font-size: 20px;
-    flex-shrink: 0;
-}
-
 text.launcher-section {
-    height: 24px;
+    height: 20px;
     color: var(--nickel-soft-text);
-    font-size: 14px;
+    font-size: 12px;
 }
 
 text.launcher-status {
@@ -37,7 +32,7 @@ text.launcher-status {
 }
 
 text-field {
-    height: 44px;
+    height: 46px;
     flex-shrink: 0;
     padding: 8px 12px;
     background: var(--nickel-control);
@@ -59,8 +54,8 @@ row.launcher-app-row {
 
 div.launcher-app-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
     width: 100%;
 }
 
@@ -68,40 +63,38 @@ div.launcher-app-card {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 4px;
-    min-height: 130px;
-    padding: 8px;
-    background: var(--nickel-control);
-    border: 1px solid var(--nickel-border);
-    border-radius: 10px;
+    gap: 2px;
+    min-height: 88px;
+    padding: 4px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
 }
 
 text.launcher-app-name {
-    height: 28px;
-    font-size: 13px;
+    height: 20px;
+    font-size: 12px;
 }
 
 button.launcher-icon-button {
-    width: 64px;
-    height: 64px;
-    background: var(--nickel-selected);
-    border: 1px solid var(--nickel-selected-border);
-    border-radius: 12px;
-    font-size: 22px;
-}
-
-button.launcher-card-pin {
-    width: 72px;
-    height: 26px;
+    width: 48px;
+    height: 48px;
     background: transparent;
     border: 1px solid transparent;
-    color: var(--nickel-soft-text);
-    font-size: 12px;
+    border-radius: 8px;
+    font-size: 20px;
 }
 
 row.launcher-tabs {
     width: 100%;
+    gap: 4px;
+}
+
+row.launcher-footer {
+    width: 100%;
+    height: 48px;
     gap: 8px;
+    flex-shrink: 0;
 }
 
 column.launcher-projects {
@@ -137,14 +130,27 @@ button.launcher-pin-button {
 }
 
 button.launcher-tab {
-    background: var(--nickel-raised);
+    height: 30px;
+    padding: 4px 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--nickel-soft-text);
+    font-size: 12px;
 }
 
 button.launcher-tab.selected {
-    background: var(--nickel-selected);
-    border: 1px solid var(--nickel-selected-border);
+    color: var(--nickel-text);
+    border-color: var(--nickel-border);
 }
 
 button.launcher-footer-button {
-    width: 100%;
+    width: 86px;
+    height: 40px;
+}
+
+button.launcher-account-button {
+    flex-grow: 1;
+    height: 40px;
+    background: transparent;
+    border: 1px solid transparent;
 }
