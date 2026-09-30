@@ -119,7 +119,7 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     fs::write(
         windows.join("main.js"),
-        "function App() { return nickel.data.surface.id === 'first' ? h(Window, {width: 360, height: 220}, h(Column, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second'), h(Button, {id: 'move', onClick: () => nickel.request({type: 'surface.setPlacement', surfaceId: 'first', anchor: 'top-left', offsetX: 24, offsetY: 24})}, 'Move first'))) : h(Window, {width: 420, height: 240}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
+        "function App() { const [compact, setCompact] = useState(false); return nickel.data.surface.id === 'first' ? h(Window, {width: compact ? 300 : 360, height: 220}, h(Column, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second'), h(Button, {id: 'move', onClick: () => nickel.request({type: 'surface.setPlacement', surfaceId: 'first', anchor: 'top-left', offsetX: 24, offsetY: 24})}, 'Move first'), h(Button, {id: 'resize', onClick: () => setCompact(true)}, 'Resize first'))) : h(Window, {width: 420, height: 240}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
     )
     .map_err(|error| error.to_string())?;
     let dialog = runtime
@@ -1648,6 +1648,35 @@ fn verify_sibling_windows(
         }
         if Instant::now() >= deadline {
             return Err(format!("typed window hide did not retire only its sibling: {windows}"));
+        }
+        thread::sleep(POLL);
+    }
+    let windows = checked(test_input, environment, &["windows"])?;
+    let location = windows
+        .lines()
+        .find(|line| line.starts_with(&format!("{first}\t")))
+        .and_then(|line| line.rsplit('\t').next())
+        .and_then(|field| field.split_whitespace().next())
+        .and_then(|location| location.split_once(','))
+        .and_then(|(x, y)| Some((x.parse::<i32>().ok()?, y.parse::<i32>().ok()?)))
+        .ok_or("surviving plugin window has no location before JSX resize")?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.acceptance-windows/first",
+        "resize",
+        location,
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        if windows.lines().any(|line| {
+            line.starts_with(&format!("{first}\t")) && line.ends_with("300x220")
+        }) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("JSX root resize did not reach its native window: {windows}"));
         }
         thread::sleep(POLL);
     }

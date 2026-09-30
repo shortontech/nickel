@@ -1274,6 +1274,10 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
             shell.present(id, &commands)?;
         }
     }
+    shell.set_plugin_surfaces(
+        state.shell_fixed_surface_keys(),
+        state.shell_panel_surfaces(),
+    )?;
     Ok(())
 }
 
@@ -1331,6 +1335,12 @@ fn render_role(
         } else {
             shell.present(id, &commands)?;
         }
+    }
+    if wanted == SurfaceRole::Panel {
+        shell.set_plugin_surfaces(
+            state.shell_fixed_surface_keys(),
+            state.shell_panel_surfaces(),
+        )?;
     }
     Ok(())
 }

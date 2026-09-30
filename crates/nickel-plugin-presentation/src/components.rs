@@ -3052,6 +3052,38 @@ pub fn render_panel(
     })
 }
 
+pub fn render_panel_validated(
+    runtime: &mut JsxRuntime,
+    manifest: &PluginManifest,
+    expected_surface_id: Option<&str>,
+    expression: &str,
+    stylesheet: &StyleSheet,
+    validation_rejected: &mut bool,
+) -> Result<PanelNode, String> {
+    runtime.render(expression, |value| {
+        let node =
+            parse_panel_for_manifest(value, manifest, expected_surface_id).map_err(|error| {
+                *validation_rejected = true;
+                error
+            })?;
+        if let Some(surface_id) = expected_surface_id {
+            let grant = manifest
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == surface_id)
+                .ok_or_else(|| {
+                    *validation_rejected = true;
+                    "rendered surface is no longer declared"
+                })?;
+            node.requested_surface(grant, stylesheet).map_err(|error| {
+                *validation_rejected = true;
+                error
+            })?;
+        }
+        Ok(node)
+    })
+}
+
 #[cfg(test)]
 mod class_lookup_tests {
     use super::PanelNode;

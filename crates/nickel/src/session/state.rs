@@ -5373,6 +5373,25 @@ impl NickelSession {
     }
 
     pub(crate) fn reconcile_internal_shell_outputs(&mut self) {
+        let before = self
+            .internal_shell
+            .as_ref()
+            .map(crate::internal_shell::InternalShellCoordinator::plugin_surfaces)
+            .unwrap_or_default();
+        self.reconcile_internal_shell_outputs_once();
+        let after = self
+            .internal_shell
+            .as_ref()
+            .map(crate::internal_shell::InternalShellCoordinator::plugin_surfaces)
+            .unwrap_or_default();
+        if after != before {
+            // A host-data render may change a JSX root after the first output
+            // plan was built. Apply that accepted descriptor to native slots.
+            self.reconcile_internal_shell_outputs_once();
+        }
+    }
+
+    fn reconcile_internal_shell_outputs_once(&mut self) {
         self.invalidate_remote_shell_actions();
         // Runtime slots are replaced below, but a surviving coordinator surface
         // must retain keyboard ownership across output reconciliation.

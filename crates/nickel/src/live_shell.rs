@@ -518,6 +518,10 @@ pub struct LiveShell {
         ),
     >,
     plugin_panel_memory: std::collections::BTreeMap<nickel_core::plugins::PluginSurfaceKey, u64>,
+    plugin_window_placement_overrides: std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        (nickel_core::plugins::PluginSurfaceAnchor, i32, i32),
+    >,
     plugin_launcher_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_run_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
@@ -1531,6 +1535,7 @@ impl LiveShell {
             plugin_panel_host,
             plugin_panel_extra_hosts: std::collections::BTreeMap::new(),
             plugin_panel_memory: std::collections::BTreeMap::new(),
+            plugin_window_placement_overrides: std::collections::BTreeMap::new(),
             plugin_launcher_host,
             plugin_run_host,
             plugin_taskbar_host,
@@ -2537,6 +2542,10 @@ impl LiveShell {
                     &key,
                     (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
                 );
+                if let Err(error) = self.reconcile_plugin_surface_root(&key) {
+                    self.fail_plugin_panel_runtime(&key.plugin_id, error);
+                    return Vec::new();
+                }
                 commands
             }
             SurfaceRole::Launcher if self.run_visible => self.run_scene(width, height),
@@ -3726,6 +3735,10 @@ impl LiveShell {
                 &key,
                 (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
             );
+            if let Err(error) = self.reconcile_plugin_surface_root(&key) {
+                self.fail_plugin_panel_runtime(&key.plugin_id, error);
+                break;
+            }
         }
     }
 
@@ -3792,6 +3805,10 @@ impl LiveShell {
         match result {
             Ok((commands, bytes)) => {
                 self.record_plugin_panel_memory(key, bytes);
+                if let Err(error) = self.reconcile_plugin_surface_root(key) {
+                    self.fail_plugin_panel_runtime(&key.plugin_id, error);
+                    return None;
+                }
                 Some(commands)
             }
             Err(error) => {
@@ -3938,6 +3955,7 @@ impl LiveShell {
             self.plugin_panel_extra_hosts.remove(key);
         }
         self.plugin_panel_memory.remove(key);
+        self.plugin_window_placement_overrides.remove(key);
         let remaining_bytes = self
             .plugin_panel_memory
             .iter()
@@ -4009,6 +4027,8 @@ impl LiveShell {
         surface.anchor = anchor;
         surface.offset_x = offset_x;
         surface.offset_y = offset_y;
+        self.plugin_window_placement_overrides
+            .insert(key, (anchor, offset_x, offset_y));
         Ok(true)
     }
 
@@ -4386,7 +4406,19 @@ impl LiveShell {
                         .iter()
                         .find(|surface| surface.id == surface_id)
                         .expect("replacement surface belongs to the validated manifest");
-                    let resolved = application.resolved_surface(grant)?;
+                    let mut resolved = application.resolved_surface(grant)?;
+                    let key = nickel_core::plugins::PluginSurfaceKey {
+                        plugin_id: id.to_owned(),
+                        surface_id: surface_id.clone(),
+                    };
+                    if resolved.kind == nickel_core::plugins::PluginSurfaceKind::Window
+                        && let Some((anchor, offset_x, offset_y)) =
+                            self.plugin_window_placement_overrides.get(&key).copied()
+                    {
+                        resolved.anchor = anchor;
+                        resolved.offset_x = offset_x;
+                        resolved.offset_y = offset_y;
+                    }
                     if self.plugin_panel_owner == id
                         && self.plugin_panel_surface.id == surface_id
                         && self.plugin_panel_host.is_some()
@@ -4398,10 +4430,6 @@ impl LiveShell {
                             resolved.height,
                         ));
                     } else {
-                        let key = nickel_core::plugins::PluginSurfaceKey {
-                            plugin_id: id.to_owned(),
-                            surface_id,
-                        };
                         if let Some((surface, host)) = self.plugin_panel_extra_hosts.get_mut(&key) {
                             *surface = resolved.clone();
                             *host = nickel_ui::UiHost::new(
@@ -4487,6 +4515,8 @@ impl LiveShell {
             .retain(|key, _| key.plugin_id != id);
         self.plugin_panel_memory
             .retain(|key, _| key.plugin_id != id);
+        self.plugin_window_placement_overrides
+            .retain(|key, _| key.plugin_id != id);
         if self.plugin_panel_owner == id {
             self.plugin_panel_host = None;
             self.plugin_panel_owner = crate::plugin_panel::manifest().id.clone();
@@ -4546,6 +4576,8 @@ impl LiveShell {
         self.plugin_panel_extra_hosts
             .retain(|key, _| key.plugin_id != id);
         self.plugin_panel_memory
+            .retain(|key, _| key.plugin_id != id);
+        self.plugin_window_placement_overrides
             .retain(|key, _| key.plugin_id != id);
         if id == crate::plugin_panel::codex_projects_manifest().id {
             self.codex_project_menu_visible = false;
@@ -4833,6 +4865,8 @@ impl LiveShell {
             self.plugin_panel_extra_hosts
                 .retain(|key, _| key.plugin_id != id);
             self.plugin_panel_memory
+                .retain(|key, _| key.plugin_id != id);
+            self.plugin_window_placement_overrides
                 .retain(|key, _| key.plugin_id != id);
             if id == self.plugin_panel_owner {
                 self.plugin_panel_host = None;
@@ -5752,6 +5786,55 @@ impl LiveShell {
             .map(|(_, host)| host)
     }
 
+    fn reconcile_plugin_surface_root(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Result<bool, String> {
+        let Some(grant) = self
+            .external_plugin_packages
+            .get(&key.plugin_id)
+            .and_then(|package| {
+                package
+                    .manifest
+                    .surfaces
+                    .iter()
+                    .find(|surface| surface.id == key.surface_id)
+            })
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let Some(host) = self.plugin_panel_host_for(key) else {
+            return Ok(false);
+        };
+        let mut resolved = host.application().resolved_surface(&grant)?;
+        if resolved.kind == nickel_core::plugins::PluginSurfaceKind::Window
+            && let Some((anchor, offset_x, offset_y)) =
+                self.plugin_window_placement_overrides.get(key).copied()
+        {
+            resolved.anchor = anchor;
+            resolved.offset_x = offset_x;
+            resolved.offset_y = offset_y;
+        }
+        let current = if self.plugin_panel_owner == key.plugin_id
+            && self.plugin_panel_surface.id == key.surface_id
+            && self.plugin_panel_host.is_some()
+        {
+            &mut self.plugin_panel_surface
+        } else {
+            &mut self
+                .plugin_panel_extra_hosts
+                .get_mut(key)
+                .ok_or("plugin surface host disappeared")?
+                .0
+        };
+        if *current == resolved {
+            return Ok(false);
+        }
+        *current = resolved;
+        Ok(true)
+    }
+
     pub(crate) fn plugin_panel_host_input_for(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -5826,7 +5909,13 @@ impl LiveShell {
         {
             return true;
         }
-        changed | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+        let root_changed = match self.reconcile_plugin_surface_root(key) {
+            Ok(changed) => changed,
+            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+        };
+        changed
+            | root_changed
+            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
     }
 
     pub(crate) fn plugin_panel_host_controller_for(
@@ -5891,7 +5980,13 @@ impl LiveShell {
         {
             return true;
         }
-        changed | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+        let root_changed = match self.reconcile_plugin_surface_root(key) {
+            Ok(changed) => changed,
+            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+        };
+        changed
+            | root_changed
+            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
     }
 
     #[cfg(any(test, target_os = "linux"))]
@@ -5953,7 +6048,13 @@ impl LiveShell {
         {
             return true;
         }
-        changed | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+        let root_changed = match self.reconcile_plugin_surface_root(key) {
+            Ok(changed) => changed,
+            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+        };
+        changed
+            | root_changed
+            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
     }
 
     fn apply_plugin_effects(&mut self, effects: Vec<crate::plugin_panel::PluginEffect>) -> bool {

@@ -10,7 +10,7 @@ use std::{
 use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
-use nickel_plugin_presentation::components::{PanelNode, render_panel};
+use nickel_plugin_presentation::components::{PanelNode, render_panel, render_panel_validated};
 pub use nickel_plugin_presentation::components::{
     PluginActionContribution, PluginImages, PluginMessage, PluginSectionContribution,
     PluginWidgetContribution,
@@ -1475,18 +1475,39 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
-        self.node = {
+        let previous_data = self
+            .projection_data
+            .as_deref()
+            .unwrap_or("{\"query\":\"\",\"results\":[]}")
+            .to_owned();
+        let mut validation_rejected = false;
+        let node = {
             let mut runtime = self.runtime.borrow_mut();
             runtime.select_surface(self.expected_surface_id.as_deref().unwrap_or("default"))?;
             runtime.set_data(&serialized)?;
-            render_panel(
+            let result = render_panel_validated(
                 &mut runtime,
                 &self.manifest,
                 self.expected_surface_id.as_deref(),
                 "__nickelRender()",
-            )?
+                &self.stylesheet,
+                &mut validation_rejected,
+            );
+            if result.is_err() {
+                runtime.set_data(&previous_data)?;
+            }
+            match result {
+                Ok(node) => node,
+                Err(error) if validation_rejected => {
+                    self.last_error = Some(error);
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            }
         };
+        self.node = node;
         self.projection_data = Some(serialized);
+        self.last_error = None;
         Ok(true)
     }
 
@@ -1761,6 +1782,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                 serde_json::Value::Array(events)
             )
         };
+        let mut validation_rejected = false;
         let (rendered, effects) = {
             let mut runtime = self.runtime.borrow_mut();
             if let Err(error) =
@@ -1770,11 +1792,13 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = Some(error);
                 return;
             }
-            let rendered = render_panel(
+            let rendered = render_panel_validated(
                 &mut runtime,
                 &self.manifest,
                 self.expected_surface_id.as_deref(),
                 &expression,
+                &self.stylesheet,
+                &mut validation_rejected,
             );
             let effects = runtime.take_effects();
             (rendered, effects)
@@ -2817,7 +2841,9 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = None;
             }
             (Err(error), _) | (_, Err(error)) => {
-                self.runtime_failure = Some(error.clone());
+                if !validation_rejected {
+                    self.runtime_failure = Some(error.clone());
+                }
                 self.last_error = Some(error);
             }
         })();
@@ -4606,6 +4632,69 @@ mod tests {
                 assert!(app.last_error().is_some());
             }
         }
+    }
+
+    #[test]
+    fn invalid_dynamic_root_css_rolls_back_the_event() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.surfaces[0].anchor = nickel_core::plugins::PluginSurfaceAnchor::TopLeft;
+        manifest.surfaces[0].offset_y = 20;
+        let source = "function App() { const [bad, setBad] = useState(false); return h(Window, {id:'main',width:520,height:340,className:bad?'bad':'good'}, h(Button, {id:'toggle',onClick:()=>setBad(true)}, 'Toggle')); }";
+        let mut app = PluginPanelApplication::new_with_manifest_for_surface(
+            source,
+            &manifest,
+            None,
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        app.stylesheet = StyleSheet::compile("window.bad { top: 30px; }").unwrap();
+        app.update(app.button_message("toggle").unwrap());
+        assert!(app.last_error().unwrap().contains("exceeds its grant"));
+        assert!(app.take_effects().is_empty());
+        assert!(matches!(
+            &app.node,
+            PanelNode::Surface { class_name: Some(class_name), .. } if class_name == "good"
+        ));
+    }
+
+    #[test]
+    fn invalid_host_data_root_keeps_the_last_valid_window() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.surfaces[0].anchor = nickel_core::plugins::PluginSurfaceAnchor::TopLeft;
+        manifest.surfaces[0].offset_y = 20;
+        let source = "function App() { return h(Window, {id:'main',width:520,height:340,className:nickel.data.invalid?'bad':'good'}, h(Text, null, nickel.data.label)); }";
+        let mut app = PluginPanelApplication::new_with_manifest_for_surface(
+            source,
+            &manifest,
+            Some(r#"{"invalid":false,"label":"Before"}"#.into()),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        app.stylesheet = StyleSheet::compile("window.bad { top: 30px; }").unwrap();
+        assert!(
+            !app.sync_data(&serde_json::json!({"invalid": true, "label": "Rejected"}))
+                .unwrap()
+        );
+        assert!(app.last_error().unwrap().contains("exceeds its grant"));
+        assert!(format!("{:?}", app.node).contains("Before"));
+        assert!(
+            app.sync_data(&serde_json::json!({"invalid": false, "label": "After"}))
+                .unwrap()
+        );
+        assert!(app.last_error().is_none());
+        assert!(format!("{:?}", app.node).contains("After"));
     }
 
     #[test]

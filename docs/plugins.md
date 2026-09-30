@@ -267,6 +267,9 @@ distance from the output's top edge within the manifest's positive `offset_y`
 bound. A root cannot set both CSS `top` and `bottom`.
 A plugin cannot create an undeclared native window by changing JSX. `id` is optional: the host
 supplies its surface identity. An explicit ID must match that identity.
+When state or host data changes a root's allowed size, output scope, or
+placement, Nickel updates the live native surface after validating the new
+tree. An invalid dynamic request leaves the previous tree and surface in place.
 One plugin may declare several surfaces. Nickel renders the plugin for each
 surface with `nickel.data.surface.id` set to that host's ID, so the JSX can
 return the matching `Window` root. Sibling windows share one JavaScript
