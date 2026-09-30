@@ -850,6 +850,16 @@ fn taskbar_declaration_joins_active_shell_panel_surfaces() {
         declaration.output,
         nickel_core::plugins::PluginOutputScope::All
     );
+    assert_eq!(
+        shell.plugin_panel_placement(&key),
+        Some((
+            declaration.kind,
+            declaration.bottom_offset,
+            declaration.anchor,
+            declaration.offset_x,
+            declaration.offset_y,
+        ))
+    );
 
     shell
         .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
@@ -860,6 +870,7 @@ fn taskbar_declaration_joins_active_shell_panel_surfaces() {
             .iter()
             .all(|(candidate, _)| candidate != &key)
     );
+    assert!(shell.plugin_panel_placement(&key).is_none());
 }
 
 #[test]

@@ -3175,15 +3175,10 @@ impl LiveShell {
                 && crate::plugin_panel::volume_osd_surface_key() == *key)
             || (self.plugin_preview_host.is_some()
                 && crate::plugin_panel::window_preview_surface_key() == *key)
-            || (self.plugin_notification_host.is_some()
-                && crate::plugin_panel::notification_surface_key() == *key)
-            || (self.plugin_control_host.is_some()
-                && crate::plugin_panel::control_center_surface_key() == *key)
-            || self.taskbar_surface_key().as_ref() == Some(key)
-            || (self.plugin_panel_host.is_some()
-                && self.plugin_panel_owner == key.plugin_id
-                && self.plugin_panel_surface.id == key.surface_id)
-            || self.plugin_panel_extra_hosts.contains_key(key)
+            || self
+                .shell_panel_surfaces()
+                .iter()
+                .any(|(candidate, _)| candidate == key)
     }
 
     pub(crate) fn plugin_panels(
@@ -3291,51 +3286,18 @@ impl LiveShell {
         i32,
         i32,
     )> {
-        if *key == crate::plugin_panel::control_center_surface_key()
-            && self.plugin_control_host.is_some()
-        {
-            let surface = crate::plugin_panel::control_center_surface();
-            return Some((
-                surface.kind,
-                surface.bottom_offset,
-                surface.anchor,
-                surface.offset_x,
-                surface.offset_y,
-            ));
-        }
-        if *key == crate::plugin_panel::notification_surface_key()
-            && self.plugin_notification_host.is_some()
-        {
-            let surface = crate::plugin_panel::notification_surface();
-            return Some((
-                surface.kind,
-                surface.bottom_offset,
-                surface.anchor,
-                surface.offset_x,
-                surface.offset_y,
-            ));
-        }
-        if self.plugin_panel_host.is_some()
-            && self.plugin_panel_owner == key.plugin_id
-            && self.plugin_panel_surface.id == key.surface_id
-        {
-            return Some((
-                self.plugin_panel_surface.kind,
-                self.plugin_panel_surface.bottom_offset,
-                self.plugin_panel_surface.anchor,
-                self.plugin_panel_surface.offset_x,
-                self.plugin_panel_surface.offset_y,
-            ));
-        }
-        self.plugin_panel_extra_hosts.get(key).map(|(surface, _)| {
-            (
-                surface.kind,
-                surface.bottom_offset,
-                surface.anchor,
-                surface.offset_x,
-                surface.offset_y,
-            )
-        })
+        self.shell_panel_surfaces()
+            .into_iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, surface)| {
+                (
+                    surface.kind,
+                    surface.bottom_offset,
+                    surface.anchor,
+                    surface.offset_x,
+                    surface.offset_y,
+                )
+            })
     }
 
     pub(crate) fn plugin_panel_change_token(
