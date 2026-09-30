@@ -15,7 +15,7 @@ export function QuickSettings(props) {
         nickel.openDialog("session-confirm-dialog");
     };
     return <FixedWindow id="quick-settings" edge="right" width={420} height="100%" className="control-center"
-        onEscape={() => nickel.request({type: "toggle-control-center"})}>
+        onEscape={() => nickel.surfaces.hide("quick-settings")}>
         <Column className="control-content">
             <Text className="control-title">Control Center</Text>
             <ScrollView id="control-center-scroll" height={data.scrollHeight}>
@@ -65,7 +65,7 @@ export function QuickSettings(props) {
                     </Row>
                     <Row>
                         <Button id="show-desktop" onClick={() => request("show-desktop")}>Show desktop</Button>
-                        <Button id="show-notifications" onClick={() => request("show-notifications")}>Notifications</Button>
+                        <Button id="show-notifications" onClick={() => nickel.surfaces.show("notifications")}>Notifications</Button>
                     </Row>
                     {sections.length ? <Text className="control-section-title">Extensions</Text> : null}
                     {sections.map((section, index) => <Row key={`${section.pluginId}:${section.id}`}>

@@ -14,7 +14,7 @@ export function QuickSettings(props) {
         request("session-prepare", action);
         nickel.openDialog("session-confirm-dialog");
     };
-    return h(FixedWindow, { id: "quick-settings", edge: "right", width: 420, height: "100%", className: "control-center", onEscape: () => nickel.request({ type: "toggle-control-center" }) },
+    return h(FixedWindow, { id: "quick-settings", edge: "right", width: 420, height: "100%", className: "control-center", onEscape: () => nickel.surfaces.hide("quick-settings") },
         h(Column, { className: "control-content" },
             h(Text, { className: "control-title" }, "Control Center"),
             h(ScrollView, { id: "control-center-scroll", height: data.scrollHeight },
@@ -47,7 +47,7 @@ export function QuickSettings(props) {
                         data.workspaces.length > 1 ? h(Button, { id: "workspace-remove", onClick: () => request("workspace-remove", data.activeWorkspace) }, "\u2212") : null),
                     h(Row, null,
                         h(Button, { id: "show-desktop", onClick: () => request("show-desktop") }, "Show desktop"),
-                        h(Button, { id: "show-notifications", onClick: () => request("show-notifications") }, "Notifications")),
+                        h(Button, { id: "show-notifications", onClick: () => nickel.surfaces.show("notifications") }, "Notifications")),
                     sections.length ? h(Text, { className: "control-section-title" }, "Extensions") : null,
                     sections.map((section, index) => h(Row, { key: `${section.pluginId}:${section.id}` },
                         h(Text, null, section.label + ": " + section.value),

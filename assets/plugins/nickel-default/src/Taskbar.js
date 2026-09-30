@@ -71,7 +71,7 @@ export function Taskbar(props) {
     const badges = (data.slots && data.slots["task-badge"]) || [];
     return h(FixedWindow, { id: "taskbar", output: "all", edge: "bottom", reserveWorkArea: true, className: "taskbar" },
         h("div", { className: "taskbar-content" },
-            h(Button, { id: "taskbar-launcher", className: "launcher-button", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.request({ type: "toggle-launcher" }) }, "Nickel"),
+            h(Button, { id: "taskbar-launcher", className: "launcher-button", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.surfaces.show("launcher") }, "Nickel"),
             items.flatMap(item => [
                 h(Task, { key: item.id, item: item }),
                 ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) => h(Badge, { key: badge.pluginId + ":" + item.id + ":" + index, className: "task-badge", label: badge.label, count: badge.count, color: badge.color }))
@@ -80,5 +80,5 @@ export function Taskbar(props) {
             data.keyboardEnabled ? h(Button, { id: "taskbar-keyboard", className: "utility-button", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.request({ type: "toggle-on-screen-keyboard" }) }, "\u2328") : null,
             data.codexAvailable ? h(Button, { id: "taskbar-codex", className: "utility-button", icon: "codex", accessibilityLabel: "Codex projects", onClick: () => nickel.request({ type: "toggle-projects-menu" }) }, "Codex") : null,
             tray.map(item => h(TrayItem, { key: item.id, item: item })),
-            h(Button, { id: "taskbar-control", className: "clock-button", onClick: () => nickel.request({ type: "toggle-control-center" }) }, data.clock || "")));
+            h(Button, { id: "taskbar-control", className: "clock-button", onClick: () => nickel.surfaces.show("quick-settings") }, data.clock || "")));
 }

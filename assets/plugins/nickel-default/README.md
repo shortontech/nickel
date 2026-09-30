@@ -138,3 +138,12 @@ manifest, module sources, CSS, and declared images entirely from that catalog.
 Neither building nor running Nickel invokes npm or a JSX compiler. JSX remains
 included for inspection, while the manifest entry and imports select emitted JS.
 This prepares the shared host; it does not change stock shell activation.
+
+## Package surface actions
+
+Ordinary components use `nickel.surfaces.show(id)`, `.hide(id)`, `.focus(id)`,
+and `.setPlacement(id, {anchor, offsetX, offsetY})`. Nickel validates the ID
+against the caller's declared surfaces and enforces passive-window and placement
+rules. These operations do not target another package implicitly. The default
+taskbar opens its own launcher/quick settings, and the launcher opens its own
+Settings window and closes itself after invoking application launch.

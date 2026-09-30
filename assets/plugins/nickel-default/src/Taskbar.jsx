@@ -86,7 +86,7 @@ export function Taskbar(props) {
         reserveWorkArea={true} className="taskbar">
         <div className="taskbar-content">
             <Button id="taskbar-launcher" className="launcher-button" icon="logo" accessibilityLabel="Open Nickel Start"
-                onClick={() => nickel.request({type: "toggle-launcher"})}>Nickel</Button>
+                onClick={() => nickel.surfaces.show("launcher")}>Nickel</Button>
             {items.flatMap(item => [
                 <Task key={item.id} item={item} />,
                 ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) =>
@@ -100,7 +100,7 @@ export function Taskbar(props) {
                 onClick={() => nickel.request({type: "toggle-projects-menu"})}>Codex</Button> : null}
             {tray.map(item => <TrayItem key={item.id} item={item} />)}
             <Button id="taskbar-control" className="clock-button"
-                onClick={() => nickel.request({type: "toggle-control-center"})}>{data.clock || ""}</Button>
+                onClick={() => nickel.surfaces.show("quick-settings")}>{data.clock || ""}</Button>
         </div>
     </FixedWindow>;
 }

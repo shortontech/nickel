@@ -279,6 +279,17 @@ const nickel = Object.freeze({
             __effects.push({type:'applications.movePin',id:__nickelIdentity(id),direction});
         }
     }),
+    surfaces: Object.freeze({
+        show(id) { __effects.push({type:'surface.show',surfaceId:__nickelIdentity(id)}); },
+        hide(id) { __effects.push({type:'surface.hide',surfaceId:__nickelIdentity(id)}); },
+        focus(id) { __effects.push({type:'surface.focus',surfaceId:__nickelIdentity(id)}); },
+        setPlacement(id, {anchor, offsetX = 0, offsetY = 0}) {
+            if (typeof anchor !== 'string' || !Number.isInteger(offsetX) || !Number.isInteger(offsetY)
+                || Math.abs(offsetX) > 8192 || Math.abs(offsetY) > 8192)
+                throw TypeError('invalid surface placement');
+            __effects.push({type:'surface.setPlacement',surfaceId:__nickelIdentity(id),anchor,offsetX,offsetY});
+        }
+    }),
     component(contract) {
         const component = __nickelPublicComponents.get(contract);
         if (!component) throw Error(`unknown public component ${contract}`);

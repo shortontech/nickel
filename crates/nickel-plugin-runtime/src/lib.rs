@@ -289,6 +289,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn surface_clients_emit_owned_surface_requests_and_bound_placement() {
+        let mut runtime = JsxRuntime::new("", None).unwrap();
+        runtime.eval("nickel.surfaces.show('settings'); nickel.surfaces.focus('settings'); nickel.surfaces.setPlacement('settings', {anchor:'bottom-right',offsetX:-16}); nickel.surfaces.hide('settings')").unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![
+                serde_json::json!({"type":"surface.show","surfaceId":"settings"}),
+                serde_json::json!({"type":"surface.focus","surfaceId":"settings"}),
+                serde_json::json!({"type":"surface.setPlacement","surfaceId":"settings","anchor":"bottom-right","offsetX":-16,"offsetY":0}),
+                serde_json::json!({"type":"surface.hide","surfaceId":"settings"}),
+            ]
+        );
+        assert!(runtime.eval("nickel.surfaces.show('')").is_err());
+        assert!(
+            runtime
+                .eval("nickel.surfaces.setPlacement('settings', {anchor:'center',offsetX:8193})")
+                .is_err()
+        );
+        assert!(runtime.take_effects().unwrap().is_empty());
+    }
+
+    #[test]
     fn slider_numeric_ranges_normalize_native_values_and_quantize_changes() {
         let mut runtime = JsxRuntime::new("function App() { return h(Slider, {id:'volume', accessibilityLabel:'Volume', min:10, max:110, step:5, value:60, onChange:value=>nickel.request({type:'changed',value})}); }", None).unwrap();
         let rendered = runtime
