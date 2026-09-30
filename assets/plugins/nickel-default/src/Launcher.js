@@ -56,7 +56,7 @@ export function Launcher() {
                     h(Button, { id: appControlId("launcher-pin-place-", place), className: "launcher-pin-button", onClick: () => nickel.applications.togglePin(place.id) }, place.pinned ? "Unpin" : "Pin"))),
                 search.nativeProjectsAvailable ? h(Column, { className: "launcher-projects" },
                     h(Text, { className: "launcher-section" }, "Projects"),
-                    h(Button, { id: "launcher-all-projects", className: "launcher-footer-button", onClick: () => nickel.request({ type: "launcher-see-all-projects" }) }, "Open native project overview")) : null,
+                    h(Button, { id: "launcher-all-projects", className: "launcher-footer-button", onClick: () => nickel.projects.show() }, "Open native project overview")) : null,
                 h(Row, { className: "launcher-tabs" },
                     h(Button, { id: "launcher-view-favorites", className: view === "favorites" ? "launcher-tab selected" : "launcher-tab", onClick: () => changeView("favorites") }, "Pinned & recent"),
                     h(Button, { id: "launcher-view-applications", className: view === "applications" ? "launcher-tab selected" : "launcher-tab", onClick: () => changeView("applications") }, "All applications"),

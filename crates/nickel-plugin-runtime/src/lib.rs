@@ -227,6 +227,30 @@ mod tests {
     }
 
     #[test]
+    fn native_ui_clients_emit_service_operations_and_copy_clock_snapshot() {
+        let mut runtime = super::JsxRuntime::new(
+            "",
+            Some(r#"{"clock":{"unixMilliseconds":1770000000000,"utcOffsetMinutes":-420}}"#),
+        )
+        .unwrap();
+        runtime.eval("nickel.clock.get().utcOffsetMinutes = 0; nickel.projects.show(); nickel.projects.toggle(); nickel.keyboard.toggle();").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<i32>("JSON.stringify(nickel.clock.get().utcOffsetMinutes)")
+                .unwrap(),
+            -420
+        );
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![
+                serde_json::json!({"type":"projects.show"}),
+                serde_json::json!({"type":"projects.toggle"}),
+                serde_json::json!({"type":"keyboard.toggle"})
+            ]
+        );
+    }
+
+    #[test]
     fn notification_client_uses_stable_ids_and_validates_actions() {
         let mut runtime = super::JsxRuntime::new(
             "",

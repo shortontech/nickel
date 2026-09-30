@@ -132,6 +132,7 @@ mod lock_auth;
 use launcher::{DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects};
 mod application_capabilities;
 pub mod associations_capabilities;
+mod clock_capabilities;
 pub mod connectivity_capabilities;
 mod control_view;
 pub mod feature_capabilities;

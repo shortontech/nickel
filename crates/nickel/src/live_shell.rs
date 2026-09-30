@@ -744,6 +744,7 @@ pub struct LiveShell {
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
+    clock_deadline: Instant,
     panel_pet_frame: u8,
     panel_pet_deadline: Option<Instant>,
     panel_output: Option<String>,
@@ -1721,6 +1722,7 @@ impl LiveShell {
             panel_projections: HashMap::new(),
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
+            clock_deadline: Instant::now() + crate::clock_capabilities::until_next_minute(),
             panel_pet_frame: 0,
             panel_pet_deadline: None,
             panel_output: None,
@@ -4313,6 +4315,7 @@ impl LiveShell {
             });
         [
             ("slots", self.plugin_slot_projection(id)),
+            ("clock", Some(crate::clock_capabilities::snapshot())),
             ("windows", self.external_plugin_windows(id)),
             ("applications", self.external_plugin_applications(id)),
             ("applicationSearch", self.plugin_application_search(id)),
@@ -4369,6 +4372,7 @@ impl LiveShell {
         let shortcuts = self.plugin_features(&key.plugin_id, true);
         let mut application_images =
             self.plugin_application_images(applications.as_ref(), application_search.as_ref());
+        let clock = crate::clock_capabilities::snapshot();
         let notifications = self.external_plugin_notifications(&key.plugin_id);
         let tray = self.plugin_registry.get(&key.plugin_id)
             .filter(|entry| entry.manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::TrayRead))
@@ -4406,6 +4410,7 @@ impl LiveShell {
                     .transpose()?
                     .unwrap_or(false);
                 let fields = [
+                    ("clock", Some(&clock)),
                     ("slots", slots.as_ref()),
                     ("windows", windows.as_ref()),
                     ("applications", applications.as_ref()),
@@ -6050,6 +6055,7 @@ impl LiveShell {
                 .min(),
         );
         push("on-screen-keyboard", Some(self.keyboard_deadline));
+        push("clock", Some(self.clock_deadline));
         push("launcher-preferences", self.launcher_preference_deadline);
         push(
             "panel",
@@ -6255,6 +6261,10 @@ impl LiveShell {
 
     pub fn poll_host_deadlines(&mut self, now: Instant) -> Vec<SurfaceRole> {
         let mut changed = Vec::new();
+        if now >= self.clock_deadline {
+            self.clock_deadline = now + crate::clock_capabilities::until_next_minute();
+            changed.push(SurfaceRole::Panel);
+        }
         if self.poll_launcher_preferences() {
             changed.extend([SurfaceRole::Launcher, SurfaceRole::Taskbar]);
         }
@@ -7030,16 +7040,21 @@ impl LiveShell {
                         changed |= self.try_send_window_action(window, WindowAction::Close);
                     }
                 }
-                crate::plugin_panel::PluginEffect::ToggleOnScreenKeyboard => {
-                    if self.keyboard_enabled {
-                        self.apply_panel_action(TaskbarAction::OnScreenKeyboard);
-                        changed = true;
+                crate::plugin_panel::PluginEffect::ToggleOnScreenKeyboard { plugin_id } => {
+                    if self.native_ui_service_granted(
+                        &plugin_id,
+                        nickel_core::plugins::PluginCapability::OnScreenKeyboardShow,
+                    ) && self.keyboard_enabled
+                    {
+                        changed |= self.set_keyboard_visible(!self.keyboard_visible);
                     }
                 }
-                crate::plugin_panel::PluginEffect::ToggleCodexProjects => {
-                    if self.launcher.codex_available() {
-                        self.apply_panel_action(TaskbarAction::Codex);
-                        changed = true;
+                crate::plugin_panel::PluginEffect::ProjectsVisibility { plugin_id, toggle } => {
+                    if self.native_ui_service_granted(
+                        &plugin_id,
+                        nickel_core::plugins::PluginCapability::ProjectsMenuShow,
+                    ) {
+                        changed |= self.show_projects_menu(toggle);
                     }
                 }
                 crate::plugin_panel::PluginEffect::CodexProjectRefresh => {
@@ -10570,6 +10585,34 @@ impl LiveShell {
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+    }
+
+    fn native_ui_service_granted(
+        &self,
+        plugin_id: &str,
+        grant: nickel_core::plugins::PluginCapability,
+    ) -> bool {
+        !self.locked
+            && self.plugin_registry.get(plugin_id).is_some_and(|entry| {
+                entry.desired_enabled
+                    && entry.health == nickel_core::plugins::PluginHealth::Running
+                    && entry.manifest.capabilities.contains(&grant)
+            })
+    }
+
+    fn show_projects_menu(&mut self, toggle: bool) -> bool {
+        if !self.launcher.codex_available()
+            || !self.plugin_surface_matches(&crate::plugin_panel::codex_projects_surface_key())
+        {
+            return false;
+        }
+        let visible = !toggle || !self.codex_project_menu_visible;
+        let changed = self.codex_project_menu_visible != visible;
+        if visible {
+            self.set_launcher_visible(false);
+        }
+        self.codex_project_menu_visible = visible;
+        changed
     }
 
     fn notification_action_granted(&self, plugin_id: &str, id: u32) -> bool {

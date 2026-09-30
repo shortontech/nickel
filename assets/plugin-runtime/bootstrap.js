@@ -309,6 +309,16 @@ const nickel = Object.freeze({
         },
         selectOutput(id) { __effects.push({type:'control-action',action:'audio-device',value:__nickelIdentity(id)}); }
     }),
+    projects: Object.freeze({
+        show() { __effects.push({type:'projects.show'}); },
+        toggle() { __effects.push({type:'projects.toggle'}); }
+    }),
+    keyboard: Object.freeze({
+        toggle() { __effects.push({type:'keyboard.toggle'}); }
+    }),
+    clock: Object.freeze({
+        get() { return __nickelResource('clock', {unixMilliseconds:Date.now(),utcOffsetMinutes:0}); }
+    }),
     notifications: Object.freeze({
         get() { return __nickelResource('notifications', {notification:null,history:[]}); },
         invoke(id, key) {

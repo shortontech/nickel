@@ -53,7 +53,13 @@ function TrayItem(props) {
     return h(Button, { id: "taskbar-tray-" + item.id, className: "tray-button", accessibilityLabel: item.title, icon: item.icon ? "tray:" + item.id : null, onContextMenu: () => nickel.tray.contextMenu(item.id), onClick: () => nickel.tray.activate(item.id) }, item.title.charAt(0).toUpperCase() || "?");
 }
 export function Taskbar(props) {
-    const data = { ...{ items: [], tray: [], clock: '', codexAvailable: false, keyboardEnabled: false }, ...props?.data };
+    const features = nickel.features?.get() || { keyboard: {}, codex: {} };
+    const keyboardEnabled = features.keyboard.enabled === true;
+    const codexAvailable = ['enabled', 'enabling', 'rejected', 'stale'].includes(features.codex.state);
+    const clock = nickel.clock.get();
+    const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
+    const hours = localTime.getUTCHours();
+    const clockText = (hours % 12 || 12) + ':' + String(localTime.getUTCMinutes()).padStart(2, '0') + (hours >= 12 ? ' PM' : ' AM');
     const items = taskItems(nickel.applications.list(), nickel.windows.list());
     const tray = nickel.tray.list();
     const contributions = nickel.contributions("taskbar.items");
@@ -63,8 +69,8 @@ export function Taskbar(props) {
             items.map(item => h(Task, { key: item.id, item: item })),
             contributions.map(entry => h(entry.component, { key: entry.key })),
             h(Spacer, { className: "taskbar-spacer" }),
-            data.keyboardEnabled ? h(Button, { id: "taskbar-keyboard", className: "utility-button", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.request({ type: "toggle-on-screen-keyboard" }) }, "\u2328") : null,
-            data.codexAvailable ? h(Button, { id: "taskbar-codex", className: "utility-button", icon: "codex", accessibilityLabel: "Codex projects", onClick: () => nickel.request({ type: "toggle-projects-menu" }) }, "Codex") : null,
+            keyboardEnabled ? h(Button, { id: "taskbar-keyboard", className: "utility-button", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.keyboard.toggle() }, "\u2328") : null,
+            codexAvailable ? h(Button, { id: "taskbar-codex", className: "utility-button", icon: "codex", accessibilityLabel: "Codex projects", onClick: () => nickel.projects.toggle() }, "Codex") : null,
             tray.map(item => h(TrayItem, { key: item.id, item: item })),
-            h(Button, { id: "taskbar-control", className: "clock-button", onClick: () => nickel.surfaces.show("quick-settings") }, data.clock || "")));
+            h(Button, { id: "taskbar-control", className: "clock-button", onClick: () => nickel.surfaces.show("quick-settings") }, clockText)));
 }

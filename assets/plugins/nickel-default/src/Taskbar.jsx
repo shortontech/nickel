@@ -75,7 +75,13 @@ function TrayItem(props) {
 }
 
 export function Taskbar(props) {
-    const data = {...{items:[],tray:[],clock:'',codexAvailable:false,keyboardEnabled:false}, ...props?.data};
+    const features = nickel.features?.get() || {keyboard:{},codex:{}};
+    const keyboardEnabled = features.keyboard.enabled === true;
+    const codexAvailable = ['enabled', 'enabling', 'rejected', 'stale'].includes(features.codex.state);
+    const clock = nickel.clock.get();
+    const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
+    const hours = localTime.getUTCHours();
+    const clockText = (hours % 12 || 12) + ':' + String(localTime.getUTCMinutes()).padStart(2, '0') + (hours >= 12 ? ' PM' : ' AM');
     const items = taskItems(nickel.applications.list(), nickel.windows.list());
     const tray = nickel.tray.list();
     const contributions = nickel.contributions("taskbar.items");
@@ -87,13 +93,13 @@ export function Taskbar(props) {
             {items.map(item => <Task key={item.id} item={item} />)}
             {contributions.map(entry => <entry.component key={entry.key} />)}
             <Spacer className="taskbar-spacer" />
-            {data.keyboardEnabled ? <Button id="taskbar-keyboard" className="utility-button" accessibilityLabel="On-screen keyboard"
-                onClick={() => nickel.request({type: "toggle-on-screen-keyboard"})}>⌨</Button> : null}
-            {data.codexAvailable ? <Button id="taskbar-codex" className="utility-button" icon="codex" accessibilityLabel="Codex projects"
-                onClick={() => nickel.request({type: "toggle-projects-menu"})}>Codex</Button> : null}
+            {keyboardEnabled ? <Button id="taskbar-keyboard" className="utility-button" accessibilityLabel="On-screen keyboard"
+                onClick={() => nickel.keyboard.toggle()}>⌨</Button> : null}
+            {codexAvailable ? <Button id="taskbar-codex" className="utility-button" icon="codex" accessibilityLabel="Codex projects"
+                onClick={() => nickel.projects.toggle()}>Codex</Button> : null}
             {tray.map(item => <TrayItem key={item.id} item={item} />)}
             <Button id="taskbar-control" className="clock-button"
-                onClick={() => nickel.surfaces.show("quick-settings")}>{data.clock || ""}</Button>
+                onClick={() => nickel.surfaces.show("quick-settings")}>{clockText}</Button>
         </div>
     </FixedWindow>;
 }

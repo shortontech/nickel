@@ -446,7 +446,9 @@ pub enum PluginEffect {
     ShowControlCenter,
     ActivateWindow(crate::model::WindowId),
     CloseWindow(crate::model::WindowId),
-    ToggleOnScreenKeyboard,
+    ToggleOnScreenKeyboard {
+        plugin_id: String,
+    },
     KeyboardKey {
         id: String,
         generation: u64,
@@ -464,7 +466,10 @@ pub enum PluginEffect {
         delta: i32,
         generation: u64,
     },
-    ToggleCodexProjects,
+    ProjectsVisibility {
+        plugin_id: String,
+        toggle: bool,
+    },
     CodexProjectRefresh,
     CodexProjectClose,
     CodexProjectOpen {
@@ -1703,6 +1708,7 @@ impl PluginPanelApplication {
             !matches!(
                 *field,
                 "slots"
+                    | "clock"
                     | "windows"
                     | "applications"
                     | "applicationSearch"
@@ -2638,20 +2644,27 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(requested);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("toggle-on-screen-keyboard")
+                            == Some("keyboard.toggle")
                             && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::OnScreenKeyboardShow) =>
                         {
-                            approved.push(PluginEffect::ToggleOnScreenKeyboard);
+                            approved.push(PluginEffect::ToggleOnScreenKeyboard {
+                                plugin_id: effect_manifest.id.clone(),
+                            });
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("toggle-projects-menu")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ProjectsMenuShow) =>
+                        _ if matches!(
+                            effect.get("type").and_then(Value::as_str),
+                            Some("projects.show" | "projects.toggle")
+                        ) && effect_manifest
+                            .capabilities
+                            .contains(&PluginCapability::ProjectsMenuShow) =>
                         {
-                            approved.push(PluginEffect::ToggleCodexProjects);
+                            approved.push(PluginEffect::ProjectsVisibility {
+                                plugin_id: effect_manifest.id.clone(),
+                                toggle: effect.get("type").and_then(Value::as_str)
+                                    == Some("projects.toggle"),
+                            });
                         }
 
                         _ if effect
@@ -6655,6 +6668,62 @@ mod tests {
     }
 
     #[test]
+    fn stock_taskbar_formats_public_clock_without_native_presentation_data() {
+        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "taskbar")
+            .unwrap();
+        let mut application =
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), surface)
+                .unwrap();
+        application
+            .sync_host_data_field(
+                "clock",
+                &serde_json::json!({"unixMilliseconds":47_100_000,"utcOffsetMinutes":0}),
+            )
+            .unwrap();
+        assert!(format!("{:?}", application.node).contains("1:05 PM"));
+    }
+
+    #[test]
+    fn public_native_ui_clients_follow_host_owned_manifest_grants() {
+        let mut manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
+        manifest.capabilities.clear();
+        let source = "function App() { return h(Window, {width:320,height:180}, h(Button, {id:'projects',onClick:() => nickel.projects.show()}, 'Projects'), h(Button, {id:'keyboard',onClick:() => nickel.keyboard.toggle()}, 'Keyboard')); }";
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        denied.update(denied.button_message("projects").unwrap());
+        denied.update(denied.button_message("keyboard").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest.capabilities.extend([
+            PluginCapability::ProjectsMenuShow,
+            PluginCapability::OnScreenKeyboardShow,
+        ]);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        granted.update(granted.button_message("projects").unwrap());
+        granted.update(granted.button_message("keyboard").unwrap());
+        assert_eq!(
+            granted.take_effects(),
+            vec![
+                PluginEffect::ProjectsVisibility {
+                    plugin_id: manifest.id.clone(),
+                    toggle: false
+                },
+                PluginEffect::ToggleOnScreenKeyboard {
+                    plugin_id: manifest.id
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn external_notification_data_and_actions_follow_capabilities() {
         let mut manifest = PluginPackage::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -7378,52 +7447,6 @@ mod tests {
             granted.take_effects(),
             vec![PluginEffect::ToggleControlCenter]
         );
-    }
-
-    #[test]
-    fn external_shell_toggles_use_capabilities_instead_of_taskbar_identity() {
-        for (action, capability, expected) in [
-            (
-                "show-control-center",
-                PluginCapability::ControlCenterShow,
-                PluginEffect::ShowControlCenter,
-            ),
-            (
-                "toggle-launcher",
-                PluginCapability::LauncherShow,
-                PluginEffect::ToggleLauncher,
-            ),
-            (
-                "toggle-on-screen-keyboard",
-                PluginCapability::OnScreenKeyboardShow,
-                PluginEffect::ToggleOnScreenKeyboard,
-            ),
-            (
-                "toggle-projects-menu",
-                PluginCapability::ProjectsMenuShow,
-                PluginEffect::ToggleCodexProjects,
-            ),
-        ] {
-            let mut external_manifest = manifest().clone();
-            external_manifest.id = format!("org.example.{action}");
-            external_manifest.capabilities.clear();
-            let mut package = PluginPackage {
-                modules: Vec::new(),
-                manifest: external_manifest,
-                images: Default::default(),
-                stylesheet: String::new(),
-                source: format!(
-                    "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%', onEscape: () => nickel.request({{type: '{action}'}})}}); }}"
-                ),
-            };
-            let mut denied = PluginPanelApplication::from_package(&package).unwrap();
-            denied.shortcut_outcome(Shortcut::Escape);
-            assert!(denied.take_effects().is_empty(), "{action}");
-            package.manifest.capabilities.push(capability);
-            let mut granted = PluginPanelApplication::from_package(&package).unwrap();
-            granted.shortcut_outcome(Shortcut::Escape);
-            assert_eq!(granted.take_effects(), vec![expected], "{action}");
-        }
     }
 
     #[test]

@@ -69,7 +69,7 @@ export function Launcher() {
             {search.nativeProjectsAvailable ? <Column className="launcher-projects">
                 <Text className="launcher-section">Projects</Text>
                 <Button id="launcher-all-projects" className="launcher-footer-button"
-                    onClick={() => nickel.request({type:"launcher-see-all-projects"})}>Open native project overview</Button>
+                    onClick={() => nickel.projects.show()}>Open native project overview</Button>
             </Column> : null}
             <Row className="launcher-tabs">
                 <Button id="launcher-view-favorites" className={view === "favorites" ? "launcher-tab selected" : "launcher-tab"} onClick={() => changeView("favorites")}>Pinned &amp; recent</Button>
