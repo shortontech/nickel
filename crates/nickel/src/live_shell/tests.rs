@@ -30,6 +30,120 @@ use super::{
     window_belongs_to_panel,
 };
 
+#[cfg(target_os = "linux")]
+#[test]
+fn plugin_display_preview_rejects_stale_topology_and_rolls_back_on_deadline() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            use crate::session_host::SessionHost;
+            use std::sync::Mutex;
+
+            struct DisplayHost {
+                outputs: Mutex<Vec<nickel_session_protocol::OutputSnapshot>>,
+                applied: Mutex<Vec<nickel_session_protocol::OutputLayout>>,
+            }
+            impl crate::session_host::SessionHost for DisplayHost {
+                fn dispatch(
+                    &self,
+                    command: crate::platform::ShellCommand,
+                ) -> Result<(), crate::platform::SessionRequestError> {
+                    if let crate::platform::ShellCommand::ApplyOutputs(layout) = command {
+                        let mut outputs = self.outputs.lock().unwrap();
+                        for placement in &layout.placements {
+                            let output = outputs
+                                .iter_mut()
+                                .find(|output| output.name == placement.name)
+                                .unwrap();
+                            output.geometry.x = placement.x;
+                            output.geometry.y = placement.y;
+                            output.enabled = placement.enabled;
+                            output.primary = placement.name == layout.primary;
+                            output.scale_120 = placement.scale_120;
+                            if let Some(mode) = placement.mode {
+                                output.current_mode = Some(mode);
+                            }
+                        }
+                        self.applied.lock().unwrap().push(layout);
+                    }
+                    Ok(())
+                }
+                fn projection_outputs(
+                    &self,
+                ) -> Result<Vec<nickel_session_protocol::OutputSnapshot>, String> {
+                    Ok(self.outputs.lock().unwrap().clone())
+                }
+            }
+            let mode = nickel_session_protocol::OutputMode {
+                width: 1920,
+                height: 1080,
+                refresh_millihz: 60_000,
+            };
+            let outputs = ["DP-1", "HDMI-1"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| nickel_session_protocol::OutputSnapshot {
+                    name: name.into(),
+                    model: name.into(),
+                    geometry: nickel_session_protocol::Geometry {
+                        x: index as i32 * 1920,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                    work_area: nickel_session_protocol::Geometry {
+                        x: index as i32 * 1920,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                    scale_120: 120,
+                    transform: nickel_session_protocol::OutputTransform::Normal,
+                    physical_width_mm: 500,
+                    physical_height_mm: 300,
+                    primary: index == 0,
+                    enabled: true,
+                    modes: vec![mode],
+                    current_mode: Some(mode),
+                })
+                .collect();
+            let host = Arc::new(DisplayHost {
+                outputs: Mutex::new(outputs),
+                applied: Mutex::new(Vec::new()),
+            });
+            let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+            let mut requested =
+                super::output_layout_from_snapshot(&host.projection_outputs().unwrap());
+            requested.placements[1].x = 0;
+            requested.placements[1].y = 1080;
+            let mut stale = requested.clone();
+            stale.placements[1].name = "disconnected".into();
+            assert!(!shell.preview_plugin_display_layout("plugin-a".into(), stale));
+            assert!(host.applied.lock().unwrap().is_empty());
+            assert!(shell.preview_plugin_display_layout("plugin-a".into(), requested));
+            assert!(!shell.confirm_plugin_display_layout("plugin-b"));
+            assert_eq!(host.applied.lock().unwrap().len(), 1);
+            shell.display_preview.as_mut().unwrap().deadline =
+                Instant::now() - Duration::from_millis(1);
+            shell.poll_deadlines(Instant::now());
+            assert!(shell.display_preview.is_none());
+            assert_eq!(host.applied.lock().unwrap().len(), 2);
+            assert_eq!(host.outputs.lock().unwrap()[1].geometry.x, 1920);
+            let mut requested =
+                super::output_layout_from_snapshot(&host.projection_outputs().unwrap());
+            requested.placements[1].x = 0;
+            requested.placements[1].y = 1080;
+            assert!(shell.preview_plugin_display_layout("plugin-a".into(), requested));
+            assert!(shell.confirm_plugin_display_layout("plugin-a"));
+            assert!(shell.display_preview.is_none());
+            shell.poll_deadlines(Instant::now() + Duration::from_secs(16));
+            assert_eq!(host.applied.lock().unwrap().len(), 3);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 fn click_taskbar(shell: &mut LiveShell, x: f32, width: u32, secondary: bool) -> bool {
     let point = Point { x, y: 28.0 };
     if secondary {

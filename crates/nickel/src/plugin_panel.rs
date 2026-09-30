@@ -394,6 +394,16 @@ pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, St
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
+    SetDisplayLayout {
+        plugin_id: String,
+        layout: nickel_session_protocol::OutputLayout,
+    },
+    ConfirmDisplayLayout {
+        plugin_id: String,
+    },
+    RevertDisplayLayout {
+        plugin_id: String,
+    },
     ShowLauncher,
     ShowSettings(Option<String>),
     ShowPluginSurface {
@@ -1264,6 +1274,7 @@ impl PluginPanelApplication {
             "slots": {},
             "windows": [],
             "applications": [],
+            "displays": {"available": false, "outputs": []},
             "notifications": initial_notifications_data(&package.manifest),
             "surface": {
                 "id": surface.id,
@@ -1730,7 +1741,7 @@ impl PluginPanelApplication {
         if fields.iter().any(|(field, _)| {
             !matches!(
                 *field,
-                "slots" | "windows" | "applications" | "notifications" | "audio"
+                "slots" | "windows" | "applications" | "notifications" | "audio" | "displays"
             )
         }) {
             return Err("unknown host data field".into());
@@ -1758,6 +1769,14 @@ impl PluginPanelApplication {
                 .contains(&PluginCapability::AudioRead)
         {
             return Err("audio data requires audio-read".into());
+        }
+        if fields.iter().any(|(field, _)| *field == "displays")
+            && !self
+                .manifest
+                .capabilities
+                .contains(&PluginCapability::DisplayControl)
+        {
+            return Err("display data requires display-control".into());
         }
         let Some(data) = self.projection_data.as_deref() else {
             return Err("plugin has no external projection".into());
@@ -1901,6 +1920,77 @@ impl nickel_ui::Application for PluginPanelApplication {
                 let mut requested_dialog = None;
                 for effect in effects {
                     match effect.as_str() {
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("displays.setLayout") =>
+                        {
+                            if !self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DisplayControl)
+                            {
+                                self.last_error = Some("display control is not granted".into());
+                                return;
+                            }
+                            let Some(value) = effect.get("layout") else {
+                                self.last_error = Some("display layout is missing".into());
+                                return;
+                            };
+                            if value.to_string().len() > 16_384 {
+                                self.last_error = Some("display layout is too large".into());
+                                return;
+                            }
+                            let Ok(layout) = serde_json::from_value::<
+                                nickel_session_protocol::OutputLayout,
+                            >(value.clone()) else {
+                                self.last_error = Some("display layout is invalid".into());
+                                return;
+                            };
+                            if layout.placements.is_empty()
+                                || layout.placements.len() > nickel_session_protocol::MAX_OUTPUTS
+                                || layout.primary.is_empty()
+                                || layout.primary.len() > 128
+                                || layout.placements.iter().any(|placement| {
+                                    placement.name.is_empty() || placement.name.len() > 128
+                                })
+                            {
+                                self.last_error = Some("display layout is invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::SetDisplayLayout {
+                                plugin_id: self.manifest.id.clone(),
+                                layout,
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("displays.confirm") =>
+                        {
+                            if !self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DisplayControl)
+                            {
+                                self.last_error = Some("display control is not granted".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ConfirmDisplayLayout {
+                                plugin_id: self.manifest.id.clone(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("displays.revert") =>
+                        {
+                            if !self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DisplayControl)
+                            {
+                                self.last_error = Some("display control is not granted".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::RevertDisplayLayout {
+                                plugin_id: self.manifest.id.clone(),
+                            });
+                        }
                         Some("show-launcher")
                             if self
                                 .manifest
@@ -3104,6 +3194,56 @@ impl nickel_ui::Application for PluginPanelApplication {
 mod tests {
     use super::*;
     use nickel_ui::Application;
+
+    #[test]
+    fn display_layout_effect_requires_capability_and_valid_shape() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        let source = r#"function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'apply',onClick:()=>nickel.request({type:'displays.setLayout',layout:{primary:'DP-1',placements:[{name:'DP-1',x:0,y:0,enabled:true,scale_120:120}]}})}, 'Apply')); }"#;
+        manifest.capabilities.clear();
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        assert_eq!(
+            denied.sync_host_data_field(
+                "displays",
+                &serde_json::json!({"available":true,"outputs":[]})
+            ),
+            Err("display data requires display-control".into())
+        );
+        denied.update(denied.button_message("apply").unwrap());
+        assert!(denied.take_effects().is_empty());
+        assert_eq!(denied.last_error(), Some("display control is not granted"));
+
+        manifest.capabilities.push(PluginCapability::DisplayControl);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        assert!(
+            granted
+                .sync_host_data_field(
+                    "displays",
+                    &serde_json::json!({"available":true,"outputs":[]})
+                )
+                .unwrap()
+        );
+        granted.update(granted.button_message("apply").unwrap());
+        assert!(
+            matches!(granted.take_effects().as_slice(), [PluginEffect::SetDisplayLayout { plugin_id, layout }] if plugin_id == &manifest.id && layout.placements.len() == 1)
+        );
+
+        let malformed = r#"function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'apply',onClick:()=>nickel.request({type:'displays.setLayout',layout:{primary:'DP-1',placements:'bad'}})}, 'Apply')); }"#;
+        let mut rejected =
+            PluginPanelApplication::new_with_manifest(malformed, &manifest, Some("{}".into()))
+                .unwrap();
+        rejected.update(rejected.button_message("apply").unwrap());
+        assert!(rejected.take_effects().is_empty());
+        assert_eq!(rejected.last_error(), Some("display layout is invalid"));
+    }
 
     #[test]
     fn staged_bundled_source_reads_isolated_profile() {

@@ -433,6 +433,115 @@ pub(crate) enum CodexMenuRequest {
     },
 }
 
+struct DisplayPreview {
+    owner: String,
+    previous: nickel_session_protocol::OutputLayout,
+    applied: nickel_session_protocol::OutputLayout,
+    deadline: Instant,
+}
+
+fn output_layout_from_snapshot(
+    outputs: &[nickel_session_protocol::OutputSnapshot],
+) -> nickel_session_protocol::OutputLayout {
+    let mut layout = nickel_session_protocol::OutputLayout {
+        primary: outputs
+            .iter()
+            .find(|output| output.primary && output.enabled)
+            .map(|output| output.name.clone())
+            .unwrap_or_default(),
+        placements: outputs
+            .iter()
+            .map(|output| nickel_session_protocol::OutputPlacement {
+                name: output.name.clone(),
+                x: output.geometry.x,
+                y: output.geometry.y,
+                enabled: output.enabled,
+                scale_120: output.scale_120,
+                mode: output.current_mode,
+            })
+            .collect(),
+    };
+    layout
+        .placements
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    layout
+}
+
+fn normalized_output_layout_with_modes(
+    mut layout: nickel_session_protocol::OutputLayout,
+    outputs: &[nickel_session_protocol::OutputSnapshot],
+) -> nickel_session_protocol::OutputLayout {
+    let minimum_x = layout
+        .placements
+        .iter()
+        .map(|placement| placement.x)
+        .min()
+        .unwrap_or(0);
+    let minimum_y = layout
+        .placements
+        .iter()
+        .map(|placement| placement.y)
+        .min()
+        .unwrap_or(0);
+    for placement in &mut layout.placements {
+        placement.x -= minimum_x;
+        placement.y -= minimum_y;
+        if placement.mode.is_none() {
+            placement.mode = outputs
+                .iter()
+                .find(|output| output.name == placement.name)
+                .and_then(|output| output.current_mode);
+        }
+    }
+    layout
+        .placements
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    layout
+}
+
+fn validate_plugin_display_layout(
+    outputs: &[nickel_session_protocol::OutputSnapshot],
+    layout: &nickel_session_protocol::OutputLayout,
+) -> Result<(), &'static str> {
+    if outputs.is_empty()
+        || outputs.len() > nickel_session_protocol::MAX_OUTPUTS
+        || layout.placements.len() != outputs.len()
+    {
+        return Err("display topology changed");
+    }
+    let current = outputs
+        .iter()
+        .map(|output| (output.name.as_str(), output))
+        .collect::<HashMap<_, _>>();
+    if current.len() != outputs.len() {
+        return Err("ambiguous display topology");
+    }
+    let mut seen = HashSet::new();
+    for placement in &layout.placements {
+        let Some(output) = current.get(placement.name.as_str()) else {
+            return Err("display topology changed");
+        };
+        if !seen.insert(placement.name.as_str())
+            || !(60..=480).contains(&placement.scale_120)
+            || !(-1_000_000..=1_000_000).contains(&placement.x)
+            || !(-1_000_000..=1_000_000).contains(&placement.y)
+            || placement
+                .mode
+                .is_some_and(|mode| !output.modes.contains(&mode))
+        {
+            return Err("invalid display placement");
+        }
+    }
+    if !layout
+        .placements
+        .iter()
+        .any(|placement| placement.name == layout.primary && placement.enabled)
+    {
+        return Err("primary display must be enabled");
+    }
+    Ok(())
+}
+
 pub struct LiveShell {
     session_host: Arc<dyn SessionHost>,
     screenshot_capture_pending: bool,
@@ -593,6 +702,7 @@ pub struct LiveShell {
     control_deadline: Option<Instant>,
     projection_chooser: nickel_core::display_projection::ProjectionChooser,
     projection_rollback_deadline: Option<Instant>,
+    display_preview: Option<DisplayPreview>,
     launcher_icons: LauncherIconCache,
     launcher_icon_revision: u64,
     launcher_plugin_result_page: usize,
@@ -1668,6 +1778,7 @@ impl LiveShell {
             control_deadline: Some(Instant::now()),
             projection_chooser: Default::default(),
             projection_rollback_deadline: None,
+            display_preview: None,
             launcher_icons,
             launcher_icon_revision,
             launcher_plugin_result_page: 0,
@@ -3448,6 +3559,39 @@ impl LiveShell {
             .then(|| self.audio_plugin_data())
     }
 
+    fn plugin_displays(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        if !manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::DisplayControl)
+        {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return Some(match self.session_host.projection_outputs() {
+                Ok(outputs) => serde_json::json!({"available": true, "outputs": outputs}),
+                Err(error) => {
+                    serde_json::json!({"available": false, "reason": error, "outputs": []})
+                }
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        Some(serde_json::json!({
+            "available": false,
+            "reason": "display layout control is unavailable on this platform",
+            "outputs": [],
+        }))
+    }
+
     fn audio_plugin_data(&self) -> serde_json::Value {
         audio_plugin_data(&self.audio, self.locked)
     }
@@ -3681,6 +3825,7 @@ impl LiveShell {
         let applications = self.external_plugin_applications(&key.plugin_id);
         let notifications = self.external_plugin_notifications(&key.plugin_id);
         let audio = self.plugin_audio(&key.plugin_id);
+        let displays = self.plugin_displays(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
         let result = (|| {
@@ -3714,6 +3859,7 @@ impl LiveShell {
                     ("applications", applications.as_ref()),
                     ("notifications", notifications.as_ref()),
                     ("audio", audio.as_ref()),
+                    ("displays", displays.as_ref()),
                 ]
                 .into_iter()
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
@@ -5103,6 +5249,12 @@ impl LiveShell {
         push("window-preview-close", self.preview_leave_deadline);
         push("task-switcher-peek", self.task_switcher.peek_deadline());
         push("volume-osd", self.volume_osd_until);
+        push(
+            "display-preview",
+            self.display_preview
+                .as_ref()
+                .map(|preview| preview.deadline),
+        );
         sources
     }
 
@@ -5496,6 +5648,19 @@ impl LiveShell {
         {
             self.rollback_projection();
             outcome.visibility_changed = true;
+        }
+        if self
+            .display_preview
+            .as_ref()
+            .is_some_and(|preview| now >= preview.deadline)
+        {
+            let reverted = self.revert_plugin_display_layout(None);
+            outcome.visibility_changed |= reverted;
+            if !reverted {
+                if let Some(preview) = self.display_preview.as_mut() {
+                    preview.deadline = now + Duration::from_secs(1);
+                }
+            }
         }
         outcome
     }
@@ -5988,6 +6153,15 @@ impl LiveShell {
         let mut changed = false;
         for effect in effects {
             match effect {
+                crate::plugin_panel::PluginEffect::SetDisplayLayout { plugin_id, layout } => {
+                    changed |= self.preview_plugin_display_layout(plugin_id, layout);
+                }
+                crate::plugin_panel::PluginEffect::ConfirmDisplayLayout { plugin_id } => {
+                    changed |= self.confirm_plugin_display_layout(&plugin_id);
+                }
+                crate::plugin_panel::PluginEffect::RevertDisplayLayout { plugin_id } => {
+                    changed |= self.revert_plugin_display_layout(Some(&plugin_id));
+                }
                 effect @ (crate::plugin_panel::PluginEffect::KeyboardKey { .. }
                 | crate::plugin_panel::PluginEffect::KeyboardHide { .. }
                 | crate::plugin_panel::PluginEffect::KeyboardDock { .. }
@@ -11597,6 +11771,99 @@ impl LiveShell {
             };
             let _ = self
                 .send_session_command("rollback-projection", ShellCommand::ApplyOutputs(layout));
+        }
+    }
+
+    fn preview_plugin_display_layout(
+        &mut self,
+        plugin_id: String,
+        layout: nickel_session_protocol::OutputLayout,
+    ) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            if self.display_preview.is_some() || self.projection_rollback_deadline.is_some() {
+                return false;
+            }
+            let Ok(outputs) = self.session_host.projection_outputs() else {
+                return false;
+            };
+            if validate_plugin_display_layout(&outputs, &layout).is_err() {
+                return false;
+            }
+            let previous = output_layout_from_snapshot(&outputs);
+            if validate_plugin_display_layout(&outputs, &previous).is_err() {
+                return false;
+            }
+            if self.send_session_command(
+                "preview-plugin-display-layout",
+                ShellCommand::ApplyOutputs(layout.clone()),
+            ) {
+                self.display_preview = Some(DisplayPreview {
+                    owner: plugin_id,
+                    previous,
+                    applied: normalized_output_layout_with_modes(layout, &outputs),
+                    deadline: Instant::now() + Duration::from_secs(15),
+                });
+                return true;
+            }
+            false
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (plugin_id, layout);
+            false
+        }
+    }
+
+    fn confirm_plugin_display_layout(&mut self, plugin_id: &str) -> bool {
+        if self
+            .display_preview
+            .as_ref()
+            .is_some_and(|preview| preview.owner == plugin_id && Instant::now() < preview.deadline)
+        {
+            self.display_preview = None;
+            return true;
+        }
+        false
+    }
+
+    fn revert_plugin_display_layout(&mut self, plugin_id: Option<&str>) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(preview) = self.display_preview.as_ref() else {
+                return false;
+            };
+            if plugin_id.is_some_and(|owner| owner != preview.owner) {
+                return false;
+            }
+            let Ok(outputs) = self.session_host.projection_outputs() else {
+                return false;
+            };
+            // A separate display owner may have changed the topology during the
+            // preview. Never overwrite a layout that is no longer our preview.
+            let current = output_layout_from_snapshot(&outputs);
+            if current != preview.applied && current != preview.previous {
+                self.display_preview = None;
+                return false;
+            }
+            if validate_plugin_display_layout(&outputs, &preview.previous).is_err() {
+                self.display_preview = None;
+                return false;
+            }
+            let previous = preview.previous.clone();
+            if self.send_session_command(
+                "revert-plugin-display-layout",
+                ShellCommand::ApplyOutputs(previous),
+            ) {
+                self.display_preview = None;
+                return true;
+            }
+            false
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = plugin_id;
+            false
         }
     }
 
