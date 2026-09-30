@@ -135,7 +135,7 @@ impl WindowRequest {
         if let Some(output) = self.output.as_deref() {
             let matches = match output {
                 "all" => surface.output == nickel_core::plugins::PluginOutputScope::All,
-                "primary" => surface.output == nickel_core::plugins::PluginOutputScope::Primary,
+                "primary" => true,
                 _ => false,
             };
             if !matches {
@@ -144,19 +144,19 @@ impl WindowRequest {
         }
         if self
             .reserve_work_area
-            .is_some_and(|reserve| reserve != surface.reserve_work_area)
+            .is_some_and(|reserve| reserve && !surface.reserve_work_area)
         {
             return Err(format!(
-                "window {:?} work-area reservation differs from its grant",
+                "window {:?} work-area reservation exceeds its grant",
                 self.id
             ));
         }
         if self
             .bottom_offset
-            .is_some_and(|offset| offset != surface.bottom_offset)
+            .is_some_and(|offset| offset > surface.bottom_offset)
         {
             return Err(format!(
-                "window {:?} bottom offset differs from its grant",
+                "window {:?} bottom offset exceeds its grant",
                 self.id
             ));
         }
@@ -178,12 +178,14 @@ impl WindowRequest {
                         | nickel_core::plugins::PluginSurfaceAnchor::TopRight
                 ),
                 "bottom" => {
-                    surface.kind == PluginSurfaceKind::Panel
-                        || matches!(
-                            surface.anchor,
-                            nickel_core::plugins::PluginSurfaceAnchor::BottomLeft
-                                | nickel_core::plugins::PluginSurfaceAnchor::BottomRight
-                        )
+                    matches!(
+                        surface.kind,
+                        PluginSurfaceKind::Panel | PluginSurfaceKind::Dock
+                    ) || matches!(
+                        surface.anchor,
+                        nickel_core::plugins::PluginSurfaceAnchor::BottomLeft
+                            | nickel_core::plugins::PluginSurfaceAnchor::BottomRight
+                    )
                 }
                 "left" => matches!(
                     surface.anchor,
@@ -520,7 +522,7 @@ impl PanelNode {
         matches.next().is_none().then_some(first)
     }
 
-    pub fn requested_window_size(&self, surface: &PluginSurface) -> Option<(u32, u32)> {
+    pub fn requested_surface(&self, grant: &PluginSurface) -> Option<PluginSurface> {
         let Self::Surface {
             window_request: Some(request),
             width,
@@ -530,7 +532,7 @@ impl PanelNode {
         else {
             return None;
         };
-        if request.id != surface.id {
+        if request.id != grant.id {
             return None;
         }
         let dimension = |length, bound| match length {
@@ -538,10 +540,19 @@ impl PanelNode {
             Length::Percent(1.0) => bound,
             _ => bound,
         };
-        Some((
-            dimension(*width, surface.width),
-            dimension(*height, surface.height),
-        ))
+        let mut surface = grant.clone();
+        surface.width = dimension(*width, grant.width);
+        surface.height = dimension(*height, grant.height);
+        if request.output.as_deref() == Some("primary") {
+            surface.output = nickel_core::plugins::PluginOutputScope::Primary;
+        }
+        if let Some(reserve) = request.reserve_work_area {
+            surface.reserve_work_area = reserve;
+        }
+        if let Some(offset) = request.bottom_offset {
+            surface.bottom_offset = offset;
+        }
+        Some(surface)
     }
 
     pub fn contribution_bytes(&self) -> u64 {

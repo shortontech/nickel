@@ -249,9 +249,12 @@ with fixed placement; it does not create a second renderer. In the current
 manifest version, numeric root dimensions must stay within the declared surface bounds;
 `"100%"` fills the host surface. Requested output, edge, anchor, work-area
 reservation, and bottom offset are checked against the manifest before the
-render is accepted. The manifest still determines native placement until the
-surface authority envelope replaces its duplicated geometry. A plugin cannot
-create an undeclared native window by changing JSX. `id` is optional: the host
+render is accepted. A grant for all outputs permits JSX to choose the primary
+output; a work-area reservation grant permits JSX to omit the reservation;
+and `bottom_offset` is the maximum dock distance JSX may request. These resolved
+values reach native placement. The manifest still determines the surface kind
+and anchor until the full authority envelope replaces its duplicated geometry.
+A plugin cannot create an undeclared native window by changing JSX. `id` is optional: the host
 supplies its surface identity. An explicit ID must match that identity.
 One plugin may declare several surfaces. Nickel renders the plugin for each
 surface with `nickel.data.surface.id` set to that host's ID, so the JSX can

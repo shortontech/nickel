@@ -1066,12 +1066,9 @@ fn initial_notifications_data(manifest: &PluginManifest) -> Value {
 
 impl PluginPanelApplication {
     pub fn resolved_surface(&self, grant: &PluginSurface) -> PluginSurface {
-        let mut surface = grant.clone();
-        if let Some((width, height)) = self.node.requested_window_size(grant) {
-            surface.width = width;
-            surface.height = height;
-        }
-        surface
+        self.node
+            .requested_surface(grant)
+            .unwrap_or_else(|| grant.clone())
     }
 
     fn bundled_application(
@@ -4125,11 +4122,22 @@ mod tests {
         package.source = source.replace("id: 'main', ", "");
         assert!(PluginPanelApplication::from_package(&package).is_ok());
 
+        package.source = source.replace("reserveWorkArea: true", "reserveWorkArea: false");
+        let app = PluginPanelApplication::from_package(&package).unwrap();
+        assert!(
+            !app.resolved_surface(&package.manifest.surfaces[0])
+                .reserve_work_area
+        );
+        package.source = source.replace("output: 'all'", "output: 'primary'");
+        let app = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(
+            app.resolved_surface(&package.manifest.surfaces[0]).output,
+            nickel_core::plugins::PluginOutputScope::Primary
+        );
+
         for invalid in [
             source.replace("id: 'main'", "id: 'other'"),
-            source.replace("reserveWorkArea: true", "reserveWorkArea: false"),
             source.replace("height: 56", "height: 64"),
-            source.replace("output: 'all'", "output: 'primary'"),
         ] {
             package.source = invalid;
             assert!(PluginPanelApplication::from_package(&package).is_err());
@@ -4142,6 +4150,15 @@ mod tests {
         package.manifest.surfaces[0].reserve_work_area = false;
         package.source = "function App() { return h(Window, {id: 'main', width: 520, height: 340}, h(Button, {id: 'save', onClick: () => {}}, 'Save')); }".into();
         assert!(PluginPanelApplication::from_package(&package).is_ok());
+        let ordinary_source = package.source.clone();
+        for invalid in [
+            ordinary_source.replace("height: 340", "height: 340, output: 'all'"),
+            ordinary_source.replace("height: 340", "height: 340, reserveWorkArea: true"),
+        ] {
+            package.source = invalid;
+            assert!(PluginPanelApplication::from_package(&package).is_err());
+        }
+        package.source = ordinary_source;
         let mut sibling = package.manifest.surfaces[0].clone();
         sibling.id = "sibling".into();
         package.manifest.surfaces.push(sibling.clone());
@@ -4183,6 +4200,30 @@ mod tests {
                 .is_err()
         );
         package.source = "function App() { return h(Panel, {}, h(Window, {id: 'main', width: 520, height: 340})); }".into();
+        assert!(PluginPanelApplication::from_package(&package).is_err());
+    }
+
+    #[test]
+    fn fixed_window_resolves_dock_distance_within_manifest_bound() {
+        let mut package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/hello-panel"
+        ))
+        .unwrap();
+        package.source = package
+            .source
+            .replace("bottomOffset: 24", "bottomOffset: 12");
+        let application = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(
+            application
+                .resolved_surface(&package.manifest.surfaces[0])
+                .bottom_offset,
+            12
+        );
+
+        package.source = package
+            .source
+            .replace("bottomOffset: 12", "bottomOffset: 25");
         assert!(PluginPanelApplication::from_package(&package).is_err());
     }
 

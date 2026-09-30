@@ -476,6 +476,51 @@ fn section_slot_can_target_an_installed_window_plugin() {
 }
 
 #[test]
+fn installed_dock_uses_jsx_distance_and_output_within_its_grant() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("org.example.placed-dock");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.placed-dock","name":"Placed dock",
+            "entry":"main.js","surfaces":[{"id":"main","kind":"dock","width":480,
+            "height":80,"bottom_offset":48,"output":"all"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(FixedWindow, {width: 400, height: 64, output: 'primary', edge: 'bottom', bottomOffset: 20}, h(Text, {}, 'Dock')); }",
+    )
+    .unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    let descriptor = catalog.packages.remove("org.example.placed-dock").unwrap();
+    let mut shell = LiveShell::new().unwrap();
+    shell
+        .plugin_registry
+        .register(descriptor.manifest.clone())
+        .unwrap();
+    shell
+        .external_plugin_packages
+        .insert(descriptor.manifest.id.clone(), descriptor);
+    shell
+        .set_plugin_enabled("org.example.placed-dock", true)
+        .unwrap();
+    let (_, surface) = shell
+        .plugin_panels()
+        .into_iter()
+        .find(|(key, _)| key.plugin_id == "org.example.placed-dock")
+        .unwrap();
+    assert_eq!(
+        (surface.width, surface.height, surface.bottom_offset),
+        (400, 64, 20)
+    );
+    assert_eq!(
+        surface.output,
+        nickel_core::plugins::PluginOutputScope::Primary
+    );
+}
+
+#[test]
 fn installed_panel_can_be_enabled_measured_and_disabled() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.panel");
