@@ -121,7 +121,11 @@ pub fn init_winit(
             .request_user_attention(Some(UserAttentionType::Critical));
         backend.window().focus_window();
     }
-    state.set_winit_redraw_window(backend.window(), winit.wake_proxy());
+    state.set_winit_redraw_window(
+        backend.window(),
+        winit.wake_proxy(),
+        winit.capture_redraw_requester(),
+    );
     state.advertise_dmabuf_formats(backend.renderer().dmabuf_formats().iter().copied(), None);
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
@@ -180,6 +184,7 @@ pub fn init_winit(
             let mut display = data.display_handle.clone();
             let state = data;
 
+            let capture_only_frame = matches!(&event, WinitEvent::CaptureRedraw);
             match event {
                 WinitEvent::Resized { size, scale_factor } => {
                     let mode = Mode {
@@ -212,7 +217,7 @@ pub fn init_winit(
                     state.release_pressed_keys_on_host_focus_loss();
                 }
                 WinitEvent::Focus(true) => {}
-                WinitEvent::Redraw => {
+                WinitEvent::Redraw | WinitEvent::CaptureRedraw => {
                     let trace_started = Instant::now();
                     state.poll_task_switcher_peek(trace_started);
                     state.flush_desktop_scenes_for_frame();
@@ -260,7 +265,7 @@ pub fn init_winit(
                         // Capture the following fully rendered frame. This prevents a surface
                         // commit queued beside the capture request (notably an overlay unmap)
                         // from exposing a compositor transition buffer to the screenshot.
-                        state.request_output_redraw();
+                        state.request_capture_redraw();
                     }
                     let capture_requested = image_copy_requested || output_capture_path.is_some();
                     if capture_requested {
@@ -695,18 +700,20 @@ pub fn init_winit(
                         (captured, render_result.states)
                     };
                     state.update_output_primary_scanout(&output, &render_states);
-                    let mut presentation_feedback =
-                        state.take_output_presentation_feedback(&output, Some(&render_states));
-                    backend.submit(Some(&[damage])).unwrap();
-                    presentation_sequence = presentation_sequence.wrapping_add(1);
-                    presentation_feedback.presented(
-                        Clock::<Monotonic>::new().now(),
-                        smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(
-                            1_000_000_000_000_u64 / 60_000,
-                        )),
-                        presentation_sequence,
-                        smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
-                    );
+                    // Captures render the compositor's pixels even when the host has withheld
+                    // frame callbacks (for example an occluded nested window). They do not swap
+                    // host buffers or claim presentation feedback for an unpresented frame.
+                    if !capture_only_frame {
+                        let mut presentation_feedback = state.take_output_presentation_feedback(&output, Some(&render_states));
+                        backend.submit(Some(&[damage])).unwrap();
+                        presentation_sequence = presentation_sequence.wrapping_add(1);
+                        presentation_feedback.presented(
+                            Clock::<Monotonic>::new().now(),
+                            smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(1_000_000_000_000_u64 / 60_000)),
+                            presentation_sequence,
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                        );
+                    }
 
                     if image_copy_requested
                         && captured_frame

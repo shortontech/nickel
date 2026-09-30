@@ -2964,6 +2964,8 @@ pub struct NickelSession {
     winit_redraw_window: Option<*const dyn smithay::reexports::winit::window::Window>,
     #[cfg(feature = "backend-winit")]
     winit_redraw_proxy: Option<smithay::reexports::winit::event_loop::EventLoopProxy>,
+    #[cfg(feature = "backend-winit")]
+    winit_capture_redraw: Option<smithay::backend::winit::CaptureRedrawRequester>,
 }
 
 mod control_protocol;
@@ -8991,6 +8993,8 @@ impl NickelSession {
             winit_redraw_window: None,
             #[cfg(feature = "backend-winit")]
             winit_redraw_proxy: None,
+            #[cfg(feature = "backend-winit")]
+            winit_capture_redraw: None,
         };
         // Hosted applications must receive the compositor's clipboard bound
         // before their first pointer action. Waiting for a keyboard paste to
@@ -9014,9 +9018,20 @@ impl NickelSession {
         &mut self,
         window: &dyn smithay::reexports::winit::window::Window,
         proxy: smithay::reexports::winit::event_loop::EventLoopProxy,
+        capture: smithay::backend::winit::CaptureRedrawRequester,
     ) {
         self.winit_redraw_window = Some(std::ptr::from_ref(window));
         self.winit_redraw_proxy = Some(proxy);
+        self.winit_capture_redraw = Some(capture);
+    }
+
+    pub(crate) fn request_capture_redraw(&self) {
+        #[cfg(feature = "backend-winit")]
+        if let Some(requester) = &self.winit_capture_redraw {
+            requester.request();
+            return;
+        }
+        self.request_output_redraw();
     }
 
     #[cfg(feature = "backend-winit")]

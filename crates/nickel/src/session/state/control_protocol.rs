@@ -1941,7 +1941,7 @@ impl NickelSession {
                 self.output_capture_name = output;
                 self.output_capture_reply_path = source.map(PathBuf::from);
                 self.output_capture_request_id = Some(request_id);
-                self.request_output_redraw();
+                self.request_capture_redraw();
             }
             SessionCommand::ApplyOutputs { layout } => {
                 if let Err(error) = self.apply_output_layout(layout) {

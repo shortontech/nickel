@@ -162,6 +162,7 @@ where
             event_loop,
             initial_events,
             pending_events: Vec::new(),
+            capture_redraw_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             span,
         },
     ))
@@ -404,11 +405,32 @@ pub struct WinitEventLoop {
     fake_token: Option<Token>,
     initial_events: Vec<WinitEvent>,
     pending_events: Vec<WinitEvent>,
+    capture_redraw_pending: Arc<std::sync::atomic::AtomicBool>,
     event_loop: Generic<EventLoop>,
     span: tracing::Span,
 }
 
+/// Coalesced compositor capture rendering independent of host-window frame pacing.
+#[derive(Clone, Debug)]
+pub struct CaptureRedrawRequester {
+    pending: Arc<std::sync::atomic::AtomicBool>,
+    proxy: winit::event_loop::EventLoopProxy,
+}
+
+impl CaptureRedrawRequester {
+    /// Request one capture frame on the compositor thread, never from a native presentation callback.
+    pub fn request(&self) {
+        self.pending.store(true, std::sync::atomic::Ordering::Release);
+        self.proxy.wake_up();
+    }
+}
+
 impl WinitEventLoop {
+    /// Obtain the trusted capture-only redraw queue.
+    pub fn capture_redraw_requester(&self) -> CaptureRedrawRequester {
+        CaptureRedrawRequester { pending: self.capture_redraw_pending.clone(), proxy: self.wake_proxy() }
+    }
+
     /// Explicitly wakes a registered winit loop for compositor-originated redraws.
     /// Window redraw requests may already be coalesced while host frame callbacks are pending.
     pub fn wake_proxy(&self) -> winit::event_loop::EventLoopProxy {
@@ -686,7 +708,7 @@ impl EventSource for WinitEventLoop {
         // `process_events` drains it; pumping here can enter the host presentation path before
         // calloop dispatches other already-readable sources, indefinitely starving compositor
         // control and protocol sockets.
-        if self.pending_events.is_empty() {
+        if self.pending_events.is_empty() && !self.capture_redraw_pending.load(std::sync::atomic::Ordering::Acquire) {
             Ok(None)
         } else {
             Ok(Some((Readiness::EMPTY, self.fake_token.unwrap())))
@@ -703,6 +725,9 @@ impl EventSource for WinitEventLoop {
         F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
     {
         let mut callback = |event| callback(event, &mut ());
+        if self.capture_redraw_pending.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            callback(WinitEvent::CaptureRedraw);
+        }
         for event in self.pending_events.drain(..) {
             callback(event);
         }
@@ -756,4 +781,7 @@ pub enum WinitEvent {
 
     /// A redraw was requested
     Redraw,
+
+    /// A trusted compositor capture frame was requested, independent of host visibility.
+    CaptureRedraw,
 }
