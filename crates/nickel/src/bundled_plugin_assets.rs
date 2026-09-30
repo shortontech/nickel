@@ -19,3 +19,17 @@ pub fn load_package(id: &str) -> Result<nickel_core::plugins::PluginPackage, Str
     }
     Err(format!("bundled package {id:?} is unavailable"))
 }
+
+/// Authoring catalog; caller packages override these installed or shipped entries.
+pub fn validation_catalog()
+-> Result<std::collections::BTreeMap<String, nickel_core::plugins::PluginPackage>, String> {
+    let mut catalog = std::collections::BTreeMap::new();
+    for files in BUNDLED_PACKAGES {
+        let package = nickel_core::plugins::PluginPackage::from_embedded(files)?;
+        catalog.insert(package.manifest.id.clone(), package);
+    }
+    for (id, descriptor) in nickel_core::plugins::PluginCatalog::discover_default()?.packages {
+        catalog.insert(id, descriptor.load()?);
+    }
+    Ok(catalog)
+}

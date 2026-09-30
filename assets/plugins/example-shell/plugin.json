@@ -1,0 +1,58 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.example-shell",
+  "name": "Example Derived Shell",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "stylesheet": "ui.css",
+  "composition": {
+    "api_version": 1,
+    "id": "org.nickel.example-shell",
+    "version": "0.1.0",
+    "extends": "nickel-default",
+    "requires": {
+      "nickel-default": "^0.2"
+    },
+    "replaces": {
+      "shell.taskbar": "./main.js#Taskbar",
+      "shell": "./main.js#Shell"
+    },
+    "uses": {
+      "shell.quickSettings": {
+        "package": "nickel-default",
+        "export": "shell.quickSettings"
+      }
+    }
+  },
+  "capabilities": [
+    "windows-read",
+    "windows-focus"
+  ],
+  "surfaces": [
+    {
+      "id": "taskbar",
+      "kind": "panel",
+      "width": 1920,
+      "height": 56,
+      "output": "all",
+      "reserve_work_area": true
+    },
+    {
+      "id": "quick-settings",
+      "kind": "overlay",
+      "width": 420,
+      "height": 600,
+      "anchor": "top-right",
+      "passive": true,
+      "initially_open": false
+    },
+    {
+      "id": "settings",
+      "kind": "window",
+      "width": 1100,
+      "height": 800,
+      "initially_open": false
+    }
+  ]
+}

@@ -2682,3 +2682,123 @@ fn selected_launcher_and_run_never_use_reserved_launcher_presentation() {
         assert!(shell.plugin_surface_matches(&run));
     });
 }
+
+#[test]
+fn shipped_example_shell_composes_owned_taskbar_default_controls_and_registered_setting() {
+    with_package_runtime_stack(|| {
+        use nickel_core::plugins::{PluginPackage, PluginPackageSource, PluginSurfaceKey};
+        let package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-shell"
+        ))
+        .unwrap();
+        let id = package.manifest.id.clone();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(id.clone(), PluginPackageSource::embedded(package));
+        shell.set_plugin_enabled(&id, true).unwrap();
+        shell.select_shell_package(&id).unwrap();
+        let key = |surface: &str| PluginSurfaceKey {
+            plugin_id: id.clone(),
+            surface_id: surface.into(),
+        };
+        let taskbar = key("taskbar");
+        shell.plugin_panel_scene(&taskbar, 1280, 56).unwrap();
+        let shared = shell
+            .plugin_panel_host_for(&taskbar)
+            .unwrap()
+            .application()
+            .shared_composition_runtime()
+            .unwrap();
+        let resolution = shared.borrow().resolution().clone();
+        assert_eq!(resolution.exports["shell.taskbar"].implemented_by.id, id);
+        assert_eq!(
+            resolution.exports["shell.quickSettings"].implemented_by.id,
+            "nickel-default"
+        );
+        assert!(
+            !shell
+                .plugin_registry
+                .get(&id)
+                .unwrap()
+                .manifest
+                .capabilities
+                .contains(&nickel_core::plugins::PluginCapability::AudioControl)
+        );
+        let button = shell
+            .plugin_panel_host_for(&taskbar)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Quick Settings".into(),
+            })
+            .unwrap();
+        shell.plugin_panel_host_ui_for(
+            &taskbar,
+            nickel_ui::UiEvent::AccessibilityActivate(button.id),
+            1280,
+            56,
+        );
+        let quick = key("quick-settings");
+        shell.plugin_panel_scene(&quick, 420, 600).unwrap();
+        assert!(std::rc::Rc::ptr_eq(
+            &shared,
+            &shell
+                .plugin_panel_host_for(&quick)
+                .unwrap()
+                .application()
+                .shared_composition_runtime()
+                .unwrap()
+        ));
+        assert!(
+            shell
+                .plugin_panel_host_for(&quick)
+                .unwrap()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Lock".into()
+                })
+                .is_ok()
+        );
+        assert!(
+            shell
+                .package_settings_registry
+                .settings_snapshot()
+                .settings
+                .iter()
+                .any(|setting| setting.provider_package == id
+                    && setting.registration.id == "show-title")
+        );
+        shell.launch_settings(Some(&format!("{id}/show-title")));
+        let settings = key("settings");
+        shell.plugin_panel_scene(&settings, 1100, 800).unwrap();
+        let toggle = shell
+            .plugin_panel_host_for(&settings)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Switch,
+                name: "Show shell title".into(),
+            })
+            .unwrap();
+        assert!(shell.plugin_panel_host_ui_for(
+            &settings,
+            nickel_ui::UiEvent::AccessibilityActivate(toggle.id),
+            1100,
+            800
+        ));
+        let owner = shared.borrow().resolution().active.clone();
+        let values = shared
+            .borrow()
+            .shared_owner_runtime(&owner)
+            .unwrap()
+            .borrow_mut()
+            .read_settings_values(&shell.package_settings_registry)
+            .unwrap();
+        assert_eq!(values["show-title"], serde_json::json!(false));
+    });
+}

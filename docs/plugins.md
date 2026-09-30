@@ -584,3 +584,12 @@ Windows currently exposes an empty preset list. Super+P opens the trusted native
 display recovery chooser independently of the selected shell's Quick Settings
 component. Ordinary Quick Settings is an ordinary JSX surface; retired
 `control-action` requests are unavailable.
+
+### Build a derived shell
+
+[The derived shell example](../assets/plugins/example-shell/README.md) provides a
+complete copy/edit/validate/live-dev starting point. It extends the versioned
+`nickel-default` public API, replaces the taskbar, explicitly reuses default Quick
+Settings, and exposes a registered setting through inherited Settings. Components
+execute with their author's grants in the shared package host; selecting a public
+component does not grant its caller the provider's capabilities.

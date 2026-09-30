@@ -188,7 +188,14 @@ mod platform {
         root.join(directory)
     }
 
+    #[cfg(test)]
     fn load_dev_package(directory: &Path) -> Result<PluginPackage, String> {
+        let package = load_dev_package_unvalidated(directory)?;
+        PluginPanelApplication::validate_package(&package)?;
+        Ok(package)
+    }
+
+    fn load_dev_package_unvalidated(directory: &Path) -> Result<PluginPackage, String> {
         let package = load_package(directory)?;
         if package.manifest.claims_native_shell_surface() {
             return Err("desktop and screenshot presentation are native Rust UI".into());
@@ -225,8 +232,6 @@ mod platform {
                     .into(),
             );
         }
-        PluginPanelApplication::validate_package(&package)
-            .map_err(|error| format!("plugin JavaScript failed: {error}"))?;
         Ok(package)
     }
 
@@ -495,7 +500,7 @@ mod platform {
     fn load_dev_packages(directories: &[PathBuf]) -> Result<Vec<PluginPackage>, String> {
         let packages = directories
             .iter()
-            .map(|directory| load_dev_package(directory))
+            .map(|directory| load_dev_package_unvalidated(directory))
             .collect::<Result<Vec<_>, _>>()?;
         let ids = packages
             .iter()
@@ -503,6 +508,15 @@ mod platform {
             .collect::<HashSet<_>>();
         if ids.len() != packages.len() {
             return Err("dev package IDs must be distinct".into());
+        }
+        let mut catalog = nickel_shell::bundled_plugin_assets::validation_catalog()?;
+        for package in &packages {
+            catalog.insert(package.manifest.id.clone(), package.clone());
+        }
+        for package in &packages {
+            PluginPanelApplication::validate_package_with_catalog(package, &catalog).map_err(
+                |error| format!("plugin {} JavaScript failed: {error}", package.manifest.id),
+            )?;
         }
         Ok(packages)
     }
@@ -1102,6 +1116,28 @@ mod platform {
             let package = load_dev_package(root).unwrap();
             assert_eq!(package.manifest.id, "org.nickel.hello-panel");
             assert_eq!(package.manifest.surfaces.len(), 1);
+        }
+
+        #[test]
+        fn dev_validates_supplied_composition_dependencies_in_any_order() {
+            let base = tempfile::tempdir().unwrap();
+            let child = tempfile::tempdir().unwrap();
+            std::fs::write(base.path().join("plugin.json"), r#"{"api_version":1,"id":"org.example.dev-base","name":"Base","version":"1.0.0","entry":"main.js","composition":{"api_version":1,"id":"org.example.dev-base","version":"1.0.0","exports":{"shell":"./main.js#Shell"}},"surfaces":[{"id":"main","kind":"panel","width":300,"height":48}]}"#).unwrap();
+            std::fs::write(base.path().join("main.js"), "export function Shell(){return h(Panel,{},h(Text,{},'Base'));}\nexport default Shell;").unwrap();
+            std::fs::write(child.path().join("plugin.json"), r#"{"api_version":1,"id":"org.example.dev-child","name":"Child","version":"1.0.0","entry":"main.js","composition":{"api_version":1,"id":"org.example.dev-child","version":"1.0.0","extends":"org.example.dev-base","requires":{"org.example.dev-base":"^1"}},"surfaces":[{"id":"main","kind":"panel","width":300,"height":48}]}"#).unwrap();
+            std::fs::write(
+                child.path().join("main.js"),
+                "export function Unused(){return h(Text,{},'Child');}\nexport default Unused;",
+            )
+            .unwrap();
+            let packages =
+                super::load_dev_packages(&[child.path().into(), base.path().into()]).unwrap();
+            assert_eq!(packages[0].manifest.id, "org.example.dev-child");
+            assert!(
+                super::load_dev_packages(&[child.path().into()])
+                    .unwrap_err()
+                    .contains("org.example.dev-base")
+            );
         }
 
         #[test]

@@ -822,6 +822,127 @@ impl PluginPanelApplication {
     }
 
     pub fn validate_package(package: &PluginPackage) -> Result<(), String> {
+        if package
+            .manifest
+            .composition
+            .as_ref()
+            .is_some_and(|composition| {
+                composition.extends.is_some()
+                    || composition.exports.contains_key("shell")
+                    || composition.replaces.contains_key("shell")
+            })
+        {
+            return Self::validate_package_with_catalog(
+                package,
+                &crate::bundled_plugin_assets::validation_catalog()?,
+            );
+        }
+        Self::validate_standalone_package(package)
+    }
+
+    /// Validate public shell composition through the same owner contexts and native
+    /// parser as production. The supplied package always overrides catalog copies.
+    pub fn validate_package_with_catalog(
+        package: &PluginPackage,
+        catalog: &std::collections::BTreeMap<String, PluginPackage>,
+    ) -> Result<(), String> {
+        let package = package.clone();
+        let catalog = catalog.clone();
+        std::thread::Builder::new()
+            .name("nickel-composition-validation".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || Self::validate_composed_package(&package, &catalog))
+            .map_err(|error| format!("could not start composition validation: {error}"))?
+            .join()
+            .map_err(|_| "composition validation panicked".to_owned())?
+    }
+
+    fn validate_composed_package(
+        package: &PluginPackage,
+        catalog: &std::collections::BTreeMap<String, PluginPackage>,
+    ) -> Result<(), String> {
+        let Some(composition) = &package.manifest.composition else {
+            return Self::validate_standalone_package(package);
+        };
+        if composition.extends.is_none()
+            && !composition.exports.contains_key("shell")
+            && !composition.replaces.contains_key("shell")
+        {
+            return Self::validate_standalone_package(package);
+        }
+        let mut catalog = catalog.clone();
+        catalog.insert(package.manifest.id.clone(), package.clone());
+        let declarations = catalog
+            .iter()
+            .filter_map(|(id, source)| {
+                source
+                    .manifest
+                    .composition
+                    .clone()
+                    .map(|composition| (id.clone(), composition))
+            })
+            .collect();
+        let resolution = nickel_core::package_composition::resolve_shell_package(
+            &declarations,
+            &package.manifest.id,
+        )
+        .map_err(|error| format!("composition failed: {error:?}"))?;
+        // Available dependencies are a source catalog, not approval to execute
+        // unrelated installed contributors during offline authoring validation.
+        catalog.retain(|id, _| {
+            resolution
+                .inheritance_chain
+                .iter()
+                .any(|owner| &owner.id == id)
+        });
+        let shared = std::rc::Rc::new(std::cell::RefCell::new(ShellCompositionRuntime::new(
+            &catalog,
+            &package.manifest.id,
+            &Default::default(),
+        )?));
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        let owners = shared
+            .borrow()
+            .participating_owners()
+            .cloned()
+            .collect::<Vec<_>>();
+        for owner in &owners {
+            let runtime = shared.borrow().shared_owner_runtime(owner)?;
+            runtime
+                .borrow_mut()
+                .publish_settings(&mut registry, &owner.id)?;
+        }
+        for owner in &owners {
+            shared
+                .borrow()
+                .shared_owner_runtime(owner)?
+                .borrow_mut()
+                .set_settings_registry(&registry)?;
+        }
+        for surface in &package.manifest.surfaces {
+            let snapshots = owners.iter().map(|owner| {
+                let source = &catalog[&owner.id];
+                let settings = source.manifest.settings.iter().map(|setting| (setting.id.clone(), setting.kind.default_value())).collect::<std::collections::BTreeMap<_,_>>();
+                let mut data = serde_json::json!({"settings":settings,"windows":[],"applications":[],"notifications":initial_notifications_data(&source.manifest),"surface":{"id":surface.id,"kind":surface.kind.as_str(),"width":surface.width,"height":surface.height}});
+                if let Some(projection) = validation_surface_projection(source, surface) {
+                    data.as_object_mut().unwrap().extend(projection.as_object().unwrap().clone());
+                }
+                (owner.clone(), data)
+            }).collect();
+            Self::from_composed_surface(
+                &catalog,
+                &package.manifest.id,
+                &snapshots,
+                surface,
+                Some(shared.clone()),
+            )
+            .and_then(|application| application.resolved_surface(surface))
+            .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
+        }
+        Ok(())
+    }
+
+    fn validate_standalone_package(package: &PluginPackage) -> Result<(), String> {
         package_stylesheet(package)?;
         package_images(package)?;
         let settings: std::collections::BTreeMap<_, _> = package
@@ -3056,6 +3177,40 @@ mod tests {
         stale.update(PluginMessage::Click(0));
         assert!(stale.take_effects().is_empty());
         assert!(stale.last_error.is_some());
+    }
+
+    #[test]
+    fn copied_derived_shell_validates_against_explicit_dependency_catalog() {
+        let root = tempfile::tempdir().unwrap();
+        for entry in std::fs::read_dir(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-shell"
+        ))
+        .unwrap()
+        {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), root.path().join(entry.file_name())).unwrap();
+        }
+        let package = PluginPackage::load(root.path()).unwrap();
+        let base = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        let mut catalog = std::collections::BTreeMap::from([("nickel-default".into(), base)]);
+        let mut stale = package.clone();
+        stale
+            .manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .requires
+            .insert("nickel-default".into(), "^99".into());
+        catalog.insert(package.manifest.id.clone(), stale);
+        // The copy being checked overrides any installed package with the same ID.
+        PluginPanelApplication::validate_package_with_catalog(&package, &catalog).unwrap();
+        catalog.remove("nickel-default");
+        assert!(
+            PluginPanelApplication::validate_package_with_catalog(&package, &catalog)
+                .unwrap_err()
+                .contains("nickel-default")
+        );
     }
 
     #[test]
