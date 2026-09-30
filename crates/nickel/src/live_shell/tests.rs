@@ -1,3 +1,15 @@
+fn ordinary_package_runtime(
+    shell: &LiveShell,
+    id: &str,
+) -> std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>> {
+    match &shell.package_runtimes[id] {
+        RetainedPackageRuntime::Ordinary(runtime) => runtime.clone(),
+        RetainedPackageRuntime::Composed(_) => {
+            panic!("ordinary package unexpectedly uses composition")
+        }
+    }
+}
+
 // Boa package evaluation needs the same stack reserve as the shipped host.
 fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
@@ -32,7 +44,7 @@ fn embedded_package_visibility_preserves_shared_runtime_until_disable() {
             .external_plugin_packages
             .insert(id.clone(), PluginPackageSource::embedded(package));
         shell.set_plugin_enabled(&id, true).unwrap();
-        let runtime = shell.package_runtimes[&id].clone();
+        let runtime = ordinary_package_runtime(&shell, &id);
         let first = PluginSurfaceKey {
             plugin_id: id.clone(),
             surface_id: "first".into(),
@@ -69,7 +81,10 @@ fn embedded_package_visibility_preserves_shared_runtime_until_disable() {
             shell.plugin_registry.get(&id).unwrap().health,
             PluginHealth::Running
         );
-        assert!(std::rc::Rc::ptr_eq(&runtime, &shell.package_runtimes[&id]));
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            &ordinary_package_runtime(&shell, &id)
+        ));
         assert!(
             shell
                 .package_settings_registry
@@ -121,8 +136,11 @@ fn embedded_package_visibility_preserves_shared_runtime_until_disable() {
         );
         assert!(shell.show_plugin_window(&id, "second").is_err());
         shell.set_plugin_enabled(&id, true).unwrap();
-        assert!(!std::rc::Rc::ptr_eq(&runtime, &shell.package_runtimes[&id]));
-        let count: u32 = shell.package_runtimes[&id]
+        assert!(!std::rc::Rc::ptr_eq(
+            &runtime,
+            &ordinary_package_runtime(&shell, &id)
+        ));
+        let count: u32 = ordinary_package_runtime(&shell, &id)
             .borrow_mut()
             .eval_json("JSON.stringify(__nickelRequireModule('src/state.js').shared.count)")
             .unwrap();
@@ -151,7 +169,7 @@ fn embedded_package_can_enable_with_all_windows_initially_closed() {
             nickel_core::plugins::PluginPackageSource::embedded(package),
         );
         shell.set_plugin_enabled(&id, true).unwrap();
-        let runtime = shell.package_runtimes[&id].clone();
+        let runtime = ordinary_package_runtime(&shell, &id);
         assert!(
             shell
                 .plugin_surface_hosts
@@ -192,7 +210,7 @@ fn embedded_default_shell_starts_only_taskbar_and_uses_normal_surface_lifecycle(
         assert!(!shell.plugin_registry.get(id).unwrap().desired_enabled);
         assert!(!shell.package_runtimes.contains_key(id));
         shell.set_plugin_enabled(id, true).unwrap();
-        let runtime = shell.package_runtimes[id].clone();
+        let runtime = ordinary_package_runtime(&shell, id);
         let surfaces = shell
             .plugin_surface_hosts
             .keys()
