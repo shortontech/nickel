@@ -58,3 +58,16 @@ text {
     font-size: 13px;
     line-height: 18px;
 }
+
+div.display-plane {
+    width: 100%;
+    min-height: 240px;
+    padding: 12px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+}
+layer#display-arrangement { width: 100%; height: 216px; }
+button.display-card-button { background: @accent-soft@; border: 2px solid @border@; }
+button.display-card-button.primary { border: 4px solid @accent@; }
+div.display-selected { display: flex; flex-direction: row; gap: 12px; }

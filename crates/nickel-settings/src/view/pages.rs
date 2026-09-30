@@ -1,7 +1,7 @@
 use super::*;
 use nickel_ui::{
-    Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
-    Layer, NavigationScope, Point, Row, Text,
+    Collection, CollectionPresentation, CollectionState, Column, Container, NavigationScope, Row,
+    Text,
 };
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
@@ -559,11 +559,8 @@ impl SettingsApp {
             .collect()
     }
 
-    pub(super) fn display_components(&self, content_width: f32) -> AnyView<SettingsMessage> {
-        let palette = self.palette();
-        let theme = self.ui_theme();
-        let selected = &self.displays[self.selected];
-        let plugin_view = if self.settings_jsx_enabled {
+    pub(super) fn display_components(&self, _content_width: f32) -> AnyView<SettingsMessage> {
+        let rendered = if self.settings_jsx_enabled {
             let data = crate::display_plugin::projection(self);
             self.display_page
                 .borrow_mut()
@@ -573,151 +570,12 @@ impl SettingsApp {
                 })
                 .as_mut()
                 .map_err(|error| error.clone())
-                .and_then(|page| page.render(&data, theme))
+                .and_then(|page| page.render(&data, self.ui_theme()))
         } else {
             Err("Settings plugin is disabled".into())
         };
-        let (plugin_cards, plugin_actions) = match plugin_view {
-            Ok(view) => view,
-            Err(error) => {
-                return self.settings_plugin_recovery(
-                    "Display settings are unavailable",
-                    error,
-                    None,
-                );
-            }
-        };
-        let [
-            enabled,
-            resolution,
-            refresh_rate,
-            scale,
-            actions,
-            confirmation,
-            application_policy,
-            application_scale_slider,
-        ] = plugin_actions;
-        let app_scale = SettingsCard::titled(
-            theme,
-            self.localizer.text("ui-pages-application-compatibility-scale"),
-            self.localizer.text("ui-pages-toolkit-scale-can-differ-from-display-scale-applications-may-need-a-restart"),
-        )
-        .id("application-scale")
-        .child(application_policy)
-        .child(application_scale_slider)
-        .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
-        let compact_cards = content_width < 520.0;
-        let display_order = plugin_cards
-            .iter()
-            .map(|card| card.index)
-            .collect::<Vec<_>>();
-        let display_cards = display_order.into_iter().map(|index| {
-            let display = &self.displays[index];
-            let selected = index == self.selected;
-            let plugin_card = plugin_cards.iter().find(|card| card.index == index)
-                .expect("projected display order contains its card");
-            let name = &plugin_card.name;
-            let detail = &plugin_card.detail;
-            let primary_label = &plugin_card.primary_label;
-            let border_color = if !display.enabled {
-                palette.muted
-            } else if display.primary {
-                palette.accent
-            } else {
-                palette.muted
-            };
-            let border_width = if display.primary && display.enabled {
-                4.0
-            } else {
-                2.0
-            };
-            let card = ui! {
-                <Container id={format!("display-card-{index}")}
-                    width={if compact_cards { (content_width - 120.0).max(120.0) } else { display.rect.w as f32 }}
-                    height={if compact_cards { 140.0 } else { display.rect.h as f32 }}
-                    min_width={if compact_cards { 120.0 } else { 160.0 }} min_height={if compact_cards { 140.0 } else { 80.0 }}
-                    background={if !display.enabled { palette.background }
-                        else if selected { palette.accent_soft } else { palette.surface }}
-                    border={(border_color, border_width)} radius={theme.radii.card}
-                    padding={Insets::all(12.0)}
-                    on_drag={(SettingsMessage::SelectDisplay(index), display_drag_message)}
-                    on_press={SettingsMessage::SelectDisplay(index)}
-                    semantic_role={SemanticRole::Button}
-                    accessibility_label={format!("{} display, {}", name, detail)}
-                    accessibility_state={if selected { "selected" } else { "not selected" }}>
-                    <Column gap={4.0}>
-                        <Text color={palette.text} wrap={true}>{name.as_str()}</Text>
-                        <Text scale={0.9} color={palette.muted} wrap={true}>{detail.as_str()}</Text>
-                        <Text scale={0.9} bold={true} color={palette.accent}>
-                            {primary_label.as_str()}
-                        </Text>
-                    </Column>
-                </Container>
-            };
-            if compact_cards {
-                card
-            } else {
-                card.position(Point {
-                    x: (display.rect.x - self.display_plane.x - 12) as f32,
-                    y: (display.rect.y - self.display_plane.y - 12) as f32,
-                })
-            }
-        }).collect::<Vec<_>>();
-        let display_layout = if compact_cards {
-            AnyView::new(Column::new().gap(12.0).children(display_cards))
-        } else {
-            AnyView::new(
-                Layer::new()
-                    .fill_width()
-                    .height(216.0)
-                    .children(display_cards),
-            )
-        };
-        AnyView::new(ui! {
-            <Column grow={1.0} padding={Insets {
-                top: 20.0, right: 32.0, bottom: 20.0, left: 20.0,
-            }}>
-                <VerticalScroll id={"display-page-scroll"} on_scroll={SettingsMessage::DisplayScroll}
-                    grow={1.0}
-                    offset={0.0} theme={theme}>
-                    <Column gap={8.0}>
-                        <Container id={"display-plane"} min_height={240.0}
-                            background={palette.surface} border={(palette.muted, 1.0)}
-                            padding={Insets::all(12.0)} align_items={nickel_ui::Align::Center}
-                            justify_content={nickel_ui::Justify::Center}
-                            semantic_role={SemanticRole::TabPanel}
-                            accessibility_label={"Display arrangement"}>
-                            {display_layout}
-                        </Container>
-                        <Container background={palette.surface} border={(palette.muted, 1.0)}
-                            padding={Insets::all(8.0)}>
-                            <Column gap={6.0}>
-                                <Row gap={12.0}>
-                                    <Column grow={1.0} gap={3.0}>
-                                        <Text color={palette.text} wrap={true}>{&selected.name}</Text>
-                                        <Text scale={0.9} color={palette.muted} wrap={true}>{&selected.detail}</Text>
-                                    </Column>
-                                    <Text bold={true} wrap={true} color={if selected.primary { palette.accent } else { palette.muted }}>
-                                        {if selected.primary {
-                                            self.localizer.text("settings-display-primary")
-                                        } else { String::new() }}
-                                    </Text>
-                                </Row>
-                                {enabled}
-                                {resolution}
-                                {refresh_rate}
-                                {scale}
-                                {actions}
-                                {confirmation}
-                            </Column>
-                        </Container>
-                        <Text color={if self.applied { palette.complement } else { palette.muted }} wrap={true}>
-                            {&self.status}
-                        </Text>
-                        {app_scale}
-                    </Column>
-                </VerticalScroll>
-            </Column>
+        rendered.unwrap_or_else(|error| {
+            self.settings_plugin_recovery("Display settings are unavailable", error, None)
         })
     }
 

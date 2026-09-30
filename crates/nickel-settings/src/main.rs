@@ -67,13 +67,12 @@ use nickel_i18n::Localizer;
 use nickel_input::{DeviceId, InputEvent, KeyEdge, LogicalKey, NamedKey};
 use nickel_ui::{
     ActionLegend, ActionLegendEntry, AdapterOutcome, AnyView, Application, Button,
-    ButtonPresentation, DragGesture, DragPhase, FrameOverlay, GlobalAction, HostAdapter,
-    HostServices, Image, ImageFit, InputModality, Insets, NavigationItem, OverlayAnchor, OverlayId,
-    OverlayStyle, PageHeader, Popover, ReadingDirection, ResponsiveNavigation,
-    ResponsiveNavigationDestination, SemanticControllerAction, SemanticRole, SemanticSelector,
-    SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow, SettingsSearchField,
-    SettingsStatus, SettingsStatusKind, Size, SwitchState, UiHost, UiId, ViewContext,
-    search_settings, ui,
+    ButtonPresentation, FrameOverlay, GlobalAction, HostAdapter, HostServices, Image, ImageFit,
+    InputModality, Insets, NavigationItem, OverlayAnchor, OverlayId, OverlayStyle, PageHeader,
+    Popover, ReadingDirection, ResponsiveNavigation, ResponsiveNavigationDestination,
+    SemanticControllerAction, SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation,
+    SettingsRow, SettingsSearchField, SettingsStatus, SettingsStatusKind, Size, SwitchState,
+    UiHost, UiId, ViewContext, search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
 
@@ -583,15 +582,8 @@ enum SettingsMessage {
     JsxAction(usize, String),
     JsxScopedAction(String, usize, String),
     SetDesktopCount(u8),
-    DisplayScroll,
     DisplayIdentify,
     SelectDisplay(usize),
-    DisplayDrag {
-        index: usize,
-        phase: DragPhase,
-        x: i32,
-        y: i32,
-    },
     DisplayPrimary,
     DisplayEnabled(bool),
     SetDisplayScale(u32),
@@ -608,18 +600,6 @@ enum SettingsMessage {
     DisplayApply,
     DisplayKeep,
     DisplayRevert,
-}
-
-fn display_drag_message(seed: SettingsMessage, gesture: DragGesture) -> SettingsMessage {
-    let SettingsMessage::SelectDisplay(index) = seed else {
-        unreachable!("display drag targets use SelectDisplay as their typed seed")
-    };
-    SettingsMessage::DisplayDrag {
-        index,
-        phase: gesture.phase,
-        x: gesture.position.x.round() as i32,
-        y: gesture.position.y.round() as i32,
-    }
 }
 
 fn display_scale_message(value: f32) -> SettingsMessage {
@@ -1908,31 +1888,7 @@ impl SettingsApp {
                     _ => self.status = self.localizer.text("settings-status-identify-failed"),
                 }
             }
-            SettingsMessage::SelectDisplay(index) => {
-                let action = if self.page == SettingsPage::Display && self.settings_jsx_enabled {
-                    self.display_page
-                        .borrow()
-                        .as_ref()
-                        .and_then(|page| page.as_ref().ok())
-                        .and_then(|page| page.card_action(index))
-                } else {
-                    None
-                };
-                if let Some(action) = action {
-                    self.handle_display_jsx_action(action);
-                } else {
-                    self.select_display_native(index);
-                }
-            }
-            SettingsMessage::DisplayDrag { index, phase, x, y } => match phase {
-                DragPhase::Started => self.begin_display_drag(index, x, y),
-                DragPhase::Moved => self.move_display_drag(x, y),
-                DragPhase::Ended => {
-                    self.move_display_drag(x, y);
-                    self.finish_drag();
-                }
-                DragPhase::Cancelled => self.cancel_drag(),
-            },
+            SettingsMessage::SelectDisplay(index) => self.select_display_native(index),
             SettingsMessage::DisplayPrimary => {
                 self.displays[self.selected].enabled = true;
                 for (index, display) in self.displays.iter_mut().enumerate() {
@@ -2037,8 +1993,7 @@ impl SettingsApp {
             }
             SettingsMessage::DisplayRevert => self.revert_display_layout(),
             SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
-            SettingsMessage::DisplayScroll
-            | SettingsMessage::BluetoothScroll
+            SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
             | SettingsMessage::OptionalFeaturesScroll
             | SettingsMessage::PluginsScroll
@@ -2107,84 +2062,6 @@ impl SettingsApp {
             self.display_resolution_select_expanded = false;
             self.display_refresh_select_expanded = false;
         }
-    }
-
-    fn begin_display_drag(&mut self, index: usize, x: i32, y: i32) {
-        if self.page != SettingsPage::Display || index >= self.displays.len() {
-            return;
-        }
-        self.selected = index;
-        let rect = self.displays[index].rect;
-        self.drag_offset = Some((x - rect.x, y - rect.y));
-        self.drag_origin = Some(rect);
-        self.drag_layout_origin = Some((
-            self.displays[index].logical_x,
-            self.displays[index].logical_y,
-        ));
-    }
-
-    fn move_display_drag(&mut self, x: i32, y: i32) {
-        self.cursor = (x, y);
-        let Some((offset_x, offset_y)) = self.drag_offset else {
-            return;
-        };
-        let mut rect = self.displays[self.selected].rect;
-        rect.x = x - offset_x;
-        rect.y = y - offset_y;
-        rect = constrain_center(rect, self.display_plane);
-        rect = self
-            .displays
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != self.selected)
-            .fold(rect, |moving, (_, other)| snap_rect(moving, other.rect, 42));
-        self.displays[self.selected].rect = rect;
-        if let (Some(origin), Some((logical_x, logical_y))) =
-            (self.drag_origin, self.drag_layout_origin)
-        {
-            self.displays[self.selected].logical_x =
-                logical_x + (f64::from(rect.x - origin.x) / self.pixels_per_logical).round() as i32;
-            self.displays[self.selected].logical_y =
-                logical_y + (f64::from(rect.y - origin.y) / self.pixels_per_logical).round() as i32;
-        }
-        if self.drag_origin != Some(rect) {
-            self.applied = false;
-            self.status = self.localizer.text("settings-status-changes-not-applied");
-        }
-        self.request_redraw();
-    }
-
-    fn finish_drag(&mut self) {
-        if self.page != SettingsPage::Display {
-            return;
-        }
-        if self.drag_offset.take().is_none() {
-            return;
-        }
-        let Some(origin) = self.drag_origin.take() else {
-            return;
-        };
-        let selected = self.displays[self.selected].rect;
-        if selected == origin {
-            self.request_redraw();
-            return;
-        }
-        self.drag_layout_origin = None;
-        if selected != origin {
-            self.applied = false;
-            self.status = self.localizer.text("settings-status-changes-not-applied");
-        }
-        self.request_redraw();
-    }
-
-    fn cancel_drag(&mut self) {
-        self.drag_offset = None;
-        self.drag_layout_origin = None;
-        let Some(origin) = self.drag_origin.take() else {
-            return;
-        };
-        self.displays[self.selected].rect = origin;
-        self.request_redraw();
     }
 
     fn set_desktop_count(&mut self, count: u8) {
@@ -2704,44 +2581,6 @@ impl SettingsApp {
             }
         }
     }
-}
-
-fn snap_rect(mut moving: Rect, fixed: Rect, threshold: i32) -> Rect {
-    let horizontal_candidates = [fixed.x - moving.w, fixed.x + fixed.w];
-    if let Some(x) = horizontal_candidates
-        .into_iter()
-        .min_by_key(|candidate| (moving.x - candidate).abs())
-        .filter(|candidate| (moving.x - candidate).abs() <= threshold)
-    {
-        moving.x = x;
-        let vertical_candidates = [fixed.y, fixed.y + fixed.h - moving.h];
-        if let Some(y) = vertical_candidates
-            .into_iter()
-            .min_by_key(|candidate| (moving.y - candidate).abs())
-            .filter(|candidate| (moving.y - candidate).abs() <= threshold)
-        {
-            moving.y = y;
-        }
-        return moving;
-    }
-
-    let vertical_candidates = [fixed.y - moving.h, fixed.y + fixed.h];
-    if let Some(y) = vertical_candidates
-        .into_iter()
-        .min_by_key(|candidate| (moving.y - candidate).abs())
-        .filter(|candidate| (moving.y - candidate).abs() <= threshold)
-    {
-        moving.y = y;
-        let horizontal_alignment = [fixed.x, fixed.x + fixed.w - moving.w];
-        if let Some(x) = horizontal_alignment
-            .into_iter()
-            .min_by_key(|candidate| (moving.x - candidate).abs())
-            .filter(|candidate| (moving.x - candidate).abs() <= threshold)
-        {
-            moving.x = x;
-        }
-    }
-    moving
 }
 
 fn center_display_rects(displays: &mut [DisplayCard], plane: Rect) {
@@ -3319,11 +3158,10 @@ mod tests {
         AnimationLevel, ApplicationScalePolicy, BluetoothDevice, BluetoothOperation,
         ControllerAction, DefaultAppsDiscovery, FeatureEffectiveState, FeatureHealth,
         FeatureInstallation, FeatureSupport, FileIconPreference, NetworkAdapter,
-        OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
-        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
-        WallpaperPosition, WallpaperSettings, WifiNetwork, codex_feature_state, constrain_center,
-        resolve_codex_feature_state, separate_overlapping_display_cards,
-        shell_behavior_transaction, snap_rect,
+        OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SettingsApp, SettingsMessage,
+        SettingsPage, ThemePreference, UiHost, WallpaperPosition, WallpaperSettings, WifiNetwork,
+        codex_feature_state, constrain_center, resolve_codex_feature_state,
+        separate_overlapping_display_cards, shell_behavior_transaction,
     };
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
@@ -4424,26 +4262,6 @@ mod tests {
     }
 
     #[test]
-    fn nearby_monitor_edges_snap_together_and_align() {
-        let fixed = Rect {
-            x: 400,
-            y: 180,
-            w: 300,
-            h: 180,
-        };
-        let moving = Rect {
-            x: 105,
-            y: 190,
-            w: 270,
-            h: 160,
-        };
-
-        let snapped = snap_rect(moving, fixed, 42);
-        assert_eq!(snapped.x + snapped.w, fixed.x);
-        assert_eq!(snapped.y, fixed.y);
-    }
-
-    #[test]
     fn visual_monitor_cards_do_not_overlap_when_logical_outputs_are_adjacent() {
         let mut displays = SettingsApp::with_initial_page(SettingsPage::Display).displays;
         displays[0].logical_x = 0;
@@ -4466,25 +4284,6 @@ mod tests {
         separate_overlapping_display_cards(&mut displays);
 
         assert_eq!(displays[1].rect.x, displays[0].rect.x + displays[0].rect.w);
-    }
-
-    #[test]
-    fn distant_monitors_keep_freeform_position() {
-        let fixed = Rect {
-            x: 400,
-            y: 180,
-            w: 300,
-            h: 180,
-        };
-        let moving = Rect {
-            x: 40,
-            y: 430,
-            w: 200,
-            h: 120,
-        };
-
-        let snapped = snap_rect(moving, fixed, 42);
-        assert_eq!((snapped.x, snapped.y), (moving.x, moving.y));
     }
 
     #[test]
@@ -4587,21 +4386,6 @@ mod tests {
 
         assert_eq!(app.displays[0].mode, staged);
         assert!(!app.applied);
-    }
-
-    #[test]
-    fn selecting_display_without_moving_it_keeps_layout_clean() {
-        let mut app = SettingsApp {
-            applied: true,
-            ..SettingsApp::default()
-        };
-        let display = app.displays[0].rect;
-        app.begin_display_drag(0, display.x + 20, display.y + 20);
-        app.finish_drag();
-
-        assert_eq!(app.selected, 0);
-        assert_eq!(app.displays[0].rect, display);
-        assert!(app.applied);
     }
 
     #[test]
@@ -5589,100 +5373,6 @@ mod tests {
     }
 
     #[test]
-    fn display_page_scrolls_and_reflows_controls_at_compact_localized_sizes() {
-        fn overlaps(left: nickel_ui::Rect, right: nickel_ui::Rect) -> bool {
-            left.origin.x < right.origin.x + right.size.width
-                && left.origin.x + left.size.width > right.origin.x
-                && left.origin.y < right.origin.y + right.size.height
-                && left.origin.y + left.size.height > right.origin.y
-        }
-
-        for (locale, width, height, scale) in [
-            ("de-DE", 850.0, 580.0, 1.0),
-            ("es", 560.0, 580.0, 2.0),
-            ("en-US", 360.0, 580.0, 1.5),
-        ] {
-            let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
-            app.localizer = nickel_i18n::Localizer::for_locale(Some(locale));
-            app.displays[0].name =
-                "A deliberately long localized display heading that wraps".into();
-            app.displays[0].detail =
-                "3840 × 2160 — detailed compatibility description on multiple lines".into();
-            let tree = app.build_ui_with_diagnostics(width, height);
-            assert!(
-                tree.scroll_extent(&SettingsMessage::DisplayScroll)
-                    .is_some_and(|extent| extent.can_scroll()),
-                "Display content must remain reachable at {locale} {width}x{height}"
-            );
-            let diagnostics = tree
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| {
-                    diagnostic.kind != nickel_ui::DiagnosticKind::ClippedInteraction
-                })
-                .collect::<Vec<_>>();
-            assert!(diagnostics.is_empty(), "{locale}: {diagnostics:#?}");
-
-            let display_page = app.display_page.borrow();
-            let display_page = display_page.as_ref().unwrap().as_ref().unwrap();
-            let buttons = ["display-identify", "display-primary", "display-apply"]
-                .iter()
-                .flat_map(|id| {
-                    let action = display_page.action_for_id(id).unwrap();
-                    tree.semantic_targets_for_message(&SettingsMessage::JsxScopedAction(
-                        "display".into(),
-                        action,
-                        "null".into(),
-                    ))
-                })
-                .map(|target| target.bounds)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                buttons.len(),
-                3,
-                "localized display actions remain semantic"
-            );
-            assert!(
-                buttons
-                    .iter()
-                    .all(|rect| rect.size.width > 0.0 && rect.size.height >= 40.0)
-            );
-            for (index, left) in buttons.iter().enumerate() {
-                for right in &buttons[index + 1..] {
-                    assert!(
-                        !overlaps(*left, *right),
-                        "display actions must reflow, not overlap"
-                    );
-                }
-            }
-
-            let physical_width = (width * scale) as u32;
-            let physical_height = (height * scale) as u32;
-            let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(
-                physical_width,
-                physical_height,
-                scale,
-            );
-            renderer.render(tree.commands());
-            assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
-            if locale == "de-DE" {
-                let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(
-                    physical_width,
-                    physical_height,
-                    |x, y| {
-                        let pixel = renderer.pixels()[(y * physical_width + x) as usize];
-                        image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-                    },
-                );
-                let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../target/nickel-ui-snapshots/settings-display-shared.png");
-                std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-                image.save(output).unwrap();
-            }
-        }
-    }
-
-    #[test]
     fn unavailable_named_file_icon_theme_remains_visible_and_accessible() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.shell_settings.file_icon_provider = FileIconPreference::System;
@@ -6355,105 +6045,6 @@ mod tests {
         app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Display));
         assert_eq!(app.active_destination, Some(SettingsPage::Display));
         assert_eq!(app.page, SettingsPage::Display);
-    }
-
-    #[test]
-    fn display_cards_follow_the_resolved_canvas_instead_of_legacy_coordinates() {
-        let mut host = UiHost::new(
-            SettingsApp::with_initial_page(SettingsPage::Display),
-            1200,
-            760,
-        );
-        SettingsHostAdapter::sync_display_plane(&mut host);
-
-        let app = host.application();
-        let plane = app.display_plane;
-        assert!(plane.x > SIDEBAR_WIDTH);
-        for display in &app.displays {
-            assert!(display.rect.x >= plane.x);
-            assert!(display.rect.y >= plane.y);
-            assert!(display.rect.x + display.rect.w <= plane.x + plane.w);
-            assert!(display.rect.y + display.rect.h <= plane.y + plane.h);
-        }
-    }
-
-    #[test]
-    fn display_card_selection_uses_the_declarative_semantic_route() {
-        let mut host = UiHost::new(
-            SettingsApp::with_initial_page(SettingsPage::Display),
-            1200,
-            760,
-        );
-        let second = host
-            .unique_semantic_target_for_message(&SettingsMessage::SelectDisplay(1))
-            .expect("second display card exposes an activation action")
-            .id;
-
-        host.perform_accessibility_action(
-            second,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-        );
-
-        assert_eq!(host.application().selected, 1);
-    }
-
-    #[test]
-    fn display_drag_flows_through_declarative_capture_and_application_update() {
-        let mut host = UiHost::new(
-            SettingsApp::with_initial_page(SettingsPage::Display),
-            1200,
-            760,
-        );
-        SettingsHostAdapter::sync_display_plane(&mut host);
-        // The native adapter schedules a frame after synchronizing resolved
-        // canvas geometry. Rebuild explicitly in this direct host test so its
-        // semantic hit targets use the same coordinates as the model.
-        host.resize(1200, 760);
-        let target = host
-            .unique_semantic_target_for_message(&SettingsMessage::SelectDisplay(0))
-            .expect("first display is a semantic drag target");
-        let start = nickel_ui::Point {
-            x: target.bounds.origin.x + 12.0,
-            y: target.bounds.origin.y + 12.0,
-        };
-        let moved = nickel_ui::Point {
-            x: start.x + 80.0,
-            y: start.y + 55.0,
-        };
-        host.application_mut().applied = true;
-        let origin = host.application().displays[0].rect;
-
-        host.handle_event(nickel_ui::UiEvent::PointerPressed(start));
-        assert_eq!(host.application().selected, 0);
-        assert!(host.application().drag_offset.is_some());
-
-        host.handle_event(nickel_ui::UiEvent::PointerMoved(moved));
-        assert_ne!(host.application().displays[0].rect, origin);
-        assert_ne!(host.application().displays[0].logical_y, 0);
-
-        host.handle_event(nickel_ui::UiEvent::PointerReleased(moved));
-        assert!(host.application().drag_offset.is_none());
-        assert!(host.application().drag_origin.is_none());
-        assert!(!host.application().applied);
-
-        let settled = host.application().displays[0].rect;
-        let settled_target = host
-            .unique_semantic_target_for_message(&SettingsMessage::SelectDisplay(0))
-            .expect("moved display remains a semantic drag target");
-        let settled_start = nickel_ui::Point {
-            x: settled_target.bounds.origin.x + 12.0,
-            y: settled_target.bounds.origin.y + 12.0,
-        };
-        host.handle_event(nickel_ui::UiEvent::PointerPressed(settled_start));
-        host.handle_event(nickel_ui::UiEvent::PointerMoved(nickel_ui::Point {
-            x: settled_start.x - 45.0,
-            y: settled_start.y - 35.0,
-        }));
-        assert_ne!(host.application().displays[0].rect, settled);
-        host.handle_event(nickel_ui::UiEvent::FocusLost);
-        assert_eq!(host.application().displays[0].rect, settled);
-        assert!(host.application().drag_offset.is_none());
-        assert!(host.application().drag_origin.is_none());
     }
 
     #[test]

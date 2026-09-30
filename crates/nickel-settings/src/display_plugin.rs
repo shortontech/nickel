@@ -1,10 +1,7 @@
 //! Selected-display actions supplied by the bundled Settings JSX package.
 //! Topology, mode validation, drag geometry, and timed revert stay in Settings.
 
-use nickel_plugin_presentation::{
-    components::{PanelNode, PluginImages},
-    page::JsxPage,
-};
+use nickel_plugin_presentation::{components::PluginImages, page::JsxPage};
 use nickel_ui::{AnyView, SemanticTheme};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,14 +12,6 @@ const STALE_STATUS: &str = "Display selection changed; refresh the page";
 
 pub(super) struct DisplayPage {
     page: StyledSettingsPage,
-}
-
-#[derive(Clone)]
-pub(super) struct DisplayCardView {
-    pub(super) index: usize,
-    pub(super) name: String,
-    pub(super) detail: String,
-    pub(super) primary_label: String,
 }
 
 impl DisplayPage {
@@ -49,98 +38,17 @@ impl DisplayPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<(Vec<DisplayCardView>, [AnyView<SettingsMessage>; 8]), String> {
+    ) -> Result<AnyView<SettingsMessage>, String> {
         let (root, stylesheet) = self.page.render(
             data,
             theme,
             include_str!("../../../assets/plugins/settings/settings-display.css"),
         )?;
-        let PanelNode::Div { .. } = root else {
-            return Err("Display actions have an invalid root".into());
-        };
-        let PanelNode::Div {
-            children: card_nodes,
-            ..
-        } = root
-            .direct_child_with_class("display-cards")
-            .ok_or("Display arrangement is unavailable")?
-        else {
-            return Err("Display arrangement is invalid".into());
-        };
-        let projected = data["cards"]
-            .as_array()
-            .ok_or("Display arrangement projection is invalid")?;
-        if card_nodes.len() != projected.len() || card_nodes.len() > 16 {
-            return Err("Display arrangement changed".into());
-        }
-        let mut cards = Vec::with_capacity(card_nodes.len());
-        for node in card_nodes {
-            let PanelNode::Div { children, .. } = node else {
-                return Err("Display card is invalid".into());
-            };
-            let Some(PanelNode::Button { id, label, .. }) = children.last() else {
-                return Err("Display card action is invalid".into());
-            };
-            let [
-                PanelNode::Text { value: name, .. },
-                PanelNode::Text { value: detail, .. },
-                _,
-            ] = children.as_slice()
-            else {
-                return Err("Display card labels are invalid".into());
-            };
-            let index = id
-                .strip_prefix("display-card-")
-                .and_then(|index| index.parse::<usize>().ok())
-                .ok_or("Display card ID is invalid")?;
-            let Some(card) = projected
-                .iter()
-                .find(|card| card["index"].as_u64() == Some(index as u64))
-            else {
-                return Err("Display card identity changed".into());
-            };
-            if cards
-                .iter()
-                .any(|card: &DisplayCardView| card.index == index)
-            {
-                return Err("Display card identity changed".into());
-            }
-            cards.push(DisplayCardView {
-                index,
-                name: name.clone(),
-                detail: detail.clone(),
-                primary_label: if card["primary"] == true {
-                    label.clone()
-                } else {
-                    String::new()
-                },
-            });
-        }
-        let images = PluginImages::new();
-        let control_nodes = [
-            "display-enabled-row",
-            "display-resolution",
-            "display-refresh",
-            "display-scale",
-            "display-actions",
-            "display-confirmation",
-            "display-application-policy",
-            "display-application-scale",
-        ]
-        .map(|class| {
-            root.direct_child_with_class(class)
-                .ok_or_else(|| format!("Display section {class:?} is unavailable"))
-        })
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-        let controls = std::array::from_fn(|index| {
-            control_nodes[index].view_as_scoped::<SettingsMessage>(
-                &images,
-                stylesheet,
-                Some("display"),
-            )
-        });
-        Ok((cards, controls))
+        Ok(root.view_as_scoped::<SettingsMessage>(
+            &PluginImages::new(),
+            stylesheet,
+            Some("display"),
+        ))
     }
 
     fn dispatch(
@@ -161,12 +69,6 @@ impl DisplayPage {
         self.page
             .node()
             .and_then(|node| node.button_action(id).or_else(|| node.slider_action(id)))
-    }
-
-    pub(super) fn card_action(&self, index: usize) -> Option<usize> {
-        self.page
-            .node()
-            .and_then(|node| node.button_action(&format!("display-card-{index}")))
     }
 }
 
@@ -361,6 +263,10 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
                 "detail": display.detail,
                 "enabled": display.enabled,
                 "primary": display.primary,
+                "geometry": {"x": display.rect.x, "y": display.rect.y,
+                    "width": display.rect.w, "height": display.rect.h},
+                "scale_120": display.scale.units(),
+                "current_mode": display.mode,
             })
         })
         .collect::<Vec<_>>();
@@ -387,6 +293,11 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
     };
     json!({
         "connector": selected.connector,
+        "title": app.localizer.text("settings-display-title"),
+        "subtitle": app.localizer.text("settings-display-subtitle"),
+        "selectedName": selected.name,
+        "selectedDetail": selected.detail,
+        "status": app.status,
         "cards": cards,
         "disabledLabel": "DISABLED",
         "cardPrimaryLabel": "PRIMARY",
@@ -426,10 +337,6 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
 }
 
 impl SettingsApp {
-    pub(super) fn handle_display_jsx_action(&mut self, index: usize) {
-        self.handle_display_jsx_event(index, Value::Null);
-    }
-
     pub(super) fn handle_display_jsx_event(&mut self, index: usize, value: Value) {
         if self.page != SettingsPage::Display || !self.settings_jsx_enabled {
             return;
@@ -464,9 +371,7 @@ mod tests {
         let app = SettingsApp::with_initial_page(SettingsPage::Display);
         let data = projection(&app);
         let mut page = DisplayPage::new().unwrap();
-        let (cards, _) = page.render(&data, app.ui_theme()).unwrap();
-        assert_eq!(cards.len(), app.displays.len());
-        assert!(cards.iter().any(|card| card.name == app.displays[0].name));
+        let _ = page.render(&data, app.ui_theme()).unwrap();
         let select = page.action_for_id("display-card-0").unwrap();
         assert!(matches!(
             page.dispatch(select, Value::Null, &data),
