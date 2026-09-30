@@ -268,7 +268,7 @@ struct AssociationServiceState {
 }
 
 impl AssociationService {
-    fn new(backend: Box<dyn AssociationBackend>) -> Self {
+    pub(crate) fn new(backend: Box<dyn AssociationBackend>) -> Self {
         Self {
             backend,
             state: Mutex::new(AssociationServiceState::default()),
@@ -312,6 +312,26 @@ impl AssociationService {
             generation: state.generation,
             snapshot,
         })
+    }
+
+    /// Resolves the current platform catalog as one revisioned observation.
+    /// Consumers can use the returned generation for a later compare-and-set
+    /// without depending on a presentation-specific projection.
+    pub fn inspect_available_versioned(
+        &self,
+    ) -> Result<(u64, Vec<AssociationSnapshot>), AssociationError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let targets = self.backend.available_targets()?;
+        let results = self.backend.inspect_many(&targets);
+        let mut snapshots = Vec::with_capacity(results.len());
+        for (_, result) in results {
+            snapshots.push(result?);
+        }
+
+        for snapshot in &snapshots {
+            observe_snapshot(&mut state, &snapshot.target, snapshot)?;
+        }
+        Ok((state.generation, snapshots))
     }
 
     /// Changes only a target and handler selected from the fresh native catalog.
