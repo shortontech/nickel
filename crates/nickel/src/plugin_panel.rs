@@ -398,6 +398,10 @@ pub enum PluginEffect {
         id: String,
         direction: i8,
     },
+    Associations {
+        plugin_id: String,
+        effect: crate::associations_capabilities::AssociationsEffect,
+    },
     Connectivity {
         plugin_id: String,
         effect: crate::connectivity_capabilities::ConnectivityEffect,
@@ -1868,6 +1872,7 @@ impl PluginPanelApplication {
                     | "tray"
                     | "wifi"
                     | "bluetooth"
+                    | "associations"
             )
         }) {
             return Err("unknown host data field".into());
@@ -1923,6 +1928,7 @@ impl PluginPanelApplication {
         for (field, capability) in [
             ("wifi", PluginCapability::NetworkRead),
             ("bluetooth", PluginCapability::BluetoothRead),
+            ("associations", PluginCapability::AssociationsRead),
         ] {
             if fields.iter().any(|(name, _)| *name == field)
                 && !self.manifest.capabilities.contains(&capability)
@@ -2870,6 +2876,35 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 plugin_id: plugin_id.unwrap().to_owned(),
                                 id: id.unwrap().to_owned(),
                             });
+                        }
+                        _ if effect
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|operation| operation.starts_with("associations.")) =>
+                        {
+                            let request = crate::associations_capabilities::AssociationsEffect::parse(&effect).and_then(|request| {
+                                if !self.manifest.capabilities.contains(&request.capability()) {
+                                    return Err("associations control is not granted".into());
+                                }
+                                if matches!(request, crate::associations_capabilities::AssociationsEffect::SetDefault { .. }) {
+                                    if !self.manifest.capabilities.contains(&PluginCapability::AssociationsRead) {
+                                        return Err("associations read is not granted".into());
+                                    }
+                                    let data: Value = self.projection_data.as_deref().and_then(|data| serde_json::from_str(data).ok()).ok_or("association snapshot is unavailable")?;
+                                    request.validate(&data["associations"])?;
+                                }
+                                Ok(request)
+                            });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::Associations {
+                                    plugin_id: self.manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
                         }
                         _ if effect.get("type").and_then(Value::as_str).is_some_and(
                             |operation| {
@@ -5754,6 +5789,82 @@ mod tests {
         .unwrap();
         assert!(app.sync_host_data_field("audio", &next).unwrap());
         assert!(format!("{:?}", app.node).contains("65"));
+    }
+
+    #[test]
+    fn associations_clients_require_grants_and_validate_effect_identity() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities.clear();
+        let snapshot = serde_json::json!({"available":true,"revision":"7","targets":[{"id":"mime:text/plain","canSetDefault":true,"protected":false,"effectiveHandlerId":"old.desktop","handlers":[{"id":"new.desktop","protected":false}]}]});
+        let source = "function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'change',onClick:()=>nickel.associations.setDefault('mime:text/plain','new.desktop','7')}, 'Change')); }";
+        let data = serde_json::json!({"associations":snapshot}).to_string();
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        assert!(
+            denied
+                .sync_host_data_field("associations", &snapshot)
+                .is_err()
+        );
+        denied.update(denied.button_message("change").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest
+            .capabilities
+            .push(PluginCapability::AssociationsRead);
+        let mut readonly =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        assert!(
+            readonly
+                .sync_host_data_field("associations", &snapshot)
+                .is_ok()
+        );
+        readonly.update(readonly.button_message("change").unwrap());
+        assert!(readonly.take_effects().is_empty());
+        manifest
+            .capabilities
+            .push(PluginCapability::AssociationsControl);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data)).unwrap();
+        granted.update(granted.button_message("change").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::Associations { .. }]
+        ));
+        let mut stale = snapshot;
+        stale["revision"] = "8".into();
+        granted
+            .sync_host_data_field("associations", &stale)
+            .unwrap();
+        granted.update(granted.button_message("change").unwrap());
+        assert!(granted.take_effects().is_empty());
+
+        let source = "function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'open',onClick:()=>nickel.associations.openSystemSettings()}, 'Open')); }";
+        manifest.capabilities.clear();
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        denied.update(denied.button_message("open").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest
+            .capabilities
+            .push(PluginCapability::AssociationsControl);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        granted.update(granted.button_message("open").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::Associations {
+                effect: crate::associations_capabilities::AssociationsEffect::OpenSystemSettings,
+                ..
+            }]
+        ));
     }
 
     #[test]

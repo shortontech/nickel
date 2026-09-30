@@ -627,6 +627,7 @@ pub struct LiveShell {
     bluetooth: BluetoothStatus,
     audio: AudioStatus,
     audio_status_observed: bool,
+    associations_results: HashMap<String, serde_json::Value>,
     volume_osd_until: Option<Instant>,
     launcher_visible: bool,
     run_visible: bool,
@@ -1713,6 +1714,7 @@ impl LiveShell {
             audio,
             volume_osd_until: None,
             audio_status_observed: false,
+            associations_results: HashMap::new(),
             launcher_visible: false,
             run_visible: false,
             locked: false,
@@ -3583,6 +3585,24 @@ impl LiveShell {
         })
     }
 
+    fn plugin_associations(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::AssociationsRead)
+            .then(|| {
+                crate::associations_capabilities::snapshot(self.associations_results.get(plugin_id))
+            })
+    }
+
     fn plugin_audio(&self, plugin_id: &str) -> Option<serde_json::Value> {
         let manifest = self
             .external_plugin_packages
@@ -3878,6 +3898,7 @@ impl LiveShell {
             .filter(|entry| entry.manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::TrayRead))
             .map(|_| serde_json::Value::Array(self.tray.iter().take(128).map(|item| serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect()));
         let audio = self.plugin_audio(&key.plugin_id);
+        let associations = self.plugin_associations(&key.plugin_id);
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
         let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
         let displays = self.plugin_displays(&key.plugin_id);
@@ -3915,6 +3936,7 @@ impl LiveShell {
                     ("notifications", notifications.as_ref()),
                     ("audio", audio.as_ref()),
                     ("tray", tray.as_ref()),
+                    ("associations", associations.as_ref()),
                     ("wifi", wifi.as_ref()),
                     ("bluetooth", bluetooth.as_ref()),
                     ("displays", displays.as_ref()),
@@ -4459,6 +4481,7 @@ impl LiveShell {
             self.package_settings_runtimes.remove(&id);
             self.package_settings_values.remove(&id);
             self.package_settings_value_revisions.remove(&id);
+            self.associations_results.remove(&id);
         }
         let mut changed_runtime = false;
         for (id, runtime) in &runtimes {
@@ -4469,6 +4492,7 @@ impl LiveShell {
             {
                 continue;
             }
+            self.associations_results.remove(id);
             match runtime
                 .borrow_mut()
                 .publish_settings(&mut self.package_settings_registry, id)
@@ -6924,6 +6948,18 @@ impl LiveShell {
                             .application_mut()
                             .request_effect(NotificationEffect::CloseHistory);
                         changed |= self.apply_notification_effects();
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Associations { plugin_id, effect } => {
+                    let granted = self.external_plugin_packages.get(&plugin_id).map(|package| &package.manifest)
+                        .or_else(|| self.plugin_registry.get(&plugin_id).map(|entry| &entry.manifest))
+                        .is_some_and(|manifest| manifest.capabilities.contains(&effect.capability())
+                            && (!matches!(effect, crate::associations_capabilities::AssociationsEffect::SetDefault { .. })
+                                || manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::AssociationsRead)));
+                    if granted && !self.locked {
+                        let result = effect.execute_native().unwrap_or_else(|error| serde_json::json!({"status":"rejected","detail":error.chars().take(512).collect::<String>()}));
+                        self.associations_results.insert(plugin_id, result);
+                        changed = true;
                     }
                 }
                 crate::plugin_panel::PluginEffect::Connectivity { plugin_id, effect } => {

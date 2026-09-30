@@ -320,18 +320,29 @@ impl AssociationService {
     pub fn inspect_available_versioned(
         &self,
     ) -> Result<(u64, Vec<AssociationSnapshot>), AssociationError> {
+        let (revision, snapshots, _) = self.inspect_available_bounded_versioned(usize::MAX)?;
+        Ok((revision, snapshots))
+    }
+
+    /// Bounded catalog observation for capability clients. The returned flag
+    /// reports whether native targets were omitted from this observation.
+    pub fn inspect_available_bounded_versioned(
+        &self,
+        limit: usize,
+    ) -> Result<(u64, Vec<AssociationSnapshot>, bool), AssociationError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let targets = self.backend.available_targets()?;
+        let mut targets = self.backend.available_targets()?;
+        let truncated = targets.len() > limit;
+        targets.truncate(limit);
         let results = self.backend.inspect_many(&targets);
         let mut snapshots = Vec::with_capacity(results.len());
         for (_, result) in results {
             snapshots.push(result?);
         }
-
         for snapshot in &snapshots {
             observe_snapshot(&mut state, &snapshot.target, snapshot)?;
         }
-        Ok((state.generation, snapshots))
+        Ok((state.generation, snapshots, truncated))
     }
 
     /// Changes only a target and handler selected from the fresh native catalog.
@@ -1799,6 +1810,43 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.handlers.len(), 250);
         assert_eq!(snapshot.handlers.last().unwrap().id, "handler-249.desktop");
+    }
+
+    #[test]
+    fn associations_bounded_catalog_observes_only_exposed_targets_without_revision_churn() {
+        struct CatalogFixture;
+        impl AssociationBackend for CatalogFixture {
+            fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
+                Ok((0..1000)
+                    .map(|id| AssociationTarget::mime(format!("application/x-{id}")))
+                    .collect())
+            }
+            fn inspect(
+                &self,
+                target: &AssociationTarget,
+            ) -> Result<AssociationSnapshot, AssociationError> {
+                assert!(
+                    matches!(target, AssociationTarget::Mime(id) if id == "application/x-0" || id == "application/x-1")
+                );
+                LargeFixture.inspect(target)
+            }
+            fn request_change(
+                &self,
+                _: &AssociationTarget,
+                _: &str,
+            ) -> Result<ChangeOutcome, AssociationError> {
+                unreachable!()
+            }
+        }
+        let service = AssociationService::new(Box::new(CatalogFixture));
+        let (revision, snapshots, truncated) =
+            service.inspect_available_bounded_versioned(2).unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert!(truncated);
+        assert_eq!(
+            service.inspect_available_bounded_versioned(2).unwrap().0,
+            revision
+        );
     }
 
     #[test]

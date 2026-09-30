@@ -175,6 +175,45 @@ mod tests {
     }
 
     #[test]
+    fn associations_clients_copy_snapshots_and_emit_expected_revision_and_handler() {
+        let mut runtime = super::JsxRuntime::new("", Some(r#"{"associations":{"available":true,"revision":"9007199254740993","targets":[{"id":"mime:text/plain","capability":"nativeConsent","canSetDefault":true,"protected":false,"effectiveHandlerId":"old.desktop","handlers":[{"id":"new.desktop","name":"New","protected":false},{"id":"protected.desktop","protected":true}]}]}}"#)).unwrap();
+        runtime.eval("nickel.associations.getHandlers('mime:text/plain').handlers[0].name = 'mutated'; nickel.associations.setDefault('mime:text/plain','new.desktop','9007199254740993'); nickel.associations.openSystemSettings();").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>(
+                    "JSON.stringify(nickel.associations.list()[0].handlers[0].name)"
+                )
+                .unwrap(),
+            "New"
+        );
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(
+            effects[0],
+            serde_json::json!({"type":"associations.setDefault","targetId":"mime:text/plain","handlerId":"new.desktop","revision":"9007199254740993","expectedHandlerId":"old.desktop"})
+        );
+        assert_eq!(effects[1]["type"], "associations.openSystemSettings");
+        assert!(runtime.eval("nickel.associations.setDefault('mime:text/plain','new.desktop',9007199254740993)").is_err());
+        assert!(
+            runtime
+                .eval("nickel.associations.setDefault('mime:text/plain','new.desktop','1')")
+                .is_err()
+        );
+        assert!(runtime.eval("nickel.associations.setDefault('mime:text/plain','protected.desktop','9007199254740993')").is_err());
+        let mut denied = super::JsxRuntime::new("", None).unwrap();
+        assert_eq!(
+            denied
+                .eval_json::<serde_json::Value>("JSON.stringify(nickel.associations.get())")
+                .unwrap()["available"],
+            false
+        );
+        assert!(
+            denied
+                .eval("nickel.associations.getHandlers('mime:text/plain')")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn connectivity_clients_copy_snapshots_and_emit_revision_bound_effects() {
         let mut runtime = super::JsxRuntime::new("", Some(r#"{"wifi":{"available":true,"revision":"0123456789abcdef","operations":{"connect":true,"setEnabled":true},"networks":[{"id":"stable-profile","name":"SSID"}]},"bluetooth":{"available":true,"revision":"fedcba9876543210","operations":{"connect":true},"devices":[{"id":"stable-device"}]}}"#)).unwrap();
         runtime.eval("nickel.wifi.listNetworks()[0].name = 'mutated'; nickel.wifi.connect('stable-profile'); nickel.bluetooth.connect('stable-device');").unwrap();

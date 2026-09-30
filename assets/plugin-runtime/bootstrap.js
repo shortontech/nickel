@@ -265,6 +265,28 @@ const nickel = Object.freeze({
         if (!component) throw Error(`unknown public component ${contract}`);
         return component;
     },
+    associations: Object.freeze({
+        get() { return __nickelResource('associations', {available:false,reason:'Associations read capability is unavailable',targets:[],operations:{},lastResult:null}); },
+        list() { return this.get().targets; },
+        getHandlers(targetId) {
+            const target = this.list().find(target => target.id === __nickelIdentity(targetId));
+            if (!target) throw Error('association target is unavailable');
+            return {revision:this.get().revision,target,handlers:target.handlers};
+        },
+        setDefault(targetId, handlerId, expectedRevision) {
+            const snapshot = this.get();
+            const target = snapshot.targets.find(target => target.id === __nickelIdentity(targetId));
+            handlerId = __nickelIdentity(handlerId);
+            if (typeof expectedRevision !== 'string' || !/^[1-9][0-9]*$/.test(expectedRevision) || expectedRevision !== snapshot.revision)
+                throw Error('association snapshot is stale');
+            if (!snapshot.available || !target?.canSetDefault || target.protected)
+                throw Error('association changes are unavailable or protected');
+            const handler = target.handlers.find(handler => handler.id === handlerId);
+            if (!handler || handler.protected) throw Error('association handler is unavailable or protected');
+            __effects.push({type:'associations.setDefault',targetId,handlerId,revision:expectedRevision,expectedHandlerId:target.effectiveHandlerId});
+        },
+        openSystemSettings() { __effects.push({type:'associations.openSystemSettings'}); }
+    }),
     wifi: Object.freeze({
         get() { return __nickelResource('wifi', {available:false, reason:'Wi-Fi read capability is unavailable', networks:[], operations:{}}); },
         listNetworks() { return this.get().networks; },
