@@ -4283,6 +4283,22 @@ impl LiveShell {
         }
     }
 
+    fn plugin_navigation(&self, id: &str) -> Option<serde_json::Value> {
+        self.plugin_registry
+            .get(id)
+            .filter(|entry| {
+                entry
+                    .manifest
+                    .capabilities
+                    .contains(&nickel_core::plugins::PluginCapability::SettingsRead)
+            })
+            .and_then(|_| self.settings_navigation.clone())
+    }
+
+    fn plugin_system_metadata() -> serde_json::Value {
+        serde_json::json!({"available":true,"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH})
+    }
+
     fn plugin_owner_resource_fields(&mut self, id: &str) -> Vec<(&'static str, serde_json::Value)> {
         let tray = self
             .plugin_registry
@@ -4311,6 +4327,10 @@ impl LiveShell {
             ("appearance", self.plugin_appearance(id, false)),
             ("wallpaper", self.plugin_appearance(id, true)),
             ("session", self.plugin_session(id)),
+            ("features", self.plugin_features(id, false)),
+            ("shortcuts", self.plugin_features(id, true)),
+            ("system", Some(Self::plugin_system_metadata())),
+            ("navigation", self.plugin_navigation(id)),
             ("wifi", self.plugin_connectivity(id, true)),
             ("bluetooth", self.plugin_connectivity(id, false)),
             ("displays", self.plugin_displays(id)),
@@ -4365,17 +4385,8 @@ impl LiveShell {
         if wallpaper.is_some() {
             application_images.extend(self.appearance_capabilities.wallpaper_images.clone());
         }
-        let system = serde_json::json!({"available":true,"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH});
-        let navigation = self
-            .plugin_registry
-            .get(&key.plugin_id)
-            .filter(|entry| {
-                entry
-                    .manifest
-                    .capabilities
-                    .contains(&nickel_core::plugins::PluginCapability::SettingsRead)
-            })
-            .and_then(|_| self.settings_navigation.clone());
+        let system = Self::plugin_system_metadata();
+        let navigation = self.plugin_navigation(&key.plugin_id);
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
         let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
         let displays = self.plugin_displays(&key.plugin_id);
