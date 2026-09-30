@@ -1,61 +1,38 @@
 # Nested runtime acceptance
 
-Build and run the bounded live nested-session check with:
+Build the participating binaries locally:
 
 ```sh
 cargo build -p nickel --no-default-features --features backend-winit \
   --bin nickel-nested --bin nickel-test-input --bin nickel-nested-acceptance
-cargo build -p nickel-settings --bin nickel-settings
 ./target/debug/nickel-nested-acceptance
 ```
 
-The harness creates a private `XDG_RUNTIME_DIR`, starts the dedicated `nickel-nested`
-binary with explicit test control, then waits for
-compositor-owned shell readiness. It asserts that no
-shell PID is expected or authenticated and no `--role shell` child exists,
-checks the internal surface inventory and live health of eight bundled UI
-plugins, measures the launcher's rendered native UI memory, then disables and
-re-enables it while checking memory cleanup and surface retirement. It injects
-Meta through the nested session's test-control socket and verifies that the
-internal launcher becomes visible and closes again. It then samples compositor
-CPU ticks across a two-second idle interval. After the idle sample it opens
-Settings in the private nested session, waits for
-its measured plugin UI memory to appear in shell status, closes Settings, and
-checks that the report expires before requesting logout. The harness does not
-create a uinput controller: Linux exposes that device to the
-host desktop too, where its Guide button can activate the host launcher. Every
-phase has a deadline. On
-failure, the harness terminates its compositor child and removes its temporary
-runtime data.
+The harness creates a private runtime and configuration directory, starts the
+nested compositor with explicit test control, and waits for native output
+readiness. It checks the default shell as one package: taskbar layout, opening
+the launcher with Meta, opening and closing the JSX Settings window, retaining
+the package when optional windows close, and retiring/re-enabling its surfaces.
+It also checks installed sibling windows, separate dialogs and overlays, native
+screenshot input/lifecycle, and socket component layout pagination. Native
+Desktop and Lock surfaces remain required. No separate Settings executable is
+built or launched, and there is no memory budget acceptance gate.
 
-The harness also installs the shipped component-window example into the private
-profile. It checks that enabling the package maps an ordinary window with a
-retained UI memory report, sends a scoped pointer click to open its component
-dialog, and observes the larger retained native tree. It clicks the dialog's
-typed Settings action, checks that Settings opens in the private session and
-reports its own UI memory, then closes it and waits for that report to expire.
-Disabling the example unregisters
-the window and clears that report, and re-enabling creates a fresh window identity.
-It then installs a two-window package, focuses one window and sends Alt+F4
-through the same scoped test-control socket. The test checks that the other
-declared window remains, the package stays running, and its reported native UI
-memory falls after the close. The surviving window retains its ordinary window
-ID while the input lease rotates during output reconciliation. Its component
-button then requests its declared sibling through the plugin API; the test
-checks that the sibling maps again and the memory account grows.
+Input is sent through the nested session's private socket. The harness does not
+create a host-visible controller or inject a Guide key. Failures request logout,
+then terminate the compositor if necessary and remove the private runtime.
+Each readiness/interaction wait is bounded. This harness targets the new default
+package; it must run after stock cutover, not against the retired per-page hosts.
 
-This is a live graphical acceptance check, so it requires a working host display.
-On hosts where GLVND's default vendor cannot create a nested EGL display, an installed Mesa software
-renderer can be selected explicitly without changing the compositor under test:
+A working graphical host display is required. Mesa software rendering can be
+selected explicitly where the default EGL vendor cannot create a nested display:
 
 ```sh
 __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
 LIBGL_ALWAYS_SOFTWARE=1 ./target/debug/nickel-nested-acceptance
 ```
 
-To exercise the X11 host path from a Wayland session, provide a nonexistent `WAYLAND_DISPLAY` to
-the harness while retaining a valid `DISPLAY`. The harness removes both Wayland selectors from the
-nested child so winit selects X11:
+To exercise X11 from a Wayland host while retaining a valid `DISPLAY`:
 
 ```sh
 WAYLAND_DISPLAY=does-not-exist \
@@ -63,9 +40,8 @@ __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
 LIBGL_ALWAYS_SOFTWARE=1 ./target/debug/nickel-nested-acceptance
 ```
 
-The idle check allows up to one fully occupied CPU core across its two-second
-window (on the Linux 100 Hz process clock), a deliberately broad bound intended
-to catch an unbounded redraw loop without imposing a benchmark-grade threshold.
+The records below describe the previous harness and its previous architecture;
+they do not establish acceptance for the shared shell package.
 
 ## Recorded plugin run, 2026-09-27
 

@@ -43,7 +43,6 @@ fn run() -> Result<(), String> {
         .ok_or("acceptance harness has no parent directory")?;
     let nickel = sibling(directory, "nickel-nested")?;
     let test_input = sibling(directory, "nickel-test-input")?;
-    let settings = sibling(directory, "nickel-settings")?;
     let runtime = env::temp_dir().join(format!(
         "nickel-nested-acceptance-{}-{}",
         std::process::id(),
@@ -55,62 +54,7 @@ fn run() -> Result<(), String> {
     fs::create_dir(&runtime).map_err(|error| error.to_string())?;
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
         .map_err(|error| error.to_string())?;
-    let plugin = runtime
-        .join("config/nickel/plugins/org.example.acceptance-panel");
-    fs::create_dir_all(&plugin).map_err(|error| error.to_string())?;
-    fs::write(
-        plugin.join("plugin.json"),
-        r#"{"api_version":1,"id":"org.example.acceptance-panel","name":"Acceptance Panel","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":360,"height":96,"bottom_offset":12,"output":"all"}],"settings":[{"id":"show-label","label":"Show label","kind":"boolean","default":true}]}"#,
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(
-        plugin.join("main.js"),
-        "function App() { return h(FixedWindow, {width: 360, height: 96}, h(Text, {}, nickel.data.settings['show-label'] ? 'On' : 'Off')); }",
-    )
-    .map_err(|error| error.to_string())?;
-    let reserved = runtime
-        .join("config/nickel/plugins/org.example.reserved-panel");
-    fs::create_dir_all(&reserved).map_err(|error| error.to_string())?;
-    fs::write(
-        reserved.join("plugin.json"),
-        include_str!("../../../../../assets/plugins/example-reserved-panel/plugin.json"),
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(
-        reserved.join("main.js"),
-        include_str!("../../../../../assets/plugins/example-reserved-panel/main.js"),
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(
-        reserved.join("ui.css"),
-        include_str!("../../../../../assets/plugins/example-reserved-panel/ui.css"),
-    )
-    .map_err(|error| error.to_string())?;
-    let window = runtime
-        .join("config/nickel/plugins/org.example.component-window");
-    fs::create_dir_all(&window).map_err(|error| error.to_string())?;
-    fs::write(
-        window.join("plugin.json"),
-        include_str!("../../../../../assets/plugins/example-window/plugin.json"),
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(
-        window.join("main.js"),
-        include_str!("../../../../../assets/plugins/example-window/main.js"),
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(
-        window.join("ui.css"),
-        include_str!("../../../../../assets/plugins/example-window/ui.css"),
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(
-        window.join("icon.png"),
-        include_bytes!("../../../../../assets/plugins/example-window/icon.png"),
-    )
-    .map_err(|error| error.to_string())?;
-    let windows = runtime
-        .join("config/nickel/plugins/org.example.acceptance-windows");
+    let windows = runtime.join("config/nickel/plugins/org.example.acceptance-windows");
     fs::create_dir_all(&windows).map_err(|error| error.to_string())?;
     fs::write(
         windows.join("plugin.json"),
@@ -122,8 +66,7 @@ fn run() -> Result<(), String> {
         "function App() { const [compact, setCompact] = useState(false); return nickel.data.surface.id === 'first' ? h(Window, {width: compact ? 300 : 360, height: 220}, h(Column, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second'), h(Button, {id: 'focus', onClick: () => nickel.request({type: 'surface.focus', id: 'second'})}, 'Focus second'), h(Button, {id: 'move', onClick: () => nickel.request({type: 'surface.setPlacement', surfaceId: 'first', anchor: 'top-left', offsetX: 24, offsetY: 24})}, 'Move first'), h(Button, {id: 'resize', onClick: () => setCompact(true)}, 'Resize first'))) : h(Window, {width: 420, height: 240}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
     )
     .map_err(|error| error.to_string())?;
-    let dialog = runtime
-        .join("config/nickel/plugins/org.example.surface-dialog");
+    let dialog = runtime.join("config/nickel/plugins/org.example.surface-dialog");
     fs::create_dir_all(&dialog).map_err(|error| error.to_string())?;
     fs::write(
         dialog.join("plugin.json"),
@@ -157,34 +100,6 @@ fn run() -> Result<(), String> {
         include_str!("../../../../../assets/plugins/example-overlay/ui.css"),
     )
     .map_err(|error| error.to_string())?;
-    for (id, manifest, source, stylesheet) in [
-        (
-            "org.example.widget-host",
-            include_str!("../../../../../assets/plugins/example-widget-host/plugin.json"),
-            include_str!("../../../../../assets/plugins/example-widget-host/main.js"),
-            Some(include_str!("../../../../../assets/plugins/example-widget-host/ui.css")),
-        ),
-        (
-            "org.example.widget-contributor",
-            include_str!("../../../../../assets/plugins/example-widget-contributor/plugin.json"),
-            include_str!("../../../../../assets/plugins/example-widget-contributor/main.js"),
-            None,
-        ),
-        (
-            "org.example.action-contributor",
-            include_str!("../../../../../assets/plugins/example-action-contributor/plugin.json"),
-            include_str!("../../../../../assets/plugins/example-action-contributor/main.js"),
-            None,
-        ),
-    ] {
-        let directory = runtime.join("config/nickel/plugins").join(id);
-        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-        fs::write(directory.join("plugin.json"), manifest).map_err(|error| error.to_string())?;
-        fs::write(directory.join("main.js"), source).map_err(|error| error.to_string())?;
-        if let Some(stylesheet) = stylesheet {
-            fs::write(directory.join("ui.css"), stylesheet).map_err(|error| error.to_string())?;
-        }
-    }
     let capability_file = runtime.join("shell-environment");
 
     let mut command = Command::new(&nickel);
@@ -215,7 +130,7 @@ fn run() -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("could not start nested compositor: {error}"))?;
 
-    let result = exercise(&mut compositor, &test_input, &settings, &capability_file);
+    let result = exercise(&mut compositor, &test_input, &capability_file);
     if compositor
         .try_wait()
         .map_err(|error| error.to_string())?
@@ -258,7 +173,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor ran bundled UI, native screenshot input and lifecycle, an installed panel, component and standalone dialogs, a plugin overlay, and sibling windows; checked live component layouts, typed surface focus and hide, owner-close retirement, memory, launcher plugin retirement, and clean shutdown"
+        "PASS: shared default shell, optional JSX Settings, scoped Meta input, installed sibling/dialog/overlay lifecycle, native screenshot, component socket layouts, and clean shutdown"
     );
     Ok(())
 }
@@ -266,7 +181,6 @@ fn run() -> Result<(), String> {
 fn exercise(
     compositor: &mut Child,
     test_input: &Path,
-    settings: &Path,
     capability_file: &Path,
 ) -> Result<(), String> {
     let deadline = Instant::now() + DEADLINE;
@@ -276,402 +190,143 @@ fn exercise(
                 "nested compositor exited before readiness: {status}"
             ));
         }
-        if let Ok(environment) = read_environment(capability_file) {
+        if let Ok(environment) = read_environment(capability_file)
+            && let Ok(readiness) = checked(test_input, &environment, &["readiness"])
+            && readiness.contains("output_roles_ready=true")
+        {
+            if !readiness.contains("expected_pid=None authenticated_pid=None") {
+                return Err(format!("unexpected shell process authority: {readiness}"));
+            }
             break environment;
         }
         if Instant::now() >= deadline {
-            return Err("nested compositor did not become ready within 30 seconds".into());
+            return Err("nested shell readiness timed out".into());
         }
         thread::sleep(POLL);
     };
-
-    // The capability file is published just before the datagram listener is
-    // fully dispatchable. Treat that narrow startup window as readiness still
-    // pending instead of failing the acceptance run on a transient EAGAIN.
-    let readiness = loop {
-        match checked(test_input, &environment, &["readiness"]) {
-            Ok(readiness)
-                if readiness.contains("panels=1")
-                    && readiness.contains("output_roles_ready=true") =>
-            {
-                break readiness;
-            }
-            Ok(readiness) if Instant::now() >= deadline => {
-                let surfaces = checked(test_input, &environment, &["surfaces"])
-                    .unwrap_or_else(|error| format!("surface inventory unavailable: {error}"));
-                return Err(format!("panel readiness did not settle: {readiness}; {surfaces}"));
-            }
-            Ok(_) => thread::sleep(POLL),
-            Err(error) if Instant::now() < deadline => {
-                if let Some(status) = compositor.try_wait().map_err(|error| error.to_string())? {
-                    return Err(format!(
-                        "nested compositor exited while awaiting readiness: {status}: {error}"
-                    ));
-                }
-                thread::sleep(POLL);
-            }
-            Err(error) => return Err(format!("readiness failed before deadline: {error}")),
-        }
-    };
-    if !readiness.contains("expected_pid=None authenticated_pid=None") {
-        return Err(format!(
-            "internal runtime unexpectedly has shell PID authority: {readiness}"
-        ));
-    }
-    let surfaces = checked(test_input, &environment, &["surfaces"])?;
-    for role in ["Desktop", "Lock", "Launcher"] {
-        if !surfaces.contains(role) {
-            return Err(format!(
-                "surface inventory does not contain {role}: {surfaces:?}"
-            ));
-        }
-    }
-    if !surfaces.lines().any(|line| {
-        line.starts_with("Panel\twinit\t")
-            && line.ends_with("org.nickel.taskbar/main")
-    }) {
-        return Err(format!("taskbar plugin surface is missing: {surfaces:?}"));
-    }
-    if native_surface_geometry(&surfaces, "Desktop").is_none() {
-        return Err(format!("native desktop surface is missing: {surfaces:?}"));
-    }
-    if !surfaces.lines().any(|line| {
-        line.starts_with("Preview\tunmapped\t")
-            && line.ends_with("org.nickel.window-preview/main")
-    }) {
-        return Err(format!("preview plugin surface is missing: {surfaces:?}"));
-    }
-    verify_layout_snapshot(test_input, &environment, "org.nickel.taskbar/main")?;
-    verify_taskbar_control_layout(test_input, &environment, &surfaces)?;
-    verify_native_layout_snapshot(test_input, &environment, "Desktop")?;
-    let plugin_output = checked(test_input, &environment, &["plugins"])?;
-    let plugins: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&plugin_output).map_err(|error| error.to_string())?;
-    for id in [
-        "org.nickel.taskbar",
-        "org.nickel.launcher",
-        "org.nickel.run",
-        "org.nickel.notification",
-        "org.nickel.volume-osd",
-        "org.nickel.control-center",
-        "org.nickel.codex-projects",
-        "org.nickel.on-screen-keyboard",
-        "org.nickel.window-preview",
-    ] {
-        let plugin = plugins
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == id)
-            .ok_or_else(|| format!("missing bundled plugin {id}"))?;
-        if !plugin.desired_enabled
-            || plugin.health != nickel_session_protocol::PluginRuntimeHealth::Running
-        {
-            return Err(format!("bundled plugin {id} is not running: {:?}", plugin.health));
-        }
-    }
-    for id in ["org.nickel.desktop", "org.nickel.screenshot"] {
-        if plugins.plugins.iter().any(|plugin| plugin.id == id) {
-            return Err(format!("native surface {id} is still registered as a plugin"));
-        }
-    }
     assert_no_shell_child(compositor.id())?;
-    let taskbar_origin = panel_geometry(&surfaces, "org.nickel.taskbar/main")
-        .map(|(x, y, _, _)| (x, y))
-        .ok_or("taskbar has no panel geometry")?;
+    let surfaces = checked(test_input, &environment, &["surfaces"])?;
+    for role in ["Desktop", "Lock"] {
+        if !surfaces
+            .lines()
+            .any(|line| line.starts_with(&format!("{role}\t")))
+        {
+            return Err(format!("native {role} is absent: {surfaces}"));
+        }
+    }
+    verify_native_layout_snapshot(test_input, &environment, "Desktop")?;
+    assert_default_package(test_input, &environment, true)?;
+    verify_layout_snapshot(test_input, &environment, "nickel-default/taskbar")?;
+    // Meta is sent only through the explicitly enabled nested socket.
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    let launcher = wait_for_plugin_window(
+        test_input,
+        &environment,
+        "nickel-default",
+        "Nickel Launcher",
+        Duration::from_secs(5),
+    )?;
+    verify_layout_snapshot(test_input, &environment, "nickel-default/launcher")?;
     click_plugin_control(
         test_input,
         &environment,
-        "org.nickel.taskbar/main",
-        "taskbar-launcher",
-        taskbar_origin,
+        "nickel-default/launcher",
+        "launcher-settings",
+        (launcher.1, launcher.2),
     )?;
-    wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
-    verify_layout_snapshot(test_input, &environment, "org.nickel.launcher/main")?;
-    verify_launcher_control_layout(test_input, &environment)?;
-    let launcher_memory = wait_for_plugin_native_memory(
+    let settings = wait_for_plugin_window(
         test_input,
         &environment,
-        "org.nickel.launcher",
-        Duration::from_secs(2),
-    )?;
-    if launcher_memory == 0 {
-        return Err("rendered launcher reported zero native UI memory".into());
-    }
-    let disabled = checked(
-        test_input,
-        &environment,
-        &["plugin-set", "org.nickel.launcher", "disabled"],
-    )?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let launcher_status = disabled
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == "org.nickel.launcher")
-        .ok_or("launcher missing after disable")?;
-    if launcher_status.desired_enabled
-        || launcher_status.health != nickel_session_protocol::PluginRuntimeHealth::Disabled
-        || launcher_status.memory.native_ui_bytes.is_some()
-    {
-        return Err("launcher did not retire and clear reported UI memory".into());
-    }
-    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
-    thread::sleep(Duration::from_millis(250));
-    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
-    verify_run_plugin_owns_dialog(test_input, &environment)?;
-    let enabled = checked(
-        test_input,
-        &environment,
-        &["plugin-set", "org.nickel.launcher", "enabled"],
-    )?;
-    let enabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&enabled).map_err(|error| error.to_string())?;
-    let launcher_status = enabled
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == "org.nickel.launcher")
-        .ok_or("launcher missing after re-enable")?;
-    if !launcher_status.desired_enabled
-        || launcher_status.health != nickel_session_protocol::PluginRuntimeHealth::Running
-    {
-        return Err("launcher did not resume after re-enable".into());
-    }
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
-    wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
-    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
-    verify_taskbar_plugin_retires(test_input, &environment)?;
-    wait_for_desktop_presence(test_input, &environment, true, Duration::from_secs(2))?;
-    verify_bundled_overlay_surface_retires(test_input, &environment, "org.nickel.volume-osd", "VolumeOsd")?;
-    verify_bundled_overlay_surface_retires(test_input, &environment, "org.nickel.window-preview", "Preview")?;
-    verify_control_plugin_retires(test_input, &environment)?;
-    verify_codex_project_plugin_retires(test_input, &environment)?;
-    verify_keyboard_plugin_retires(test_input, &environment)?;
-    verify_notification_plugin_retires(test_input, &environment)?;
-    verify_reserved_panel_stacks_and_reflows(test_input, &environment)?;
-    let panel_id = "org.example.acceptance-panel";
-    let activated = checked(test_input, &environment, &["plugin-set", panel_id, "enabled"])?;
-    let activated: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&activated).map_err(|error| error.to_string())?;
-    let panel = activated
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == panel_id)
-        .ok_or("installed panel missing after enable")?;
-    if !panel.desired_enabled
-        || panel.health != nickel_session_protocol::PluginRuntimeHealth::Running
-        || panel.settings.first().map(|setting| &setting.value) != Some(&serde_json::json!(true))
-    {
-        return Err("installed panel did not start with its declared setting".into());
-    }
-    wait_for_plugin_panel_on_output(
-        test_input,
-        &environment,
-        "winit",
-        true,
+        "nickel-default",
+        "Nickel Settings",
         Duration::from_secs(5),
     )?;
-    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(5))?;
+    verify_layout_snapshot(test_input, &environment, "nickel-default/settings")?;
     checked(
         test_input,
         &environment,
-        &["output-connect", "DP-plugin-test", "1024", "768", "180", "normal"],
+        &["window", "close", &settings.0.to_string()],
     )?;
-    let outputs = checked(test_input, &environment, &["outputs"])?;
-    if !outputs
-        .lines()
-        .any(|line| line.starts_with("DP-plugin-test\t") && line.contains("\tscale=180/120\t"))
-    {
-        return Err(format!("scaled plugin test output is missing: {outputs}"));
+    wait_for_window_absent(test_input, &environment, settings.0)?;
+    checked(
+        test_input,
+        &environment,
+        &["window", "close", &launcher.0.to_string()],
+    )?;
+    wait_for_window_absent(test_input, &environment, launcher.0)?;
+    // Closing optional windows must keep the package and taskbar alive.
+    assert_default_package(test_input, &environment, true)?;
+    verify_layout_snapshot(test_input, &environment, "nickel-default/taskbar")?;
+    checked(
+        test_input,
+        &environment,
+        &["plugin-set", "nickel-default", "disabled"],
+    )?;
+    assert_default_package(test_input, &environment, false)?;
+    let layouts = checked(test_input, &environment, &["layouts"])?;
+    if layouts.lines().any(|line| line.contains("nickel-default/")) {
+        return Err(format!(
+            "disabled shell retained native component surfaces: {layouts}"
+        ));
     }
-    wait_for_plugin_panel_on_output(
+    checked(
         test_input,
         &environment,
-        "DP-plugin-test",
-        true,
-        Duration::from_secs(5),
+        &["plugin-set", "nickel-default", "enabled"],
     )?;
-    checked(test_input, &environment, &["output-disconnect", "DP-plugin-test"])?;
-    wait_for_plugin_panel_on_output(
-        test_input,
-        &environment,
-        "DP-plugin-test",
-        false,
-        Duration::from_secs(5),
-    )?;
-    wait_for_plugin_panel_on_output(
-        test_input,
-        &environment,
-        "winit",
-        true,
-        Duration::from_secs(5),
-    )?;
-    let changed = checked(
-        test_input,
-        &environment,
-        &["plugin-setting", panel_id, "show-label", "false"],
-    )?;
-    let changed: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&changed).map_err(|error| error.to_string())?;
-    let panel = changed
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == panel_id)
-        .ok_or("installed panel missing after setting change")?;
-    if !panel.desired_enabled
-        || panel.health != nickel_session_protocol::PluginRuntimeHealth::Running
-        || panel.settings.first().map(|setting| &setting.value) != Some(&serde_json::json!(false))
-        || changed.activation_generation <= activated.activation_generation
-    {
-        return Err("installed panel setting was not applied to the running plugin".into());
-    }
-    wait_for_plugin_native_memory(test_input, &environment, panel_id, Duration::from_secs(5))?;
-    let disabled = checked(test_input, &environment, &["plugin-set", panel_id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let panel = disabled
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == panel_id)
-        .ok_or("installed panel missing after disable")?;
-    if panel.desired_enabled || panel.memory.native_ui_bytes.is_some() {
-        return Err("installed panel did not release its reported UI memory".into());
-    }
-    verify_component_window(test_input, &environment)?;
-    verify_generic_widget_slot(test_input, &environment)?;
+    assert_default_package(test_input, &environment, true)?;
+    verify_layout_snapshot(test_input, &environment, "nickel-default/taskbar")?;
     verify_sibling_windows(test_input, &environment)?;
     verify_separate_plugin_dialog(test_input, &environment)?;
     verify_separate_plugin_overlay(test_input, &environment)?;
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
-    let toggled = checked(test_input, &environment, &["surfaces"])?;
-    let launcher = toggled
-        .lines()
-        .find(|line| line.starts_with("Launcher\t"))
-        .ok_or("internal launcher disappeared after injected Meta input")?;
-    if !launcher_line_visible(launcher) {
-        return Err("injected Meta did not make the internal launcher visible".into());
-    }
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
-    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
-
-    // Launcher construction and its first GPU upload are interaction work, not
-    // idle work. Let that frame settle before sampling the unchanged runtime.
-    thread::sleep(Duration::from_millis(500));
-    let before_ticks = process_ticks(compositor.id())?;
-    thread::sleep(Duration::from_secs(2));
-    let after_ticks = process_ticks(compositor.id())?;
-    let idle_ticks = after_ticks.saturating_sub(before_ticks);
-    println!(
-        "idle diagnostic: compositor_cpu_ticks={} over 2s",
-        idle_ticks
-    );
-    if idle_ticks > 200 {
-        return Err(format!(
-            "internal runtime consumed {idle_ticks} CPU ticks during bounded idle"
-        ));
-    }
-    verify_settings_memory_report(settings, test_input, &environment)?;
     verify_native_screenshot_lifecycle(test_input, &environment)?;
     Ok(())
 }
 
-fn press_super_r(test_input: &Path, environment: &[(String, String)]) -> Result<(), String> {
-    press_super_key(test_input, environment, "r")
-}
-
-fn press_super_key(
+fn assert_default_package(
     test_input: &Path,
     environment: &[(String, String)],
-    key: &str,
+    enabled: bool,
 ) -> Result<(), String> {
-    checked(test_input, environment, &["key", "meta", "pressed"])?;
-    checked(test_input, environment, &["key", key, "pressed"])?;
-    checked(test_input, environment, &["key", key, "released"])?;
-    checked(test_input, environment, &["key", "meta", "released"])?;
+    let output = checked(test_input, environment, &["plugins"])?;
+    let snapshot: nickel_session_protocol::PluginStatusSnapshot =
+        serde_json::from_str(&output).map_err(|error| error.to_string())?;
+    let package = snapshot
+        .plugins
+        .iter()
+        .find(|package| package.id == "nickel-default")
+        .ok_or("default shell package missing")?;
+    let expected = if enabled {
+        nickel_session_protocol::PluginRuntimeHealth::Running
+    } else {
+        nickel_session_protocol::PluginRuntimeHealth::Disabled
+    };
+    if package.desired_enabled != enabled || package.health != expected {
+        return Err(format!("default shell lifecycle differs: {package:?}"));
+    }
     Ok(())
 }
 
-fn verify_run_plugin_owns_dialog(
+fn wait_for_window_absent(
     test_input: &Path,
     environment: &[(String, String)],
+    id: u64,
 ) -> Result<(), String> {
-    let id = "org.nickel.run";
-    press_super_r(test_input, environment)?;
-    wait_for_launcher_visibility(test_input, environment, true, Duration::from_secs(5))?;
-    wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
-    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let plugin = disabled.plugins.iter().find(|plugin| plugin.id == id).ok_or("Run plugin missing")?;
-    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
-        return Err("disabled Run plugin retained its UI memory".into());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        if !windows
+            .lines()
+            .any(|line| line.split('\t').next() == Some(id.to_string().as_str()))
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("closed window {id} remains registered: {windows}"));
+        }
+        thread::sleep(POLL);
     }
-    wait_for_launcher_visibility(test_input, environment, false, Duration::from_secs(5))?;
-    wait_for_role_presence(test_input, environment, "Launcher", false)?;
-    press_super_r(test_input, environment)?;
-    thread::sleep(Duration::from_millis(250));
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if surfaces
-        .lines()
-        .any(|line| line.starts_with("Launcher\t") && launcher_line_visible(line))
-    {
-        return Err(format!("disabled Run opened a fallback dialog: {surfaces}"));
-    }
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    wait_for_role_presence(test_input, environment, "Launcher", true)?;
-    press_super_r(test_input, environment)?;
-    wait_for_launcher_visibility(test_input, environment, true, Duration::from_secs(5))?;
-    checked(test_input, environment, &["key", "escape", "pressed"])?;
-    checked(test_input, environment, &["key", "escape", "released"])?;
-    wait_for_launcher_visibility(test_input, environment, false, Duration::from_secs(5))?;
-    Ok(())
-}
-
-fn verify_taskbar_plugin_retires(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let id = "org.nickel.taskbar";
-    wait_for_taskbar_presence(test_input, environment, true, Duration::from_secs(2))?;
-    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let plugin = disabled.plugins.iter().find(|plugin| plugin.id == id).ok_or("taskbar missing")?;
-    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
-        return Err("disabled taskbar retained native UI memory".into());
-    }
-    wait_for_taskbar_presence(test_input, environment, false, Duration::from_secs(2))?;
-    wait_for_role_presence(test_input, environment, "ContextMenu", false)?;
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    wait_for_taskbar_presence(test_input, environment, true, Duration::from_secs(2))?;
-    wait_for_role_presence(test_input, environment, "ContextMenu", true)?;
-    Ok(())
-}
-
-fn panel_geometry(surfaces: &str, key: &str) -> Option<(i32, i32, u32, u32)> {
-    surface_geometry(surfaces, "Panel", key)
-}
-
-fn surface_geometry(surfaces: &str, role: &str, key: &str) -> Option<(i32, i32, u32, u32)> {
-    let geometry = surfaces
-        .lines()
-        .find(|line| {
-            line.starts_with(&format!("{role}\t"))
-                && line.ends_with(key)
-                && line.split('\t').count() == 4
-        })?
-        .split('\t')
-        .nth(2)?;
-    let (origin, size) = geometry.split_once(' ')?;
-    let (x, y) = origin.split_once(',')?;
-    let (width, height) = size.split_once('x')?;
-    Some((x.parse().ok()?, y.parse().ok()?, width.parse().ok()?, height.parse().ok()?))
 }
 
 fn native_surface_geometry(surfaces: &str, role: &str) -> Option<(i32, i32, u32, u32)> {
@@ -683,351 +338,12 @@ fn native_surface_geometry(surfaces: &str, role: &str) -> Option<(i32, i32, u32,
     let (origin, size) = geometry.split_once(' ')?;
     let (x, y) = origin.split_once(',')?;
     let (width, height) = size.split_once('x')?;
-    Some((x.parse().ok()?, y.parse().ok()?, width.parse().ok()?, height.parse().ok()?))
-}
-
-fn verify_reserved_panel_stacks_and_reflows(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    const TASKBAR: &str = "org.nickel.taskbar/main";
-    const RESERVED: &str = "org.example.reserved-panel/main";
-    let before = checked(test_input, environment, &["surfaces"])?;
-    let baseline = panel_geometry(&before, TASKBAR).ok_or("taskbar geometry unavailable")?;
-    checked(test_input, environment, &["plugin-set", "org.example.reserved-panel", "enabled"])?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        if let (Some(taskbar), Some(reserved)) =
-            (panel_geometry(&surfaces, TASKBAR), panel_geometry(&surfaces, RESERVED))
-        {
-            let taskbar_bottom = taskbar.1 + taskbar.3 as i32;
-            let reserved_bottom = reserved.1 + reserved.3 as i32;
-            if taskbar.0 != reserved.0
-                || taskbar.2 != reserved.2
-                || !(taskbar_bottom <= reserved.1 || reserved_bottom <= taskbar.1)
-                || taskbar_bottom.max(reserved_bottom) != baseline.1 + baseline.3 as i32
-            {
-                return Err(format!("reserved panels did not stack on one output: {surfaces}"));
-            }
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("reserved panel did not appear: {surfaces}"));
-        }
-        thread::sleep(POLL);
-    }
-    checked(test_input, environment, &["plugin-set", "org.example.reserved-panel", "disabled"])?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        if panel_geometry(&surfaces, RESERVED).is_none()
-            && panel_geometry(&surfaces, TASKBAR) == Some(baseline)
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("taskbar did not reflow after reserved panel retirement: {surfaces}"));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn wait_for_desktop_presence(
-    test_input: &Path,
-    environment: &[(String, String)],
-    expected_present: bool,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let present = surfaces
-            .lines()
-            .any(|line| line.starts_with("Desktop\twinit\t"));
-        if present == expected_present {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("desktop surface presence did not become {expected_present}: {surfaces}"));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn verify_bundled_overlay_surface_retires(
-    test_input: &Path,
-    environment: &[(String, String)],
-    plugin_id: &str,
-    role: &str,
-) -> Result<(), String> {
-    wait_for_role_presence(test_input, environment, role, true)?;
-    checked(test_input, environment, &["plugin-set", plugin_id, "disabled"])?;
-    wait_for_role_presence(test_input, environment, role, false)?;
-    checked(test_input, environment, &["plugin-set", plugin_id, "enabled"])?;
-    wait_for_role_presence(test_input, environment, role, true)
-}
-
-fn wait_for_role_presence(
-    test_input: &Path,
-    environment: &[(String, String)],
-    role: &str,
-    expected: bool,
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let present = surfaces.lines().any(|line| line.starts_with(&format!("{role}\t")));
-        if present == expected {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("{role} surface presence did not become {expected}: {surfaces}"));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn verify_control_plugin_retires(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let id = "org.nickel.control-center";
-    press_super_key(test_input, environment, "a")?;
-    wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    verify_layout_snapshot(test_input, environment, "org.nickel.control-center/main")?;
-    thread::sleep(Duration::from_millis(250));
-    checked(test_input, environment, &["key", "escape", "pressed"])?;
-    checked(test_input, environment, &["key", "escape", "released"])?;
-    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    press_super_key(test_input, environment, "a")?;
-    wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let plugin = disabled.plugins.iter().find(|plugin| plugin.id == id).ok_or("control plugin missing")?;
-    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
-        return Err("disabled Control Center retained native UI memory".into());
-    }
-    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    press_super_key(test_input, environment, "a")?;
-    thread::sleep(Duration::from_millis(250));
-    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    press_super_key(test_input, environment, "a")?;
-    wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    checked(test_input, environment, &["semantic", "control-center", "open"])?;
-    wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    checked(test_input, environment, &["key", "escape", "pressed"])?;
-    checked(test_input, environment, &["key", "escape", "released"])?;
-    wait_for_control_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    Ok(())
-}
-
-fn verify_codex_project_plugin_retires(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let id = "org.nickel.codex-projects";
-    let surface_present = |surfaces: &str| {
-        surfaces.lines().any(|line| {
-            line.starts_with("PluginSurface\t")
-                && line.ends_with("org.nickel.codex-projects/main")
-        })
-    };
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if surfaces.lines().any(|line| {
-        line.starts_with("CodexProjectMenu\t") || line.starts_with("ProjectMenu\t")
-    }) {
-        return Err(format!("retired Codex menu surface is still present: {surfaces}"));
-    }
-    if !surface_present(&surfaces) {
-        return Err(format!("Codex project plugin surface is missing: {surfaces}"));
-    }
-    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let plugin = disabled
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == id)
-        .ok_or("Codex project plugin missing after disable")?;
-    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
-        return Err("disabled Codex project plugin retained native UI memory".into());
-    }
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if surface_present(&surfaces) {
-        return Err(format!("Codex project plugin surface survived disable: {surfaces}"));
-    }
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if !surface_present(&surfaces) {
-        return Err(format!("Codex project plugin surface did not return: {surfaces}"));
-    }
-    Ok(())
-}
-
-fn verify_keyboard_plugin_retires(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let id = "org.nickel.on-screen-keyboard";
-    let surface_present = |surfaces: &str| {
-        surfaces.lines().any(|line| {
-            line.starts_with("PluginSurface\t")
-                && line.ends_with("org.nickel.on-screen-keyboard/main")
-        })
-    };
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if !surface_present(&surfaces) {
-        return Err(format!("keyboard plugin surface is missing: {surfaces}"));
-    }
-    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let plugin = disabled
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == id)
-        .ok_or("keyboard plugin missing after disable")?;
-    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
-        return Err("disabled keyboard plugin retained native UI memory".into());
-    }
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if surface_present(&surfaces) {
-        return Err(format!("keyboard plugin surface survived disable: {surfaces}"));
-    }
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if !surface_present(&surfaces) {
-        return Err(format!("keyboard plugin surface did not return: {surfaces}"));
-    }
-    checked(test_input, environment, &["semantic", "keyboard-toggle"])?;
-    wait_for_keyboard_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    if wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(2))? == 0 {
-        return Err("visible keyboard plugin reported zero native UI memory".into());
-    }
-    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if surface_present(&surfaces) {
-        return Err(format!("visible keyboard plugin survived disable: {surfaces}"));
-    }
-    wait_for_keyboard_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    if !surface_present(&surfaces) {
-        return Err(format!("visible keyboard plugin did not return: {surfaces}"));
-    }
-    checked(test_input, environment, &["semantic", "keyboard", "osk-hide"])?;
-    wait_for_keyboard_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    Ok(())
-}
-
-fn wait_for_keyboard_visibility(
-    test_input: &Path,
-    environment: &[(String, String)],
-    expected: bool,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let status = checked(test_input, environment, &["keyboard-status"])?;
-        let snapshot: nickel_session_protocol::OnScreenKeyboardSnapshot =
-            serde_json::from_str(&status).map_err(|error| error.to_string())?;
-        if snapshot.visible == expected {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("keyboard visibility did not become {expected}: {status}"));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn wait_for_control_visibility(
-    test_input: &Path,
-    environment: &[(String, String)],
-    expected: bool,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let line = surfaces.lines().find(|line| {
-            line.starts_with("PluginSurface\t")
-                && line.ends_with("org.nickel.control-center/main")
-        });
-        let visible = line.is_some_and(|line| line.split('\t').nth(2) != Some("hidden"));
-        if visible == expected {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("Control Center visibility stayed {visible}: {surfaces}"));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn verify_notification_plugin_retires(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let id = "org.nickel.notification";
-    press_super_key(test_input, environment, "n")?;
-    wait_for_notification_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    thread::sleep(Duration::from_millis(250));
-    checked(test_input, environment, &["key", "escape", "pressed"])?;
-    checked(test_input, environment, &["key", "escape", "released"])?;
-    wait_for_notification_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    press_super_key(test_input, environment, "n")?;
-    wait_for_notification_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let plugin = disabled.plugins.iter().find(|plugin| plugin.id == id).ok_or("notification plugin missing")?;
-    if plugin.desired_enabled || plugin.memory.native_ui_bytes.is_some() {
-        return Err("disabled notification plugin retained native UI memory".into());
-    }
-    wait_for_notification_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    press_super_key(test_input, environment, "n")?;
-    thread::sleep(Duration::from_millis(250));
-    wait_for_notification_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    wait_for_notification_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    press_super_key(test_input, environment, "n")?;
-    wait_for_notification_visibility(test_input, environment, true, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    wait_for_notification_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    Ok(())
-}
-
-fn wait_for_notification_visibility(
-    test_input: &Path,
-    environment: &[(String, String)],
-    expected: bool,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let line = surfaces.lines().find(|line| {
-            line.starts_with("PluginSurface\t")
-                && line.ends_with("org.nickel.notification/main")
-        });
-        let visible = line.is_some_and(|line| line.split('\t').nth(2) != Some("hidden"));
-        if visible == expected {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("notification visibility stayed {visible}: {surfaces}"));
-        }
-        thread::sleep(POLL);
-    }
+    Some((
+        x.parse().ok()?,
+        y.parse().ok()?,
+        width.parse().ok()?,
+        height.parse().ok()?,
+    ))
 }
 
 fn wait_for_screenshot_visibility(
@@ -1048,7 +364,9 @@ fn wait_for_screenshot_visibility(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!("screenshot visibility did not become {expected}: {surfaces}"));
+            return Err(format!(
+                "screenshot visibility did not become {expected}: {surfaces}"
+            ));
         }
         thread::sleep(POLL);
     }
@@ -1060,7 +378,11 @@ fn verify_native_screenshot_lifecycle(
 ) -> Result<(), String> {
     let press_print_screen = || -> Result<(), String> {
         checked(test_input, environment, &["key", "print-screen", "pressed"])?;
-        checked(test_input, environment, &["key", "print-screen", "released"])?;
+        checked(
+            test_input,
+            environment,
+            &["key", "print-screen", "released"],
+        )?;
         Ok(())
     };
     press_print_screen()?;
@@ -1071,9 +393,17 @@ fn verify_native_screenshot_lifecycle(
         .ok_or_else(|| format!("native screenshot geometry is missing: {surfaces}"))?;
     let start = (x + width as i32 / 4, y + height as i32 / 4);
     let end = (x + width as i32 * 3 / 4, y + height as i32 * 3 / 4);
-    checked(test_input, environment, &["move", &start.0.to_string(), &start.1.to_string()])?;
+    checked(
+        test_input,
+        environment,
+        &["move", &start.0.to_string(), &start.1.to_string()],
+    )?;
     checked(test_input, environment, &["button", "left", "pressed"])?;
-    checked(test_input, environment, &["move", &end.0.to_string(), &end.1.to_string()])?;
+    checked(
+        test_input,
+        environment,
+        &["move", &end.0.to_string(), &end.1.to_string()],
+    )?;
     checked(test_input, environment, &["button", "left", "released"])?;
     let center = (x + width as i32 / 2, y + height as i32 / 2);
     click_at(test_input, environment, center.0, center.1)?;
@@ -1088,250 +418,6 @@ fn verify_native_screenshot_lifecycle(
     checked(test_input, environment, &["key", "escape", "released"])?;
     wait_for_screenshot_visibility(test_input, environment, false, Duration::from_secs(2))?;
     Ok(())
-}
-
-fn wait_for_taskbar_presence(
-    test_input: &Path,
-    environment: &[(String, String)],
-    expected: bool,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let present = surfaces.lines().any(|line| {
-            line.starts_with("Panel\t")
-                && line.ends_with("org.nickel.taskbar/main")
-        });
-        if present == expected {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("taskbar surface presence remained {present}: {surfaces}"));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn verify_generic_widget_slot(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let host = "org.example.widget-host";
-    let contributor = "org.example.widget-contributor";
-    checked(test_input, environment, &["plugin-set", host, "enabled"])?;
-    let base = wait_for_plugin_native_memory(test_input, environment, host, Duration::from_secs(5))?;
-    checked(test_input, environment, &["plugin-set", contributor, "enabled"])?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let contributed = loop {
-        let status = checked(test_input, environment, &["plugins"])?;
-        let status: nickel_session_protocol::PluginStatusSnapshot =
-            serde_json::from_str(&status).map_err(|error| error.to_string())?;
-        let provider = status.plugins.iter().find(|plugin| plugin.id == host);
-        let extension = status.plugins.iter().find(|plugin| plugin.id == contributor);
-        if let (Some(provider), Some(extension)) = (provider, extension)
-            && let Some(bytes) = provider.memory.native_ui_bytes
-            && bytes > base
-            && extension.health == nickel_session_protocol::PluginRuntimeHealth::Running
-            && extension.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0)
-        {
-            break bytes;
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("generic widget did not enter its provider: {status:?}"));
-        }
-        thread::sleep(POLL);
-    };
-    checked(
-        test_input,
-        environment,
-        &["plugin-setting", contributor, "unread-count", "12345"],
-    )?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let contributed = loop {
-        let status = checked(test_input, environment, &["plugins"])?;
-        let status: nickel_session_protocol::PluginStatusSnapshot =
-            serde_json::from_str(&status).map_err(|error| error.to_string())?;
-        let provider = status.plugins.iter().find(|plugin| plugin.id == host);
-        if let Some(bytes) = provider.and_then(|plugin| plugin.memory.native_ui_bytes)
-            && bytes > contributed
-        {
-            break bytes;
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("generic widget setting did not refresh its provider: {status:?}"));
-        }
-        thread::sleep(POLL);
-    };
-    checked(test_input, environment, &["plugin-set", contributor, "disabled"])?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let status = checked(test_input, environment, &["plugins"])?;
-        let status: nickel_session_protocol::PluginStatusSnapshot =
-            serde_json::from_str(&status).map_err(|error| error.to_string())?;
-        let provider = status.plugins.iter().find(|plugin| plugin.id == host);
-        let extension = status.plugins.iter().find(|plugin| plugin.id == contributor);
-        if let (Some(provider), Some(extension)) = (provider, extension)
-            && provider.memory.native_ui_bytes.is_some_and(|bytes| bytes < contributed)
-            && !extension.desired_enabled
-            && extension.memory.native_ui_bytes.is_none()
-        {
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("generic widget did not retire from its provider: {status:?}"));
-        }
-        thread::sleep(POLL);
-    }
-    let action = "org.example.action-contributor";
-    checked(test_input, environment, &["plugin-set", action, "enabled"])?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let status = checked(test_input, environment, &["plugins"])?;
-        let status: nickel_session_protocol::PluginStatusSnapshot =
-            serde_json::from_str(&status).map_err(|error| error.to_string())?;
-        let provider = status.plugins.iter().find(|plugin| plugin.id == host);
-        let extension = status.plugins.iter().find(|plugin| plugin.id == action);
-        if let (Some(provider), Some(extension)) = (provider, extension)
-            && provider.memory.native_ui_bytes.is_some_and(|bytes| bytes > base)
-            && extension.health == nickel_session_protocol::PluginRuntimeHealth::Running
-        {
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("generic action did not enter its provider: {status:?}"));
-        }
-        thread::sleep(POLL);
-    }
-    let window = wait_for_plugin_window(
-        test_input,
-        environment,
-        "org.example.widget-host",
-        "Widget Host Example",
-        Duration::from_secs(5),
-    )?;
-    click_plugin_control(
-        test_input,
-        environment,
-        "org.example.widget-host/main",
-        "slot-action-open-launcher",
-        (window.1, window.2),
-    )?;
-    wait_for_launcher_visibility(test_input, environment, true, Duration::from_secs(5))?;
-    checked(test_input, environment, &["key", "meta", "pressed"])?;
-    checked(test_input, environment, &["key", "meta", "released"])?;
-    wait_for_launcher_visibility(test_input, environment, false, Duration::from_secs(2))?;
-    checked(test_input, environment, &["plugin-set", action, "disabled"])?;
-    checked(test_input, environment, &["plugin-set", host, "disabled"])?;
-    Ok(())
-}
-
-fn verify_component_window(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let id = "org.example.component-window";
-    let enabled = checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    let enabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&enabled).map_err(|error| error.to_string())?;
-    let status = enabled
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == id)
-        .ok_or("component window missing after enable")?;
-    if !status.desired_enabled
-        || status.health != nickel_session_protocol::PluginRuntimeHealth::Running
-    {
-        return Err("component window plugin did not start".into());
-    }
-    let initial_bytes =
-        wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
-    if initial_bytes < 287 * 287 * 4 {
-        return Err(format!(
-            "component window did not account for its decoded plugin image: {initial_bytes} bytes"
-        ));
-    }
-    let first_window = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
-    click_plugin_control(
-        test_input,
-        environment,
-        "org.example.component-window/main",
-        "open-dialog",
-        (first_window.1, first_window.2),
-    )?;
-    wait_for_component_dialog_memory(test_input, environment, initial_bytes)?;
-    click_plugin_control(
-        test_input,
-        environment,
-        "org.example.component-window/main",
-        "show-settings",
-        (first_window.1, first_window.2),
-    )?;
-    wait_for_settings_memory(test_input, environment, true, Duration::from_secs(8))?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let settings_window = loop {
-        let windows = checked(test_input, environment, &["windows"])?;
-        if let Some(id) = windows.lines().find_map(|line| {
-            line.contains("\tNickel Settings\t")
-                .then(|| line.split('\t').next()?.parse::<u64>().ok())
-                .flatten()
-        }) {
-            break id;
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("plugin action launched no Settings window: {windows}"));
-        }
-        thread::sleep(POLL);
-    };
-    checked(
-        test_input,
-        environment,
-        &["semantic", "window", &settings_window.to_string(), "click"],
-    )?;
-    checked(test_input, environment, &["key", "alt", "pressed"])?;
-    checked(test_input, environment, &["key", "f4", "pressed"])?;
-    checked(test_input, environment, &["key", "f4", "released"])?;
-    checked(test_input, environment, &["key", "alt", "released"])?;
-    wait_for_settings_memory_expiry(test_input, environment, Duration::from_secs(7))?;
-    let disabled = checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    let disabled: nickel_session_protocol::PluginStatusSnapshot =
-        serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-    let status = disabled
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == id)
-        .ok_or("component window missing after disable")?;
-    if status.desired_enabled || status.memory.native_ui_bytes.is_some() {
-        return Err("component window did not release its reported UI memory".into());
-    }
-    let windows = checked(test_input, environment, &["windows"])?;
-    if windows
-        .lines()
-        .any(|line| line.contains("\torg.example.component-window\tComponent Window Example\t"))
-    {
-        return Err(format!("component window remained registered after disable: {windows}"));
-    }
-    checked(test_input, environment, &["plugin-set", id, "enabled"])?;
-    let reopened = wait_for_component_window(test_input, environment, Duration::from_secs(5))?;
-    if reopened.0 == first_window.0 {
-        return Err("component window reused its retired window identity".into());
-    }
-    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
-    Ok(())
-}
-
-fn wait_for_component_window(
-    test_input: &Path,
-    environment: &[(String, String)],
-    timeout: Duration,
-) -> Result<(u64, i32, i32), String> {
-    wait_for_plugin_window(
-        test_input,
-        environment,
-        "org.example.component-window",
-        "Component Window Example",
-        timeout,
-    )
 }
 
 fn wait_for_plugin_window(
@@ -1359,7 +445,9 @@ fn wait_for_plugin_window(
             return Ok(window);
         }
         if Instant::now() >= deadline {
-            return Err(format!("plugin window {plugin_id} did not enter the window registry: {windows}"));
+            return Err(format!(
+                "plugin window {plugin_id} did not enter the window registry: {windows}"
+            ));
         }
         thread::sleep(POLL);
     }
@@ -1371,7 +459,11 @@ fn click_at(
     x: i32,
     y: i32,
 ) -> Result<(), String> {
-    checked(test_input, environment, &["move", &x.to_string(), &y.to_string()])?;
+    checked(
+        test_input,
+        environment,
+        &["move", &x.to_string(), &y.to_string()],
+    )?;
     checked(test_input, environment, &["button", "left", "pressed"])?;
     checked(test_input, environment, &["button", "left", "released"])?;
     Ok(())
@@ -1414,7 +506,10 @@ fn plugin_control_geometry(
         .iter()
         .find(|line| {
             line.split_whitespace().nth(1).is_some_and(|id| {
-                id == control_id || id.strip_suffix(control_id).is_some_and(|prefix| prefix.ends_with('/'))
+                id == control_id
+                    || id
+                        .strip_suffix(control_id)
+                        .is_some_and(|prefix| prefix.ends_with('/'))
             })
         })
         .ok_or_else(|| format!("{control_id} is absent from {plugin_surface} layout: {nodes:?}"))?;
@@ -1432,99 +527,6 @@ fn plugin_control_geometry(
         return Err(format!("{control_id} has incomplete geometry: {node}"));
     };
     Ok([*x, *y, *width, *height])
-}
-
-fn verify_taskbar_control_layout(
-    test_input: &Path,
-    environment: &[(String, String)],
-    surfaces: &str,
-) -> Result<(), String> {
-    const TASKBAR: &str = "org.nickel.taskbar/main";
-    let (_, _, panel_width, panel_height) =
-        panel_geometry(surfaces, TASKBAR).ok_or("taskbar has no panel geometry")?;
-    let launcher = plugin_control_geometry(test_input, environment, TASKBAR, "taskbar-launcher")?;
-    let control = plugin_control_geometry(test_input, environment, TASKBAR, "taskbar-control")?;
-    for (name, [x, y, width, height]) in [("launcher", launcher), ("control", control)] {
-        if ![x, y, width, height].iter().all(|value| value.is_finite())
-            || width <= 0.0
-            || height <= 0.0
-            || x < 0.0
-            || y < 0.0
-            || x + width > panel_width as f32 + 1.0
-            || y + height > panel_height as f32 + 1.0
-        {
-            return Err(format!("taskbar {name} is outside its panel: {x},{y},{width},{height} in {panel_width}x{panel_height}"));
-        }
-    }
-    if launcher[0] + launcher[2] > control[0] {
-        return Err(format!("taskbar launcher overlaps its control area: {launcher:?}, {control:?}"));
-    }
-    Ok(())
-}
-
-fn verify_launcher_control_layout(
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    const LAUNCHER: &str = "org.nickel.launcher/main";
-    let surfaces = checked(test_input, environment, &["surfaces"])?;
-    let (_, _, width, height) = surface_geometry(&surfaces, "Launcher", LAUNCHER)
-        .ok_or_else(|| format!("launcher has no mapped surface geometry: {surfaces}"))?;
-    if (width, height) != (620, 548) {
-        return Err(format!("launcher CSS size is {width}x{height}, expected 620x548"));
-    }
-    let query = plugin_control_geometry(test_input, environment, LAUNCHER, "launcher-query")?;
-    let settings = plugin_control_geometry(test_input, environment, LAUNCHER, "launcher-settings")?;
-    for (name, [x, y, control_width, control_height]) in
-        [("search field", query), ("Settings button", settings)]
-    {
-        if ![x, y, control_width, control_height]
-            .iter()
-            .all(|value| value.is_finite())
-            || control_width <= 0.0
-            || control_height <= 0.0
-            || x < 0.0
-            || y < 0.0
-            || x + control_width > width as f32 + 1.0
-            || y + control_height > height as f32 + 1.0
-        {
-            return Err(format!(
-                "launcher {name} is outside its window: {x},{y},{control_width},{control_height} in {width}x{height}"
-            ));
-        }
-    }
-    if query[1] + query[3] > settings[1] {
-        return Err(format!("launcher search overlaps its footer: {query:?}, {settings:?}"));
-    }
-    Ok(())
-}
-
-fn wait_for_component_dialog_memory(
-    test_input: &Path,
-    environment: &[(String, String)],
-    initial_bytes: u64,
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let output = checked(test_input, environment, &["plugins"])?;
-        let snapshot: nickel_session_protocol::PluginStatusSnapshot =
-            serde_json::from_str(&output).map_err(|error| error.to_string())?;
-        let bytes = snapshot
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == "org.example.component-window")
-            .and_then(|plugin| plugin.memory.native_ui_bytes)
-            .ok_or("component window has no native UI memory after dialog click")?;
-        if bytes > initial_bytes {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "component dialog did not increase retained UI memory: initial={initial_bytes}, current={bytes}"
-            ));
-        }
-        thread::sleep(POLL);
-    }
 }
 
 fn verify_sibling_windows(
@@ -1555,7 +557,8 @@ fn verify_sibling_windows(
         }
         thread::sleep(POLL);
     };
-    let before = wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    let before =
+        wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
     checked(
         test_input,
         environment,
@@ -1579,7 +582,9 @@ fn verify_sibling_windows(
             break;
         }
         if Instant::now() >= deadline {
-            return Err(format!("closing one window did not preserve its sibling: {windows}"));
+            return Err(format!(
+                "closing one window did not preserve its sibling: {windows}"
+            ));
         }
         thread::sleep(POLL);
     }
@@ -1642,7 +647,9 @@ fn verify_sibling_windows(
             break moved;
         }
         if Instant::now() >= deadline {
-            return Err(format!("typed plugin placement did not move its window: {windows}"));
+            return Err(format!(
+                "typed plugin placement did not move its window: {windows}"
+            ));
         }
         thread::sleep(POLL);
     };
@@ -1661,19 +668,24 @@ fn verify_sibling_windows(
             .filter(|line| line.contains("\torg.example.acceptance-windows\t"))
             .collect::<Vec<_>>();
         if installed.len() == 2
-            && installed.iter().any(|line| line.starts_with(&format!("{first}\t")))
+            && installed
+                .iter()
+                .any(|line| line.starts_with(&format!("{first}\t")))
             && installed.iter().any(|line| line.ends_with("420x240"))
         {
             break;
         }
         if Instant::now() >= deadline {
-            return Err(format!("plugin button did not reopen its sibling: {windows}"));
+            return Err(format!(
+                "plugin button did not reopen its sibling: {windows}"
+            ));
         }
         thread::sleep(POLL);
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let bytes = wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(1))?;
+        let bytes =
+            wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(1))?;
         if bytes > reduced_bytes {
             break;
         }
@@ -1687,7 +699,9 @@ fn verify_sibling_windows(
     let windows = checked(test_input, environment, &["windows"])?;
     let second_line = windows
         .lines()
-        .find(|line| line.contains("\torg.example.acceptance-windows\t") && line.ends_with("420x240"))
+        .find(|line| {
+            line.contains("\torg.example.acceptance-windows\t") && line.ends_with("420x240")
+        })
         .ok_or("reopened plugin window disappeared before typed hide")?;
     let second_id = second_line
         .split('\t')
@@ -1704,7 +718,9 @@ fn verify_sibling_windows(
         || focus_bounds[0] + focus_bounds[2] > 360.0
         || focus_bounds[1] + focus_bounds[3] > 220.0
     {
-        return Err(format!("surface.focus control is outside its window: {focus_bounds:?}"));
+        return Err(format!(
+            "surface.focus control is outside its window: {focus_bounds:?}"
+        ));
     }
     click_plugin_control(
         test_input,
@@ -1717,12 +733,15 @@ fn verify_sibling_windows(
     loop {
         let windows = checked(test_input, environment, &["windows"])?;
         if windows.lines().any(|line| {
-            line.starts_with(&format!("{second_id}\t")) && line.split('\t').any(|field| field == "active")
+            line.starts_with(&format!("{second_id}\t"))
+                && line.split('\t').any(|field| field == "active")
         }) {
             break;
         }
         if Instant::now() >= deadline {
-            return Err(format!("surface.focus did not activate the owned window: {windows}; control={focus_bounds:?}"));
+            return Err(format!(
+                "surface.focus did not activate the owned window: {windows}; control={focus_bounds:?}"
+            ));
         }
         thread::sleep(POLL);
     }
@@ -1767,7 +786,9 @@ fn verify_sibling_windows(
             break;
         }
         if Instant::now() >= deadline {
-            return Err(format!("typed window hide did not retire only its sibling: {windows}"));
+            return Err(format!(
+                "typed window hide did not retire only its sibling: {windows}"
+            ));
         }
         thread::sleep(POLL);
     }
@@ -1790,13 +811,16 @@ fn verify_sibling_windows(
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let windows = checked(test_input, environment, &["windows"])?;
-        if windows.lines().any(|line| {
-            line.starts_with(&format!("{first}\t")) && line.ends_with("300x220")
-        }) {
+        if windows
+            .lines()
+            .any(|line| line.starts_with(&format!("{first}\t")) && line.ends_with("300x220"))
+        {
             break;
         }
         if Instant::now() >= deadline {
-            return Err(format!("JSX root resize did not reach its native window: {windows}"));
+            return Err(format!(
+                "JSX root resize did not reach its native window: {windows}"
+            ));
         }
         thread::sleep(POLL);
     }
@@ -1827,8 +851,8 @@ fn verify_separate_plugin_dialog(
             .and_then(|line| line.split('\t').next())
             .and_then(|field| field.parse::<u64>().ok())
             && let Some(location) = home
-            .and_then(|line| line.rsplit('\t').next())
-            .and_then(|field| field.split_whitespace().next())
+                .and_then(|line| line.rsplit('\t').next())
+                .and_then(|field| field.split_whitespace().next())
             && let Some((x, y)) = location.split_once(',')
             && let (Ok(x), Ok(y)) = (x.parse::<i32>(), y.parse::<i32>())
         {
@@ -1839,7 +863,8 @@ fn verify_separate_plugin_dialog(
         }
         thread::sleep(POLL);
     };
-    let home_bytes = wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    let home_bytes =
+        wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
     let surfaces = checked(test_input, environment, &["surfaces"])?;
     if dialog_surface_line(&surfaces).is_some() {
         return Err(format!("plugin dialog started open: {surfaces}"));
@@ -1867,7 +892,8 @@ fn verify_separate_plugin_dialog(
         }
         thread::sleep(POLL);
     };
-    let opened_bytes = wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
+    let opened_bytes =
+        wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(5))?;
     if opened_bytes <= home_bytes {
         return Err("plugin dialog did not increase its retained UI memory".into());
     }
@@ -1883,7 +909,9 @@ fn verify_separate_plugin_dialog(
     if dialog_surface_line(&surfaces).is_none()
         || !surfaces.contains("org.example.surface-dialog/home")
     {
-        return Err(format!("owned dialog allowed input to close its owner: {surfaces}"));
+        return Err(format!(
+            "owned dialog allowed input to close its owner: {surfaces}"
+        ));
     }
     click_plugin_control(
         test_input,
@@ -1975,7 +1003,9 @@ fn verify_separate_plugin_dialog(
             break;
         }
         if Instant::now() >= deadline {
-            return Err(format!("closing dialog owner left plugin surfaces alive: {surfaces}"));
+            return Err(format!(
+                "closing dialog owner left plugin surfaces alive: {surfaces}"
+            ));
         }
         thread::sleep(POLL);
     }
@@ -1998,8 +1028,7 @@ fn verify_separate_plugin_overlay(
     let (home_x, home_y) = loop {
         let windows = checked(test_input, environment, &["windows"])?;
         let home = windows.lines().find(|line| {
-            line.contains("\torg.example.overlay\tOverlay Example\t")
-                && line.ends_with("420x250")
+            line.contains("\torg.example.overlay\tOverlay Example\t") && line.ends_with("420x250")
         });
         if let Some(location) = home
             .and_then(|line| line.rsplit('\t').next())
@@ -2044,9 +1073,8 @@ fn verify_separate_plugin_overlay(
         thread::sleep(POLL);
     };
     let surfaces = checked(test_input, environment, &["surfaces"])?;
-    let (output_x, output_y, output_width, _) =
-        native_surface_geometry(&surfaces, "Desktop")
-            .ok_or("nested desktop output geometry is unavailable")?;
+    let (output_x, output_y, output_width, _) = native_surface_geometry(&surfaces, "Desktop")
+        .ok_or("nested desktop output geometry is unavailable")?;
     let expected = (output_x + output_width as i32 - 300 - 18, output_y + 24);
     if (overlay_x, overlay_y) != expected {
         return Err(format!(
@@ -2092,178 +1120,6 @@ fn verify_separate_plugin_overlay(
     Ok(())
 }
 
-fn verify_settings_memory_report(
-    settings: &Path,
-    test_input: &Path,
-    environment: &[(String, String)],
-) -> Result<(), String> {
-    let mut process = Command::new(settings)
-        .args(["--screen", "plugins"])
-        .envs(environment.iter().cloned())
-        .spawn()
-        .map_err(|error| format!("could not launch nested Settings: {error}"))?;
-    let result = (|| {
-        let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
-            if let Some(status) = process.try_wait().map_err(|error| error.to_string())? {
-                return Err(format!("nested Settings exited before reporting memory: {status}"));
-            }
-            let output = checked(test_input, environment, &["plugins"])?;
-            let snapshot: nickel_session_protocol::PluginStatusSnapshot =
-                serde_json::from_str(&output).map_err(|error| error.to_string())?;
-            if snapshot.plugins.iter().any(|plugin| {
-                plugin.id == "org.nickel.settings"
-                    && plugin.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0)
-            }) {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err("nested Settings did not publish plugin UI memory".into());
-            }
-            thread::sleep(POLL);
-        }
-        let disabled = checked(
-            test_input,
-            environment,
-            &["plugin-set", "org.nickel.settings", "disabled"],
-        )?;
-        let disabled: nickel_session_protocol::PluginStatusSnapshot =
-            serde_json::from_str(&disabled).map_err(|error| error.to_string())?;
-        if disabled.plugins.iter().all(|plugin| {
-            plugin.id != "org.nickel.settings" || plugin.desired_enabled
-        }) {
-            return Err("shell did not disable the Settings plugin".into());
-        }
-        wait_for_settings_memory(test_input, environment, false, Duration::from_secs(5))?;
-        checked(
-            test_input,
-            environment,
-            &["plugin-set", "org.nickel.settings", "enabled"],
-        )?;
-        wait_for_settings_memory(test_input, environment, true, Duration::from_secs(5))?;
-        Ok(())
-    })();
-    let _ = process.kill();
-    let _ = process.wait();
-    result?;
-    wait_for_settings_memory_expiry(test_input, environment, Duration::from_secs(7))
-}
-
-fn wait_for_settings_memory_expiry(
-    test_input: &Path,
-    environment: &[(String, String)],
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let output = checked(test_input, environment, &["plugins"])?;
-        let snapshot: nickel_session_protocol::PluginStatusSnapshot =
-            serde_json::from_str(&output).map_err(|error| error.to_string())?;
-        if snapshot.plugins.iter().any(|plugin| {
-            plugin.id == "org.nickel.settings"
-                && plugin.desired_enabled
-                && plugin.memory.native_ui_bytes.is_none()
-        }) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("Settings plugin memory did not expire after process exit".into());
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn wait_for_settings_memory(
-    test_input: &Path,
-    environment: &[(String, String)],
-    enabled: bool,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let output = checked(test_input, environment, &["plugins"])?;
-        let snapshot: nickel_session_protocol::PluginStatusSnapshot =
-            serde_json::from_str(&output).map_err(|error| error.to_string())?;
-        let plugin = snapshot
-            .plugins
-            .iter()
-            .find(|plugin| plugin.id == "org.nickel.settings")
-            .ok_or("Settings disappeared from the shell registry")?;
-        if plugin.desired_enabled == enabled
-            && plugin.memory.native_ui_bytes.is_some_and(|bytes| bytes > 0) == enabled
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "Settings did not follow shell activation: desired={}, memory={:?}",
-                plugin.desired_enabled, plugin.memory.native_ui_bytes
-            ));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn wait_for_plugin_panel_on_output(
-    test_input: &Path,
-    environment: &[(String, String)],
-    output: &str,
-    expected: bool,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let present = surfaces.lines().any(|line| {
-            line.starts_with(&format!("PluginSurface\t{output}\t"))
-                && line.contains("360x96\t")
-                && line.ends_with("org.example.acceptance-panel/main")
-        });
-        if present == expected {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "plugin panel presence on {output} stayed {present}, expected {expected}: {surfaces}"
-            ));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn wait_for_launcher_visibility(
-    test_input: &Path,
-    environment: &[(String, String)],
-    expected_visible: bool,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        let launcher = surfaces
-            .lines()
-            .find(|line| line.starts_with("Launcher\t"));
-        if launcher.is_some_and(launcher_line_visible) == expected_visible {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "launcher did not become {} before deadline: {launcher:?}",
-                if expected_visible {
-                    "visible"
-                } else {
-                    "hidden"
-                }
-            ));
-        }
-        thread::sleep(POLL);
-    }
-}
-
-fn launcher_line_visible(line: &str) -> bool {
-    line.split('\t').nth(2) != Some("hidden")
-}
-
 fn wait_for_plugin_native_memory(
     test_input: &Path,
     environment: &[(String, String)],
@@ -2281,7 +1137,12 @@ fn wait_for_plugin_native_memory(
             .find(|plugin| plugin.id == id)
             .ok_or_else(|| format!("missing plugin {id} while awaiting memory"))?;
         if let Some(bytes) = plugin.memory.native_ui_bytes {
-            if bytes > 0 && plugin.memory.tracked_peak_bytes.is_some_and(|peak| peak >= bytes) {
+            if bytes > 0
+                && plugin
+                    .memory
+                    .tracked_peak_bytes
+                    .is_some_and(|peak| peak >= bytes)
+            {
                 return Ok(bytes);
             }
         }
@@ -2294,21 +1155,6 @@ fn wait_for_plugin_native_memory(
         }
         thread::sleep(POLL);
     }
-}
-
-fn process_ticks(pid: u32) -> Result<u64, String> {
-    let stat =
-        fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| error.to_string())?;
-    let fields = stat
-        .rsplit_once(") ")
-        .ok_or("malformed compositor process stat")?
-        .1
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    let user = fields.get(11).ok_or("process stat omitted utime")?;
-    let system = fields.get(12).ok_or("process stat omitted stime")?;
-    Ok(user.parse::<u64>().map_err(|error| error.to_string())?
-        + system.parse::<u64>().map_err(|error| error.to_string())?)
 }
 
 fn assert_no_shell_child(compositor: u32) -> Result<(), String> {
@@ -2378,7 +1224,9 @@ fn verify_native_layout_snapshot(
                 || !line.contains(" children=")
         })
     {
-        return Err(format!("native {role} has no computed component layout: {nodes:?}"));
+        return Err(format!(
+            "native {role} has no computed component layout: {nodes:?}"
+        ));
     }
     Ok(())
 }
@@ -2392,11 +1240,17 @@ fn layout_nodes(
     let mut total = None;
     let mut all_nodes = Vec::new();
     loop {
-        let layout = checked(test_input, environment, &["layout", surface, &offset.to_string()])?;
+        let layout = checked(
+            test_input,
+            environment,
+            &["layout", surface, &offset.to_string()],
+        )?;
         let header = layout.lines().next().ok_or("layout page has no header")?;
         let fields = header.split_whitespace().collect::<Vec<_>>();
         if fields.len() != 5 || fields[0] != "#" || fields[1] != "layout" {
-            return Err(format!("{surface} layout page has an invalid header: {header}"));
+            return Err(format!(
+                "{surface} layout page has an invalid header: {header}"
+            ));
         }
         let page_offset = fields[2]
             .strip_prefix("offset=")
@@ -2414,15 +1268,21 @@ fn layout_nodes(
         if nodes.is_empty() {
             return Err(format!("{surface} has an empty layout page: {layout}"));
         }
-        let next = fields[4].strip_prefix("next=").ok_or("layout page has no next offset")?;
+        let next = fields[4]
+            .strip_prefix("next=")
+            .ok_or("layout page has no next offset")?;
         all_nodes.extend(nodes.iter().map(|line| (*line).to_owned()));
         if next == "end" {
             if all_nodes.len() != page_total {
-                return Err(format!("{surface} layout ends before all nodes were returned"));
+                return Err(format!(
+                    "{surface} layout ends before all nodes were returned"
+                ));
             }
             break;
         }
-        let next = next.parse::<usize>().map_err(|_| "invalid next layout offset")?;
+        let next = next
+            .parse::<usize>()
+            .map_err(|_| "invalid next layout offset")?;
         if next != offset + nodes.len() || next > page_total {
             return Err(format!("{surface} layout page skipped nodes"));
         }
@@ -2486,7 +1346,7 @@ fn sibling(directory: &Path, name: &str) -> Result<PathBuf, String> {
     let path = directory.join(name);
     path.is_file().then_some(path).ok_or_else(|| {
         format!(
-            "missing {}; build nickel-nested, nickel-test-input, nickel-settings, and nickel-nested-acceptance together",
+            "missing {}; build nickel-nested, nickel-test-input, and nickel-nested-acceptance together",
             name
         )
     })
