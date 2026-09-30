@@ -576,9 +576,57 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_connectivity_pages_preserve_disconnect_pair_and_native_details() {
+        let graph = super::JsxModuleGraph::new("entry.js",[
+            super::ModuleSource {path:"entry.js",source:"import { Wifi } from './Wifi.js';\nimport { Bluetooth } from './Bluetooth.js';\nexport default function App(){return h(Column,{},h(Wifi,{}),h(Bluetooth,{}));}"},
+            super::ModuleSource {path:"Wifi.js",source:include_str!("../../../assets/plugins/nickel-default/src/Wifi.js")},
+            super::ModuleSource {path:"Bluetooth.js",source:include_str!("../../../assets/plugins/nickel-default/src/Bluetooth.js")},
+            super::ModuleSource {path:"styles/connectivity.css",source:include_str!("../../../assets/plugins/nickel-default/src/styles/connectivity.css")},
+        ]).unwrap();
+        let mut runtime = JsxRuntime::new_modules(&graph,Some(r#"{"wifi":{"available":true,"enabled":true,"revision":"0123456789abcdef","operations":{"disconnect":true},"adaptersAvailable":true,"adapters":[{"name":"eth0","description":"Ethernet","connected":true,"speedBitsPerSecond":null}],"networks":[{"id":"profile","name":"SSID","connected":true,"canDisconnect":true,"signalPercent":80}]},"bluetooth":{"available":true,"powered":true,"revision":"fedcba9876543210","adapterName":"Native radio","operations":{"pair":true},"devices":[{"id":"device","name":"Headset","paired":false,"connected":false,"batteryPercent":75,"signalDbm":-42,"kind":"audio-card"}]}}"#)).unwrap();
+        fn find<'a>(node: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
+            if node["id"] == id {
+                return Some(node);
+            }
+            node["children"]
+                .as_array()?
+                .iter()
+                .find_map(|child| find(child, id))
+        }
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(tree.to_string().contains("Battery: 75%"));
+        assert!(tree.to_string().contains("eth0"));
+        let action = find(&tree, "settings-wifi-disconnect/profile").unwrap()["action"]
+            .as_u64()
+            .unwrap();
+        let tree = runtime
+            .render(&format!("__nickelDispatch({action})"), |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        let action = find(&tree, "settings-bluetooth-pair/device").unwrap()["action"]
+            .as_u64()
+            .unwrap();
+        runtime
+            .render(&format!("__nickelDispatch({action})"), |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![
+                serde_json::json!({"type":"wifi.disconnect","id":"profile","revision":"0123456789abcdef"}),
+                serde_json::json!({"type":"bluetooth.pair","id":"device","revision":"fedcba9876543210"})
+            ]
+        );
+    }
+
+    #[test]
     fn connectivity_clients_copy_snapshots_and_emit_revision_bound_effects() {
-        let mut runtime = super::JsxRuntime::new("", Some(r#"{"wifi":{"available":true,"revision":"0123456789abcdef","operations":{"connect":true,"setEnabled":true},"networks":[{"id":"stable-profile","name":"SSID"}]},"bluetooth":{"available":true,"revision":"fedcba9876543210","operations":{"connect":true},"devices":[{"id":"stable-device"}]}}"#)).unwrap();
-        runtime.eval("nickel.wifi.listNetworks()[0].name = 'mutated'; nickel.wifi.connect('stable-profile'); nickel.bluetooth.connect('stable-device');").unwrap();
+        let mut runtime = super::JsxRuntime::new("", Some(r#"{"wifi":{"available":true,"revision":"0123456789abcdef","operations":{"connect":true,"disconnect":true,"setEnabled":true},"networks":[{"id":"stable-profile","name":"SSID"}]},"bluetooth":{"available":true,"revision":"fedcba9876543210","operations":{"connect":true},"devices":[{"id":"stable-device"}]}}"#)).unwrap();
+        runtime.eval("nickel.wifi.listNetworks()[0].name = 'mutated'; nickel.wifi.connect('stable-profile'); nickel.bluetooth.connect('stable-device'); nickel.wifi.disconnect('stable-profile');").unwrap();
         assert_eq!(
             runtime
                 .eval_json::<String>("JSON.stringify(nickel.wifi.listNetworks()[0].name)")
@@ -591,6 +639,10 @@ mod tests {
             serde_json::json!({"type":"wifi.connect","id":"stable-profile","revision":"0123456789abcdef"})
         );
         assert_eq!(effects[1]["id"], "stable-device");
+        assert_eq!(
+            effects[2],
+            serde_json::json!({"type":"wifi.disconnect","id":"stable-profile","revision":"0123456789abcdef"})
+        );
         assert!(runtime.eval("nickel.wifi.setEnabled('yes')").is_err());
         assert!(
             runtime

@@ -379,6 +379,14 @@ pub fn activate_wifi_network(id: &str) -> bool {
     linux_control::activate_wifi_network(id)
 }
 
+pub fn disconnect_wifi_network(id: &str) -> bool {
+    linux_control::disconnect_wifi_network(id)
+}
+
+pub fn pair_bluetooth_device(id: &str) -> bool {
+    linux_control::pair_bluetooth_device(id)
+}
+
 pub fn bluetooth_status() -> super::BluetoothStatus {
     linux_control::bluetooth_status()
 }

@@ -3090,6 +3090,7 @@ mod tests {
                 name: "Audit Network".into(),
                 signal_percent: 53,
                 networks: Vec::new(),
+                ..Default::default()
             });
         assert_eq!(
             coordinator.apply_system_status_update(network.clone()),

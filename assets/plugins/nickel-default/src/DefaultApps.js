@@ -4,10 +4,15 @@ export function DefaultApps() {
     const catalog = nickel.associations.get();
     const [query, setQuery] = useState("");
     const needle = query.trim().toLowerCase();
-    const targets = catalog.targets.filter(target => !needle || (target.id + " " + target.family + " " + target.handlers.map(handler => handler.name).join(" ")).toLowerCase().includes(needle));
+    const [family, setFamily] = useState(null);
+    const families = Array.from(new Set(catalog.targets.map(target => target.family)));
+    const targets = catalog.targets.filter(target => (!family || target.family === family) && (!needle || (target.id + " " + target.family + " " + target.handlers.map(handler => handler.name).join(" ")).toLowerCase().includes(needle)));
     const result = catalog.lastResult;
     return h(Column, { className: "default-apps-page" },
         h(TextField, { id: "default-app-search", accessibilityLabel: "Search default applications", placeholder: "Search applications or file types", value: query, onChange: setQuery }),
+        h(Row, null,
+            h(Button, { id: "default-app-family-all", state: family === null ? "selected" : "unselected", onClick: () => setFamily(null) }, "All types"),
+            families.map(value => h(Button, { key: value, id: "default-app-family/" + value, state: family === value ? "selected" : "unselected", onClick: () => setFamily(value) }, value))),
         !catalog.available ? h(Text, { wrap: true }, catalog.reason || "Default applications are unavailable.") : null,
         catalog.writable === false ? h(Text, null, "Default applications are read only.") : null,
         catalog.truncated ? h(Text, { wrap: true }, "This catalog is incomplete. Open system settings to see all associations.") : null,

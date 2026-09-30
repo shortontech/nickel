@@ -216,3 +216,10 @@ impl WindowFeed {
         None
     }
 }
+
+pub fn disconnect_wifi_network(_id: &str) -> bool {
+    false
+}
+pub fn pair_bluetooth_device(_id: &str) -> bool {
+    false
+}

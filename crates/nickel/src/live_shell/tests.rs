@@ -2928,12 +2928,14 @@ fn in_process_system_feed_propagates_audio_network_and_bluetooth() {
         name: "Nickel Lab".into(),
         signal_percent: 82,
         networks: Vec::new(),
+        ..Default::default()
     };
     let bluetooth = BluetoothStatus {
         available: true,
         powered: true,
         discovering: false,
         devices: Vec::new(),
+        ..Default::default()
     };
     let audio = AudioStatus {
         available: true,

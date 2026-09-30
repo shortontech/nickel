@@ -3942,11 +3942,20 @@ impl LiveShell {
             nickel_core::plugins::PluginCapability::BluetoothRead
         };
         manifest.capabilities.contains(&capability).then(|| {
-            if wifi {
+            let snapshot = if wifi {
                 crate::connectivity_capabilities::wifi_snapshot(&self.network)
             } else {
                 crate::connectivity_capabilities::bluetooth_snapshot(&self.bluetooth)
-            }
+            };
+            let control = if wifi {
+                nickel_core::plugins::PluginCapability::NetworkControl
+            } else {
+                nickel_core::plugins::PluginCapability::BluetoothControl
+            };
+            crate::connectivity_capabilities::restrict_controls(
+                snapshot,
+                !self.locked && manifest.capabilities.contains(&control),
+            )
         })
     }
 

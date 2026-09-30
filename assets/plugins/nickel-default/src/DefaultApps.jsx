@@ -5,11 +5,14 @@ export function DefaultApps() {
     const catalog = nickel.associations.get();
     const [query, setQuery] = useState("");
     const needle = query.trim().toLowerCase();
-    const targets = catalog.targets.filter(target => !needle || (target.id + " " + target.family + " " + target.handlers.map(handler => handler.name).join(" ")).toLowerCase().includes(needle));
+    const [family, setFamily] = useState(null);
+    const families = Array.from(new Set(catalog.targets.map(target => target.family)));
+    const targets = catalog.targets.filter(target => (!family || target.family === family) && (!needle || (target.id + " " + target.family + " " + target.handlers.map(handler => handler.name).join(" ")).toLowerCase().includes(needle)));
     const result = catalog.lastResult;
     return <Column className="default-apps-page">
         <TextField id="default-app-search" accessibilityLabel="Search default applications" placeholder="Search applications or file types"
             value={query} onChange={setQuery} />
+        <Row><Button id="default-app-family-all" state={family === null ? "selected" : "unselected"} onClick={() => setFamily(null)}>All types</Button>{families.map(value => <Button key={value} id={"default-app-family/" + value} state={family === value ? "selected" : "unselected"} onClick={() => setFamily(value)}>{value}</Button>)}</Row>
         {!catalog.available ? <Text wrap={true}>{catalog.reason || "Default applications are unavailable."}</Text> : null}
         {catalog.writable === false ? <Text>Default applications are read only.</Text> : null}
         {catalog.truncated ? <Text wrap={true}>This catalog is incomplete. Open system settings to see all associations.</Text> : null}

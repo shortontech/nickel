@@ -1757,6 +1757,7 @@ mod tests {
                         name: "Headphones".into(),
                         paired: true,
                         connected: true,
+                        ..Default::default()
                     }],
                     ..BluetoothStatus::default()
                 },

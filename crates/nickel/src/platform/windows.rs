@@ -685,13 +685,16 @@ pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
 }
 
 pub fn network_status() -> super::NetworkStatus {
-    nickel_platform::windows_connectivity::wifi_snapshot()
+    let adapters = nickel_platform::windows_connectivity::network_adapters();
+    let mut status = nickel_platform::windows_connectivity::wifi_snapshot()
         .map(|snapshot| super::NetworkStatus {
             available: snapshot.available,
             enabled: snapshot.enabled,
             connected: snapshot.connected,
             name: snapshot.name,
             signal_percent: snapshot.signal_percent,
+            adapters_available: false,
+            adapters: Vec::new(),
             networks: snapshot
                 .networks
                 .into_iter()
@@ -704,7 +707,19 @@ pub fn network_status() -> super::NetworkStatus {
                 })
                 .collect(),
         })
+        .unwrap_or_default();
+    status.adapters_available = adapters.is_ok();
+    status.adapters = adapters
         .unwrap_or_default()
+        .into_iter()
+        .map(|adapter| super::NetworkAdapterStatus {
+            name: adapter.name,
+            description: adapter.description,
+            connected: adapter.connected,
+            speed_bits_per_second: adapter.speed_bits_per_second,
+        })
+        .collect();
+    status
 }
 
 pub fn set_wifi_enabled(enabled: bool) -> bool {
@@ -715,9 +730,18 @@ pub fn activate_wifi_network(id: &str) -> bool {
     nickel_platform::windows_connectivity::connect_wifi_id(id).is_ok()
 }
 
+pub fn disconnect_wifi_network(_id: &str) -> bool {
+    false
+}
+
+pub fn pair_bluetooth_device(id: &str) -> bool {
+    nickel_platform::windows_connectivity::pair_bluetooth_device(id, false).is_ok()
+}
+
 pub fn bluetooth_status() -> super::BluetoothStatus {
     nickel_platform::windows_connectivity::bluetooth_snapshot()
         .map(|snapshot| super::BluetoothStatus {
+            adapter_name: snapshot.adapter_name,
             available: snapshot.available,
             powered: snapshot.powered,
             discovering: false,
@@ -729,6 +753,7 @@ pub fn bluetooth_status() -> super::BluetoothStatus {
                     name: device.name,
                     paired: device.paired,
                     connected: device.connected,
+                    ..Default::default()
                 })
                 .collect(),
         })

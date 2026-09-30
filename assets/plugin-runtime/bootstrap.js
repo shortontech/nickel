@@ -445,13 +445,14 @@ const nickel = Object.freeze({
         openSystemSettings() { __effects.push({type:'associations.openSystemSettings'}); }
     }),
     wifi: Object.freeze({
-        get() { return __nickelResource('wifi', {available:false, reason:'Wi-Fi read capability is unavailable', networks:[], operations:{}}); },
+        get() { return __nickelResource('wifi', {available:false, reason:'Wi-Fi read capability is unavailable', enabled:false, adaptersAvailable:false, adapters:[], networks:[], operations:{}}); },
         listNetworks() { return this.get().networks; },
         setEnabled(value) { __nickelConnectivityEffect('wifi', 'setEnabled', value); },
-        connect(id) { __nickelConnectivityEffect('wifi', 'connect', __nickelIdentity(id), true); }
+        connect(id) { __nickelConnectivityEffect('wifi', 'connect', __nickelIdentity(id), true); },
+        disconnect(id) { __nickelConnectivityEffect('wifi', 'disconnect', __nickelIdentity(id), true); }
     }),
     bluetooth: Object.freeze({
-        get() { return __nickelResource('bluetooth', {available:false, reason:'Bluetooth read capability is unavailable', devices:[], operations:{}}); },
+        get() { return __nickelResource('bluetooth', {available:false, reason:'Bluetooth read capability is unavailable', adapterName:'', powered:false, discovering:false, devices:[], operations:{}}); },
         listDevices() { return this.get().devices; },
         setPowered(value) { __nickelConnectivityEffect('bluetooth', 'setPowered', value); },
         setDiscovery(value) { __nickelConnectivityEffect('bluetooth', 'setDiscovery', value); },

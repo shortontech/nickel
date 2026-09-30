@@ -503,6 +503,22 @@ declare const nickel: Readonly<{
         get(): Readonly<{available: boolean; editable: false; reason?: string; globalAvailable?: boolean; globalReason?: string | null; shortcuts: ReadonlyArray<Readonly<{id: string; action: string; keys: string; scope: string; available: boolean}>>}>;
     }>;
     /** Copied native feature snapshot; controls require features-control and capture its current revision. */
+    wifi: Readonly<{
+        get():Readonly<{available:boolean;writable?:boolean;reason?:string;revision?:string;enabled:boolean;adaptersAvailable:boolean;adapters:ReadonlyArray<{name:string;description:string;connected:boolean;speedBitsPerSecond:number|null}>;networks:ReadonlyArray<{id:string;name:string;signalPercent:number;connected:boolean;saved:boolean;canConnect:boolean;canDisconnect:boolean}>;operations:Readonly<Record<string,boolean>>}>;
+        listNetworks():ReadonlyArray<{id:string;name:string;signalPercent:number;connected:boolean;saved:boolean;canConnect:boolean;canDisconnect:boolean}>;
+        setEnabled(value:boolean):void;
+        connect(id:string):void;
+        disconnect(id:string):void;
+    }>;
+    bluetooth: Readonly<{
+        get():Readonly<{available:boolean;writable?:boolean;reason?:string;revision?:string;adapterName:string;powered:boolean;discovering:boolean;devices:ReadonlyArray<{id:string;name:string;paired:boolean;connected:boolean;batteryPercent:number|null;kind:string|null;signalDbm:number|null}>;operations:Readonly<Record<string,boolean>>}>;
+        listDevices():ReadonlyArray<{id:string;name:string;paired:boolean;connected:boolean;batteryPercent:number|null;kind:string|null;signalDbm:number|null}>;
+        setPowered(value:boolean):void;
+        setDiscovery(value:boolean):void;
+        connect(id:string):void;
+        disconnect(id:string):void;
+        pair(id:string):void;
+    }>;
     features: Readonly<{
         get(): Readonly<{available: boolean; revision?: string; reason?: string; operations: Readonly<{setKeyboardMode?: boolean; setCodexEnabled?: boolean; retryCodex?: boolean}>; keyboard: Readonly<{mode?: "automatic" | "enabled" | "disabled"; generation?: number; environmentOverride?: boolean; runtimeAvailable?: boolean; enabled?: boolean | null; touchscreenPresent?: boolean | null}>; codex: Readonly<{configuredEnabled?: boolean; requestedEnabled?: boolean; generation?: number; acknowledgedGeneration?: number; state?: string; policy?: string; support?: string; installation?: string; health?: string; source?: string; diagnostic?: string | null; disableConfirmationRequired?: boolean; runtimeCountersAvailable?: boolean; activeWindows?: number | null; backgroundWorkers?: number | null; subscriptions?: number | null; warmSurfaces?: number | null; cacheEntries?: number | null}>; lastResult?: Readonly<{status: string; detail: string}> | null}>;
         setKeyboardMode(mode: "automatic" | "enabled" | "disabled"): void;

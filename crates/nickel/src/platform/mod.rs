@@ -61,6 +61,14 @@ pub struct WifiNetworkStatus {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetworkAdapterStatus {
+    pub name: String,
+    pub description: String,
+    pub connected: bool,
+    pub speed_bits_per_second: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkStatus {
     pub available: bool,
     pub enabled: bool,
@@ -68,10 +76,15 @@ pub struct NetworkStatus {
     pub name: String,
     pub signal_percent: u32,
     pub networks: Vec<WifiNetworkStatus>,
+    pub adapters: Vec<NetworkAdapterStatus>,
+    pub adapters_available: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BluetoothDeviceStatus {
+    pub battery_percent: Option<u8>,
+    pub kind: Option<String>,
+    pub signal_dbm: Option<i16>,
     pub id: String,
     pub name: String,
     pub paired: bool,
@@ -80,6 +93,7 @@ pub struct BluetoothDeviceStatus {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BluetoothStatus {
+    pub adapter_name: String,
     pub available: bool,
     pub powered: bool,
     pub discovering: bool,
@@ -103,6 +117,8 @@ pub(crate) fn bound_connectivity_refresh(
     let mut partial = network.networks.len() > CONNECTIVITY_DEVICE_LIMIT
         || bluetooth.devices.len() > CONNECTIVITY_DEVICE_LIMIT;
     network.networks.truncate(CONNECTIVITY_DEVICE_LIMIT);
+    partial |= network.adapters.len() > CONNECTIVITY_DEVICE_LIMIT;
+    network.adapters.truncate(CONNECTIVITY_DEVICE_LIMIT);
     bluetooth.devices.truncate(CONNECTIVITY_DEVICE_LIMIT);
     let bounded = |value: &mut String, partial: &mut bool| {
         if value.chars().count() > CONNECTIVITY_TEXT_LIMIT {
@@ -111,6 +127,11 @@ pub(crate) fn bound_connectivity_refresh(
         }
     };
     bounded(&mut network.name, &mut partial);
+    bounded(&mut bluetooth.adapter_name, &mut partial);
+    for adapter in &mut network.adapters {
+        bounded(&mut adapter.name, &mut partial);
+        bounded(&mut adapter.description, &mut partial);
+    }
     for entry in &mut network.networks {
         bounded(&mut entry.id, &mut partial);
         bounded(&mut entry.name, &mut partial);
@@ -118,6 +139,10 @@ pub(crate) fn bound_connectivity_refresh(
     for entry in &mut bluetooth.devices {
         bounded(&mut entry.id, &mut partial);
         bounded(&mut entry.name, &mut partial);
+        if let Some(kind) = &mut entry.kind {
+            bounded(kind, &mut partial);
+        }
+        entry.battery_percent = entry.battery_percent.filter(|value| *value <= 100);
     }
     ConnectivityRefresh {
         network,
@@ -1157,12 +1182,12 @@ pub use linux::{
     application_discovery, application_icon, applications, audio_status, bluetooth_status,
     capture_active_window, capture_active_window_to_file, capture_desktop, capture_pointer,
     configure_on_screen_keyboard, configured_primary_output, copy_image_to_clipboard,
-    copy_temp_image_path, deliver_on_screen_keyboard_input, execute_run_command,
-    handle_consumer_control, handle_focused_shortcut, launch_application,
+    copy_temp_image_path, deliver_on_screen_keyboard_input, disconnect_wifi_network,
+    execute_run_command, handle_consumer_control, handle_focused_shortcut, launch_application,
     launch_session_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
     launcher_visibility_applied, network_status, on_screen_keyboard_snapshot,
-    prepare_audio_environment, projection_outputs, read_guarded_device, register_session_shell,
-    register_shell_surface, release_pointer, request_secure_storage_retry,
+    pair_bluetooth_device, prepare_audio_environment, projection_outputs, read_guarded_device,
+    register_session_shell, register_shell_surface, release_pointer, request_secure_storage_retry,
     respond_runtime_diagnostics, respond_semantic_action, respond_semantic_target,
     secure_storage_state, select_audio_device, semantic_target_receiver, send_shell_command,
     set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
@@ -1187,15 +1212,16 @@ pub use windows::{
     configure_notification_window, configure_panel_window, configure_plugin_dialog_window,
     configure_preview_window, configure_screenshot_window, configure_volume_osd_window,
     configured_primary_output, copy_image_to_clipboard, copy_temp_image_path,
-    deliver_on_screen_keyboard_input, ensure_panel_tray_host, execute_run_command,
-    handle_consumer_control, handle_focused_shortcut, hide_preview_window, launch_application,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    launcher_window_visible, lock_workstation, network_status, observe_nickel_window_key,
-    on_screen_keyboard_snapshot, register_internal_window_thread, register_session_shell,
-    release_panel_window, release_pointer, reposition_panel_window, select_audio_device,
-    send_shell_command, set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered,
-    set_wifi_enabled, show_overlay_window_without_activation, show_window_system_menu,
-    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
+    deliver_on_screen_keyboard_input, disconnect_wifi_network, ensure_panel_tray_host,
+    execute_run_command, handle_consumer_control, handle_focused_shortcut, hide_preview_window,
+    launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
+    launcher_visibility_applied, launcher_window_visible, lock_workstation, network_status,
+    observe_nickel_window_key, on_screen_keyboard_snapshot, pair_bluetooth_device,
+    register_internal_window_thread, register_session_shell, release_panel_window, release_pointer,
+    reposition_panel_window, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
+    show_overlay_window_without_activation, show_window_system_menu, toggle_bluetooth_device,
+    update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -1204,13 +1230,13 @@ mod unsupported;
 pub use unsupported::{
     NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, active_display_point,
     application_discovery, application_icon, applications, audio_status, bluetooth_status,
-    capture_pointer, configure_volume_osd_window, configured_primary_output, execute_run_command,
-    handle_consumer_control, handle_focused_shortcut, launch_application,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, register_session_shell, release_pointer, select_audio_device,
-    send_shell_command, set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered,
-    set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
-    update_panel_fullscreen_state, wallpaper,
+    capture_pointer, configure_volume_osd_window, configured_primary_output,
+    disconnect_wifi_network, execute_run_command, handle_consumer_control, handle_focused_shortcut,
+    launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
+    launcher_visibility_applied, network_status, pair_bluetooth_device, register_session_shell,
+    release_pointer, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(target_os = "windows")]

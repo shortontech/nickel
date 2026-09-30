@@ -442,3 +442,76 @@ pub fn pair_bluetooth_device(id: &str, connected: bool) -> Result<(), String> {
         Err(format!("Windows Bluetooth pairing failed ({})", status.0))
     }
 }
+
+/// Bounded native interface inventory, independent of any Settings page.
+#[derive(Clone, Debug)]
+pub struct NetworkAdapter {
+    pub name: String,
+    pub description: String,
+    pub connected: bool,
+    pub speed_bits_per_second: Option<u64>,
+}
+
+pub fn network_adapters() -> Result<Vec<NetworkAdapter>, String> {
+    use windows::Win32::{
+        Foundation::ERROR_BUFFER_OVERFLOW,
+        NetworkManagement::{
+            IpHelper::{GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH},
+            Ndis::IfOperStatusUp,
+        },
+        Networking::WinSock::AF_UNSPEC,
+    };
+    let mut bytes = 0;
+    // SAFETY: The initial call only queries the required buffer size.
+    let first = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            None,
+            &mut bytes,
+        )
+    };
+    if first != ERROR_BUFFER_OVERFLOW.0 || bytes == 0 || bytes > 4 * 1024 * 1024 {
+        return Err("Network adapter inventory is unavailable".into());
+    }
+    let mut storage = vec![0usize; (bytes as usize).div_ceil(std::mem::size_of::<usize>())];
+    let start = storage.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    // SAFETY: Storage is aligned and sized to the reported buffer requirement and remains live during traversal.
+    let result = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            Some(start),
+            &mut bytes,
+        )
+    };
+    if result != NO_ERROR.0 {
+        return Err("Network adapter inventory changed".into());
+    }
+    let mut adapters = Vec::new();
+    let mut current = start;
+    for _ in 0..256 {
+        // SAFETY: GetAdaptersAddresses returns a linked list contained in the live storage buffer.
+        let Some(adapter) = (unsafe { current.as_ref() }) else {
+            break;
+        };
+        // SAFETY: Names returned by GetAdaptersAddresses are terminated wide strings in the same buffer.
+        let name = unsafe { adapter.FriendlyName.to_string() }.unwrap_or_default();
+        let description = unsafe { adapter.Description.to_string() }.unwrap_or_default();
+        if !name.is_empty() && adapter.IfType != 24 {
+            let speed = adapter.ReceiveLinkSpeed.max(adapter.TransmitLinkSpeed);
+            adapters.push(NetworkAdapter {
+                name: name.chars().take(512).collect(),
+                description: description.chars().take(512).collect(),
+                connected: adapter.OperStatus == IfOperStatusUp,
+                speed_bits_per_second: (speed > 0 && speed <= 9_007_199_254_740_991)
+                    .then_some(speed),
+            });
+        }
+        current = adapter.Next;
+    }
+    adapters.sort_by_key(|adapter| (!adapter.connected, adapter.name.to_lowercase()));
+    Ok(adapters)
+}
