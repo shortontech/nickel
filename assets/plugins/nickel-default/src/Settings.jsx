@@ -40,12 +40,7 @@ export function SettingControl(props) {
             accessibilityLabel={setting.label} onChange={change} />;
     }
     if (setting.type === "select") {
-        return <Column className="settings-options">
-            {setting.options.map(option => <Button key={option.value}
-                id={controlId + "/" + option.value}
-                className={value === option.value ? "settings-option active" : "settings-option"}
-                onClick={() => change(option.value)}>{option.label}</Button>)}
-        </Column>;
+        return <SettingSelect setting={setting} value={value} controlId={controlId} onChange={change} />;
     }
     if (setting.type === "color") {
         const Picker = nickel.component("shell.settings.colorPicker");
@@ -67,6 +62,20 @@ export function SettingControl(props) {
         return <Button id={controlId} onClick={() => change(null)}>{setting.actionLabel || setting.label}</Button>;
     }
     return <Text>{value === undefined || value === null ? "" : String(value)}</Text>;
+}
+
+function SettingSelect({ setting, value, controlId, onChange }) {
+    const [open, setOpen] = useState(false);
+    const selected = setting.options.find(option => option.value === value);
+    return <Select id={controlId} accessibilityLabel={setting.label}
+        value={selected ? selected.label : String(value || "")} open={open}
+        onClick={() => setOpen(!open)}>
+        {setting.options.map((option, index) => <Option key={option.value}
+            id={controlId + "/option-" + index} onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+            }}>{option.label}</Option>)}
+    </Select>;
 }
 
 export function SettingsNavigation(props) {
