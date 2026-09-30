@@ -1397,7 +1397,7 @@ impl WinitShell {
             let Some((previous, current)) = previous_panels.get(key).zip(active.get(key)) else {
                 continue;
             };
-            if (previous.width, previous.height) == (current.width, current.height) {
+            if previous == current {
                 continue;
             }
             let Some((geometry, _)) = self.displays.get(existing.display_index) else {
@@ -1418,9 +1418,11 @@ impl WinitShell {
                     .window
                     .set_outer_position(LogicalPosition::new(x, y));
             }
-            let _ = existing
-                .window
-                .request_inner_size(LogicalSize::new(width, height));
+            if (previous.width, previous.height) != (current.width, current.height) {
+                let _ = existing
+                    .window
+                    .request_inner_size(LogicalSize::new(width, height));
+            }
         }
         self.rebuild_surface_indices();
         #[cfg(target_os = "linux")]

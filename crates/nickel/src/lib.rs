@@ -1876,13 +1876,12 @@ fn handle_shell_input(
                 state.set_panel_origin_y(display.y);
             }
         }
-        let plugin_surface_count = state.shell_panel_surfaces().len();
+        let plugin_surfaces_before = state.shell_panel_surfaces();
         if state.plugin_panel_host_input_for(&key, event, width, height) {
-            if state.shell_panel_surfaces().len() != plugin_surface_count {
-                shell.set_plugin_surfaces(
-                    state.shell_fixed_surface_keys(),
-                    state.shell_panel_surfaces(),
-                )?;
+            let plugin_surfaces_after = state.shell_panel_surfaces();
+            if plugin_surfaces_after != plugin_surfaces_before {
+                shell
+                    .set_plugin_surfaces(state.shell_fixed_surface_keys(), plugin_surfaces_after)?;
             }
             if taskbar {
                 state.sync_transient_overlays();
