@@ -251,6 +251,33 @@ mod tests {
     use nickel_core::optional_features::{FeatureInstallation, FeaturePolicy, FeatureSupport};
 
     #[test]
+    fn shared_optional_features_page_renders() {
+        fn save(host: &nickel_ui::UiHost<SettingsApp>, name: &str) {
+            const WIDTH: u32 = 850;
+            const HEIGHT: u32 = 580;
+            let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(WIDTH, HEIGHT, 1.0);
+            host.render_software(&mut renderer);
+            let image =
+                image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(WIDTH, HEIGHT, |x, y| {
+                    let pixel = renderer.pixels()[(y * WIDTH + x) as usize];
+                    image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+                });
+            let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/nickel-ui-snapshots")
+                .join(name);
+            std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+            image.save(output).unwrap();
+        }
+
+        let jsx = nickel_ui::UiHost::new(
+            SettingsApp::with_initial_page(SettingsPage::OptionalFeatures),
+            850,
+            580,
+        );
+        save(&jsx, "settings-optional-features-shared.png");
+    }
+
+    #[test]
     fn shared_optional_features_has_a_semantic_switch() {
         let app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         let host = nickel_ui::UiHost::new(app, 960, 498);
@@ -258,6 +285,21 @@ mod tests {
             node.id.as_str().contains("optional-feature-codex-enabled")
                 && node.role == Some(nickel_ui::SemanticRole::Switch)
         }));
+        let nodes = host.semantic_nodes();
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| node.role == Some(nickel_ui::SemanticRole::RadioGroup))
+                .count(),
+            1
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| node.role == Some(nickel_ui::SemanticRole::Radio))
+                .count(),
+            3
+        );
     }
 
     #[test]

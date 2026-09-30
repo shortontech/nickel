@@ -212,8 +212,8 @@ impl SettingsApp {
             return AnyView::new(Container::new());
         }
         let theme = self.ui_theme();
-        let data = crate::optional_features_plugin::projection(self);
-        let plugin_view = if self.settings_jsx_enabled {
+        let rendered = if self.settings_jsx_enabled {
+            let data = crate::optional_features_plugin::projection(self);
             self.optional_features_page
                 .borrow_mut()
                 .get_or_insert_with(|| {
@@ -228,158 +228,18 @@ impl SettingsApp {
         } else {
             Err("Settings plugin is disabled".into())
         };
-        if let Ok(view) = plugin_view {
-            return view;
-        }
-        let state = &self.codex_feature;
-        let switch_state = codex_switch_state(state);
-        let switch_action = match switch_state {
-            SwitchState::On => Some(SettingsMessage::SetCodexEnabled(false)),
-            SwitchState::Off => Some(SettingsMessage::SetCodexEnabled(true)),
-            SwitchState::Mixed => Some(SettingsMessage::SetCodexEnabled(false)),
-            SwitchState::MixedUnavailable | SwitchState::DisabledOff | SwitchState::DisabledOn => {
-                None
-            }
-        };
-        let status = match state.effective {
-            FeatureEffectiveState::Disabled => "Off",
-            FeatureEffectiveState::Enabling | FeatureEffectiveState::Stale => "Starting Codex…",
-            FeatureEffectiveState::Enabled => "On",
-            FeatureEffectiveState::Unavailable => "Codex is unavailable",
-            FeatureEffectiveState::Rejected => "Codex could not start",
-        };
-        let confirmation = if self.codex_disable_confirmation {
+        rendered.unwrap_or_else(|error| {
             AnyView::new(
-                SettingsRow::new(
-                    theme,
-                    format!(
-                        "Close {} built-in Codex window(s) and disable?",
-                        self.optional_feature_runtime.active_windows
+                SettingsCard::titled(theme, "Optional Features are unavailable", error).child(
+                    Button::semantic(
+                        theme,
+                        SettingsMessage::Navigate(SettingsPage::Plugins),
+                        "Manage plugins",
+                        ButtonPresentation::Primary,
                     ),
-                    "External Codex clients and upstream conversation history are not affected.",
-                )
-                .trailing(ui! { <Row width={190.0} gap={8.0}>
-                    {Button::semantic(theme, SettingsMessage::ConfirmDisableCodex,
-                        "Close & disable", ButtonPresentation::Primary).width(118.0)}
-                    {Button::semantic(theme, SettingsMessage::CancelDisableCodex,
-                        "Cancel", ButtonPresentation::Quiet).width(64.0)}
-                </Row> }),
-            )
-        } else {
-            AnyView::new(ui! { <Column /> })
-        };
-        let codex = SettingsCard::titled(
-            theme,
-            self.localizer.text("ui-pages-codex"),
-            self.localizer
-                .text("ui-pages-use-codex-projects-and-conversations-in-nickel"),
-        )
-        .child(
-            SettingsRow::new(theme, "Enable Codex", status).trailing(
-                Switch::with_state_action(switch_state, switch_action, theme)
-                    .id("optional-feature-codex-enabled")
-                    .accessibility_label("Enable Codex integration"),
-            ),
-        )
-        .child(confirmation)
-        .child(
-            if matches!(
-                state.effective,
-                FeatureEffectiveState::Unavailable | FeatureEffectiveState::Rejected
-            ) {
-                AnyView::new(Button::semantic(
-                    theme,
-                    SettingsMessage::RetryCodexProbe,
-                    "Try again",
-                    ButtonPresentation::Secondary,
-                ))
-            } else {
-                AnyView::new(ui! { <Column /> })
-            },
-        );
-        use nickel_core::on_screen_keyboard::KeyboardPreference;
-        let preference = self.optional_features.on_screen_keyboard;
-        let editable = !self
-            .keyboard_runtime
-            .as_ref()
-            .is_some_and(|runtime| runtime.environment_override);
-        let mode = RadioGroup::new([
-            RadioOption::new(
-                theme,
-                SettingsMessage::SetOnScreenKeyboard(KeyboardPreference::Automatic),
-                "Automatic",
-                preference == KeyboardPreference::Automatic,
-            )
-            .description("Enable when a touchscreen is connected.")
-            .enabled(editable),
-            RadioOption::new(
-                theme,
-                SettingsMessage::SetOnScreenKeyboard(KeyboardPreference::Enabled),
-                "On",
-                preference == KeyboardPreference::Enabled,
-            )
-            .description("Available even without a touchscreen.")
-            .enabled(editable),
-            RadioOption::new(
-                theme,
-                SettingsMessage::SetOnScreenKeyboard(KeyboardPreference::Disabled),
-                "Off",
-                preference == KeyboardPreference::Disabled,
-            )
-            .description("Hide the keyboard and its tray control.")
-            .enabled(editable),
-        ])
-        .id("on-screen-keyboard-mode");
-        let status = if let Some(error) = &self.keyboard_error {
-            format!("Could not save: {error}")
-        } else if let Some(runtime) = &self.keyboard_runtime {
-            if runtime.generation != self.optional_features.on_screen_keyboard_generation {
-                "Saved; waiting for the shell".into()
-            } else if runtime.environment_override {
-                format!(
-                    "{} for this session · controlled by the shell environment",
-                    if runtime.enabled { "On" } else { "Off" }
-                )
-            } else {
-                format!(
-                    "{} · {}",
-                    if runtime.enabled { "On" } else { "Off" },
-                    if runtime.touchscreen_present {
-                        "Touchscreen detected"
-                    } else {
-                        "No touchscreen detected"
-                    }
-                )
-            }
-        } else {
-            "Shell keyboard status unavailable".into()
-        };
-        let keyboard = SettingsCard::titled(
-            theme,
-            self.localizer.text("ui-pages-on-screen-keyboard"),
-            self.localizer
-                .text("ui-pages-type-with-touch-a-controller-or-a-mouse"),
-        )
-        .child(mode)
-        .child(SettingsRow::new(theme, "Current state", status));
-        AnyView::new(
-            nickel_ui::VerticalScroll::new(SettingsMessage::OptionalFeaturesScroll, 0.0)
-                .grow(1.0)
-                .theme(theme)
-                .child(
-                    Column::new()
-                        .fill_width()
-                        .gap(16.0)
-                        .padding(Insets {
-                            top: 0.0,
-                            right: 12.0,
-                            bottom: 24.0,
-                            left: 0.0,
-                        })
-                        .child(keyboard.shrink(0.0))
-                        .child(codex.shrink(0.0)),
                 ),
-        )
+            )
+        })
     }
 
     pub(super) fn default_apps_components(&self) -> AnyView<SettingsMessage> {

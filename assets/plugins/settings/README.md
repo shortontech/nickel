@@ -67,7 +67,7 @@ The generic `<Switch>` preserves native switch semantics for on, off, mixed,
 and unavailable states. Its callbacks request typed changes, retry, and disable
 confirmation; the Settings host checks current policy, runtime state, and
 environment overrides before applying them. Its Boa context starts only while
-this page is open, and the native view remains available if JSX fails. Build
+this page is open; Settings links to plugin management if JSX fails. Build
 its shipped JS with the same command and its source filename.
 
 `settings-network.jsx` uses shared components and `settings-network.css` for

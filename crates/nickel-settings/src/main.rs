@@ -60,7 +60,7 @@ use nickel_core::{
         OptionalFeatureSettings, codex_policy,
     },
     shell_settings::{AnimationLevel, FileIconPreference, ShellSettings, ThemePreference},
-    theme::{Appearance, ThemePalette},
+    theme::ThemePalette,
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
@@ -76,6 +76,9 @@ use nickel_ui::{
     SwitchState, UiHost, UiId, ViewContext, search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
+
+#[cfg(target_os = "windows")]
+use nickel_core::theme::Appearance;
 
 #[cfg(test)]
 use nickel_ui::{ControllerAction, Rect as UiRect, UiFrame};
@@ -4095,7 +4098,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_optional_features_jsx_keeps_native_codex_switch_available() {
+    fn failed_optional_features_jsx_offers_plugin_recovery_without_native_controls() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         app.codex_feature.requested_enabled = false;
         app.codex_feature.effective = FeatureEffectiveState::Disabled;
@@ -4103,12 +4106,21 @@ mod tests {
         app.codex_feature.capability.support = FeatureSupport::Supported;
         app.codex_feature.capability.policy = FeaturePolicy::Editable;
         *app.optional_features_page.borrow_mut() = Some(Err("JSX failed".into()));
-        let host = UiHost::new(app, 850, 580);
-        assert_eq!(
+        let mut host = UiHost::new(app, 850, 580);
+        assert!(
             host.semantic_targets_for_message(&SettingsMessage::SetCodexEnabled(true))
-                .len(),
-            1
+                .is_empty()
         );
+        let recovery = host
+            .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
+            .into_iter()
+            .next()
+            .expect("Optional Features recovery opens plugin management");
+        host.perform_semantic_action(
+            recovery.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(host.application().page, SettingsPage::Plugins);
     }
 
     #[test]

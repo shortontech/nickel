@@ -12,16 +12,17 @@ function App() {
         <div className="features-card">
             <Text className="features-title">{keyboard.title}</Text>
             <Text className="features-description" wrap={true}>{keyboard.description}</Text>
-            <div className="keyboard-options">
+            <div className="keyboard-options" role="radiogroup" aria-label={keyboard.title}>
                 {keyboard.options.map(option =>
-                    <div key={option.value} className="keyboard-option">
-                        {keyboard.editable
-                            ? <Button id={`keyboard-mode-${option.value}`}
-                                className={option.selected ? 'feature-option selected' : 'feature-option'}
-                                accessibilityLabel={option.label}
-                                onClick={() => request('keyboard-mode', {mode: option.value})}>{`${option.selected ? '◉' : '○'}  ${option.label}`}</Button>
-                            : <Text className="feature-option-disabled">{`${option.selected ? '◉' : '○'}  ${option.label}`}</Text>}
-                        <Text className="features-description" wrap={true}>{option.description}</Text>
+                    <div key={option.value} id={`keyboard-mode-${option.value}`}
+                        className={option.selected ? 'keyboard-option selected' : 'keyboard-option'}
+                        role="radio" aria-label={option.label} aria-checked={option.selected}
+                        disabled={!keyboard.editable}
+                        onClick={keyboard.editable
+                            ? () => request('keyboard-mode', {mode: option.value})
+                            : undefined}>
+                        <Text className="keyboard-option-label">{`${option.selected ? '◉' : '○'}  ${option.label}`}</Text>
+                        <Text className="keyboard-option-description" wrap={true}>{option.description}</Text>
                     </div>)}
             </div>
             <div className="features-status-row">

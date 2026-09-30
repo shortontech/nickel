@@ -38,7 +38,6 @@ text.features-description {
     line-height: 18px;
 }
 
-div.keyboard-options,
 div.features-actions,
 div.codex-control-row {
     display: flex;
@@ -46,33 +45,39 @@ div.codex-control-row {
     gap: 10px;
 }
 
+div.keyboard-options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
 div.keyboard-option {
     display: flex;
     flex-direction: column;
-    width: 33%;
-    gap: 5px;
-}
-
-button.feature-option,
-text.feature-option-disabled {
     width: 100%;
-    height: 44px;
-    padding: 9px 10px;
+    min-height: 54px;
+    gap: 2px;
+    padding: 8px 10px;
     background: @card@;
     border: 1px solid @border@;
     border-radius: @radius@px;
+}
+
+div.keyboard-option.selected {
+    background: @accent-soft@;
+    border: 2px solid @selected@;
+}
+
+text.keyboard-option-label {
     color: @primary@;
     font-size: 14px;
     line-height: 20px;
 }
 
-button.feature-option.selected {
-    background: @accent-soft@;
-    border: 2px solid @selected@;
-}
-
-text.feature-option-disabled {
+text.keyboard-option-description {
     color: @secondary@;
+    font-size: 12px;
+    line-height: 17px;
 }
 
 div.features-status-row,

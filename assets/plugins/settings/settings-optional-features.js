@@ -11,11 +11,11 @@ function App() {
         h("div", { className: "features-card" },
             h(Text, { className: "features-title" }, keyboard.title),
             h(Text, { className: "features-description", wrap: true }, keyboard.description),
-            h("div", { className: "keyboard-options" }, keyboard.options.map(option => h("div", { key: option.value, className: "keyboard-option" },
-                keyboard.editable
-                    ? h(Button, { id: `keyboard-mode-${option.value}`, className: option.selected ? 'feature-option selected' : 'feature-option', accessibilityLabel: option.label, onClick: () => request('keyboard-mode', { mode: option.value }) }, `${option.selected ? '◉' : '○'}  ${option.label}`)
-                    : h(Text, { className: "feature-option-disabled" }, `${option.selected ? '◉' : '○'}  ${option.label}`),
-                h(Text, { className: "features-description", wrap: true }, option.description)))),
+            h("div", { className: "keyboard-options", role: "radiogroup", "aria-label": keyboard.title }, keyboard.options.map(option => h("div", { key: option.value, id: `keyboard-mode-${option.value}`, className: option.selected ? 'keyboard-option selected' : 'keyboard-option', role: "radio", "aria-label": option.label, "aria-checked": option.selected, disabled: !keyboard.editable, onClick: keyboard.editable
+                    ? () => request('keyboard-mode', { mode: option.value })
+                    : undefined },
+                h(Text, { className: "keyboard-option-label" }, `${option.selected ? '◉' : '○'}  ${option.label}`),
+                h(Text, { className: "keyboard-option-description", wrap: true }, option.description)))),
             h("div", { className: "features-status-row" },
                 h(Text, { className: "features-label" }, keyboard.statusLabel),
                 h(Text, { className: "features-description", wrap: true }, keyboard.status))),
