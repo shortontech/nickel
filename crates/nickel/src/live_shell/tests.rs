@@ -1176,9 +1176,15 @@ fn installed_plugin_can_reposition_only_its_open_window() {
         240,
     ));
     assert_eq!(shell.plugin_panel_surface.width, 300);
-    assert_eq!(shell.plugin_panel_surface.anchor, PluginSurfaceAnchor::TopRight);
     assert_eq!(
-        (shell.plugin_panel_surface.offset_x, shell.plugin_panel_surface.offset_y),
+        shell.plugin_panel_surface.anchor,
+        PluginSurfaceAnchor::TopRight
+    );
+    assert_eq!(
+        (
+            shell.plugin_panel_surface.offset_x,
+            shell.plugin_panel_surface.offset_y
+        ),
         (-24, 24)
     );
     assert!(

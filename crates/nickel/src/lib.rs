@@ -128,7 +128,6 @@ mod control_view;
 #[allow(dead_code)] // Wired into the Smithay runtime by the next integration slice.
 #[cfg(target_os = "linux")]
 mod internal_shell;
-#[cfg(any(test, feature = "workbench-fixtures"))]
 mod live_shell;
 mod local_cues;
 #[allow(dead_code)]
