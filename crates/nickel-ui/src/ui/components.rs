@@ -973,6 +973,11 @@ impl<Message> Component<Message> for StyledText<Message> {
 pub struct Text<Message = String>(Element<Message>);
 
 impl<Message> Text<Message> {
+    pub fn css_paint(mut self, enabled: bool) -> Self {
+        self.0.style.css_paint = enabled;
+        self
+    }
+
     pub fn new(value: impl Into<String>) -> Self {
         let value = value.into();
         Self(Element::text(value.clone(), 2.0).accessibility_label(value))
@@ -1657,6 +1662,8 @@ impl<Message> TextField<Message> {
             frame.interaction_backgrounds[1].map(Background::Solid);
         self.text.0.style.focus_background =
             frame.interaction_backgrounds[2].map(Background::Solid);
+        self.text.0.style.interaction_paints = Some(Box::new(frame.interaction_paints));
+        self.text.0.style.css_paint = true;
         self.text.0.style.automatic_focus_tint = false;
         self.text.0.style.editing_parts = Some(Box::new([caret.bounded(), selection.bounded()]));
         self.text.0.style.overflow_x = Overflow::Clip;
@@ -1821,6 +1828,16 @@ impl<Message> Component<Message> for Header<Message> {
 pub struct Container<Message = String>(Element<Message>);
 
 impl<Message> Container<Message> {
+    pub fn css_paint(mut self, enabled: bool) -> Self {
+        self.0.style.css_paint = enabled;
+        self
+    }
+
+    pub fn interaction_paints(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.interaction_paints = Some(Box::new(paints));
+        self
+    }
+
     pub fn automatic_focus_tint(mut self, enabled: bool) -> Self {
         self.0.style.automatic_focus_tint = enabled;
         self
@@ -3283,6 +3300,7 @@ pub struct DropdownPartStyle {
     pub background: Option<Color>,
     /// Hover, pressed and focused backgrounds supplied by CSS.
     pub interaction_backgrounds: [Option<Color>; 3],
+    pub interaction_paints: [InteractionPaint; 3],
     pub foreground: Option<Color>,
     pub border_color: Option<Color>,
     pub border_width: f32,
@@ -3292,6 +3310,21 @@ pub struct DropdownPartStyle {
 }
 
 impl DropdownPartStyle {
+    pub(crate) fn with_interaction(mut self, index: usize) -> Self {
+        let paint = self.interaction_paints[index];
+        self.background = paint
+            .background
+            .or(self.interaction_backgrounds[index])
+            .or(self.background);
+        self.foreground = paint.foreground.or(self.foreground);
+        self.border_color = paint.border_color.or(self.border_color);
+        self.border_width = paint.border_width.unwrap_or(self.border_width);
+        self.radius = paint.radius.unwrap_or(self.radius);
+        self.font_size = paint.font_size.unwrap_or(self.font_size);
+        self.line_height = paint.line_height.unwrap_or(self.line_height);
+        self
+    }
+
     fn bounded(mut self) -> Self {
         let bound = |value: f32| {
             if value.is_finite() {
@@ -3347,6 +3380,7 @@ impl<Message> Dropdown<Message> {
                 option_background: 0x34445f,
                 foreground: 0xf4f7ff,
                 presentation: None,
+                option_presentations: Vec::new(),
                 resolved_options: Vec::new(),
             },
             style: Style::default(),
@@ -3371,6 +3405,17 @@ impl<Message> Dropdown<Message> {
         };
         element.style.height = Length::Px(42.0);
         Self(element)
+    }
+
+    pub fn option_parts(mut self, styles: impl IntoIterator<Item = DropdownPartStyle>) -> Self {
+        if let Kind::Dropdown {
+            option_presentations,
+            ..
+        } = &mut self.0.kind
+        {
+            *option_presentations = styles.into_iter().map(DropdownPartStyle::bounded).collect();
+        }
+        self
     }
 
     /// Replace the native stock appearance with compiler-owned part styles.
@@ -3532,6 +3577,7 @@ impl<Message: Clone> Menu<Message> {
                 option_background: 0x202630,
                 foreground: 0xe8edf4,
                 presentation: None,
+                option_presentations: Vec::new(),
                 resolved_options: Vec::new(),
             },
             style: Style::default(),

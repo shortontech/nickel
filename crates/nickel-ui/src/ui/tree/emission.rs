@@ -37,10 +37,19 @@ pub(super) fn paint_dropdown_part(
         if let Some(color) = border
             && style.border_width > 0.0
         {
-            commands.push(PaintCommand::Stroke {
-                rect,
-                color,
-                width: style.border_width,
+            commands.push(if style.radius > 0.0 {
+                PaintCommand::RoundedStroke {
+                    rect,
+                    color,
+                    width: style.border_width,
+                    radius: style.radius,
+                }
+            } else {
+                PaintCommand::Stroke {
+                    rect,
+                    color,
+                    width: style.border_width,
+                }
             });
         }
     }
@@ -54,7 +63,7 @@ pub(super) fn paint_dropdown_part(
         commands.push(PaintCommand::Text {
             bounds,
             text: text.into(),
-            scale: style.font_size / 7.0,
+            scale: -style.font_size,
             color,
             align,
             bold: false,
@@ -69,6 +78,7 @@ fn custom_paint_bounds(command: &PaintCommand) -> Option<Rect> {
         | PaintCommand::TopRoundedFill { rect, .. }
         | PaintCommand::RoundedFill { rect, .. }
         | PaintCommand::Gradient { rect, .. }
+        | PaintCommand::RoundedStroke { rect, .. }
         | PaintCommand::Stroke { rect, .. } => Some(*rect),
         PaintCommand::Text { bounds, .. }
         | PaintCommand::StyledText { bounds, .. }
@@ -97,6 +107,7 @@ fn translate_custom_command(mut command: PaintCommand, origin: Point) -> PaintCo
         | PaintCommand::TopRoundedFill { rect, .. }
         | PaintCommand::RoundedFill { rect, .. }
         | PaintCommand::Gradient { rect, .. }
+        | PaintCommand::RoundedStroke { rect, .. }
         | PaintCommand::Stroke { rect, .. } => translate(rect),
         PaintCommand::Text { bounds, .. }
         | PaintCommand::StyledText { bounds, .. }
@@ -207,10 +218,19 @@ pub(super) fn emit_element<Message: Clone>(
             });
         }
         if let Some(color) = element.style.border {
-            tree.commands.push(PaintCommand::Stroke {
-                rect,
-                color,
-                width: element.style.border_width,
+            tree.commands.push(if element.style.corner_radius > 0.0 {
+                PaintCommand::RoundedStroke {
+                    rect,
+                    color,
+                    width: element.style.border_width,
+                    radius: element.style.corner_radius,
+                }
+            } else {
+                PaintCommand::Stroke {
+                    rect,
+                    color,
+                    width: element.style.border_width,
+                }
             });
         }
     }
@@ -516,15 +536,17 @@ pub(super) fn emit_element<Message: Clone>(
                     });
                 }
             }
-            tree.commands.push(PaintCommand::Text {
-                bounds: text_rect,
-                text,
-                scale: *scale,
-                color: foreground.unwrap_or(0x00ff_ffff),
-                align: element.style.text_align,
-                bold: *bold,
-                wrap: *wrap,
-            });
+            if !element.style.css_paint || foreground.is_some_and(|color| color != 0) {
+                tree.commands.push(PaintCommand::Text {
+                    bounds: text_rect,
+                    text,
+                    scale: *scale,
+                    color: foreground.unwrap_or(0x00ff_ffff),
+                    align: element.style.text_align,
+                    bold: *bold,
+                    wrap: *wrap,
+                });
+            }
         }
         Kind::StyledText {
             value,
@@ -776,6 +798,7 @@ pub(super) fn emit_element<Message: Clone>(
             option_background,
             foreground,
             presentation,
+            option_presentations,
             resolved_options,
             ..
         } => {
@@ -789,7 +812,15 @@ pub(super) fn emit_element<Message: Clone>(
                 .map_or(if *overlay { 34.0 } else { 36.0 }, |parts| {
                     parts[1].height + parts[1].margin.height()
                 });
-            let options_height = option_height * options.len() as f32;
+            let option_part = |index: usize| {
+                resolved_options
+                    .get(index)
+                    .or_else(|| option_presentations.get(index))
+            };
+            let row_height = |index: usize| {
+                option_part(index).map_or(option_height, |part| part.height + part.margin.height())
+            };
+            let options_height = (0..options.len()).map(row_height).sum::<f32>();
             let options_origin_y = if *overlay
                 && rect.origin.y + header_height + options_height
                     > tree.viewport.origin.y + tree.viewport.size.height
@@ -798,6 +829,19 @@ pub(super) fn emit_element<Message: Clone>(
                 rect.origin.y - options_height
             } else {
                 rect.origin.y + header_height
+            };
+            let option_bounds = |index: usize| {
+                let y = options_origin_y + (0..index).map(row_height).sum::<f32>();
+                let bounds = Rect::new(rect.origin.x, y, rect.size.width, row_height(index));
+                if let Some(part) = option_part(index) {
+                    let mut bounds = bounds.inset(part.margin);
+                    if part.width > 0.0 {
+                        bounds.size.width = bounds.size.width.min(part.width);
+                    }
+                    bounds
+                } else {
+                    bounds
+                }
             };
             let header = Rect::new(rect.origin.x, rect.origin.y, rect.size.width, header_height);
             let header = presentation
@@ -877,12 +921,7 @@ pub(super) fn emit_element<Message: Clone>(
                         tree.messages.push(MessageRegion {
                             id: node.id.scoped(format!("option-{index}")),
                             navigation_owner: Some(node.id.clone()),
-                            rect: Rect::new(
-                                rect.origin.x,
-                                options_origin_y + index as f32 * option_height,
-                                rect.size.width,
-                                option_height,
-                            ),
+                            rect: option_bounds(index),
                             message: message.clone(),
                             message_mapper: None,
                             seeded_value_mapper: None,
@@ -892,15 +931,7 @@ pub(super) fn emit_element<Message: Clone>(
             }
             if *expanded {
                 for (index, option) in options.iter().enumerate() {
-                    let option_rect = Rect::new(
-                        rect.origin.x,
-                        options_origin_y + index as f32 * option_height,
-                        rect.size.width,
-                        option_height,
-                    );
-                    let option_rect = presentation
-                        .as_ref()
-                        .map_or(option_rect, |parts| option_rect.inset(parts[1].margin));
+                    let option_rect = option_bounds(index);
                     let commands = if *overlay {
                         &mut tree.overlay_commands
                     } else {
@@ -910,7 +941,7 @@ pub(super) fn emit_element<Message: Clone>(
                         paint_dropdown_part(
                             commands,
                             option_rect,
-                            resolved_options.get(index).unwrap_or(&parts[1]),
+                            option_part(index).unwrap_or(&parts[1]),
                             option,
                             TextAlign::Start,
                         );
@@ -945,9 +976,7 @@ pub(super) fn emit_element<Message: Clone>(
                         padding_box: option_rect,
                         border_box: option_rect,
                         content: option_rect.inset(
-                            presentation
-                                .as_ref()
-                                .map_or(Insets::all(8.0), |parts| parts[1].padding),
+                            option_part(index).map_or(Insets::all(8.0), |part| part.padding),
                         ),
                         constraints: Constraints::tight(option_rect.size),
                         preferred: option_rect.size,

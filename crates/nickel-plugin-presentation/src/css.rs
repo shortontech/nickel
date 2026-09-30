@@ -609,6 +609,7 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                             | "switch"
                             | "checkbox"
                             | "text-field-menu-item"
+                            | "color-swatch"
                     )
                 )
             }) {
@@ -616,20 +617,8 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                     "plugin CSS state selectors require an interactive control part",
                 ));
             }
-            let transparent_part = selectors.iter().all(|selector| {
-                matches!(
-                    selector.kind.as_deref(),
-                    Some("select-header" | "option" | "menu-item" | "text-field-menu-item")
-                )
-            });
-            if declarations.iter().any(|declaration| {
-                !matches!(declaration, ParsedDeclaration::Property(name, value)
-                    if matches!(name.as_str(), "background" | "background-color")
-                        && (value.contains("var(") || color(value).is_ok_and(|color| color != 0 || transparent_part)))
-            }) {
-                return Err(ParseError::custom(
-                    "plugin CSS state selectors require a nontransparent background",
-                ));
+            if declarations.iter().any(|parsed| !matches!(parsed, ParsedDeclaration::Property(name, _) if matches!(name.as_str(), "background" | "background-color" | "color" | "border" | "border-color" | "border-width" | "border-radius" | "font-size" | "line-height"))) {
+                return Err(ParseError::custom("CSS interaction declarations require paint or typography properties"));
             }
         }
         if declarations
@@ -1046,6 +1035,42 @@ impl StyleSheet {
         style
     }
 
+    pub(crate) fn resolve_interaction_paint(
+        &self,
+        kind: &str,
+        id: Option<&str>,
+        class_name: Option<&str>,
+        state: InteractionState,
+        properties: &HashMap<String, String>,
+        ancestors: &[(String, Option<String>, Option<String>)],
+    ) -> nickel_ui::InteractionPaint {
+        let mut style = ControlStyle::default();
+        for rule in &self.rules {
+            if rule.selectors.iter().any(|selector| {
+                selector.state == Some(state)
+                    && selector.matches(kind, id, class_name, Some(state), ancestors)
+            }) {
+                for parsed in &rule.declarations {
+                    if let ParsedDeclaration::Property(name, value) = parsed
+                        && let Ok(value) = resolve_value(value, properties, &mut HashSet::new())
+                        && let Ok(declaration) = declaration(name, &value)
+                    {
+                        declaration.apply(&mut style);
+                    }
+                }
+            }
+        }
+        nickel_ui::InteractionPaint {
+            background: style.background,
+            foreground: style.color,
+            border_color: style.border_color,
+            border_width: style.border_width,
+            radius: style.radius,
+            font_size: style.font_size,
+            line_height: style.line_height,
+        }
+    }
+
     pub fn resolve_interaction_background(
         &self,
         kind: &str,
@@ -1084,11 +1109,6 @@ impl StyleSheet {
                         && matches!(name.as_str(), "background" | "background-color")
                         && let Ok(value) = resolve_value(value, properties, &mut HashSet::new())
                         && let Ok(Declaration::Background(color)) = declaration(name, &value)
-                        && (color != 0
-                            || matches!(
-                                kind,
-                                "select-header" | "option" | "menu-item" | "text-field-menu-item"
-                            ))
                     {
                         background = Some(color);
                     }
@@ -1306,8 +1326,6 @@ mod tests {
             "button { unknown: 4px }",
             "button { padding: 10000px }",
             "@import 'remote.css';",
-            "button:hover { color: #fff }",
-            "button:hover { background: transparent }",
             "div:hover { background: #fff }",
         ] {
             assert!(StyleSheet::compile(source).is_err(), "{source}");

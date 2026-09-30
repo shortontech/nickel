@@ -511,6 +511,22 @@ impl SoftwareRenderer {
                 *color,
                 clip,
             ),
+            PaintCommand::RoundedStroke {
+                rect,
+                color,
+                width,
+                radius,
+            } => {
+                for span in crate::ui::rounded_border_spans(
+                    physical_rect(*rect, self.scale),
+                    width * self.scale,
+                    radius * self.scale,
+                ) {
+                    if let Some(bounds) = intersection(span, clip) {
+                        self.fill_rect(bounds, pixel(*color));
+                    }
+                }
+            }
             PaintCommand::Gradient { rect, gradient } => {
                 self.fill_gradient(physical_rect(*rect, self.scale), *gradient, clip);
             }
@@ -1101,6 +1117,7 @@ fn command_bounds(command: &PaintCommand) -> Option<Rect> {
         | PaintCommand::TopRoundedFill { rect, .. }
         | PaintCommand::RoundedFill { rect, .. }
         | PaintCommand::Gradient { rect, .. }
+        | PaintCommand::RoundedStroke { rect, .. }
         | PaintCommand::Stroke { rect, .. }
         | PaintCommand::OverlayFill { rect, .. }
         | PaintCommand::OverlayStroke { rect, .. } => Some(*rect),
@@ -1326,6 +1343,33 @@ mod tests {
     use nickel_core::resource_owner::{DependencyOwnerKind, dependency_owner_diagnostics};
 
     use super::{PaintCommand, Pixel, Rect, SoftwareRenderer, TextAlign, command_intersects_clip};
+
+    #[test]
+    fn rounded_border_preserves_center_and_corner_background_at_multiple_scales() {
+        for scale in [1.0, 1.5, 2.0] {
+            let mut renderer =
+                SoftwareRenderer::new((40.0 * scale) as u32, (30.0 * scale) as u32, scale);
+            renderer.render(&[
+                PaintCommand::Fill {
+                    rect: Rect::new(0.0, 0.0, 40.0, 30.0),
+                    color: 0xff123456,
+                },
+                PaintCommand::RoundedStroke {
+                    rect: Rect::new(5.0, 5.0, 30.0, 20.0),
+                    color: 0xffabcdef,
+                    width: 2.0,
+                    radius: 6.0,
+                },
+            ]);
+            let at = |x: f32, y: f32| {
+                renderer.pixels()
+                    [((y * scale) as u32 * renderer.size().0 + (x * scale) as u32) as usize]
+            };
+            assert_eq!(at(20.0, 15.0), Pixel::rgba(0x12, 0x34, 0x56, 255));
+            assert_eq!(at(5.0, 5.0), Pixel::rgba(0x12, 0x34, 0x56, 255));
+            assert_eq!(at(20.0, 5.0), Pixel::rgba(0xab, 0xcd, 0xef, 255));
+        }
+    }
 
     #[test]
     fn exact_text_pixels_match_layout_font_size() {

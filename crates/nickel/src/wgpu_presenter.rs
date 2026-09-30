@@ -718,6 +718,16 @@ impl Frame {
                     color,
                     radius,
                 } => self.rounded(*rect, *color, *radius, true),
+                PaintCommand::RoundedStroke {
+                    rect,
+                    color,
+                    width,
+                    radius,
+                } => {
+                    for span in nickel_ui::backend::rounded_border_spans(*rect, *width, *radius) {
+                        self.solid(span, *color);
+                    }
+                }
                 PaintCommand::Gradient { rect, gradient } => {
                     let horizontal = gradient.axis == GradientAxis::Horizontal;
                     let extent = if horizontal {

@@ -844,16 +844,18 @@ impl<Message: Clone> UiFrame<Message> {
                 item_rect.inset(part.map_or(menu.item_padding, |part| part.padding));
             if let Some(parts) = &item.presentation {
                 let mut style = parts[0];
-                let active = if interaction.pressed {
-                    style.interaction_backgrounds[1]
-                } else if interaction.hovered {
-                    style.interaction_backgrounds[0]
+                let index = if interaction.pressed {
+                    Some(1)
                 } else if interaction.focused || interaction.controller_selected {
-                    style.interaction_backgrounds[2]
+                    Some(2)
+                } else if interaction.hovered {
+                    Some(0)
                 } else {
                     None
                 };
-                style.background = active.or(style.background);
+                if let Some(index) = index {
+                    style = style.with_interaction(index);
+                }
                 emission::paint_dropdown_part(
                     &mut self.commands,
                     item_rect,

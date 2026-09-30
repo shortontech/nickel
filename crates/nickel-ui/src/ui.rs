@@ -161,6 +161,18 @@ pub enum TextUnderlineStyle {
 }
 
 /// One non-overlapping byte range in a styled text stream.
+/// Typed paint overrides for hover, pressed, and keyboard/controller focus.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InteractionPaint {
+    pub background: Option<Color>,
+    pub foreground: Option<Color>,
+    pub border_color: Option<Color>,
+    pub border_width: Option<f32>,
+    pub radius: Option<f32>,
+    pub font_size: Option<f32>,
+    pub line_height: Option<f32>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StyledTextSpan {
     pub range: Range<usize>,
@@ -832,6 +844,12 @@ pub enum PaintCommand {
         color: Color,
         radius: f32,
     },
+    RoundedStroke {
+        rect: Rect,
+        color: Color,
+        width: f32,
+        radius: f32,
+    },
     Gradient {
         rect: Rect,
         gradient: LinearGradient,
@@ -908,7 +926,8 @@ pub(crate) fn assert_background_color_policy(identity: &str, commands: &[PaintCo
                 }
                 continue;
             }
-            PaintCommand::Stroke { .. }
+            PaintCommand::RoundedStroke { .. }
+            | PaintCommand::Stroke { .. }
             | PaintCommand::OverlayStroke { .. }
             | PaintCommand::Text { .. }
             | PaintCommand::StyledText { .. }
@@ -940,6 +959,7 @@ pub struct Style {
     pub border_width: f32,
     pub foreground: Option<Color>,
     /// Semantic background applied while an interactive element is hovered.
+    pub interaction_paints: Option<Box<[InteractionPaint; 3]>>,
     pub hover_background: Option<Background>,
     /// Semantic background applied while an interactive element is pressed.
     pub pressed_background: Option<Background>,
@@ -950,6 +970,7 @@ pub struct Style {
     pub focus_background_tint: Option<Color>,
     /// Presentation compilers may supply complete focus cues explicitly.
     pub automatic_focus_tint: bool,
+    pub css_paint: bool,
     pub auto_focus: bool,
     pub editing_parts: Option<Box<[DropdownPartStyle; 2]>>,
     pub editing_menu: Option<Box<crate::OverlayMenuPresentation>>,
@@ -1017,11 +1038,13 @@ impl Default for Style {
             border: None,
             border_width: 1.0,
             foreground: None,
+            interaction_paints: None,
             hover_background: None,
             pressed_background: None,
             focus_background: None,
             focus_background_tint: None,
             automatic_focus_tint: true,
+            css_paint: false,
             auto_focus: false,
             editing_parts: None,
             editing_menu: None,
@@ -1133,6 +1156,7 @@ enum Kind {
         option_background: Color,
         foreground: Color,
         presentation: Option<Box<[DropdownPartStyle; 3]>>,
+        option_presentations: Vec<DropdownPartStyle>,
         resolved_options: Vec<DropdownPartStyle>,
     },
 }
@@ -2381,4 +2405,59 @@ mod background_policy_tests {
             }],
         );
     }
+}
+
+/// Tessellate an inside rounded border without painting its transparent center.
+/// All presenters consume the same bounded logical strips.
+pub fn rounded_border_spans(rect: Rect, width: f32, radius: f32) -> impl Iterator<Item = Rect> {
+    let width = width
+        .max(0.0)
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height / 2.0);
+    let radius = radius
+        .max(0.0)
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height / 2.0);
+    let inner = rect.inset(Insets::all(width));
+    let inner_radius = (radius - width).max(0.0);
+    let inset = |y: f32, height: f32, r: f32| {
+        let edge = y.min(height - y);
+        if edge >= r {
+            0.0
+        } else {
+            r - (r * r - (r - edge).powi(2)).max(0.0).sqrt()
+        }
+    };
+    (0..rect.size.height.ceil().max(0.0).min(16384.0) as u32).flat_map(move |row| {
+        let y = row as f32;
+        let h = (rect.size.height - y).min(1.0);
+        let middle = y + h / 2.0;
+        let outer_inset = inset(middle, rect.size.height, radius);
+        let x = rect.origin.x + outer_inset;
+        let right = rect.origin.x + rect.size.width - outer_inset;
+        let inner_y = middle - width;
+        let hole = width > 0.0 && inner_y >= 0.0 && inner_y < inner.size.height;
+        let inner_inset = inset(inner_y, inner.size.height, inner_radius);
+        let left_end = if hole {
+            inner.origin.x + inner_inset
+        } else {
+            right
+        };
+        let right_start = inner.origin.x + inner.size.width - inner_inset;
+        [
+            Rect::new(x, rect.origin.y + y, (left_end - x).max(0.0), h),
+            Rect::new(
+                right_start,
+                rect.origin.y + y,
+                if hole {
+                    (right - right_start).max(0.0)
+                } else {
+                    0.0
+                },
+                h,
+            ),
+        ]
+        .into_iter()
+        .filter(move |span| width > 0.0 && span.size.width > 0.0 && span.size.height > 0.0)
+    })
 }

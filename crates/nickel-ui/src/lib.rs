@@ -95,24 +95,24 @@ pub use ui::{
     FieldGroup, FileGrid, FileGridItem, FilePlaneItem, FrameRequest, FrameResourceDiagnostics,
     GradientAxis, Grid, GridColumnSpec, Header, HorizontalRule, Icon, Image, ImageAlignment,
     ImageFit, ImagePresentation, InlineButtonGroup, InputSource, InteractionIntent,
-    InteractionState, LauncherSearchField, Layer, LayoutDiagnostic, LinearGradient, Menu, MenuBar,
-    MenuItem, NavigationDirection, NavigationEntry, NavigationExit, NavigationItem,
-    NavigationNeighbors, NavigationScope, NavigationSectionLabel, NavigationTraversal, PageHeader,
-    PointerIcon, PreviewState, PreviewTile, ProjectStatusRow, RESPONSIVE_NAVIGATION_BREAKPOINT,
-    RadioButton, RadioGroup, RadioOption, ReadingDirection, ResolvedGrid, ResolvedLayout,
-    ResolvedNode, ResponsiveNavigation, ResponsiveNavigationDestination, ResponsiveNavigationError,
-    ResponsiveNavigationPresentation, Row, SETTINGS_SHELL_NARROW_BREAKPOINT,
-    START_MENU_SINGLE_PANE_BREAKPOINT, ScrollExtent, SectionHeader, SelectField,
-    SelectionIndicator, SelectionRegion, SemanticAction, SemanticActionError,
-    SemanticControllerAction, SemanticNodeSnapshot, SemanticQueryError, SemanticRole,
-    SemanticSelector, SemanticTarget, SemanticValueInput, SemanticValueSnapshot, SessionActionRow,
-    SettingsCard, SettingsListCard, SettingsNavigation, SettingsRow, SettingsSearchEntry,
-    SettingsSearchField, SettingsSection, SettingsShell, SettingsStatus, SettingsStatusKind,
-    ShortcutRow, ShortcutState, ShoulderHints, Sidebar, SidebarFolder, SidebarItem, SidebarSection,
-    Slider, SliderField, SourceLocation, Spacer, StartMenuNarrowPane, StartMenuShell, StyledText,
-    StyledTextSpan, Surface, SurfaceRole, Switch, SwitchState, TabList, Text, TextAlign, TextField,
-    TextMeasureCacheMode, TextUnderlineStyle, Tone, UiEvent, UiFrame, VerticalScroll,
-    VirtualColumn, VirtualWindow, intrinsic_text_width, search_settings,
+    InteractionPaint, InteractionState, LauncherSearchField, Layer, LayoutDiagnostic,
+    LinearGradient, Menu, MenuBar, MenuItem, NavigationDirection, NavigationEntry, NavigationExit,
+    NavigationItem, NavigationNeighbors, NavigationScope, NavigationSectionLabel,
+    NavigationTraversal, PageHeader, PointerIcon, PreviewState, PreviewTile, ProjectStatusRow,
+    RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup, RadioOption, ReadingDirection,
+    ResolvedGrid, ResolvedLayout, ResolvedNode, ResponsiveNavigation,
+    ResponsiveNavigationDestination, ResponsiveNavigationError, ResponsiveNavigationPresentation,
+    Row, SETTINGS_SHELL_NARROW_BREAKPOINT, START_MENU_SINGLE_PANE_BREAKPOINT, ScrollExtent,
+    SectionHeader, SelectField, SelectionIndicator, SelectionRegion, SemanticAction,
+    SemanticActionError, SemanticControllerAction, SemanticNodeSnapshot, SemanticQueryError,
+    SemanticRole, SemanticSelector, SemanticTarget, SemanticValueInput, SemanticValueSnapshot,
+    SessionActionRow, SettingsCard, SettingsListCard, SettingsNavigation, SettingsRow,
+    SettingsSearchEntry, SettingsSearchField, SettingsSection, SettingsShell, SettingsStatus,
+    SettingsStatusKind, ShortcutRow, ShortcutState, ShoulderHints, Sidebar, SidebarFolder,
+    SidebarItem, SidebarSection, Slider, SliderField, SourceLocation, Spacer, StartMenuNarrowPane,
+    StartMenuShell, StyledText, StyledTextSpan, Surface, SurfaceRole, Switch, SwitchState, TabList,
+    Text, TextAlign, TextField, TextMeasureCacheMode, TextUnderlineStyle, Tone, UiEvent, UiFrame,
+    VerticalScroll, VirtualColumn, VirtualWindow, intrinsic_text_width, search_settings,
     with_text_measure_cache_mode,
 };
 pub use ui_declarative_macros::{component, id, ui};
@@ -124,7 +124,7 @@ pub(crate) use ui::PaintCommand;
 /// Renderer-facing command stream. Application UI should use declarative
 /// components or [`CustomPaint`]; platform presenters consume this module.
 pub mod backend {
-    pub use crate::ui::PaintCommand;
+    pub use crate::ui::{PaintCommand, rounded_border_spans};
 
     use std::{convert::Infallible, sync::Arc};
 

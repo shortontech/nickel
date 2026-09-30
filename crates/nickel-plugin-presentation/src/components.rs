@@ -366,7 +366,7 @@ pub enum PanelNode {
         value: String,
         open: bool,
         action: usize,
-        options: Vec<(String, String, usize)>,
+        options: Vec<(String, String, usize, Option<String>)>,
     },
     Spacer {
         class_name: Option<String>,
@@ -445,6 +445,7 @@ fn dropdown_part(style: &ControlStyle) -> DropdownPartStyle {
         margin: style.margin.unwrap_or_default(),
         background: style.background.filter(|color| *color != 0),
         interaction_backgrounds: [None; 3],
+        interaction_paints: [nickel_ui::InteractionPaint::default(); 3],
         foreground: style.color.filter(|color| *color != 0),
         border_color: style.border_color.filter(|color| *color != 0),
         border_width: style.border_width.unwrap_or(0.0),
@@ -462,26 +463,24 @@ fn apply_control_interactions<Message>(
     id: &str,
     class_name: Option<&str>,
 ) -> Container<Message> {
-    for state in [
-        InteractionState::Hover,
-        InteractionState::Active,
-        InteractionState::Focus,
-    ] {
-        if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
-            kind,
-            Some(id),
-            class_name,
-            state,
-            &style.custom_properties,
-            &style.ancestors[..style.ancestors.len().saturating_sub(1)],
-        ) {
-            control = match state {
-                InteractionState::Hover => control.hover_background(background),
-                InteractionState::Active => control.pressed_background(background),
-                InteractionState::Focus => control.focus_background(background),
-            };
-        }
-    }
+    control = control.automatic_focus_tint(false).interaction_paints(
+        [
+            InteractionState::Hover,
+            InteractionState::Active,
+            InteractionState::Focus,
+        ]
+        .map(|state| {
+            stylesheet.resolve_interaction_paint(
+                kind,
+                Some(id),
+                class_name,
+                state,
+                &style.custom_properties,
+                &style.ancestors[..style.ancestors.len().saturating_sub(1)],
+            )
+        }),
+    );
+
     control
 }
 
@@ -489,6 +488,7 @@ fn apply_container_style<Message>(
     mut container: Container<Message>,
     style: &ControlStyle,
 ) -> Container<Message> {
+    container = container.css_paint(true).automatic_focus_tint(false);
     if let Some(width) = style.width {
         container = if width == Length::Percent(1.0) {
             container.fill_width()
@@ -531,11 +531,11 @@ fn apply_container_style<Message>(
         container = container.radius(radius);
     }
     if style.border_width.is_some() || style.border_color.is_some() {
-        container = if style.border_color == Some(0) {
+        container = if style.border_color.or(style.color).unwrap_or(0) == 0 {
             container.clear_border()
         } else {
             container.border(
-                style.border_color.unwrap_or(0xff000000),
+                style.border_color.or(style.color).unwrap_or(0),
                 style.border_width.unwrap_or(1.0),
             )
         };
@@ -561,9 +561,7 @@ fn with_margin<Message: Clone>(view: AnyView<Message>, style: &ControlStyle) -> 
 }
 
 fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<Message> {
-    if let Some(color) = style.color {
-        text = text.color(color);
-    }
+    text = text.css_paint(true).color(style.color.unwrap_or(0));
     if let Some(font_size) = style.font_size {
         text = text.font_size(font_size);
     }
@@ -883,7 +881,9 @@ impl PanelNode {
                             as u64
                         + options
                             .iter()
-                            .map(|(id, label, _)| capacity(id) + capacity(label))
+                            .map(|(id, label, _, class)| {
+                                capacity(id) + capacity(label) + class.as_ref().map_or(0, capacity)
+                            })
                             .sum::<u64>()
                 }
                 Self::Div {
@@ -1646,7 +1646,23 @@ impl PanelNode {
                         .and_then(Value::as_u64)
                         .and_then(|action| usize::try_from(action).ok())
                         .ok_or("option needs an onClick handler")?;
-                    options.push((id.to_owned(), label, action));
+                    let option_class = match child.get("className") {
+                        None => None,
+                        Some(Value::String(class))
+                            if class.len() <= 256
+                                && class.split_ascii_whitespace().all(|name| {
+                                    name.len() <= 64
+                                        && name.bytes().all(|byte| {
+                                            byte.is_ascii_alphanumeric()
+                                                || matches!(byte, b'-' | b'_')
+                                        })
+                                }) =>
+                        {
+                            Some(class.clone())
+                        }
+                        _ => return Err("option className is invalid".into()),
+                    };
+                    options.push((id.to_owned(), label, action, option_class));
                 }
                 Ok(Self::Select {
                     id: value
@@ -2160,6 +2176,21 @@ impl PanelNode {
         ]
         .map(|state| {
             stylesheet.resolve_interaction_background_with_properties(
+                "menu-item",
+                Some(id),
+                Some(&classes),
+                state,
+                &style.custom_properties,
+                &inherited.ancestors,
+            )
+        });
+        frame.interaction_paints = [
+            InteractionState::Hover,
+            InteractionState::Active,
+            InteractionState::Focus,
+        ]
+        .map(|state| {
+            stylesheet.resolve_interaction_paint(
                 "menu-item",
                 Some(id),
                 Some(&classes),
@@ -3006,7 +3037,7 @@ impl PanelNode {
                     Some(id),
                     class_name.as_deref(),
                 ));
-                let with_interactions = |kind: &str, control: &ControlStyle| {
+                let with_interactions = |kind: &str, control: &ControlStyle, target_id: &str| {
                     let mut part = dropdown_part(control);
                     part.interaction_backgrounds = [
                         crate::css::InteractionState::Hover,
@@ -3016,11 +3047,32 @@ impl PanelNode {
                     .map(|state| {
                         stylesheet.resolve_interaction_background_with_properties(
                             kind,
-                            Some(id),
-                            class_name.as_deref(),
+                            Some(target_id),
+                            control
+                                .ancestors
+                                .last()
+                                .and_then(|ancestor| ancestor.2.as_deref()),
                             state,
                             &control.custom_properties,
-                            &parts.ancestors,
+                            &control.ancestors[..control.ancestors.len().saturating_sub(1)],
+                        )
+                    });
+                    part.interaction_paints = [
+                        crate::css::InteractionState::Hover,
+                        crate::css::InteractionState::Active,
+                        crate::css::InteractionState::Focus,
+                    ]
+                    .map(|state| {
+                        stylesheet.resolve_interaction_paint(
+                            kind,
+                            Some(target_id),
+                            control
+                                .ancestors
+                                .last()
+                                .and_then(|ancestor| ancestor.2.as_deref()),
+                            state,
+                            &control.custom_properties,
+                            &control.ancestors[..control.ancestors.len().saturating_sub(1)],
                         )
                     });
                     part
@@ -3028,7 +3080,7 @@ impl PanelNode {
                 let select = Dropdown::new(
                     Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
                     value,
-                    options.iter().map(|(_, label, action)| {
+                    options.iter().map(|(_, label, action, _)| {
                         (
                             label.as_str(),
                             Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
@@ -3040,10 +3092,26 @@ impl PanelNode {
                 .overlay(true)
                 .expanded(*open)
                 .parts(
-                    with_interactions("select-header", &header_style),
-                    with_interactions("option", &option_style),
+                    with_interactions("select-header", &header_style, id),
+                    with_interactions("option", &option_style, id),
                     dropdown_part(&indicator_style),
-                );
+                )
+                .option_parts(options.iter().map(
+                    |(option_id, _, _, option_class)| {
+                        let classes = format!(
+                            "{} {}",
+                            class_name.as_deref().unwrap_or(""),
+                            option_class.as_deref().unwrap_or("")
+                        );
+                        let option = parts.apply(parts.resolve(
+                            stylesheet,
+                            "option",
+                            Some(option_id),
+                            Some(&classes),
+                        ));
+                        with_interactions("option", &option, option_id)
+                    },
+                ));
                 let container = Container::new().child(select);
                 with_margin(
                     AnyView::new(apply_container_style(container, &style)),
@@ -3088,11 +3156,7 @@ impl PanelNode {
                         Some(id),
                         class_name.as_deref(),
                     ));
-                    AnyView::new(
-                        Text::new("+")
-                            .font_size(label_style.font_size.unwrap_or(14.0))
-                            .color(label_style.color.unwrap_or(0)),
-                    )
+                    AnyView::new(styled_text(Text::new("+"), &label_style))
                 };
                 let control = Container::new()
                     .id(id.clone())
@@ -3108,6 +3172,14 @@ impl PanelNode {
                         scope,
                     ))
                     .child(inner);
+                let control = apply_control_interactions(
+                    control,
+                    &style,
+                    stylesheet,
+                    "color-swatch",
+                    id,
+                    class_name.as_deref(),
+                );
                 with_margin(AnyView::new(apply_container_style(control, &style)), &style)
             }
             Self::TextField {
@@ -3192,6 +3264,21 @@ impl PanelNode {
                         &style.ancestors[..style.ancestors.len().saturating_sub(1)],
                     )
                 });
+                frame_style.interaction_paints = [
+                    InteractionState::Hover,
+                    InteractionState::Active,
+                    InteractionState::Focus,
+                ]
+                .map(|state| {
+                    stylesheet.resolve_interaction_paint(
+                        "text-field",
+                        Some(id),
+                        class_name.as_deref(),
+                        state,
+                        &style.custom_properties,
+                        &style.ancestors[..style.ancestors.len().saturating_sub(1)],
+                    )
+                });
                 let parts = inherited.extend(&style);
                 let caret = dropdown_part(&parts.resolve(
                     stylesheet,
@@ -3245,6 +3332,21 @@ impl PanelNode {
                     ]
                     .map(|state| {
                         stylesheet.resolve_interaction_background_with_properties(
+                            "text-field-menu-item",
+                            Some(id),
+                            Some(&classes),
+                            state,
+                            &item.custom_properties,
+                            &menu_inherited.ancestors,
+                        )
+                    });
+                    frame.interaction_paints = [
+                        InteractionState::Hover,
+                        InteractionState::Active,
+                        InteractionState::Focus,
+                    ]
+                    .map(|state| {
+                        stylesheet.resolve_interaction_paint(
                             "text-field-menu-item",
                             Some(id),
                             Some(&classes),
@@ -3380,35 +3482,17 @@ impl PanelNode {
                         scope,
                     ));
                 }
-                if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
-                    "button",
-                    Some(id),
-                    class_name.as_deref(),
-                    InteractionState::Hover,
-                    &style.custom_properties,
-                    &style.ancestors[..style.ancestors.len().saturating_sub(1)],
-                ) {
-                    container = container.hover_background(background);
-                }
-                if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
-                    "button",
-                    Some(id),
-                    class_name.as_deref(),
-                    InteractionState::Active,
-                    &style.custom_properties,
-                    &style.ancestors[..style.ancestors.len().saturating_sub(1)],
-                ) {
-                    container = container.pressed_background(background);
-                }
-                if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
-                    "button",
-                    Some(id),
-                    class_name.as_deref(),
-                    InteractionState::Focus,
-                    &style.custom_properties,
-                    &style.ancestors[..style.ancestors.len().saturating_sub(1)],
-                ) {
-                    container = container.focus_background(background);
+                if !*disabled {
+                    container = apply_control_interactions(
+                        container,
+                        &style,
+                        stylesheet,
+                        "button",
+                        id,
+                        class_name.as_deref(),
+                    );
+                } else {
+                    container = container.automatic_focus_tint(false);
                 }
                 with_margin(
                     AnyView::new(apply_container_style(container.child(visual), &style)),
@@ -3554,8 +3638,8 @@ impl PanelNode {
                 } else {
                     options
                         .iter()
-                        .find(|(id, _, _)| id == requested_id)
-                        .map(|(_, _, action)| *action)
+                        .find(|(id, _, _, _)| id == requested_id)
+                        .map(|(_, _, action, _)| *action)
                 }
             }
             Self::Image {
@@ -4018,9 +4102,113 @@ mod compound_css_tests {
     use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
 
     #[test]
+    fn option_classes_drive_independent_native_geometry_paint_and_hits() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"select","id":"choice","accessibilityLabel":"Choice","value":"Small","action":1,"open":true,"children":[
+            {"kind":"option","id":"small","className":"compact","action":2,"children":["Small"]},
+            {"kind":"option","id":"large","className":"large","action":3,"children":["Large"]}
+        ]})).unwrap();
+        let sheet = StyleSheet::compile("select { width: 180px; } select-header { height: 30px; } option { height: 20px; color: #abcdef; font-size: 14px; } option.large { width: 140px; height: 42px; margin: 3px; padding: 5px; background: #123456; font-size: 19px; } option#large:hover { background: transparent; color: #fedcba; border: 2px solid #aabbcc; border-radius: 6px; }").unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let build = |state: &mut nickel_ui::UiStateStore| {
+            UiFrame::layout_with_state(
+                node.view(&PluginImages::new(), &sheet),
+                Rect::new(0.0, 0.0, 300.0, 200.0),
+                state,
+            )
+        };
+        let first = build(&mut state);
+        first.handle_event(
+            &mut state,
+            nickel_ui::UiEvent::PointerPressed(Point { x: 20.0, y: 15.0 }),
+        );
+        first.handle_event(
+            &mut state,
+            nickel_ui::UiEvent::PointerReleased(Point { x: 20.0, y: 15.0 }),
+        );
+        let frame = build(&mut state);
+        let large = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.accessibility_label.as_deref() == Some("Large"))
+            .unwrap();
+        assert_eq!(large.allocated.size, nickel_ui::Size::new(140.0, 42.0));
+        assert_eq!(large.allocated.origin.y, 53.0);
+        assert_eq!(large.content.origin.y, 58.0);
+        let at = Point {
+            x: large.allocated.origin.x + 20.0,
+            y: large.allocated.origin.y + 20.0,
+        };
+        assert_eq!(frame.message_at(at), Some(&PluginMessage::Click(3)));
+        frame.handle_event(&mut state, nickel_ui::UiEvent::PointerMoved(at));
+        let hover = build(&mut state);
+        assert!(hover.commands().iter().any(|command| matches!(command, PaintCommand::RoundedStroke { color, radius, .. } if *color == 0xffaabbcc && *radius == 6.0)));
+        assert!(hover.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, text, .. } if text == "Large" && *color == 0xfffedcba && *scale == -19.0)));
+    }
+
+    #[test]
+    fn button_states_paint_css_text_border_and_transparency() {
+        let node = PanelNode::parse(
+            &serde_json::json!({"kind":"button","id":"action","action":4,"children":["Run"]}),
+        )
+        .unwrap();
+        let sheet = StyleSheet::compile("button { width: 100px; height: 40px; background: #123456; color: #abcdef; } button:hover { background: transparent; color: #fedcba; border: 3px solid #aabbcc; border-radius: 9px; font-size: 19px; line-height: 25px; } button:active { background: #334455; color: #556677; border-color: #778899; } button:focus { color: transparent; border: 2px solid #abcdef; }").unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let build = |state: &mut nickel_ui::UiStateStore| {
+            UiFrame::layout_with_state(
+                node.view(&PluginImages::new(), &sheet),
+                Rect::new(0.0, 0.0, 300.0, 200.0),
+                state,
+            )
+        };
+        let first = build(&mut state);
+        let at = Point { x: 20.0, y: 20.0 };
+        first.handle_event(&mut state, nickel_ui::UiEvent::PointerMoved(at));
+        let hover = build(&mut state);
+        assert!(hover.commands().iter().any(|command| matches!(command, PaintCommand::RoundedStroke { color, width, radius, .. } if *color == 0xffaabbcc && *width == 3.0 && *radius == 9.0)));
+        assert!(!hover.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Fill { .. } | PaintCommand::RoundedFill { .. }
+        )));
+        assert!(hover.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, text, .. } if text == "Run" && *color == 0xfffedcba && *scale == -19.0)));
+        hover.handle_event(&mut state, nickel_ui::UiEvent::PointerPressed(at));
+        let active = build(&mut state);
+        assert!(active.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == 0xff334455)
+        ));
+        assert!(active.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { color, .. } if *color == 0xff556677)
+        ));
+        active.handle_event(&mut state, nickel_ui::UiEvent::PointerReleased(at));
+        active.handle_event(&mut state, nickel_ui::UiEvent::FocusNext);
+        let focus = build(&mut state);
+        assert!(
+            !focus
+                .commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::Text { .. }))
+        );
+    }
+
+    #[test]
+    fn editor_focus_uses_css_border_and_exact_text_metrics() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"text-field","id":"entry","value":"abc","action":4,"autoFocus":true,"children":[]})).unwrap();
+        let sheet = StyleSheet::compile("text-field { width: 180px; height: 40px; background: #123456; color: #abcdef; } text-field:focus { background: transparent; color: #aabbcc; border: 2px solid #fedcba; border-radius: 7px; font-size: 19px; line-height: 23px; } text-field-caret { width: 2px; background: #abcdef; }").unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let frame = UiFrame::layout_with_state(
+            node.view(&PluginImages::new(), &sheet),
+            Rect::new(0.0, 0.0, 300.0, 200.0),
+            &mut state,
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::RoundedStroke { color, width, radius, .. } if *color == 0xfffedcba && *width == 2.0 && *radius == 7.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, .. } if *color == 0xffaabbcc && *scale == -19.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Fill { rect, color } if *color == 0xffabcdef && rect.size.height == 23.0)));
+    }
+
+    #[test]
     fn text_field_css_frame_caret_and_selection_share_native_content_geometry() {
         let node = PanelNode::parse(&serde_json::json!({"kind":"text-field","id":"entry","value":"abc","placeholder":"Entry","action":4,"autoFocus":true,"children":[]})).unwrap();
-        let sheet = StyleSheet::compile("text-field { width: 180px; height: 50px; padding: 7px 11px; margin: 3px; background: #123456; border: 2px solid #fedcba; border-radius: 8px; font-size: 21px; line-height: 30px; }
+        let sheet = StyleSheet::compile("text-field { width: 180px; height: 50px; padding: 7px 11px; margin: 3px; background: #123456; border: 2px solid #fedcba; border-radius: 8px; color: #abcdef; font-size: 21px; line-height: 30px; }
             text-field-caret { width: 3px; background: #abcdef; }
             text-field-selection { background: #aabbcc; }").unwrap();
         let root = || {
@@ -4225,7 +4413,7 @@ mod compound_css_tests {
             }),
             Some(&PluginMessage::Click(3))
         );
-        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { text,color,scale,bounds,.. } if text == "Ctrl+S" && *color == 0xfffedcba && *scale == 1.0 && bounds.size.width == 78.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { text,color,scale,bounds,.. } if text == "Ctrl+S" && *color == 0xfffedcba && *scale == -7.0 && bounds.size.width == 78.0)));
     }
 
     #[test]
@@ -4307,7 +4495,7 @@ mod compound_css_tests {
             value: "One".into(),
             open: false,
             action: 1,
-            options: vec![("one".into(), "One".into(), 2)],
+            options: vec![("one".into(), "One".into(), 2, None)],
         };
         let frame = UiFrame::layout(
             node.view(&PluginImages::new(), &StyleSheet::default()),
@@ -4333,8 +4521,8 @@ mod compound_css_tests {
             open: true,
             action: 1,
             options: vec![
-                ("one".into(), "One".into(), 2),
-                ("two".into(), "Two".into(), 3),
+                ("one".into(), "One".into(), 2, None),
+                ("two".into(), "Two".into(), 3, None),
             ],
         };
         let sheet = StyleSheet::compile("select.custom { width: 160px; --ink: #abcdef; }
@@ -4362,7 +4550,7 @@ mod compound_css_tests {
             }),
             Some(&PluginMessage::Click(3))
         );
-        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, text, .. } if text == "One" && *color == 0xffabcdef && *scale == 3.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, text, .. } if text == "One" && *color == 0xffabcdef && *scale == -21.0)));
     }
 
     #[test]
@@ -4374,7 +4562,7 @@ mod compound_css_tests {
             value: "One".into(),
             open: true,
             action: 1,
-            options: vec![("one".into(), "One".into(), 2)],
+            options: vec![("one".into(), "One".into(), 2, None)],
         };
         let sheet = StyleSheet::compile(
             "select { width: 160px; }
@@ -4469,7 +4657,7 @@ mod compound_css_tests {
             }),
             Some(&PluginMessage::Click(2))
         );
-        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, text, .. } if text == "One" && *color == 0xffabcdef && *scale == 2.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, text, .. } if text == "One" && *color == 0xffabcdef && *scale == -14.0)));
     }
 
     #[test]

@@ -570,6 +570,7 @@ impl SmithayFrameRenderer {
                     | PaintCommand::TopRoundedFill { .. }
                     | PaintCommand::RoundedFill { .. }
                     | PaintCommand::Gradient { .. }
+                    | PaintCommand::RoundedStroke { .. }
                     | PaintCommand::Stroke { .. }
                     | PaintCommand::OverlayStroke { .. }
                     | PaintCommand::Image { .. }
@@ -599,6 +600,9 @@ impl SmithayFrameRenderer {
                     GradientAxis::Horizontal => rect.size.width.ceil().max(1.0) as usize,
                     GradientAxis::Vertical => rect.size.height.ceil().max(1.0) as usize,
                 },
+                PaintCommand::RoundedStroke { rect, .. } => {
+                    (rect.size.height.ceil().max(0.0).min(16384.0) as usize).saturating_mul(2)
+                }
                 PaintCommand::Stroke { .. } | PaintCommand::OverlayStroke { .. } => 4,
                 PaintCommand::PushClip(_) | PaintCommand::PopClip => 0,
             };
@@ -761,6 +765,16 @@ impl SmithayFrameRenderer {
                 } => self.push_rounded_solid(*rect, *color, *radius, false, clip),
                 PaintCommand::Gradient { rect, gradient } => {
                     self.push_gradient(*rect, *gradient, clip)
+                }
+                PaintCommand::RoundedStroke {
+                    rect,
+                    color,
+                    width,
+                    radius,
+                } => {
+                    for span in nickel_ui::backend::rounded_border_spans(*rect, *width, *radius) {
+                        self.push_solid(span, *color, clip);
+                    }
                 }
                 PaintCommand::Stroke { rect, color, width }
                 | PaintCommand::OverlayStroke { rect, color, width } => {

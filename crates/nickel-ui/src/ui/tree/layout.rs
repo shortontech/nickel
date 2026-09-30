@@ -777,6 +777,56 @@ pub(super) fn apply_transient_state<Message>(
         if let Some(background) = exact_focus_background {
             element.style.background = Some(background);
         }
+        let interaction_index = if state.pressed() == Some(id) {
+            Some(1)
+        } else if state.window_focused()
+            && (state.focused() == Some(id) || state.navigation().controller_selected() == Some(id))
+        {
+            Some(2)
+        } else if state.hovered() == Some(id) {
+            Some(0)
+        } else {
+            None
+        };
+        if let Some(index) = interaction_index {
+            let paint = element
+                .style
+                .interaction_paints
+                .as_ref()
+                .map_or(InteractionPaint::default(), |paints| paints[index]);
+            if let Some(color) = paint.background {
+                element.style.background = (color != 0).then_some(Background::Solid(color));
+            }
+            if let Some(color) = paint.border_color {
+                element.style.border = (color != 0).then_some(color);
+            }
+            if let Some(width) = paint.border_width {
+                element.style.border_width = width;
+            }
+            if let Some(radius) = paint.radius {
+                element.style.corner_radius = radius;
+            }
+            fn text_paint<Message>(element: &mut Element<Message>, paint: InteractionPaint) {
+                if let Some(color) = paint.foreground {
+                    element.style.foreground = Some(color);
+                }
+                if let Kind::Text {
+                    scale, line_height, ..
+                } = &mut element.kind
+                {
+                    if let Some(size) = paint.font_size {
+                        *scale = -size;
+                    }
+                    if let Some(height) = paint.line_height {
+                        *line_height = Some(height);
+                    }
+                }
+                for child in &mut element.children {
+                    text_paint(child, paint);
+                }
+            }
+            text_paint(element, paint);
+        }
         // A transparent editor already exposes keyboard focus through its caret.
         // Filling its entire text node with the generic fallback tint makes a
         // blue/purple strip appear and disappear as input modality changes.
@@ -870,37 +920,48 @@ pub(super) fn apply_transient_state<Message>(
                 options,
                 overlay,
                 presentation,
+                option_presentations,
                 resolved_options,
                 ..
             } => {
                 *expanded = dropdown_open;
                 if let Some(parts) = presentation.as_mut() {
                     let resolved = |mut part: DropdownPartStyle, part_id: &UiId| {
-                        let background = if state.pressed() == Some(part_id) {
-                            part.interaction_backgrounds[1]
-                        } else if state.hovered() == Some(part_id) {
-                            part.interaction_backgrounds[0]
+                        let index = if state.pressed() == Some(part_id) {
+                            Some(1)
                         } else if state.window_focused()
                             && (state.focused() == Some(part_id)
                                 || state.navigation().controller_selected() == Some(part_id))
                         {
-                            part.interaction_backgrounds[2]
+                            Some(2)
+                        } else if state.hovered() == Some(part_id) {
+                            Some(0)
                         } else {
                             None
                         };
-                        part.background = background.or(part.background);
+                        if let Some(index) = index {
+                            part = part.with_interaction(index);
+                        }
                         part
                     };
                     parts[0] = resolved(parts[0], id);
                     *resolved_options = (0..options.len())
-                        .map(|index| resolved(parts[1], &id.scoped(format!("option-{index}"))))
+                        .map(|index| {
+                            resolved(
+                                option_presentations.get(index).copied().unwrap_or(parts[1]),
+                                &id.scoped(format!("option-{index}")),
+                            )
+                        })
                         .collect();
                 }
                 let height = presentation.as_ref().map(|parts| {
                     parts[0].height
                         + parts[0].margin.height()
                         + if *expanded && !*overlay {
-                            options.len() as f32 * (parts[1].height + parts[1].margin.height())
+                            resolved_options
+                                .iter()
+                                .map(|part| part.height + part.margin.height())
+                                .sum::<f32>()
                         } else {
                             0.0
                         }
