@@ -3323,6 +3323,11 @@ mod tests {
         );
         let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(960, 56, 1.0);
         host.render_software(&mut renderer);
+        let clear_area = renderer.pixels()[(2 * 960 + 600) as usize];
+        assert!(
+            (1..255).contains(&clear_area.a),
+            "taskbar background lost its CSS alpha: {clear_area:?}"
+        );
         let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(960, 56, |x, y| {
             let pixel = renderer.pixels()[(y * 960 + x) as usize];
             image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])

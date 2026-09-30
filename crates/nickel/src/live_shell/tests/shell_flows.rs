@@ -1587,7 +1587,7 @@
         assert!(!shell.surface_visible(SurfaceRole::Taskbar));
         assert_eq!(shell.taskbar_reservation_height(), 0);
         assert!(shell.scene(SurfaceRole::Taskbar, 800, 56).is_empty());
-        assert!(!shell.panel_click(20.0, 800, false));
+        assert!(!click_taskbar(&mut shell, 20.0, 800, false));
         assert!(shell
             .resolve_semantic_target(&ShellSemanticTarget::OnScreenKeyboardToggle)
             .is_none());
@@ -1650,7 +1650,7 @@
         assert!(!shell.surface_visible(SurfaceRole::Taskbar));
         assert_eq!(shell.taskbar_reservation_height(), 0);
         assert!(shell.scene(SurfaceRole::Taskbar, 800, 56).is_empty());
-        assert!(!shell.panel_click(20.0, 800, false));
+        assert!(!click_taskbar(&mut shell, 20.0, 800, false));
         assert!(shell.launcher_host_ref().is_some());
         let id = &crate::plugin_panel::taskbar_manifest().id;
         assert!(shell.set_plugin_enabled(id, false).unwrap());
@@ -2296,9 +2296,9 @@
         )
         .unwrap();
         let center = item.origin.x + item.size.width / 2.0;
-        assert!(shell.panel_pointer_moved(center, 1_280));
+        assert!(shell.panel_host_ui(UiEvent::PointerMoved(Point { x: center, y: 28.0 }), 1_280));
         assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Task(index)));
-        assert!(shell.panel_click(center, 1_280, true));
+        assert!(click_taskbar(&mut shell, center, 1_280, true));
         let current_item = super::taskbar_plugin_control_bounds(
             shell.plugin_taskbar_host.as_ref().unwrap(),
             &format!("taskbar-item-{index}"),
@@ -2353,7 +2353,7 @@
             shell.plugin_taskbar_host.as_ref().unwrap(),
             &format!("taskbar-item-{index}"),
         ).unwrap();
-        assert!(shell.panel_click(bounds.origin.x + bounds.size.width / 2.0, 1_280, true));
+        assert!(click_taskbar(&mut shell, bounds.origin.x + bounds.size.width / 2.0, 1_280, true));
         let height = shell.window_context_menu_height() as u32;
         shell.scene(SurfaceRole::WindowContextMenu, super::MENU_WIDTH as u32, height);
         let action = shell.application_menu_plugin_host.as_ref().unwrap()
@@ -2419,7 +2419,7 @@
             .memory
             .native_ui_bytes
             .unwrap();
-        assert!(shell.panel_click(bounds.origin.x + bounds.size.width / 2.0, 1_280, true));
+        assert!(click_taskbar(&mut shell, bounds.origin.x + bounds.size.width / 2.0, 1_280, true));
         let menu_height = shell.window_context_menu_height() as u32;
         assert!(!shell
             .scene(SurfaceRole::WindowContextMenu, super::MENU_WIDTH as u32, menu_height)
@@ -2502,7 +2502,7 @@
             &format!("taskbar-item-{index}"),
         )
         .unwrap();
-        shell.panel_click(bounds.origin.x + bounds.size.width / 2.0, 1_280, true);
+        click_taskbar(&mut shell, bounds.origin.x + bounds.size.width / 2.0, 1_280, true);
         let menu_height = shell.window_context_menu_height() as u32;
         shell.scene(
             SurfaceRole::WindowContextMenu,

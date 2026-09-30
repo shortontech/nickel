@@ -3233,14 +3233,6 @@ impl LiveShell {
         .collect()
     }
 
-    pub(crate) fn plugin_panel_bottom_offset(
-        &self,
-        key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<u32> {
-        self.plugin_panel_placement(key)
-            .map(|(_, offset, _, _, _)| offset)
-    }
-
     pub(crate) fn plugin_panel_placement(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -5611,19 +5603,6 @@ impl LiveShell {
         outcome.changed
     }
 
-    pub fn panel_click(&mut self, x: f32, width: u32, secondary: bool) -> bool {
-        let events = if secondary {
-            vec![HostEvent::Ui(UiEvent::PointerContext(Point { x, y: 28.0 }))]
-        } else {
-            vec![
-                HostEvent::Ui(UiEvent::PointerPressed(Point { x, y: 28.0 })),
-                HostEvent::Ui(UiEvent::PointerReleased(Point { x, y: 28.0 })),
-            ]
-        };
-        self.step_taskbar_plugin(events, width)
-            .is_some_and(|outcome| outcome.changed)
-    }
-
     pub(crate) fn panel_host_ui(&mut self, event: UiEvent, width: u32) -> bool {
         self.step_taskbar_plugin(vec![HostEvent::Ui(event)], width)
             .is_some_and(|outcome| outcome.changed)
@@ -7194,14 +7173,6 @@ impl LiveShell {
         self.screenshot.perform_semantic_action(action)
     }
 
-    pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
-        self.step_taskbar_plugin(
-            vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
-            width,
-        )
-        .is_some_and(|outcome| outcome.changed)
-    }
-
     fn sync_panel_hover_from_host(&mut self) -> bool {
         let hovered = self
             .plugin_taskbar_host
@@ -7331,12 +7302,6 @@ impl LiveShell {
         self.switch_panel_output(input_output);
         self.panel_change_token = input_change_token;
         scene
-    }
-
-    fn visible_panel_hover(&self) -> Option<TaskbarHover> {
-        (self.panel_hover_output == self.panel_output)
-            .then_some(self.panel_hover)
-            .flatten()
     }
 
     #[cfg(any(target_os = "linux", test))]

@@ -633,12 +633,9 @@
         shell.panel_hover_output = Some("DP-1".into());
 
         shell.set_panel_output("DP-1");
-        assert_eq!(
-            shell.visible_panel_hover(),
-            Some(super::TaskbarHover::Launcher)
-        );
+        assert_eq!(shell.panel_hover_output, shell.panel_output);
         shell.set_panel_output("HDMI-A-1");
-        assert_eq!(shell.visible_panel_hover(), None);
+        assert_ne!(shell.panel_hover_output, shell.panel_output);
         assert!(!shell.panel_pointer_left());
         assert_eq!(shell.panel_hover, Some(super::TaskbarHover::Launcher));
 

@@ -30,6 +30,17 @@ use super::{
     window_belongs_to_panel,
 };
 
+fn click_taskbar(shell: &mut LiveShell, x: f32, width: u32, secondary: bool) -> bool {
+    let point = Point { x, y: 28.0 };
+    if secondary {
+        shell.panel_host_ui(UiEvent::PointerContext(point), width)
+    } else {
+        let pressed = shell.panel_host_ui(UiEvent::PointerPressed(point), width);
+        let released = shell.panel_host_ui(UiEvent::PointerReleased(point), width);
+        pressed || released
+    }
+}
+
 #[test]
 fn safe_mode_suppresses_installed_autostart_without_discarding_saved_choice() {
     assert!(super::should_auto_start_installed_plugin(true, false));
@@ -1712,8 +1723,18 @@ fn two_installed_panels_render_and_retire_independently() {
     }
     let panels = shell.plugin_panels();
     assert_eq!(panels.len(), 2);
-    assert_eq!(shell.plugin_panel_bottom_offset(&panels[0].0), Some(12));
-    assert_eq!(shell.plugin_panel_bottom_offset(&panels[1].0), Some(36));
+    assert_eq!(
+        shell
+            .plugin_panel_placement(&panels[0].0)
+            .map(|placement| placement.1),
+        Some(12)
+    );
+    assert_eq!(
+        shell
+            .plugin_panel_placement(&panels[1].0)
+            .map(|placement| placement.1),
+        Some(36)
+    );
     for (key, surface) in &panels {
         assert!(shell.plugin_surface_matches(key));
         let commands = shell
