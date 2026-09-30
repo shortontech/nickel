@@ -1,14 +1,24 @@
-# Nickel JSX bootstrap
+# Nickel JSX runtime
 
-`bootstrap.js` defines the small component and hook API evaluated inside each
-plugin's JavaScript context. It has no platform or shell service bindings;
-hosts supply `nickel.data` and validate requested effects. The
-`nickel-plugin-runtime` crate owns the Boa context and render/event
-transactions shared by the shell and Settings hosts. Native
-component parsing, presentation, and effect validation remain host-owned.
-Settings uses one shared native component adapter and transaction wrapper in
-`crates/nickel-settings/src/settings_components.rs`; each page supplies its own
-tree shape and typed effect validator.
+`bootstrap.js` defines components, hooks, Settings registration, and the public
+`nickel` capability clients evaluated inside a package's JavaScript context.
+Nickel runs compiled JavaScript with Boa, without Node, a browser, or a DOM.
+JSX and CSS remain ordinary authorable package files.
 
-The first-party Settings package and its JSX build commands are documented in
-[the Settings plugin README](../plugins/settings/README.md).
+Rust supplies bounded capability snapshots and validates effects before native
+execution. Presentation and interaction logic belong in JSX; a custom Settings
+page uses the same components and capability functions as any other package UI.
+The optional Settings window in [nickel-default](../plugins/nickel-default/)
+reads registered settings and custom pages. Its controls are replaceable public
+components and inherit overridable CSS variables.
+
+`nickel-plugin-runtime` owns module loading, hooks, render/event transactions,
+and shell composition. Packages have isolated JavaScript contexts. Foreign
+component callbacks retain their producing package's authority; a parent grant
+does not authorize its replacement's effects. Native component parsing, layout,
+input, rendering, and operating-system services remain host-owned.
+
+The plugin branch is still undergoing host cutover. The old Settings package and
+`nickel-settings` binary remain retirement targets, not the extension model for
+new pages. See the active shell-package spec for remaining composition and ABI
+work.

@@ -15,10 +15,12 @@ The validator supplies bounded synthetic data for Nickel's bundled plugin
 surfaces, including the launcher, so their initial trees can be checked
 without starting the shell. Live interactions still need `nickel-plugin dev`.
 
-The [first-party Settings package](settings/) uses the same manifest format
-but has a separate native Settings component adapter. Its package and page
-scripts are validated by the `nickel-settings` test suite; the shell plugin
-CLI currently validates shell components.
+The [default shell package](nickel-default/) contains ordinary JSX/CSS modules
+for shell surfaces and an optional Settings window. Plugins register settings
+or custom JSX pages through the public registry; they do not need a native
+Settings adapter. The old [Settings package](settings/) remains during retirement
+and should not be used as the model for new pages. Stock activation is still
+being migrated on the plugin branch.
 
 Inspect installed packages beneath Nickel's per-user `plugins/` configuration
 directory:
