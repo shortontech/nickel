@@ -4473,6 +4473,37 @@ mod tests {
     }
 
     #[test]
+    fn top_center_jsx_root_uses_the_matching_manifest_grant() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-overlay"
+        ))
+        .unwrap()
+        .manifest;
+        let notice = manifest
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.id == "notice")
+            .unwrap();
+        notice.anchor = nickel_core::plugins::PluginSurfaceAnchor::TopCenter;
+        let source = "function App() { return h(Window, {id:'notice',placement:'fixed',width:300,height:120,edge:'top',anchor:'top-center'}, h(Text, null, 'Notice')); }";
+        let app = PluginPanelApplication::new_with_manifest_for_surface(
+            source,
+            &manifest,
+            Some(r#"{"surface":{"id":"notice"}}"#.into()),
+            Some("notice"),
+            None,
+        )
+        .unwrap();
+        let grant = manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "notice")
+            .unwrap();
+        assert_eq!(app.resolved_surface(grant).unwrap().anchor, grant.anchor);
+    }
+
+    #[test]
     fn unstyled_plugin_button_has_no_mandatory_paint() {
         let source = "function App() { return h(Panel, {background: 0}, h(Button, {id: 'go', onClick: () => {}}, 'Go')); }";
         let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 80);
@@ -4621,25 +4652,36 @@ mod tests {
         ))
         .unwrap()
         .manifest;
-        for (surface_id, offset_x, accepted) in [
-            ("main", -24, true),
-            ("other", -24, false),
-            ("main", 8193, false),
+        for (surface_id, anchor, offset_x, expected) in [
+            (
+                "main",
+                "top-right",
+                -24,
+                Some(nickel_core::plugins::PluginSurfaceAnchor::TopRight),
+            ),
+            (
+                "main",
+                "bottom-center",
+                0,
+                Some(nickel_core::plugins::PluginSurfaceAnchor::BottomCenter),
+            ),
+            ("other", "top-right", -24, None),
+            ("main", "top-right", 8193, None),
         ] {
             let source = format!(
-                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'move',onClick:()=>nickel.request({{type:'surface.setPlacement',surfaceId:'{surface_id}',anchor:'top-right',offsetX:{offset_x},offsetY:24}})}}, 'Move')); }}"
+                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'move',onClick:()=>nickel.request({{type:'surface.setPlacement',surfaceId:'{surface_id}',anchor:'{anchor}',offsetX:{offset_x},offsetY:24}})}}, 'Move')); }}"
             );
             let mut app =
                 PluginPanelApplication::new_with_manifest(&source, &manifest, None).unwrap();
             app.update(app.button_message("move").unwrap());
-            if accepted {
+            if let Some(anchor) = expected {
                 assert_eq!(
                     app.take_effects(),
                     vec![PluginEffect::SetPluginSurfacePlacement {
                         plugin_id: manifest.id.clone(),
                         surface_id: "main".into(),
-                        anchor: nickel_core::plugins::PluginSurfaceAnchor::TopRight,
-                        offset_x: -24,
+                        anchor,
+                        offset_x,
                         offset_y: 24,
                     }]
                 );

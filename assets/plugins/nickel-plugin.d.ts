@@ -53,7 +53,7 @@ interface NickelWindowProps extends NickelProps {
     placement?: "managed" | "fixed";
     output?: "primary" | "all";
     edge?: "top" | "bottom" | "left" | "right";
-    anchor?: "center" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
+    anchor?: "center" | "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
     reserveWorkArea?: boolean;
     bottomOffset?: number;
     background?: NickelColor;
@@ -235,7 +235,7 @@ type NickelSurfaceRequest = Readonly<
     | {
         type: "surface.setPlacement";
         surfaceId: string;
-        anchor: "center" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
+        anchor: "center" | "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
         offsetX: number;
         offsetY: number;
     }

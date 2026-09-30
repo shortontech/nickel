@@ -175,6 +175,7 @@ impl WindowRequest {
                 "top" => matches!(
                     surface.anchor,
                     nickel_core::plugins::PluginSurfaceAnchor::TopLeft
+                        | nickel_core::plugins::PluginSurfaceAnchor::TopCenter
                         | nickel_core::plugins::PluginSurfaceAnchor::TopRight
                 ),
                 "bottom" => {
@@ -184,6 +185,7 @@ impl WindowRequest {
                     ) || matches!(
                         surface.anchor,
                         nickel_core::plugins::PluginSurfaceAnchor::BottomLeft
+                            | nickel_core::plugins::PluginSurfaceAnchor::BottomCenter
                             | nickel_core::plugins::PluginSurfaceAnchor::BottomRight
                     )
                 }
@@ -590,6 +592,7 @@ impl PanelNode {
             if !matches!(
                 grant.anchor,
                 nickel_core::plugins::PluginSurfaceAnchor::TopLeft
+                    | nickel_core::plugins::PluginSurfaceAnchor::TopCenter
                     | nickel_core::plugins::PluginSurfaceAnchor::TopRight
             ) || grant.offset_y < 0
             {
@@ -1046,8 +1049,10 @@ impl PanelNode {
                         &[
                             "center",
                             "top-left",
+                            "top-center",
                             "top-right",
                             "bottom-left",
+                            "bottom-center",
                             "bottom-right",
                         ],
                     )?;

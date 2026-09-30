@@ -3135,8 +3135,10 @@ fn protocol_plugin_surface_anchor(
     match anchor {
         Core::Center => Protocol::Center,
         Core::TopLeft => Protocol::TopLeft,
+        Core::TopCenter => Protocol::TopCenter,
         Core::TopRight => Protocol::TopRight,
         Core::BottomLeft => Protocol::BottomLeft,
+        Core::BottomCenter => Protocol::BottomCenter,
         Core::BottomRight => Protocol::BottomRight,
     }
 }
@@ -3148,17 +3150,14 @@ fn surface_geometry_for_panel(
     panel: &nickel_core::plugins::PluginSurface,
 ) -> (&'static str, i32, i32, u32, u32, bool) {
     if role == SurfaceRole::VolumeOsd {
-        return (
-            VOLUME_OSD_TITLE,
-            geometry.x + (geometry.width.saturating_sub(panel.width) / 2) as i32,
-            geometry.y
-                + geometry
-                    .height
-                    .saturating_sub(panel.height.saturating_add(82)) as i32,
-            panel.width.min(geometry.width),
-            panel.height.min(geometry.height),
-            true,
+        let width = panel.width.min(geometry.width);
+        let height = panel.height.min(geometry.height);
+        let (x, y) = panel.anchor.position(
+            (geometry.x, geometry.y, geometry.width, geometry.height),
+            (width, height),
+            (panel.offset_x, panel.offset_y),
         );
+        return (VOLUME_OSD_TITLE, x, y, width, height, true);
     }
     if role == SurfaceRole::Panel {
         let width = panel.width.min(geometry.width);
@@ -3866,6 +3865,15 @@ mod tests {
         assert_eq!(title, super::VOLUME_OSD_TITLE);
         assert_eq!((x, y, width, height), (850, 1102, 420, 96));
         assert!(hidden);
+        let mut shifted = crate::plugin_panel::volume_osd_surface().clone();
+        shifted.offset_y = -24;
+        let (_, _, y, _, _, _) = super::surface_geometry_for_panel(
+            SurfaceRole::VolumeOsd,
+            geometry,
+            PanelEdge::Bottom,
+            &shifted,
+        );
+        assert_eq!(y, 1160);
     }
 
     #[test]

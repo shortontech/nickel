@@ -322,8 +322,10 @@ pub enum PluginSurfaceAnchor {
     #[default]
     Center,
     TopLeft,
+    TopCenter,
     TopRight,
     BottomLeft,
+    BottomCenter,
     BottomRight,
 }
 
@@ -345,11 +347,11 @@ impl PluginSurfaceAnchor {
         let anchor_x = match self {
             Self::TopLeft | Self::BottomLeft => 0,
             Self::TopRight | Self::BottomRight => remaining_x,
-            Self::Center => remaining_x / 2,
+            Self::Center | Self::TopCenter | Self::BottomCenter => remaining_x / 2,
         };
         let anchor_y = match self {
-            Self::TopLeft | Self::TopRight => 0,
-            Self::BottomLeft | Self::BottomRight => remaining_y,
+            Self::TopLeft | Self::TopCenter | Self::TopRight => 0,
+            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => remaining_y,
             Self::Center => remaining_y / 2,
         };
         (
@@ -2499,6 +2501,17 @@ mod tests {
                 (placement.offset_x, placement.offset_y)
             ),
             (522, 224),
+        );
+        placement.anchor = PluginSurfaceAnchor::BottomCenter;
+        placement.offset_x = 0;
+        placement.offset_y = -82;
+        assert_eq!(
+            placement.anchor.position(
+                (100, 200, 800, 600),
+                (360, 64),
+                (placement.offset_x, placement.offset_y)
+            ),
+            (320, 654),
         );
         let encoded = encode(&window).unwrap();
         assert_eq!(decode::<ShellSurfaceIdentity>(&encoded).unwrap(), window);

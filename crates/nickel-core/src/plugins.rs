@@ -721,8 +721,10 @@ pub enum PluginSurfaceAnchor {
     #[default]
     Center,
     TopLeft,
+    TopCenter,
     TopRight,
     BottomLeft,
+    BottomCenter,
     BottomRight,
 }
 
@@ -731,8 +733,10 @@ impl PluginSurfaceAnchor {
         match self {
             Self::Center => "center",
             Self::TopLeft => "top-left",
+            Self::TopCenter => "top-center",
             Self::TopRight => "top-right",
             Self::BottomLeft => "bottom-left",
+            Self::BottomCenter => "bottom-center",
             Self::BottomRight => "bottom-right",
         }
     }
@@ -754,11 +758,11 @@ impl PluginSurfaceAnchor {
         let anchor_x = match self {
             Self::TopLeft | Self::BottomLeft => 0,
             Self::TopRight | Self::BottomRight => remaining_x,
-            Self::Center => remaining_x / 2,
+            Self::Center | Self::TopCenter | Self::BottomCenter => remaining_x / 2,
         };
         let anchor_y = match self {
-            Self::TopLeft | Self::TopRight => 0,
-            Self::BottomLeft | Self::BottomRight => remaining_y,
+            Self::TopLeft | Self::TopCenter | Self::TopRight => 0,
+            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => remaining_y,
             Self::Center => remaining_y / 2,
         };
         (
@@ -1715,6 +1719,24 @@ mod tests {
                 "",
             );
         assert!(PluginManifest::from_json(&window).is_err());
+    }
+
+    #[test]
+    fn centered_edge_anchors_resolve_with_bounded_offsets() {
+        let output = (100, 200, 800, 600);
+        let size = (360, 64);
+        assert_eq!(
+            PluginSurfaceAnchor::TopCenter.position(output, size, (0, 24)),
+            (320, 224)
+        );
+        assert_eq!(
+            PluginSurfaceAnchor::BottomCenter.position(output, size, (0, -82)),
+            (320, 654)
+        );
+        assert_eq!(
+            PluginSurfaceAnchor::BottomCenter.position(output, size, (9000, -9000)),
+            (540, 200)
+        );
     }
 
     #[test]
