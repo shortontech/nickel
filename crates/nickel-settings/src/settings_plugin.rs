@@ -156,6 +156,15 @@ impl StyledSettingsPage {
         &self.stylesheet
     }
 
+    pub(super) fn evaluate_with_data<T>(
+        &mut self,
+        data: &Value,
+        expression: &str,
+        parse: impl FnOnce(&Value) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.page.evaluate_with_data(data, expression, parse)
+    }
+
     pub(super) fn dispatch(
         &mut self,
         index: usize,

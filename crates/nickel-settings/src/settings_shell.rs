@@ -1,13 +1,14 @@
 //! JSX-owned Settings window and navigation layout.
 
 use nickel_i18n::Localizer;
-use nickel_plugin_presentation::{components::PluginImages, css::StyleSheet, page::JsxPage};
+use nickel_plugin_presentation::{components::PluginImages, page::JsxPage};
 use nickel_ui::SettingsSearchEntry;
 use nickel_ui::{AnyView, SemanticTheme};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::navigation::{Destination, SearchDefinition};
+use crate::settings_plugin::StyledSettingsPage;
 use crate::{SettingsApp, SettingsMessage, SettingsPage};
 use nickel_ui::search_settings;
 
@@ -21,9 +22,7 @@ pub(super) enum ShellRequest {
 }
 
 pub(super) struct SettingsShell {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
     last_data: Option<Value>,
     last_navigation_data: Option<String>,
     destinations: Vec<Destination>,
@@ -42,9 +41,7 @@ impl SettingsShell {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
             last_data: None,
             last_navigation_data: None,
             destinations: Vec::new(),
@@ -54,7 +51,6 @@ impl SettingsShell {
 
     pub(super) fn retained_bytes(&self) -> usize {
         self.page.retained_bytes()
-            + self.stylesheet.estimated_retained_bytes() as usize
             + self
                 .last_data
                 .as_ref()
@@ -107,26 +103,19 @@ impl SettingsShell {
         theme: SemanticTheme,
         content: AnyView<SettingsMessage>,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-shell.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
+        let (node, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-shell.css"),
+        )?;
         self.last_data = Some(data.clone());
         let mut content = Some(content);
-        Ok(self
-            .page
-            .node()
-            .ok_or("Settings shell is unavailable")?
-            .view_as_with_slots(
-                &PluginImages::new(),
-                &self.stylesheet,
-                Some("settings-shell"),
-                &mut |id| (id == "settings-content").then(|| content.take()).flatten(),
-            ))
+        Ok(node.view_as_with_slots(
+            &PluginImages::new(),
+            stylesheet,
+            Some("settings-shell"),
+            &mut |id| (id == "settings-content").then(|| content.take()).flatten(),
+        ))
     }
 
     pub(super) fn dispatch(
@@ -204,7 +193,15 @@ mod tests {
         let (destinations, _) = shell.navigation(&english).unwrap();
         assert_eq!(destinations.len(), 11);
         let data = serde_json::json!({"width":1100,"height":800,"active":true});
-        shell.page.render(&data).unwrap();
+        let app = SettingsApp::with_initial_page(SettingsPage::About);
+        shell
+            .page
+            .render(
+                &data,
+                app.ui_theme(),
+                include_str!("../../../assets/plugins/settings/settings-shell.css"),
+            )
+            .unwrap();
         assert!(shell.page.node().is_some());
         shell.navigation(&english).unwrap();
         assert!(shell.page.node().is_some());
@@ -219,7 +216,7 @@ mod tests {
         let shell = app.settings_shell.borrow();
         let shell = shell.as_ref().unwrap().as_ref().unwrap();
         assert!(
-            shell.last_theme.is_some(),
+            shell.page.stylesheet().estimated_retained_bytes() > 0,
             "Settings used its native fallback"
         );
         assert!(
