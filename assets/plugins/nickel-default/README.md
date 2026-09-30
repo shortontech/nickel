@@ -57,10 +57,11 @@ pieces are implemented.
 ## Settings coverage and validation
 
 The draft presents switches, sliders, select options, actions, and editable
-text/color/number values. It falls back to text for shortcuts, grouped values,
-and repeated values. A color text field does not fulfill Spec 0263's appearance
-requirements: accent swatches, custom hue/color selection, interface hue,
-intensity, modes, transparency, and the remaining appearance controls must move
+text/number values and grouped controls. Color settings use the replaceable
+`ColorPicker` with preset swatches, hue, saturation, brightness, optional alpha,
+and CSS color text entry. It falls back to text for shortcuts and repeated values.
+This generic picker does not complete Spec 0263's appearance migration:
+interface hue, intensity, modes, transparency, and remaining appearance controls must move
 from the existing page to public capabilities before activation. Unresolved
 custom component references are shown as unavailable rather than treated as
 JavaScript functions. No private Settings projection or host was introduced.

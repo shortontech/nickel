@@ -49,6 +49,13 @@ fn compile_jsx_modules(
 ) -> Result<(String, Vec<nickel_core::plugins::PluginSourceFile>), String> {
     let output = tempfile::tempdir()
         .map_err(|error| format!("could not create JSX build directory: {error}"))?;
+    // Manifest exports are module roots too; an exported JSX component need not
+    // be imported by the entry merely to make the compiler emit its artifact.
+    let jsx_roots = PluginPackage::load_module_sources(directory)?
+        .into_iter()
+        .filter(|module| module.path.ends_with(".jsx") && Path::new(&module.path) != source)
+        .map(|module| module.path)
+        .collect::<Vec<_>>();
     let compiler = directory.join("node_modules/.bin").join(tsc_executable());
     let compiler = if compiler.is_file() {
         compiler.into_os_string()
@@ -81,6 +88,7 @@ fn compile_jsx_modules(
         .arg("--outDir")
         .arg(output.path())
         .arg(source)
+        .args(jsx_roots)
         .status()
         .map_err(|error| format!("could not run TypeScript compiler (tsc): {error}"))?;
     if !status.success() {
@@ -1053,6 +1061,32 @@ mod platform {
                     .unwrap_err()
                     .contains("surface \"dock\"")
             );
+        }
+
+        #[test]
+        fn compiles_public_jsx_exports_without_entry_imports() {
+            if Command::new(tsc_executable())
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let source = tempfile::tempdir().unwrap();
+            std::fs::write(source.path().join("plugin.json"),
+                r#"{"api_version":1,"id":"org.example.exports","name":"Exports","version":"0.1.0","entry":"main.js","composition":{"api_version":1,"id":"org.example.exports","version":"0.1.0","exports":{"shell.widget":"./widget.js#Widget"}},"surfaces":[{"id":"main","kind":"panel","width":300,"height":48}]}"#,
+            ).unwrap();
+            std::fs::write(source.path().join("main.jsx"), "export function App() { const Widget = nickel.component('shell.widget'); return <FixedWindow width={300} height={48}><Widget /></FixedWindow>; }").unwrap();
+            std::fs::write(
+                source.path().join("widget.jsx"),
+                "export function Widget() { return <Text>Public widget</Text>; }",
+            )
+            .unwrap();
+            let package = load_dev_package(source.path()).unwrap();
+            assert!(package.modules.iter().any(
+                |module| module.path == "widget.js" && module.source.contains("Public widget")
+            ));
+            assert!(!source.path().join("widget.js").exists());
         }
 
         #[test]

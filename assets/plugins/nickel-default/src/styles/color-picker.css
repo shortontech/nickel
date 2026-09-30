@@ -1,0 +1,13 @@
+column.settings-color-picker, column.settings-color-channels {
+    width: 100%;
+    gap: 8px;
+}
+row.settings-color-presets, row.settings-color-entry {
+    gap: 8px;
+}
+.settings-color-picker slider {
+    width: 100%;
+}
+.settings-color-entry text-field {
+    flex-grow: 1;
+}

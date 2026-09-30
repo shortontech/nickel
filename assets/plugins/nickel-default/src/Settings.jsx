@@ -43,7 +43,12 @@ export function SettingControl(props) {
                 onClick={() => change(option.value)}>{option.label}</Button>)}
         </Column>;
     }
-    if (setting.type === "text" || setting.type === "color" || setting.type === "number") {
+    if (setting.type === "color") {
+        const Picker = nickel.component("shell.settings.colorPicker");
+        return <Picker id={controlId} label={setting.label} value={value}
+            allowAlpha={setting.allowAlpha} onChange={change} />;
+    }
+    if (setting.type === "text" || setting.type === "number") {
         return <TextField id={controlId} value={String(value)}
             accessibilityLabel={setting.label} onChange={next => {
                 if (setting.type === "number") {

@@ -17,7 +17,8 @@
       "shell.notifications": "./src/Notifications.js#Notifications",
       "shell.settings": "./src/Settings.js#Settings",
       "shell.settings.navigation": "./src/Settings.js#SettingsNavigation",
-      "shell.settings.controls": "./src/Settings.js#SettingControl"
+      "shell.settings.controls": "./src/Settings.js#SettingControl",
+      "shell.settings.colorPicker": "./src/ColorPicker.js#ColorPicker"
     }
   },
   "capabilities": [
