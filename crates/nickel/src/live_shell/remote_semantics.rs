@@ -207,7 +207,9 @@ impl LiveShell {
                 }
             }
             SurfaceRole::VolumeOsd => {
-                if let Some(host) = self.plugin_volume_osd_host.as_ref() {
+                if let Some(host) =
+                    self.plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
+                {
                     Ok(observe_only(plugin_projection(host, |_, _| false)?))
                 } else {
                     Err("Volume overlay plugin is unavailable".into())

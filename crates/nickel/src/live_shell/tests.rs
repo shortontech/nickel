@@ -2980,7 +2980,7 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
     assert_eq!(updates.len(), 1);
     assert!(shell.apply_system_status_update(updates.into_iter().next().unwrap()));
     assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
-    shell.volume_osd_scene(320, 88);
+    shell.scene(SurfaceRole::VolumeOsd, 320, 88);
     assert!(
         shell.audio_plugin_data()["label"]
             .as_str()
@@ -2989,8 +2989,7 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
     );
     assert!(
         shell
-            .plugin_volume_osd_host
-            .as_ref()
+            .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
             .unwrap()
             .accessibility_nodes()
             .iter()
@@ -3046,7 +3045,7 @@ fn audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes
     status.volume_percent = 36;
     assert!(shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone())));
     assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
-    shell.volume_osd_scene(320, 88);
+    shell.scene(SurfaceRole::VolumeOsd, 320, 88);
     assert!(
         shell.audio_plugin_data()["label"]
             .as_str()

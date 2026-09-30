@@ -138,7 +138,7 @@
                 source_digest: package.source_digest(),
             },
         );
-        assert!(shell.external_plugin_audio(&id).is_none());
+        assert!(shell.plugin_audio(&id).is_none());
         shell
             .external_plugin_packages
             .get_mut(&id)
@@ -177,11 +177,11 @@
             .accessibility_nodes()
             .iter()
             .any(|node| node.label.as_deref() == Some(expected.as_str())));
-        let audio = shell.external_plugin_audio(&id).unwrap();
+        let audio = shell.plugin_audio(&id).unwrap();
         assert_eq!(audio["percent"], shell.audio.volume_percent.min(100));
         shell.locked = true;
         assert_eq!(
-            shell.external_plugin_audio(&id).unwrap()["outputName"],
+            shell.plugin_audio(&id).unwrap()["outputName"],
             "Audio output"
         );
     }
@@ -640,16 +640,19 @@
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::volume_osd_manifest().id;
         let key = crate::plugin_panel::volume_osd_surface_key();
-        assert!(shell.plugin_volume_osd_host.is_some());
+        assert!(shell.plugin_panel_host_ref(&key).is_some());
         assert!(shell.plugin_surface_matches(&key));
+        assert!(shell.shell_fixed_surface_keys().contains(&key));
+        assert!(!shell.plugin_panels().iter().any(|(panel, _)| panel == &key));
         assert!(shell
             .plugin_surface_scene_for_output(&key, None, 420, 96)
             .is_some());
         assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.plugin_volume_osd_host.is_none());
+        assert!(shell.plugin_panel_host_ref(&key).is_none());
         assert!(!shell.plugin_surface_matches(&key));
+        assert!(!shell.shell_fixed_surface_keys().contains(&key));
         assert!(shell
             .plugin_surface_scene_for_output(&key, None, 420, 96)
             .is_none());
@@ -661,7 +664,7 @@
         assert!(shell.scene(SurfaceRole::VolumeOsd, 420, 96).is_empty());
         assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_volume_osd_host.is_some());
+        assert!(shell.plugin_panel_host_ref(&key).is_some());
         assert!(shell.plugin_surface_matches(&key));
         assert!(shell.plugin_surface_change_token(&key).is_some());
     }
@@ -676,9 +679,15 @@
             &data,
         )
         .unwrap();
-        shell.plugin_volume_osd_host = Some(nickel_ui::UiHost::new(application, 420, 96));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::volume_osd_surface_key(),
+            (
+                crate::plugin_panel::volume_osd_surface().clone(),
+                nickel_ui::UiHost::new(application, 420, 96),
+            ),
+        );
         shell.volume_osd_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
-        assert!(shell.volume_osd_scene(420, 96).is_empty());
+        assert!(shell.scene(SurfaceRole::VolumeOsd, 420, 96).is_empty());
         let id = &crate::plugin_panel::volume_osd_manifest().id;
         let entry = shell.plugin_registry().get(id).unwrap();
         assert!(entry.desired_enabled);
@@ -689,7 +698,9 @@
         assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_volume_osd_host.is_some());
+        assert!(shell
+            .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
+            .is_some());
     }
 
     #[test]

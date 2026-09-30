@@ -488,7 +488,6 @@ pub struct LiveShell {
     audio: AudioStatus,
     audio_status_observed: bool,
     volume_osd_until: Option<Instant>,
-    plugin_volume_osd_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     launcher_visible: bool,
     run_visible: bool,
     locked: bool,
@@ -1582,7 +1581,6 @@ impl LiveShell {
             audio,
             volume_osd_until: None,
             audio_status_observed: false,
-            plugin_volume_osd_host,
             launcher_visible: false,
             run_visible: false,
             locked: false,
@@ -1695,6 +1693,12 @@ impl LiveShell {
             keyboard_override,
             keyboard_recipient: None,
         };
+        if let Some(host) = plugin_volume_osd_host {
+            shell.plugin_panel_extra_hosts.insert(
+                crate::plugin_panel::volume_osd_surface_key(),
+                (crate::plugin_panel::volume_osd_surface().clone(), host),
+            );
+        }
         if plugin_activation
             .desired_enabled(&crate::plugin_panel::control_center_manifest().id, true)
         {
@@ -2451,8 +2455,7 @@ impl LiveShell {
                     )
             }
             SurfaceRole::VolumeOsd => self
-                .plugin_volume_osd_host
-                .as_ref()
+                .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
                 .is_none_or(|host| host.remote_access_protected()),
             SurfaceRole::WindowPreview => {
                 self.preview_plugin_active()
@@ -2533,8 +2536,7 @@ impl LiveShell {
                 .map(|host| host.layout_snapshot())
                 .or_else(|| Some(self.notification_host.layout_snapshot())),
             SurfaceRole::VolumeOsd => self
-                .plugin_volume_osd_host
-                .as_ref()
+                .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
                 .map(|host| host.layout_snapshot()),
             SurfaceRole::WindowPreview => self
                 .plugin_preview_host
@@ -2568,7 +2570,7 @@ impl LiveShell {
                 let windows = self.external_plugin_windows(&self.plugin_panel_owner);
                 let applications = self.external_plugin_applications(&self.plugin_panel_owner);
                 let notifications = self.external_plugin_notifications(&self.plugin_panel_owner);
-                let audio = self.external_plugin_audio(&self.plugin_panel_owner);
+                let audio = self.plugin_audio(&self.plugin_panel_owner);
                 let owner = self.plugin_panel_owner.clone();
                 let Some(host) = self.plugin_panel_host.as_mut() else {
                     return Vec::new();
@@ -2644,7 +2646,13 @@ impl LiveShell {
                     Vec::new()
                 }
             }
-            SurfaceRole::VolumeOsd => self.volume_osd_scene(width, height),
+            SurfaceRole::VolumeOsd => self
+                .plugin_panel_scene(
+                    &crate::plugin_panel::volume_osd_surface_key(),
+                    width,
+                    height,
+                )
+                .unwrap_or_default(),
             SurfaceRole::WindowPreview => self.window_preview_scene(),
             SurfaceRole::WindowContextMenu => self.window_menu_scene(),
             SurfaceRole::Lock => self.lock_scene(width, height),
@@ -3123,7 +3131,10 @@ impl LiveShell {
                         || self.trusted_notification_visible())
             }
             SurfaceRole::VolumeOsd => {
-                self.volume_osd_until.is_some() && self.plugin_volume_osd_host.is_some()
+                self.volume_osd_until.is_some()
+                    && self
+                        .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
+                        .is_some()
             }
             SurfaceRole::WindowPreview => {
                 self.plugin_preview_host.is_some()
@@ -3239,8 +3250,7 @@ impl LiveShell {
     ) -> bool {
         (self.plugin_launcher_host.is_some() && crate::plugin_panel::launcher_surface_key() == *key)
             || (self.plugin_run_host.is_some() && crate::plugin_panel::run_surface_key() == *key)
-            || (self.plugin_volume_osd_host.is_some()
-                && crate::plugin_panel::volume_osd_surface_key() == *key)
+            || self.plugin_panel_extra_hosts.contains_key(key)
             || (self.plugin_preview_host.is_some()
                 && crate::plugin_panel::window_preview_surface_key() == *key)
             || self
@@ -3271,6 +3281,7 @@ impl LiveShell {
                 .filter(|(key, _)| {
                     **key != crate::plugin_panel::codex_projects_surface_key()
                         && **key != crate::plugin_panel::on_screen_keyboard_surface_key()
+                        && **key != crate::plugin_panel::volume_osd_surface_key()
                 })
                 .map(|(key, (surface, _))| (key.clone(), surface.clone())),
         );
@@ -3440,17 +3451,6 @@ impl LiveShell {
                     .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
             });
         }
-        if *key == crate::plugin_panel::volume_osd_surface_key() {
-            let inspection = self.plugin_volume_osd_host.as_ref()?.inspect();
-            return Some(HostChangeToken {
-                frame_generation: inspection
-                    .frame_generation
-                    .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
-                semantic_generation: inspection
-                    .semantic_generation
-                    .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
-            });
-        }
         if *key == crate::plugin_panel::notification_surface_key() {
             if !self.notification_plugin_active() {
                 return None;
@@ -3572,10 +3572,17 @@ impl LiveShell {
         ))
     }
 
-    fn external_plugin_audio(&self, plugin_id: &str) -> Option<serde_json::Value> {
-        let package = self.external_plugin_packages.get(plugin_id)?;
-        package
-            .manifest
+    fn plugin_audio(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        manifest
             .capabilities
             .contains(&nickel_core::plugins::PluginCapability::AudioRead)
             .then(|| self.audio_plugin_data())
@@ -3804,7 +3811,7 @@ impl LiveShell {
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
         let notifications = self.external_plugin_notifications(&key.plugin_id);
-        let audio = self.external_plugin_audio(&key.plugin_id);
+        let audio = self.plugin_audio(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
         let result = (|| {
@@ -3883,12 +3890,6 @@ impl LiveShell {
                 return None;
             }
             return Some(self.scene(SurfaceRole::ControlCenter, width, height));
-        }
-        if *key == crate::plugin_panel::volume_osd_surface_key() {
-            if self.plugin_volume_osd_host.is_none() {
-                return None;
-            }
-            return Some(self.volume_osd_scene(width, height));
         }
         if *key == crate::plugin_panel::notification_surface_key() {
             if !self.notification_plugin_active() {
@@ -4655,6 +4656,8 @@ impl LiveShell {
             Self::retire_codex_projects_plugin_state as fn(&mut Self)
         } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
             Self::retire_keyboard_plugin_state
+        } else if id == crate::plugin_panel::volume_osd_manifest().id {
+            Self::retire_volume_osd_plugin_state
         } else {
             return self.fail_installed_plugin_runtime(id, error);
         };
@@ -4727,16 +4730,10 @@ impl LiveShell {
     }
 
     fn retire_volume_osd_plugin_state(&mut self) {
-        self.plugin_volume_osd_host = None;
+        let key = crate::plugin_panel::volume_osd_surface_key();
+        self.plugin_panel_extra_hosts.remove(&key);
+        self.plugin_panel_memory.remove(&key);
         self.volume_osd_until = None;
-    }
-
-    fn fail_volume_osd_plugin_runtime(&mut self, error: String) {
-        self.fail_bundled_plugin_runtime(
-            &crate::plugin_panel::volume_osd_manifest().id,
-            error,
-            Self::retire_volume_osd_plugin_state,
-        );
     }
 
     fn retire_preview_plugin_state(&mut self) {
@@ -5062,7 +5059,14 @@ impl LiveShell {
                 data.to_string(),
             )
             .map(|application| {
-                self.plugin_volume_osd_host = Some(nickel_ui::UiHost::new(application, 420, 96));
+                let surface = crate::plugin_panel::volume_osd_surface().clone();
+                self.plugin_panel_extra_hosts.insert(
+                    crate::plugin_panel::volume_osd_surface_key(),
+                    (
+                        surface.clone(),
+                        nickel_ui::UiHost::new(application, surface.width, surface.height),
+                    ),
+                );
             })
         } else if id == crate::plugin_panel::control_center_manifest().id {
             let data = self.control_plugin_data(720);
@@ -5284,8 +5288,7 @@ impl LiveShell {
                 Some(token)
             }
             SurfaceRole::VolumeOsd => self
-                .plugin_volume_osd_host
-                .as_ref()
+                .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
                 .map(|host| host_token(host.inspect())),
             SurfaceRole::WindowPreview => self
                 .preview_plugin_active()
@@ -5824,6 +5827,18 @@ impl LiveShell {
         self.plugin_panel_extra_hosts
             .get_mut(key)
             .map(|(_, host)| host)
+    }
+
+    fn plugin_panel_host_ref(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        if self.plugin_panel_owner == key.plugin_id
+            && self.plugin_panel_surface.id == key.surface_id
+        {
+            return self.plugin_panel_host.as_ref();
+        }
+        self.plugin_panel_extra_hosts.get(key).map(|(_, host)| host)
     }
 
     fn reconcile_plugin_surface_root(
@@ -8731,9 +8746,9 @@ impl LiveShell {
             })
             || self.desktop_overlay_pointer_capture.is_some()
             || self
-                .plugin_volume_osd_host
-                .as_ref()
-                .is_some_and(|host| host.pointer_interaction_active())
+                .plugin_panel_extra_hosts
+                .values()
+                .any(|(_, host)| host.pointer_interaction_active())
             || self
                 .plugin_run_host
                 .as_ref()
@@ -9659,43 +9674,6 @@ impl LiveShell {
         } else {
             false
         }
-    }
-
-    fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let audio = self.audio_plugin_data();
-        if let Some(host) = self.plugin_volume_osd_host.as_mut() {
-            let changed = match host.application_mut().sync_host_data_field("audio", &audio) {
-                Ok(changed) => changed,
-                Err(error) => {
-                    self.fail_volume_osd_plugin_runtime(error);
-                    return Vec::new();
-                }
-            };
-            let (commands, bytes) = match render_plugin_host(
-                host,
-                None,
-                HostBatch {
-                    application_changed: changed,
-                    surface_size: Some((width, height)),
-                    ..HostBatch::default()
-                },
-            ) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    self.fail_volume_osd_plugin_runtime(error);
-                    return Vec::new();
-                }
-            };
-            let _ = self.plugin_registry.record_memory(
-                &crate::plugin_panel::volume_osd_manifest().id,
-                nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(bytes),
-                    ..nickel_core::plugins::PluginMemory::default()
-                },
-            );
-            return commands;
-        }
-        Vec::new()
     }
 
     fn lock_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {

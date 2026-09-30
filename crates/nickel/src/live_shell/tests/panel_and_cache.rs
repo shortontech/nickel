@@ -989,7 +989,9 @@
     #[test]
     fn confirmed_audio_changes_coalesce_one_bounded_volume_osd() {
         let mut shell = LiveShell::new().unwrap();
-        assert!(shell.plugin_volume_osd_host.is_some());
+        assert!(shell
+            .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
+            .is_some());
         // The production constructor may discover the developer machine's live
         // default output. Keep this state-machine test independent of that
         // ambient device while the explicit-output case below covers labeling.
@@ -1004,12 +1006,11 @@
         });
         let first_deadline = shell.volume_osd_until.unwrap();
         assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
-        shell.volume_osd_scene(320, 88);
+        shell.scene(SurfaceRole::VolumeOsd, 320, 88);
         assert!(shell.audio_plugin_data()["label"].as_str().unwrap().starts_with("Volume 47%"));
         assert!(
             shell
-                .plugin_volume_osd_host
-                .as_ref()
+                .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
                 .unwrap()
                 .accessibility_nodes()
                 .iter()
@@ -1036,7 +1037,7 @@
             output_name: None,
         });
         assert!(shell.volume_osd_until.unwrap() >= first_deadline);
-        shell.volume_osd_scene(320, 88);
+        shell.scene(SurfaceRole::VolumeOsd, 320, 88);
         assert!(shell.audio_plugin_data()["label"].as_str().unwrap().starts_with("Muted"));
 
         let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
@@ -1065,12 +1066,11 @@
             muted: false,
             output_name: Some("Private Bluetooth Headset".into()),
         });
-        shell.volume_osd_scene(320, 88);
+        shell.scene(SurfaceRole::VolumeOsd, 320, 88);
         assert_eq!(shell.audio_plugin_data()["label"], "Volume 47% · Audio output");
         assert!(
             !shell
-                .plugin_volume_osd_host
-                .as_ref()
+                .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
                 .unwrap()
                 .accessibility_nodes()
                 .iter()
