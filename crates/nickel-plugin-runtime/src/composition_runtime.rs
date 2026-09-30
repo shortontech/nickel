@@ -80,10 +80,21 @@ struct ExpansionState {
     visited: std::collections::BTreeSet<String>,
 }
 
+#[derive(Clone)]
 struct CallbackGrant {
     receiver: u64,
     generation: u64,
     source: ComponentEventHandle,
+}
+
+#[derive(Clone)]
+struct OwnedChildGrant {
+    receiver: u64,
+    generation: u64,
+    source: u64,
+    source_generation: u64,
+    node: Value,
+    events: BTreeMap<u64, ComponentEventHandle>,
 }
 
 struct PackageRuntime {
@@ -109,6 +120,7 @@ pub struct ShellCompositionRuntime {
     effects: Vec<OwnedComponentEffect>,
     nested_mounts: BTreeMap<(u64, String), ComponentMount>,
     callbacks: BTreeMap<u64, CallbackGrant>,
+    children: BTreeMap<u64, OwnedChildGrant>,
     next_callback: u64,
     callback_depth: usize,
 }
@@ -146,6 +158,7 @@ impl ShellCompositionRuntime {
             effects: Vec::new(),
             nested_mounts: BTreeMap::new(),
             callbacks: BTreeMap::new(),
+            children: BTreeMap::new(),
             next_callback: 0,
             callback_depth: 0,
         };
@@ -503,7 +516,14 @@ impl ShellCompositionRuntime {
             events: BTreeMap::new(),
             visited: std::collections::BTreeSet::new(),
         };
-        let node = self.expand_node("root", rendered.node, &rendered.events, &mut expansion, 0)?;
+        let node = self.expand_node(
+            "root",
+            rendered.node,
+            &rendered.events,
+            root,
+            &mut expansion,
+            0,
+        )?;
         bounded_json(&node)?;
         validate(&node)?;
         let removed = self
@@ -527,11 +547,40 @@ impl ShellCompositionRuntime {
         path: &str,
         mut node: Value,
         source_events: &BTreeMap<u64, ComponentEventHandle>,
+        source_mount: u64,
         expansion: &mut ExpansionState,
         depth: usize,
     ) -> Result<Value, String> {
         if depth > 64 || expansion.events.len() > MAX_NODES {
             return Err("composition expansion exceeds limits".into());
+        }
+        if node.get("kind").and_then(Value::as_str) == Some("__packageChild") {
+            let token = node
+                .get("child")
+                .and_then(Value::as_u64)
+                .ok_or("invalid owned child token")?;
+            let grant = self
+                .children
+                .get(&token)
+                .ok_or("stale owned child")?
+                .clone();
+            if grant.receiver != source_mount
+                || self.mounts[&source_mount].generation != grant.generation
+                || self
+                    .mounts
+                    .get(&grant.source)
+                    .is_none_or(|mount| mount.generation != grant.source_generation)
+            {
+                return Err("foreign or stale owned child".into());
+            }
+            return self.expand_node(
+                path,
+                grant.node,
+                &grant.events,
+                grant.source,
+                expansion,
+                depth + 1,
+            );
         }
         if node.get("kind").and_then(Value::as_str) == Some("__packageComponent") {
             let (selection, reference) =
@@ -564,9 +613,18 @@ impl ShellCompositionRuntime {
             };
             let props = node.get("props").ok_or("missing public component props")?;
             self.callbacks.retain(|_, grant| grant.receiver != mount.id);
-            let props = self.transport_callback_props(props, source_events, &mount, depth)?;
+            self.children.retain(|_, grant| grant.receiver != mount.id);
+            let props =
+                self.transport_callback_props(props, source_events, &mount, source_mount, depth)?;
             let rendered = self.render(&mount, &props)?;
-            return self.expand_node(&key, rendered.node, &rendered.events, expansion, depth + 1);
+            return self.expand_node(
+                &key,
+                rendered.node,
+                &rendered.events,
+                mount.id,
+                expansion,
+                depth + 1,
+            );
         }
         match &mut node {
             Value::Array(values) => {
@@ -586,6 +644,7 @@ impl ShellCompositionRuntime {
                         &format!("{path}/{identity}"),
                         std::mem::take(value),
                         source_events,
+                        source_mount,
                         expansion,
                         depth + 1,
                     )?;
@@ -606,6 +665,7 @@ impl ShellCompositionRuntime {
                             &format!("{path}/{key}"),
                             std::mem::take(value),
                             source_events,
+                            source_mount,
                             expansion,
                             depth + 1,
                         )?;
@@ -622,12 +682,51 @@ impl ShellCompositionRuntime {
         value: &Value,
         source_events: &BTreeMap<u64, ComponentEventHandle>,
         receiver: &ComponentMount,
+        source_mount: u64,
         depth: usize,
     ) -> Result<Value, String> {
         if depth > 64 {
             return Err("component prop depth exceeds limit".into());
         }
         match value {
+            Value::Object(object) if object.contains_key("__ownedChild") => {
+                if object.len() != 1 {
+                    return Err("invalid owned child prop".into());
+                }
+                let node = object["__ownedChild"].clone();
+                bounded_json(&node)?;
+                if self.children.len() + self.callbacks.len() + self.children.len() >= MAX_NODES
+                    || self
+                        .children
+                        .values()
+                        .map(|child| child.node.to_string().len())
+                        .sum::<usize>()
+                        + node.to_string().len()
+                        > 4 * 1024 * 1024
+                {
+                    return Err("owned child props exceed limit".into());
+                }
+                self.next_callback = self
+                    .next_callback
+                    .checked_add(1)
+                    .ok_or("child identity exhausted")?;
+                let token = self.next_callback;
+                self.children.insert(
+                    token,
+                    OwnedChildGrant {
+                        receiver: receiver.id,
+                        generation: self.mounts[&receiver.id]
+                            .generation
+                            .checked_add(1)
+                            .ok_or("component generation exhausted")?,
+                        source: source_mount,
+                        source_generation: self.mounts[&source_mount].generation,
+                        events: owned_child_events(&node, source_events)?,
+                        node,
+                    },
+                );
+                Ok(serde_json::json!({"__hostChild":token}))
+            }
             Value::Object(object) if object.contains_key("__callbackAction") => {
                 if object.len() != 1 {
                     return Err("invalid callback prop".into());
@@ -674,6 +773,7 @@ impl ShellCompositionRuntime {
                                 value,
                                 source_events,
                                 receiver,
+                                source_mount,
                                 depth + 1,
                             )?,
                         ))
@@ -684,7 +784,13 @@ impl ShellCompositionRuntime {
             Value::Array(values) => values
                 .iter()
                 .map(|value| {
-                    self.transport_callback_props(value, source_events, receiver, depth + 1)
+                    self.transport_callback_props(
+                        value,
+                        source_events,
+                        receiver,
+                        source_mount,
+                        depth + 1,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
@@ -736,6 +842,8 @@ impl ShellCompositionRuntime {
         let state = self.mounts.remove(&mount.id).unwrap();
         self.callbacks
             .retain(|_, grant| grant.receiver != mount.id && grant.source.mount != mount.id);
+        self.children
+            .retain(|_, grant| grant.receiver != mount.id && grant.source != mount.id);
         self.packages
             .get_mut(&state.reference.owner)
             .unwrap()
@@ -752,6 +860,9 @@ impl ShellCompositionRuntime {
         self.packages.remove(owner);
         self.callbacks.retain(|_, grant| {
             &grant.source.owner != owner && self.mounts.contains_key(&grant.receiver)
+        });
+        self.children.retain(|_, grant| {
+            self.mounts.contains_key(&grant.receiver) && self.mounts.contains_key(&grant.source)
         });
         self.nested_mounts
             .retain(|_, mount| self.mounts.contains_key(&mount.id));
@@ -972,6 +1083,47 @@ impl ShellCompositionRuntime {
         self.callback_depth -= 1;
         result
     }
+}
+
+fn owned_child_events(
+    node: &Value,
+    source: &BTreeMap<u64, ComponentEventHandle>,
+) -> Result<BTreeMap<u64, ComponentEventHandle>, String> {
+    fn collect(node: &Value, tokens: &mut std::collections::BTreeSet<u64>) {
+        match node {
+            Value::Object(object) => {
+                for (key, value) in object {
+                    if is_action(key) {
+                        if let Some(token) = value.as_u64() {
+                            tokens.insert(token);
+                        }
+                    } else {
+                        collect(value, tokens);
+                    }
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, tokens);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut tokens = std::collections::BTreeSet::new();
+    collect(node, &mut tokens);
+    tokens
+        .into_iter()
+        .map(|token| {
+            Ok((
+                token,
+                source
+                    .get(&token)
+                    .ok_or("unknown owned child action")?
+                    .clone(),
+            ))
+        })
+        .collect()
 }
 
 fn is_action(key: &str) -> bool {
@@ -1223,6 +1375,48 @@ mod tests {
         assert!(host.take_effects().is_empty());
         host.unmount(&mount).unwrap();
         assert!(host.callbacks.is_empty());
+    }
+
+    #[test]
+    fn native_child_props_keep_the_authors_callbacks_and_hook_state() {
+        let mut base = package(
+            "base",
+            "export function Shell() { const [count,setCount]=useState(0); const button=id=>h(Button,{id,onClick:()=>{setCount(count+1);nickel.windows.activate(id);}},id+count); return h(nickel.component('shell.taskbar'),{header:button('header')},button('child')); }\nexport function Taskbar() {}\nexport function QuickSettings() {}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "export function Taskbar(props) { return h(Column,null,props.header,...props.children); }\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let tree = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("header0"));
+        assert!(tree.node.to_string().contains("child0"));
+        assert_eq!(tree.events.len(), 2);
+        assert!(tree.events.values().all(|event| event.owner().id == "base"));
+        let tree = host
+            .dispatch_expanded(&root, &tree.events[&0], &Value::Null, |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("header1"));
+        assert!(tree.node.to_string().contains("child1"));
+        assert_eq!(host.take_effects()[0].owner().id, "base");
+        host.unmount(&root).unwrap();
+        assert!(host.children.is_empty());
     }
 
     #[test]

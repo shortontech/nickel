@@ -173,9 +173,9 @@ function __nickelComponentProxy(selection) {
             if (typeof value === 'symbol') throw TypeError('cross-package symbol prop is unsupported');
             if (Array.isArray(value)) return value.map(encode);
             if (value && typeof value === 'object') {
-                if (value.kind && Object.keys(value).some(key => key === 'action' || key.endsWith('Action')))
-                    throw TypeError('cross-package rendered children require owned callback transport');
-                if (Object.keys(value).some(key => key.startsWith('__host') || key === '__callbackAction'))
+                if (typeof value.kind === 'string' && (Array.isArray(value.children) || value.kind === '__packageComponent'))
+                    return {__ownedChild:value};
+                if (Object.keys(value).some(key => key.startsWith('__host') || (key === '__callbackAction' || key === '__ownedChild')))
                     throw TypeError('reserved component transport prop');
                 return Object.fromEntries(Object.entries(value).map(([key,item]) => [key,encode(item)]));
             }
@@ -188,6 +188,8 @@ function __nickelComponentProxy(selection) {
 function __nickelHydrateComponentProps(value) {
     if (Array.isArray(value)) return value.map(__nickelHydrateComponentProps);
     if (value && typeof value === 'object') {
+        if (Object.keys(value).length === 1 && Object.prototype.hasOwnProperty.call(value, '__hostChild'))
+            return {kind:'__packageChild', child:value.__hostChild};
         if (Object.keys(value).length === 1 && Object.prototype.hasOwnProperty.call(value, '__hostCallback')) {
             const callback = value.__hostCallback;
             return (...args) => {
