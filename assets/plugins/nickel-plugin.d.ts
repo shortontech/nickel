@@ -460,6 +460,12 @@ declare const nickel: Readonly<{
     readPluginSettings:typeof readPluginSettings;
     readSettingsPages:typeof readSettingsPages;
     readPluginSettingsPages:typeof readPluginSettingsPages;
+    /** Read-only wall clock; the native host refreshes the snapshot each minute. */
+    clock:Readonly<{get():Readonly<{unixMilliseconds:number;utcOffsetMinutes:number}>}>;
+    /** Native project switcher; requires projects-menu-show. */
+    projects:Readonly<{show():void;toggle():void}>;
+    /** Native on-screen keyboard; requires on-screen-keyboard-show. */
+    keyboard:Readonly<{toggle():void}>;
     surfaces:Readonly<{show(id:string):void;hide(id:string):void;focus(id:string):void;setPlacement(id:string,placement:Readonly<{anchor:NickelAnchor;offsetX?:number;offsetY?:number}>):void}>;
     /** Requires appearance-read; set also requires appearance-control and a current observation. */
     appearance:Readonly<{get():NickelAppearanceSnapshot;/** Complete preferences, rather than a partial patch. */set(preferences:NickelAppearancePreferences):void}>;
