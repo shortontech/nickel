@@ -179,6 +179,80 @@ impl PluginPackage {
         digest_package(&self.source, &self.stylesheet, &self.modules, &self.images)
     }
 
+    /// Loads a package from an immutable asset catalog, without filesystem access.
+    /// Uses the same manifest, source, stylesheet, and image bounds as disk loading.
+    pub fn from_embedded(files: &[(&str, &[u8])]) -> Result<Self, String> {
+        let mut catalog = BTreeMap::new();
+        for &(path, bytes) in files {
+            if path.is_empty()
+                || path.contains(['\\', ':'])
+                || path
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err("embedded asset has an invalid package-relative path".into());
+            }
+            if catalog.insert(path, bytes).is_some() {
+                return Err("embedded asset path is duplicated".into());
+            }
+        }
+        let read = |path: &str, limit: usize| -> Result<&[u8], String> {
+            let bytes = catalog
+                .get(path)
+                .copied()
+                .ok_or_else(|| format!("embedded asset {path:?} is missing"))?;
+            if bytes.len() > limit {
+                return Err(format!("embedded asset {path:?} exceeds size limit"));
+            }
+            Ok(bytes)
+        };
+        let text = |path: &str, limit| -> Result<String, String> {
+            std::str::from_utf8(read(path, limit)?)
+                .map(str::to_owned)
+                .map_err(|_| format!("embedded asset {path:?} is not UTF-8"))
+        };
+        let manifest = PluginManifest::from_json(&text("plugin.json", MAX_MANIFEST_BYTES)?)?;
+        let source = text(&manifest.entry, MAX_PLUGIN_ENTRY_BYTES)?;
+        let stylesheet = manifest
+            .stylesheet
+            .as_deref()
+            .map(|path| text(path, MAX_PLUGIN_CSS_BYTES))
+            .transpose()?
+            .unwrap_or_default();
+        let mut modules = Vec::new();
+        let mut total = 0usize;
+        for (&path, bytes) in &catalog {
+            if !matches!(path.rsplit('.').next(), Some("js" | "jsx" | "css")) {
+                continue;
+            }
+            total = total.saturating_add(bytes.len());
+            if modules.len() >= MAX_PLUGIN_MODULES || total > MAX_PLUGIN_MODULE_TOTAL_BYTES {
+                return Err("embedded package exceeds source module limits".into());
+            }
+            modules.push(PluginSourceFile {
+                path: path.into(),
+                source: text(path, MAX_PLUGIN_MODULE_BYTES)?,
+            });
+        }
+        let mut images = BTreeMap::new();
+        let mut total = 0usize;
+        for image in &manifest.images {
+            let bytes = read(&image.path, MAX_PLUGIN_IMAGE_BYTES)?;
+            total = total.saturating_add(bytes.len());
+            if total > MAX_PLUGIN_IMAGE_TOTAL_BYTES {
+                return Err("embedded package exceeds image limits".into());
+            }
+            images.insert(image.id.clone(), bytes.to_vec());
+        }
+        Ok(Self {
+            manifest,
+            source,
+            stylesheet,
+            modules,
+            images,
+        })
+    }
+
     pub fn load(directory: impl AsRef<Path>) -> Result<Self, String> {
         let directory = std::fs::canonicalize(directory.as_ref())
             .map_err(|error| format!("could not open plugin directory: {error}"))?;
@@ -1433,6 +1507,37 @@ impl PluginRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn embedded_package_enforces_paths_required_assets_and_source_bounds() {
+        let manifest = br#"{"api_version":1,"id":"org.example.embedded","name":"Embedded","entry":"src/main.js","stylesheet":"src/theme.css"}"#;
+        let files: &[(&str, &[u8])] = &[
+            ("plugin.json", manifest),
+            ("src/main.js", b"export default function App() {}"),
+            ("src/theme.css", b"text { color: #ffffff; }"),
+        ];
+        let package = super::PluginPackage::from_embedded(files).unwrap();
+        assert_eq!(package.modules.len(), 2);
+        assert_eq!(package.manifest.id, "org.example.embedded");
+        assert!(super::PluginPackage::from_embedded(&files[..2]).is_err());
+        let mut duplicate = files.to_vec();
+        duplicate.push(files[1]);
+        assert!(super::PluginPackage::from_embedded(&duplicate).is_err());
+        for path in [
+            "../outside.js",
+            "/outside.js",
+            "C:/outside.js",
+            "src//main.js",
+        ] {
+            let mut invalid = files.to_vec();
+            invalid.push((path, b""));
+            assert!(super::PluginPackage::from_embedded(&invalid).is_err());
+        }
+        let oversized = vec![b' '; super::MAX_PLUGIN_MODULE_BYTES + 1];
+        let mut invalid = files.to_vec();
+        invalid.push(("src/large.js", &oversized));
+        assert!(super::PluginPackage::from_embedded(&invalid).is_err());
+    }
+
     use super::*;
 
     #[test]

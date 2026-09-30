@@ -3573,6 +3573,66 @@ mod tests {
     use nickel_ui::Application;
 
     #[test]
+    fn embedded_default_shell_surfaces_share_runtime_and_settings_registry() {
+        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        assert_eq!(package.manifest.entry, "src/Shell.js");
+        assert!(
+            package
+                .modules
+                .iter()
+                .any(|module| module.path == "src/Shell.jsx")
+        );
+        let runtime = PluginPanelApplication::shared_package_runtime(
+            &package,
+            &Default::default(),
+            &package.manifest.surfaces[0],
+        )
+        .unwrap();
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        runtime
+            .borrow_mut()
+            .publish_settings(&mut registry, &package.manifest.id)
+            .unwrap();
+        let pages = registry.settings_pages_snapshot();
+        assert!(
+            pages
+                .pages
+                .iter()
+                .any(|page| page.registration.id == "appearance")
+        );
+        assert!(
+            pages
+                .pages
+                .iter()
+                .any(|page| page.registration.id == "default-apps")
+        );
+        let mut applications = Vec::new();
+        for surface in &package.manifest.surfaces {
+            let application = PluginPanelApplication::from_package_surface_with_runtime(
+                &package,
+                &Default::default(),
+                surface,
+                PluginImages::new(),
+                Some(runtime.clone()),
+            )
+            .unwrap_or_else(|error| panic!("surface {}: {error}", surface.id));
+            assert_eq!(
+                application.resolved_surface(surface).unwrap().id,
+                surface.id
+            );
+            assert!(std::rc::Rc::ptr_eq(&application.shared_runtime(), &runtime));
+            applications.push(application);
+        }
+        assert_eq!(applications.len(), 5);
+        // Constructing additional surfaces must not initialize registration modules again.
+        runtime
+            .borrow_mut()
+            .publish_settings(&mut registry, &package.manifest.id)
+            .unwrap();
+        assert_eq!(registry.settings_pages_snapshot().pages, pages.pages);
+    }
+
+    #[test]
     fn one_package_entry_renders_sibling_windows_with_shared_modules() {
         let mut package = PluginPackage::load(concat!(
             env!("CARGO_MANIFEST_DIR"),

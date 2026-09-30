@@ -67,12 +67,13 @@ custom component references are shown as unavailable rather than treated as
 JavaScript functions. No private Settings projection or host was introduced.
 
 Static checks verify manifest JSON, module/CSS targets, unique root surface IDs,
-and absence of old CSS template tokens. No runtime or visual validation is
-claimed: the draft manifest, visibility props, per-component snapshots, legacy
-request dispatch, public composition resolution, and Settings bridge still need
-integration. In particular, a single undifferentiated `nickel.data` cannot serve
-all copied components; those reads must become capability snapshots or explicit
-component inputs during cutover.
+and absence of old CSS template tokens. A focused native host test loads this
+package from the embedded catalog, publishes Settings pages, and creates every
+declared surface with one shared `JsxRuntime`. Additional surface construction
+does not initialize registration modules again. Live visual validation remains.
+Stock activation, native visibility updates, complete capability snapshots,
+remaining legacy request dispatch, and inherited shell composition still need
+integration before the package replaces the stock shell.
 
 ## Public component lookup
 
@@ -116,3 +117,24 @@ Preview confirmation uses capability snapshot state. Orientation controls requir
 an explicit native operation-availability flag; application-scale policy and
 identify-display operations remain unfinished. No old Display page adapter is
 used by this module. Native preview/revert authority remains in Nickel.
+
+## Embedded build inputs
+
+The checked-in `src/*.js` modules are emitted from the authorable JSX using the
+installed TypeScript compiler in JavaScript mode. Regenerate them from the
+repository root after changing JSX:
+
+```sh
+tsc --allowJs --noResolve --checkJs false --jsx react --jsxFactory h --jsxFragmentFactory Fragment --target ES2022 --module ES2022 --outDir /tmp/nickel-default-js assets/plugins/nickel-default/src/*.jsx
+for source in assets/plugins/nickel-default/src/*.jsx; do
+  name=$(basename "$source" .jsx)
+  cp "/tmp/nickel-default-js/$name.js" assets/plugins/nickel-default/src/
+done
+```
+
+Cargo embeds ordinary package files verbatim into a generated catalog.
+`nickel_shell::bundled_plugin_assets::load_package("nickel-default")` loads the
+manifest, module sources, CSS, and declared images entirely from that catalog.
+Neither building nor running Nickel invokes npm or a JSX compiler. JSX remains
+included for inspection, while the manifest entry and imports select emitted JS.
+This prepares the shared host; it does not change stock shell activation.
