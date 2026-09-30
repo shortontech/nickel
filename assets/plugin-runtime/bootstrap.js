@@ -1,5 +1,10 @@
 
 const Window = 'window';
+const __fragmentChildren = new WeakSet();
+function Fragment({children}) {
+    __fragmentChildren.add(children);
+    return children;
+}
 function FixedWindow(props) {
     const {children, ...windowProps} = props;
     return h(Window, {...windowProps, placement: 'fixed'}, ...children);
@@ -72,7 +77,88 @@ function __nickelRegisterSurfaceApp(id, component) {
     __surfaceApps.set(id, component);
 }
 
+// Registrations retain executable values in this package's module graph. Only
+// declarative metadata crosses the host boundary; package identity comes from Rust.
+const __settings = new Map();
+const __settingsPages = new Map();
+let __settingsProvider = null;
+let __settingsSnapshot = {generation: 0, settings: []};
+let __settingsPagesSnapshot = {generation: 0, pages: []};
+function __settingMetadata(definition, page) {
+    if (!definition || typeof definition !== 'object' || Array.isArray(definition))
+        throw TypeError('invalid Settings registration');
+    if ('providerPackage' in definition) throw TypeError('provider identity is host owned');
+    const metadata = {};
+    for (const key of Object.keys(definition)) {
+        if (key === 'value' || key === 'onChange' || (page && key === 'component')) continue;
+        metadata[key] = definition[key];
+    }
+    if (page) {
+        if (typeof definition.component !== 'function') throw TypeError('Settings page component must be a function');
+        metadata.label ??= definition.group;
+        metadata.component = {module: 'settings-registry', export: 'component'};
+    } else {
+        if (definition.value !== undefined && typeof definition.value !== 'function') throw TypeError('setting value must be a function');
+        if (definition.onChange !== undefined && typeof definition.onChange !== 'function') throw TypeError('setting onChange must be a function');
+    }
+    const json = JSON.stringify(metadata);
+    if (!json || json.length > 1048576) throw RangeError('Settings registration is too large');
+    return JSON.parse(json);
+}
+function __registerSettings(definition, page) {
+    if (__settingsProvider !== null) throw Error('Settings registration phase has finished');
+    const metadata = __settingMetadata(definition, page);
+    if (typeof metadata.id !== 'string' || !metadata.id.length) throw TypeError('Settings registration requires an id');
+    const entries = page ? __settingsPages : __settings;
+    if (entries.has(metadata.id)) throw Error('duplicate Settings registration id');
+    if (entries.size >= (page ? 32 : 128)) throw RangeError('too many Settings registrations');
+    entries.set(metadata.id, {metadata, value: definition.value, onChange: definition.onChange, component: definition.component});
+}
+function registerSetting(definition) { __registerSettings(definition, false); }
+function registerSettingsPage(definition) { __registerSettings(definition, true); }
+function __nickelSettingsMetadata() {
+    return JSON.stringify({settings: Array.from(__settings.values(), entry => entry.metadata), pages: Array.from(__settingsPages.values(), entry => entry.metadata)});
+}
+function __nickelSetSettingsRegistry(provider, settings, pages) {
+    __settingsProvider = provider;
+    __settingsSnapshot = settings;
+    __settingsPagesSnapshot = pages;
+}
+function __readSettings(snapshot, page) {
+    const result = JSON.parse(JSON.stringify(snapshot));
+    const entries = page ? result.pages : result.settings;
+    for (const entry of entries) {
+        if (entry.providerPackage !== __settingsProvider) continue;
+        const live = (page ? __settingsPages : __settings).get(entry.id);
+        if (!live) continue;
+        if (page) entry.component = live.component;
+        else {
+            entry.value = live.value || (() => entry.defaultValue);
+            if (live.onChange) entry.onChange = value => __nickelInvokeSetting(entry.providerPackage, entry.id, value);
+        }
+    }
+    return result;
+}
+function readPluginSettings() { return __readSettings(__settingsSnapshot, false); }
+function readSettingsPages() { return __readSettings(__settingsPagesSnapshot, true); }
+function readPluginSettingsPages() { return readSettingsPages(); }
+function __nickelInvokeSetting(provider, id, value) {
+    if (provider !== __settingsProvider || !__settingsSnapshot.settings.some(entry => entry.providerPackage === provider && entry.id === id))
+        throw Error('Settings provider is disabled or unavailable');
+    const entry = __settings.get(id);
+    if (!entry || typeof entry.onChange !== 'function') throw Error('setting has no change handler');
+    entry.onChange(value);
+}
+function __nickelRetireSettings() {
+    __settings.clear();
+    __settingsPages.clear();
+    __settingsProvider = '';
+    __settingsSnapshot = {generation: 0, settings: []};
+    __settingsPagesSnapshot = {generation: 0, pages: []};
+}
+
 const nickel = Object.freeze({
+    registerSetting, registerSettingsPage, readPluginSettings, readSettingsPages, readPluginSettingsPages,
     request(effect) { __effects.push(effect); },
     openDialog(id) { __effects.push(`open-dialog:${id}`); },
     openMenu(id) { __effects.push(`open-menu:${id}`); },
@@ -200,7 +286,7 @@ function h(kind, props, ...children) {
         }
     }
     for (const child of children) {
-        if (!Array.isArray(child)) continue;
+        if (!Array.isArray(child) || __fragmentChildren.has(child)) continue;
         const seen = new Set();
         for (const item of child.flat(Infinity).filter(item => item !== null && item !== false)) {
             if (typeof item !== 'object') continue;

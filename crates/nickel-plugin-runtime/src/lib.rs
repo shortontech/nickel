@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 mod modules;
+mod settings;
 
 pub use modules::{JsxModuleGraph, ModuleSource};
 
@@ -18,12 +19,14 @@ const MAX_JS_LOOP_ITERATIONS: u64 = 100_000;
 
 pub struct JsxRuntime {
     context: Context,
+    settings_provider: Option<String>,
 }
 
 impl JsxRuntime {
     pub fn new(source: &str, data: Option<&str>) -> Result<Self, String> {
         let mut runtime = Self {
             context: Context::default(),
+            settings_provider: None,
         };
         runtime
             .context
