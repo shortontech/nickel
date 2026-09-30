@@ -995,9 +995,8 @@ fn verify_separate_plugin_dialog(
             .find(|plugin| plugin.id == id)
             .ok_or("dialog plugin disappeared after owner close")?;
         let surfaces = checked(test_input, environment, &["surfaces"])?;
-        if !plugin.desired_enabled
-            && plugin.health == nickel_session_protocol::PluginRuntimeHealth::Disabled
-            && plugin.memory.native_ui_bytes.is_none()
+        if plugin.desired_enabled
+            && plugin.health == nickel_session_protocol::PluginRuntimeHealth::Running
             && !surfaces.contains("org.example.surface-dialog/")
         {
             break;
@@ -1009,6 +1008,7 @@ fn verify_separate_plugin_dialog(
         }
         thread::sleep(POLL);
     }
+    checked(test_input, environment, &["plugin-set", id, "disabled"])?;
     Ok(())
 }
 
