@@ -4105,7 +4105,6 @@ impl LiveShell {
                     false
                 };
                 Ok(preview_changed
-                    || control_changed
                     || notification_changed
                     || keyboard_changed
                     || resource_changed
