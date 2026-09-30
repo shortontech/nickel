@@ -39,16 +39,7 @@ export function SettingControl(props) {
         return h(Picker, { id: controlId, label: setting.label, value: value, allowAlpha: setting.allowAlpha, onChange: change });
     }
     if (setting.type === "text" || setting.type === "number") {
-        return h(TextField, { id: controlId, value: String(value), accessibilityLabel: setting.label, onChange: next => {
-                if (setting.type === "number") {
-                    const number = Number(next);
-                    if (Number.isFinite(number) && number >= setting.min && number <= setting.max)
-                        change(number);
-                }
-                else {
-                    change(next);
-                }
-            } });
+        return h(SettingInput, { setting: setting, value: value, controlId: controlId, onChange: change });
     }
     if (setting.type === "shortcut") {
         return h(SettingShortcut, { setting: setting, value: value, controlId: controlId, onChange: change });
@@ -57,6 +48,25 @@ export function SettingControl(props) {
         return h(Button, { id: controlId, onClick: () => change(null) }, setting.actionLabel || setting.label);
     }
     return h(Text, null, value === undefined || value === null ? "" : String(value));
+}
+function SettingInput({ setting, value, controlId, onChange }) {
+    const source = String(value === undefined || value === null ? "" : value);
+    const [draft, setDraft] = useState({ source, text: source });
+    const text = draft.source === source ? draft.text : source;
+    const number = Number(text);
+    const valid = setting.type === "number"
+        ? text.trim() !== "" && Number.isFinite(number) && number >= setting.min && number <= setting.max
+        : [...text].length <= (setting.maxLength || 1024);
+    return h(Column, { className: "settings-input" },
+        h(Row, { className: "settings-input-actions" },
+            h(TextField, { id: controlId, value: text, accessibilityLabel: setting.label, onChange: next => setDraft({ source, text: next }) }),
+            h(Button, { id: controlId + "/apply", disabled: !valid, onClick: () => {
+                    if (valid)
+                        onChange(setting.type === "number" ? number : text);
+                } }, "Apply")),
+        !valid ? h(Text, { wrap: true }, setting.type === "number"
+            ? "Enter a number between " + setting.min + " and " + setting.max + "."
+            : "Enter at most " + (setting.maxLength || 1024) + " characters.") : null);
 }
 function SettingSelect({ setting, value, controlId, onChange }) {
     const [open, setOpen] = useState(false);

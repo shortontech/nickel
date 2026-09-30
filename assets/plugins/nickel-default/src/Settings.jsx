@@ -49,15 +49,7 @@ export function SettingControl(props) {
             allowAlpha={setting.allowAlpha} onChange={change} />;
     }
     if (setting.type === "text" || setting.type === "number") {
-        return <TextField id={controlId} value={String(value)}
-            accessibilityLabel={setting.label} onChange={next => {
-                if (setting.type === "number") {
-                    const number = Number(next);
-                    if (Number.isFinite(number) && number >= setting.min && number <= setting.max) change(number);
-                } else {
-                    change(next);
-                }
-            }} />;
+        return <SettingInput setting={setting} value={value} controlId={controlId} onChange={change} />;
     }
     if (setting.type === "shortcut") {
         return <SettingShortcut setting={setting} value={value} controlId={controlId} onChange={change} />;
@@ -66,6 +58,28 @@ export function SettingControl(props) {
         return <Button id={controlId} onClick={() => change(null)}>{setting.actionLabel || setting.label}</Button>;
     }
     return <Text>{value === undefined || value === null ? "" : String(value)}</Text>;
+}
+
+function SettingInput({setting, value, controlId, onChange}) {
+    const source = String(value === undefined || value === null ? "" : value);
+    const [draft, setDraft] = useState({source, text:source});
+    const text = draft.source === source ? draft.text : source;
+    const number = Number(text);
+    const valid = setting.type === "number"
+        ? text.trim() !== "" && Number.isFinite(number) && number >= setting.min && number <= setting.max
+        : [...text].length <= (setting.maxLength || 1024);
+    return <Column className="settings-input">
+        <Row className="settings-input-actions">
+            <TextField id={controlId} value={text} accessibilityLabel={setting.label}
+                onChange={next => setDraft({source, text:next})} />
+            <Button id={controlId + "/apply"} disabled={!valid} onClick={() => {
+                if (valid) onChange(setting.type === "number" ? number : text);
+            }}>Apply</Button>
+        </Row>
+        {!valid ? <Text wrap={true}>{setting.type === "number"
+            ? "Enter a number between " + setting.min + " and " + setting.max + "."
+            : "Enter at most " + (setting.maxLength || 1024) + " characters."}</Text> : null}
+    </Column>;
 }
 
 function SettingSelect({ setting, value, controlId, onChange }) {

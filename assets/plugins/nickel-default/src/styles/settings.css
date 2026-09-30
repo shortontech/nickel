@@ -153,3 +153,5 @@ column.settings-collection-row {
 column.settings-group, column.settings-group-field { gap: 8px; }
 
 column.settings-shortcut, row.settings-shortcut-key, row.settings-shortcut-actions { gap: 8px; }
+
+column.settings-input, row.settings-input-actions { gap: 8px; }
