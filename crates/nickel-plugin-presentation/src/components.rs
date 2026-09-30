@@ -520,6 +520,37 @@ impl InheritedTextStyle {
 }
 
 impl PanelNode {
+    fn parse_flow_children(children: &[Value]) -> Result<Vec<Self>, String> {
+        let mut nodes = Vec::new();
+        let mut text = String::new();
+        let flush_text = |nodes: &mut Vec<Self>, text: &mut String| {
+            if !text.trim().is_empty() {
+                nodes.push(Self::Text {
+                    value: std::mem::take(text),
+                    class_name: None,
+                    wrap: true,
+                    color: None,
+                });
+            } else {
+                text.clear();
+            }
+        };
+        for child in children {
+            match child {
+                Value::Null => {}
+                Value::String(value) => text.push_str(value),
+                Value::Number(value) => text.push_str(&value.to_string()),
+                Value::Object(_) => {
+                    flush_text(&mut nodes, &mut text);
+                    nodes.push(Self::parse(child)?);
+                }
+                _ => return Err("component children must be elements, text, or numbers".into()),
+            }
+        }
+        flush_text(&mut nodes, &mut text);
+        Ok(nodes)
+    }
+
     pub fn container_children(&self) -> Option<&Vec<Self>> {
         match self {
             Self::Box { children, .. }
@@ -977,11 +1008,7 @@ impl PanelNode {
                         _ => return Err("div id must contain 1 to 128 bytes".into()),
                     },
                     class_name,
-                    children: children
-                        .iter()
-                        .filter(|child| !child.is_null())
-                        .map(Self::parse)
-                        .collect::<Result<Vec<_>, _>>()?,
+                    children: Self::parse_flow_children(children)?,
                     action: match value.get("action") {
                         None | Some(Value::Null) => None,
                         Some(action) => Some(
@@ -1049,11 +1076,7 @@ impl PanelNode {
                 };
                 Ok(Self::Box {
                     class_name,
-                    children: children
-                        .iter()
-                        .filter(|child| !child.is_null())
-                        .map(Self::parse)
-                        .collect::<Result<Vec<_>, _>>()?,
+                    children: Self::parse_flow_children(children)?,
                     x: coordinate("x")?,
                     y: coordinate("y")?,
                     width: dimension("width")?,
@@ -1175,11 +1198,7 @@ impl PanelNode {
                         .get("submitAction")
                         .and_then(Value::as_u64)
                         .map(|action| action as usize),
-                    children: children
-                        .iter()
-                        .filter(|value| !value.is_null())
-                        .map(Self::parse)
-                        .collect::<Result<Vec<_>, _>>()?,
+                    children: Self::parse_flow_children(children)?,
                     id,
                     background: value
                         .get("background")
@@ -1190,11 +1209,7 @@ impl PanelNode {
                 })
             }
             "row" | "column" | "scroll-view" => {
-                let children = children
-                    .iter()
-                    .filter(|value| !value.is_null())
-                    .map(Self::parse)
-                    .collect::<Result<Vec<_>, _>>()?;
+                let children = Self::parse_flow_children(children)?;
                 if kind == "row" {
                     Ok(Self::Row {
                         children,
@@ -1636,10 +1651,7 @@ impl PanelNode {
                     .and_then(|action| usize::try_from(action).ok()),
                 width: value.get("width").and_then(Value::as_u64).unwrap_or(320) as u32,
                 height: value.get("height").and_then(Value::as_u64).unwrap_or(120) as u32,
-                children: children
-                    .iter()
-                    .map(Self::parse)
-                    .collect::<Result<Vec<_>, _>>()?,
+                children: Self::parse_flow_children(children)?,
             }),
             "menu" => {
                 let id = value
@@ -3313,6 +3325,28 @@ mod class_lookup_tests {
             root.direct_child_with_class("task-badge"),
             Some(PanelNode::Badge { .. })
         ));
+    }
+
+    #[test]
+    fn layout_elements_accept_and_coalesce_plain_jsx_text() {
+        let root = PanelNode::parse(&json!({
+            "kind": "div", "children": [
+                "Hello ", 42, null,
+                {"kind":"row", "children":["nested text"]},
+                "  ",
+                {"kind":"text", "children":["explicit"]}
+            ]
+        }))
+        .unwrap();
+        let PanelNode::Div { children, .. } = root else {
+            panic!("expected div");
+        };
+        assert!(
+            matches!(&children[0], PanelNode::Text { value, wrap: true, .. } if value == "Hello 42")
+        );
+        assert!(matches!(&children[1], PanelNode::Row { children, .. }
+            if matches!(&children[0], PanelNode::Text { value, .. } if value == "nested text")));
+        assert!(matches!(&children[2], PanelNode::Text { value, .. } if value == "explicit"));
     }
 }
 

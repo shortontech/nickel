@@ -53,9 +53,7 @@ function App() {
                 id={`application-scale-policy-${policy.id}`}
                 className={policy.selected ? 'application-policy selected' : 'application-policy'}
                 role="radio" aria-label={policy.label} aria-checked={policy.selected}
-                onClick={() => request('application-scale-policy', {policy: policy.id})}>
-                <Text wrap={true}>{policy.label}</Text>
-            </div>)}
+                onClick={() => request('application-scale-policy', {policy: policy.id})}>{policy.label}</div>)}
         </div>
         <div className="display-application-scale">
             <Text>{data.customScaleLabel}</Text><Text>{data.customScaleValue}</Text>
