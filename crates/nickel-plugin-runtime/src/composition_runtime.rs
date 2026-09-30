@@ -510,6 +510,14 @@ impl ShellCompositionRuntime {
         Ok(node)
     }
 
+    /// Return the host-owned data projection for an exact, live package owner.
+    pub fn snapshot(&self, owner: &PackageIdentity) -> Result<&Value, String> {
+        self.packages
+            .get(owner)
+            .map(|package| &package.data)
+            .ok_or("retired snapshot owner".into())
+    }
+
     pub fn update_snapshot(&mut self, owner: &PackageIdentity, data: &Value) -> Result<(), String> {
         bounded_json(data)?;
         if !data.is_object() {

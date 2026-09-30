@@ -1542,6 +1542,18 @@ impl PluginPanelApplication {
                     Ok(())
                 })?;
         let node = parse_panel_for_manifest(&rendered.node, &manifest, Some(&surface.id))?;
+        let snapshots = {
+            let host = host.borrow();
+            host.resolution()
+                .inheritance_chain
+                .iter()
+                .map(|owner| Ok((owner.clone(), host.snapshot(owner)?.clone())))
+                .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?
+        };
+        let projection_data = Some(
+            serde_json::to_string(&snapshots[&host.borrow().resolution().active])
+                .map_err(|error| error.to_string())?,
+        );
         Ok(Self {
             runtime,
             node,
@@ -1552,7 +1564,7 @@ impl PluginPanelApplication {
             manifest,
             expected_surface_id: Some(surface.id.clone()),
             runtime_surface_id: surface.id.clone(),
-            projection_data: None,
+            projection_data,
             overlay_open: false,
             dispatch_removed_focus: false,
             images: PluginImages::new(),
@@ -1562,7 +1574,7 @@ impl PluginPanelApplication {
                 mount,
                 events: rendered.events,
                 manifests,
-                snapshots: snapshots.clone(),
+                snapshots,
             }),
         })
     }
@@ -1579,6 +1591,21 @@ impl PluginPanelApplication {
                 state.host.borrow_mut().retire(&owner);
             }
         }
+    }
+
+    pub(crate) fn refresh_composition_snapshots(&mut self) -> Result<bool, String> {
+        let Some(state) = &mut self.composition else {
+            return Ok(false);
+        };
+        let host = state.host.borrow();
+        for (owner, data) in &mut state.snapshots {
+            *data = host.snapshot(owner)?.clone();
+        }
+        let active = host.resolution().active.clone();
+        let serialized =
+            serde_json::to_string(&state.snapshots[&active]).map_err(|error| error.to_string())?;
+        drop(host);
+        self.sync_serialized_data_inner(serialized, true)
     }
 
     pub(crate) fn shared_composition_runtime(
@@ -1837,9 +1864,7 @@ impl PluginPanelApplication {
             let mut host = state.host.borrow_mut();
             let owner = host.resolution().active.clone();
             state.snapshots.insert(owner.clone(), data.clone());
-            for (owner, data) in &state.snapshots {
-                host.update_snapshot(owner, data)?;
-            }
+            host.update_snapshot(&owner, &data)?;
             let rendered = host.render_expanded(&state.mount, &serde_json::json!({}), |value| {
                 parse_panel_for_manifest(value, &self.manifest, self.expected_surface_id.as_deref())
                     .map(|_| ())
@@ -2284,9 +2309,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .ok_or("stale host action")?
                     .clone();
                 let mut host = state.host.borrow_mut();
-                for (owner, data) in &state.snapshots {
-                    host.update_snapshot(owner, data)?;
-                }
+
                 let rendered = host.dispatch_expanded(
                     &state.mount,
                     &handle,
@@ -4244,6 +4267,22 @@ mod tests {
             if granted {
                 assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
                 assert!(application.last_error().is_none());
+                let host = application.shared_composition_runtime().unwrap();
+                let owner = host.borrow().resolution().active.clone();
+                let mut data = host.borrow().snapshot(&owner).unwrap().clone();
+                data["settings"] = serde_json::json!({"test": "changed"});
+                host.borrow_mut().update_snapshot(&owner, &data).unwrap();
+                application.refresh_composition_snapshots().unwrap();
+                assert!(std::rc::Rc::ptr_eq(
+                    &host,
+                    &application.shared_composition_runtime().unwrap()
+                ));
+                assert_eq!(
+                    application.composition.as_ref().unwrap().snapshots[&owner]["settings"]["test"],
+                    "changed"
+                );
+                application.update(application.button_message("replacement").unwrap());
+                assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
             } else {
                 assert!(application.take_effects().is_empty());
                 assert!(application.last_error().is_some());

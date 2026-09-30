@@ -4969,6 +4969,60 @@ impl LiveShell {
             return Ok(false);
         }
         values.insert(key.to_owned(), value.clone());
+        let composed = self
+            .package_runtimes
+            .values()
+            .filter_map(|runtime| {
+                let RetainedPackageRuntime::Composed(host) = runtime else {
+                    return None;
+                };
+                let owner = host
+                    .borrow()
+                    .resolution()
+                    .inheritance_chain
+                    .iter()
+                    .find(|owner| owner.id == id)
+                    .cloned()?;
+                Some((host.clone(), owner))
+            })
+            .collect::<Vec<_>>();
+        if matches!(
+            self.package_runtimes.get(id),
+            Some(RetainedPackageRuntime::Composed(_))
+        ) {
+            #[cfg(not(test))]
+            nickel_core::plugins::PluginPreferences::update_default(&manifest, key, value)
+                .map_err(|error| format!("could not save plugin setting: {error}"))?;
+            for (host, owner) in &composed {
+                let mut host = host.borrow_mut();
+                let mut data = host.snapshot(owner)?.clone();
+                data["settings"] =
+                    serde_json::to_value(&values).map_err(|error| error.to_string())?;
+                host.update_snapshot(owner, &data)?;
+            }
+            self.plugin_settings.insert(id.to_owned(), values);
+            for (_, host) in self.plugin_surface_hosts.values_mut() {
+                if host
+                    .application()
+                    .shared_composition_runtime()
+                    .is_some_and(|runtime| {
+                        composed
+                            .iter()
+                            .any(|(candidate, _)| std::rc::Rc::ptr_eq(candidate, &runtime))
+                    })
+                {
+                    let changed = host.application_mut().refresh_composition_snapshots()?;
+                    host.step(HostBatch {
+                        application_changed: changed,
+                        ..HostBatch::default()
+                    });
+                }
+            }
+            self.plugin_activation_generation =
+                self.plugin_activation_generation.wrapping_add(1).max(1);
+            self.maybe_publish_plugin_status();
+            return Ok(true);
+        }
         let mut replacement_runtime = None;
         let replacement = if entry.desired_enabled {
             self.external_plugin_packages
