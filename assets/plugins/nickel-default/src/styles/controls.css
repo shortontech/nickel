@@ -29,13 +29,14 @@ color-swatch-fill { width: 32px; height: 32px; border-radius: 16px; }
 color-swatch-label { font-size: 24px; color: var(--nickel-muted); }
 progress { background: var(--nickel-border); border-radius: 3px; }
 progress-fill { background: var(--nickel-accent); border-radius: 3px; }
-slider { height: 24px; }
+slider { width: 120px; height: 24px; }
 slider-track { height: 6px; border-radius: 3px; background: var(--nickel-border); }
 slider-fill { background: var(--nickel-accent); }
 slider-thumb {
     width: 20px; height: 20px; border-radius: 10px;
     background: var(--nickel-text); border: 1px solid var(--nickel-accent);
 }
+slider-thumb:focus { background: var(--nickel-accent); border-color: var(--nickel-text); }
 select { width: 180px; }
 select-header {
     height: 30px; padding: 5px 36px 4px 12px;
