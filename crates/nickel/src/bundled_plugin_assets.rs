@@ -1,23 +1,4 @@
-//! Compile-time source and stylesheet assets for Nickel's shipped plugins.
-//! The JSX host itself only receives a manifest, entry, and data.
-
-pub(crate) fn resolve(
-    plugin_id: &str,
-    entry: &str,
-) -> Result<(&'static str, &'static str), String> {
-    let assets = match (plugin_id, entry) {
-        ("org.nickel.hello-panel", "main.js") => (
-            include_str!("../../../assets/plugins/hello-panel/main.js"),
-            include_str!("../../../assets/plugins/hello-panel/ui.css"),
-        ),
-        _ => {
-            return Err(format!(
-                "bundled plugin {plugin_id:?} entry {entry:?} is unavailable"
-            ));
-        }
-    };
-    Ok(assets)
-}
+//! Compile-time catalog of ordinary shipped plugin packages.
 
 include!(concat!(env!("OUT_DIR"), "/bundled_packages.rs"));
 
