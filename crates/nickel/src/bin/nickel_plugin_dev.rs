@@ -66,6 +66,9 @@ fn compile_jsx_modules(
         .current_dir(directory)
         .args([
             "--allowJs",
+            // Every JSX module is an explicit root above. Avoid resolving its
+            // checked-in .js artifact as a second input for the same output.
+            "--noResolve",
             "--checkJs",
             "false",
             "--noCheck",
@@ -1251,6 +1254,22 @@ mod platform {
                 |module| module.path == "widget.js" && module.source.contains("Public widget")
             ));
             assert!(!source.path().join("widget.js").exists());
+            // Shipped packages keep compiled JS alongside editable JSX. It must
+            // neither collide in tsc nor override a fresh JSX compilation.
+            std::fs::write(
+                source.path().join("widget.js"),
+                "throw Error('stale artifact');",
+            )
+            .unwrap();
+            std::fs::write(source.path().join("main.jsx"), "import './widget.js';\nexport function App() { const Widget = nickel.component('shell.widget'); return <FixedWindow width={300} height={48}><Widget /></FixedWindow>; }").unwrap();
+            let package = load_dev_package(source.path()).unwrap();
+            assert!(package.modules.iter().any(
+                |module| module.path == "widget.js" && module.source.contains("Public widget")
+            ));
+            assert_eq!(
+                std::fs::read_to_string(source.path().join("widget.js")).unwrap(),
+                "throw Error('stale artifact');"
+            );
         }
 
         #[test]
