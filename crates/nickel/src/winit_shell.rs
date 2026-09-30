@@ -1409,11 +1409,15 @@ impl WinitShell {
                 self.options.panel_edge,
                 current,
             );
-            if !matches!(
-                current.kind,
-                nickel_core::plugins::PluginSurfaceKind::Window
-                    | nickel_core::plugins::PluginSurfaceKind::Dialog
-            ) {
+            let requested_new_placement = (previous.anchor, previous.offset_x, previous.offset_y)
+                != (current.anchor, current.offset_x, current.offset_y);
+            if requested_new_placement
+                || !matches!(
+                    current.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Window
+                        | nickel_core::plugins::PluginSurfaceKind::Dialog
+                )
+            {
                 existing
                     .window
                     .set_outer_position(LogicalPosition::new(x, y));

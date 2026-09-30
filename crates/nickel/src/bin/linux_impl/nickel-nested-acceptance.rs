@@ -119,7 +119,7 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     fs::write(
         windows.join("main.js"),
-        "function App() { return nickel.data.surface.id === 'first' ? h(Window, {width: 360, height: 220}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second')) : h(Window, {width: 420, height: 240}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
+        "function App() { return nickel.data.surface.id === 'first' ? h(Window, {width: 360, height: 220}, h(Column, {}, h(Button, {id: 'reopen', onClick: () => nickel.request({type: 'show-plugin-surface', surfaceId: 'second'})}, 'Reopen second'), h(Button, {id: 'move', onClick: () => nickel.request({type: 'surface.setPlacement', surfaceId: 'first', anchor: 'top-left', offsetX: 24, offsetY: 24})}, 'Move first'))) : h(Window, {width: 420, height: 240}, h(Button, {id: 'hide', onClick: () => nickel.request({type: 'hide-plugin-surface', surfaceId: 'second'})}, 'Hide second')); }",
     )
     .map_err(|error| error.to_string())?;
     let dialog = runtime
@@ -1536,6 +1536,33 @@ fn verify_sibling_windows(
         .ok_or("surviving plugin window has invalid location")?;
     let x: i32 = x.parse().map_err(|_| "invalid plugin window x")?;
     let y: i32 = y.parse().map_err(|_| "invalid plugin window y")?;
+    click_plugin_control(
+        test_input,
+        environment,
+        "org.example.acceptance-windows/first",
+        "move",
+        (x, y),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (x, y) = loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        let moved = windows
+            .lines()
+            .find(|line| line.starts_with(&format!("{first}\t")))
+            .and_then(|line| line.rsplit('\t').next())
+            .and_then(|field| field.split_whitespace().next())
+            .and_then(|location| location.split_once(','))
+            .and_then(|(x, y)| Some((x.parse::<i32>().ok()?, y.parse::<i32>().ok()?)));
+        if let Some(moved) = moved
+            && moved != (x, y)
+        {
+            break moved;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("typed plugin placement did not move its window: {windows}"));
+        }
+        thread::sleep(POLL);
+    };
     click_plugin_control(
         test_input,
         environment,

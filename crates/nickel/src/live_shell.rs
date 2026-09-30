@@ -3954,6 +3954,61 @@ impl LiveShell {
         Ok(true)
     }
 
+    pub(crate) fn set_plugin_window_placement(
+        &mut self,
+        id: &str,
+        surface_id: &str,
+        anchor: nickel_core::plugins::PluginSurfaceAnchor,
+        offset_x: i32,
+        offset_y: i32,
+    ) -> Result<bool, String> {
+        let entry = self
+            .plugin_registry
+            .get(id)
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        if !entry.desired_enabled || entry.health != nickel_core::plugins::PluginHealth::Running {
+            return Err(format!("plugin {id:?} is not running"));
+        }
+        let declared = self
+            .external_plugin_packages
+            .get(id)
+            .is_some_and(|package| {
+                package.manifest.surfaces.iter().any(|surface| {
+                    surface.id == surface_id
+                        && surface.kind == nickel_core::plugins::PluginSurfaceKind::Window
+                })
+            });
+        if !declared || !(-8192..=8192).contains(&offset_x) || !(-8192..=8192).contains(&offset_y) {
+            return Err(format!("plugin {id:?} cannot place window {surface_id:?}"));
+        }
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.to_owned(),
+            surface_id: surface_id.to_owned(),
+        };
+        let surface = if self.plugin_panel_host.is_some()
+            && self.plugin_panel_owner == id
+            && self.plugin_panel_surface.id == surface_id
+        {
+            &mut self.plugin_panel_surface
+        } else {
+            &mut self
+                .plugin_panel_extra_hosts
+                .get_mut(&key)
+                .ok_or_else(|| format!("plugin window {surface_id:?} is not open"))?
+                .0
+        };
+        if surface.kind != nickel_core::plugins::PluginSurfaceKind::Window {
+            return Err(format!("plugin surface {surface_id:?} is not a window"));
+        }
+        if (surface.anchor, surface.offset_x, surface.offset_y) == (anchor, offset_x, offset_y) {
+            return Ok(false);
+        }
+        surface.anchor = anchor;
+        surface.offset_x = offset_x;
+        surface.offset_y = offset_y;
+        Ok(true)
+    }
+
     pub(crate) fn show_plugin_window(
         &mut self,
         id: &str,
@@ -5892,6 +5947,24 @@ impl LiveShell {
                         }
                     }
                 }
+                crate::plugin_panel::PluginEffect::SetPluginSurfacePlacement {
+                    plugin_id,
+                    surface_id,
+                    anchor,
+                    offset_x,
+                    offset_y,
+                } => match self.set_plugin_window_placement(
+                    &plugin_id,
+                    &surface_id,
+                    anchor,
+                    offset_x,
+                    offset_y,
+                ) {
+                    Ok(moved) => changed |= moved,
+                    Err(error) => {
+                        tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin window placement request failed");
+                    }
+                },
                 crate::plugin_panel::PluginEffect::SetPluginSetting {
                     plugin_id,
                     key,

@@ -396,6 +396,13 @@ pub enum PluginEffect {
         plugin_id: String,
         surface_id: String,
     },
+    SetPluginSurfacePlacement {
+        plugin_id: String,
+        surface_id: String,
+        anchor: nickel_core::plugins::PluginSurfaceAnchor,
+        offset_x: i32,
+        offset_y: i32,
+    },
     SetPluginSetting {
         plugin_id: String,
         key: String,
@@ -1808,6 +1815,52 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::HidePluginSurface {
                                 plugin_id: self.manifest.id.clone(),
                                 surface_id: surface_id.to_owned(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("surface.setPlacement") =>
+                        {
+                            let Some(surface_id) = effect.get("surfaceId").and_then(Value::as_str)
+                            else {
+                                self.last_error = Some("plugin surface ID is invalid".into());
+                                return;
+                            };
+                            if !self.manifest.surfaces.iter().any(|surface| {
+                                surface.id == surface_id
+                                    && surface.kind
+                                        == nickel_core::plugins::PluginSurfaceKind::Window
+                            }) {
+                                self.last_error = Some("plugin window is not declared".into());
+                                return;
+                            }
+                            let Some(anchor) = effect
+                                .get("anchor")
+                                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                            else {
+                                self.last_error = Some("plugin window anchor is invalid".into());
+                                return;
+                            };
+                            let (Some(offset_x), Some(offset_y)) = (
+                                effect.get("offsetX").and_then(Value::as_i64),
+                                effect.get("offsetY").and_then(Value::as_i64),
+                            ) else {
+                                self.last_error =
+                                    Some("plugin window anchor offsets are invalid".into());
+                                return;
+                            };
+                            if !(-8192..=8192).contains(&offset_x)
+                                || !(-8192..=8192).contains(&offset_y)
+                            {
+                                self.last_error =
+                                    Some("plugin window anchor offsets exceed bounds".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::SetPluginSurfacePlacement {
+                                plugin_id: self.manifest.id.clone(),
+                                surface_id: surface_id.to_owned(),
+                                anchor,
+                                offset_x: offset_x as i32,
+                                offset_y: offset_y as i32,
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
@@ -4436,6 +4489,43 @@ mod tests {
                 assert_eq!(
                     app.take_effects(),
                     vec![PluginEffect::ShowSettings(Some("plugins".into()))]
+                );
+            } else {
+                assert!(app.take_effects().is_empty());
+                assert!(app.last_error().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn plugin_window_placement_request_is_typed_and_bounded() {
+        let manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        for (surface_id, offset_x, accepted) in [
+            ("main", -24, true),
+            ("other", -24, false),
+            ("main", 8193, false),
+        ] {
+            let source = format!(
+                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'move',onClick:()=>nickel.request({{type:'surface.setPlacement',surfaceId:'{surface_id}',anchor:'top-right',offsetX:{offset_x},offsetY:24}})}}, 'Move')); }}"
+            );
+            let mut app =
+                PluginPanelApplication::new_with_manifest(&source, &manifest, None).unwrap();
+            app.update(app.button_message("move").unwrap());
+            if accepted {
+                assert_eq!(
+                    app.take_effects(),
+                    vec![PluginEffect::SetPluginSurfacePlacement {
+                        plugin_id: manifest.id.clone(),
+                        surface_id: "main".into(),
+                        anchor: nickel_core::plugins::PluginSurfaceAnchor::TopRight,
+                        offset_x: -24,
+                        offset_y: 24,
+                    }]
                 );
             } else {
                 assert!(app.take_effects().is_empty());

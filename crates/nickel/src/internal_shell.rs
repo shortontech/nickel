@@ -1502,8 +1502,13 @@ impl InternalShellCoordinator {
         self.shell.plugin_status_snapshot()
     }
 
-    pub(crate) fn plugin_surface_count(&self) -> usize {
-        self.shell.shell_panel_surfaces().len()
+    pub(crate) fn plugin_surfaces(
+        &self,
+    ) -> Vec<(
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    )> {
+        self.shell.shell_panel_surfaces()
     }
 
     pub(crate) fn is_taskbar_surface_id(&self, id: InternalSurfaceId) -> bool {

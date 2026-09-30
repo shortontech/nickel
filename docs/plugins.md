@@ -33,6 +33,11 @@ in a working package. A window can request
 `nickel.request({ type: "hide-plugin-surface", surfaceId: "details" })` to close
 itself or a declared sibling; closing its last ordinary surface disables the
 package.
+An open ordinary window can request a new position on its current output with
+`nickel.request({ type: "surface.setPlacement", surfaceId: "details", anchor: "top-right", offsetX: -24, offsetY: 24 })`.
+Only a window declared by the requesting plugin can be moved. Offsets are
+logical pixels within ±8192; Nickel clamps the result to the output. The
+window manager still handles normal user movement and resizing.
 The [dialog example](../assets/plugins/example-dialog/) shows `useState`,
 `onClose`, a `show-settings` request, and a saved plugin setting.
 The [separate dialog example](../assets/plugins/example-surface-dialog/) declares

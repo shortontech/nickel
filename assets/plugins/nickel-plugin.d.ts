@@ -232,6 +232,13 @@ declare function useRef<T>(initial: T): { current: T };
 type NickelSurfaceRequest = Readonly<
     | { type: "show-plugin-surface"; surfaceId: string }
     | { type: "hide-plugin-surface"; surfaceId: string }
+    | {
+        type: "surface.setPlacement";
+        surfaceId: string;
+        anchor: "center" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
+        offsetX: number;
+        offsetY: number;
+    }
 >;
 
 declare const nickel: Readonly<{

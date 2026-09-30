@@ -1069,6 +1069,66 @@ fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
 }
 
 #[test]
+fn installed_plugin_can_reposition_only_its_open_window() {
+    use nickel_core::plugins::PluginSurfaceAnchor;
+
+    let root = tempfile::tempdir().unwrap();
+    let id = "org.example.placed-window";
+    let directory = root.path().join(id);
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.placed-window","name":"Placed window","entry":"main.js","surfaces":[{"id":"main","kind":"window","width":400,"height":240}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        "function App() { return h(Window, {id: 'main', width: 400, height: 240}, h(Text, null, 'Window')); }",
+    )
+    .unwrap();
+    let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
+    let descriptor = nickel_core::plugins::PluginPackageDescriptor {
+        directory,
+        manifest: package.manifest.clone(),
+        source_digest: package.source_digest(),
+    };
+    let mut shell = LiveShell::new().unwrap();
+    shell.plugin_registry.register(package.manifest).unwrap();
+    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell.set_plugin_enabled(id, true).unwrap();
+
+    assert!(
+        shell
+            .set_plugin_window_placement(id, "main", PluginSurfaceAnchor::TopRight, -24, 24)
+            .unwrap()
+    );
+    let surface = &shell.plugin_panels()[0].1;
+    assert_eq!(surface.anchor, PluginSurfaceAnchor::TopRight);
+    assert_eq!((surface.offset_x, surface.offset_y), (-24, 24));
+    assert!(
+        !shell
+            .set_plugin_window_placement(id, "main", PluginSurfaceAnchor::TopRight, -24, 24)
+            .unwrap()
+    );
+    assert!(
+        shell
+            .set_plugin_window_placement(id, "other", PluginSurfaceAnchor::Center, 0, 0)
+            .is_err()
+    );
+    assert!(
+        shell
+            .set_plugin_window_placement(id, "main", PluginSurfaceAnchor::Center, 8193, 0)
+            .is_err()
+    );
+    shell.set_plugin_enabled(id, false).unwrap();
+    assert!(
+        shell
+            .set_plugin_window_placement(id, "main", PluginSurfaceAnchor::Center, 0, 0)
+            .is_err()
+    );
+}
+
+#[test]
 fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
     let root = tempfile::tempdir().unwrap();
     let id = "org.example.two-windows";
