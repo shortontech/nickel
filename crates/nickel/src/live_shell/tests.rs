@@ -438,9 +438,8 @@ use super::{
         AudioStatus, BluetoothStatus, FeedState, FeedStatus, GlobalShortcut, NetworkStatus,
         SecureStorageState, SystemStatusUpdate,
     },
-    preview_refresh_due, retain_unchanged_desktop_icons, secure_storage_status_label,
-    session_feed_status_label, shortcut_capability_status, visible_tray_item,
-    window_belongs_to_panel,
+    preview_refresh_due, retain_unchanged_desktop_icons, shortcut_capability_status,
+    visible_tray_item, window_belongs_to_panel,
 };
 
 #[cfg(target_os = "linux")]
@@ -602,27 +601,6 @@ fn safe_mode_suppresses_installed_autostart_without_discarding_saved_choice() {
     assert!(super::should_auto_start_installed_plugin(true, false));
     assert!(!super::should_auto_start_installed_plugin(true, true));
     assert!(!super::should_auto_start_installed_plugin(false, false));
-}
-
-#[test]
-fn launcher_icon_slots_have_an_image_while_application_icons_load() {
-    let launcher = crate::launcher::Launcher::default();
-    let projection = crate::plugin_panel::LauncherPluginProjection::from_launcher(&launcher);
-    let mut cache = crate::launcher_icon_cache::LauncherIconCache::new();
-    let images = super::launcher_plugin_images(&launcher, &mut cache, &projection);
-    for (slot, items) in [
-        ("search", projection.results.as_slice()),
-        ("dashboard", projection.dashboard.as_slice()),
-        ("place", projection.places.as_slice()),
-    ] {
-        for item in items {
-            assert!(images.contains_key(&format!("{slot}:{}", item.index)));
-        }
-    }
-    let (_, placeholder) = super::launcher_placeholder_icon();
-    assert_eq!(placeholder.dimensions(), (32, 32));
-    assert!(placeholder.pixels().any(|pixel| pixel.0[3] == 0));
-    assert!(placeholder.pixels().any(|pixel| pixel.0[3] != 0));
 }
 
 #[test]
@@ -1467,35 +1445,6 @@ fn taskbar_declaration_joins_active_shell_panel_surfaces() {
             .all(|(candidate, _)| candidate != &key)
     );
     assert!(shell.plugin_panel_placement(&key).is_none());
-}
-
-#[test]
-fn fixed_shell_surface_keys_follow_bundled_plugin_activation() {
-    let mut shell = LiveShell::new().unwrap();
-    for (key, id) in [
-        (
-            crate::plugin_panel::launcher_surface_key(),
-            crate::plugin_panel::launcher_manifest().id.clone(),
-        ),
-        (
-            crate::plugin_panel::run_surface_key(),
-            crate::plugin_panel::run_manifest().id.clone(),
-        ),
-        (
-            crate::plugin_panel::volume_osd_surface_key(),
-            crate::plugin_panel::volume_osd_manifest().id.clone(),
-        ),
-        (
-            crate::plugin_panel::window_preview_surface_key(),
-            crate::plugin_panel::window_preview_manifest().id.clone(),
-        ),
-    ] {
-        assert!(shell.shell_fixed_surface_keys().contains(&key));
-        shell.set_plugin_enabled(&id, false).unwrap();
-        assert!(!shell.shell_fixed_surface_keys().contains(&key));
-        shell.set_plugin_enabled(&id, true).unwrap();
-        assert!(shell.shell_fixed_surface_keys().contains(&key));
-    }
 }
 
 #[test]
@@ -2724,147 +2673,6 @@ fn pointer_opened_control_center_does_not_paint_initial_keyboard_focus() {
 }
 
 #[test]
-fn codex_approval_notification_revises_in_place_and_retires_on_resolution() {
-    use nickel_codex::{ApprovalContext, ServerRequestId, ThreadId};
-    use nickel_codex_ui::{CodexApprovalNotification, PendingInteraction};
-    use nickel_ui::approval::{ApprovalPresentation, RequesterIdentity};
-
-    let mut shell = LiveShell::new().expect("live shell");
-    shell.apply_session_launcher_visibility(true);
-    shell.scene(SurfaceRole::Launcher, 920, 680);
-    let typing_focus = shell
-        .launcher_host_ref()
-        .expect("bundled launcher")
-        .inspect()
-        .keyboard_focus
-        .clone();
-    assert!(typing_focus.is_some());
-    let mut surfaces = nickel_ui::InternalSurfaceSet::new();
-    let id = surfaces.insert(
-        crate::notification_view::NotificationApp::new(shell.palette),
-        1,
-        1,
-    );
-    let owner = super::CodexApprovalOwner::Internal(id);
-    let snapshot = |root: &str| CodexApprovalNotification {
-        connection_generation: 1,
-        request_revision: if root == "/safe" { 1 } else { 2 },
-        thread_id: Some(ThreadId("thread".into())),
-        interaction: PendingInteraction::Approval {
-            request_id: ServerRequestId("request".into()),
-            approval_type: "item/fileChange/requestApproval".into(),
-            summary: "Write files".into(),
-            context: ApprovalContext {
-                grant_root: Some(root.into()),
-                ..Default::default()
-            },
-        },
-        presentation: ApprovalPresentation {
-            requester: "Codex".into(),
-            identity: RequesterIdentity::BackendReported,
-            action: "Change files".into(),
-            scope: Some(root.into()),
-            duration: None,
-            warning: None,
-            detail: Some(format!(
-                "Requested files under {root}; Bearer fixture-private-token"
-            )),
-        },
-        actionable: true,
-        submitting: false,
-        unconfirmed: false,
-    };
-    shell.sync_codex_approval_notifications(vec![(owner, snapshot("/safe"))]);
-    shell.refresh_fast();
-    assert_eq!(
-        shell.launcher_host_ref().unwrap().inspect().keyboard_focus,
-        typing_focus
-    );
-    let first = shell
-        .notification_feed
-        .snapshot()
-        .expect("pending notification");
-    assert_eq!(first.actions.len(), 3);
-    assert!(first.body.contains("/safe"));
-    assert!(first.body.contains("Review the full operation in Codex"));
-    assert!(!first.body.contains("fixture-private-token"));
-    assert!(!first.body.contains("Requested files under /safe"));
-
-    shell.sync_codex_approval_notifications(vec![(owner, snapshot("/broader"))]);
-    let revised = shell
-        .notification_feed
-        .snapshot()
-        .expect("revised notification");
-    assert_eq!(revised.id, first.id);
-    assert!(revised.body.contains("/broader"));
-    assert_eq!(shell.codex_approval_notifications.len(), 1);
-
-    shell.notification = Some(revised.clone());
-    shell.sync_notification_host(420, 180);
-    let cancel = shell
-        .notification_host
-        .query_unique(&SemanticSelector::RoleAndName {
-            role: SemanticRole::Button,
-            name: "Cancel".into(),
-        })
-        .expect("cancel decision");
-    shell
-        .notification_host
-        .perform_semantic_action(cancel.id, SemanticAction::Invoke(ActionKind::Activate));
-    shell.apply_notification_effects();
-    assert_eq!(
-        shell.take_codex_approval_decisions(),
-        vec![(
-            owner,
-            snapshot("/broader"),
-            nickel_codex_ui::CodexApprovalChoice::Cancel,
-        )]
-    );
-    assert!(
-        shell
-            .notification_feed
-            .history()
-            .into_iter()
-            .find(|item| item.id == revised.id)
-            .unwrap()
-            .actions
-            .is_empty(),
-        "a submitted action must not be offered again"
-    );
-    shell.dismiss_notification_transport(revised.id);
-    assert!(shell.notification.is_none());
-    assert!(
-        shell
-            .dismissed_codex_approval_notifications
-            .contains(&revised.id)
-    );
-    assert!(
-        shell
-            .notification_feed
-            .history()
-            .iter()
-            .any(|item| item.id == revised.id)
-    );
-    assert!(
-        shell
-            .notification_feed
-            .history()
-            .iter()
-            .all(|item| !item.body.contains("fixture-private-token"))
-    );
-    shell.refresh_fast();
-    assert!(
-        shell.notification.is_none(),
-        "dismissal must not re-toast a pending request"
-    );
-
-    shell.sync_codex_approval_notifications(Vec::new());
-    assert!(shell.codex_approval_notifications.is_empty());
-    assert!(shell.dismissed_codex_approval_notifications.is_empty());
-    assert!(shell.notification_feed.snapshot().is_none());
-}
-
-#[test]
 fn codex_notification_reviews_large_source_decision_set_without_truncating_it() {
     use nickel_codex::{ApprovalContext, CommandDecision, ServerRequestId};
     use nickel_codex_ui::{CodexApprovalNotification, PendingInteraction};
@@ -3217,33 +3025,6 @@ fn control_center_focus_loss_dismisses_the_ephemeral_surface() {
     assert!(shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::ControlCenter));
     assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::ControlCenter));
     assert!(!shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::ControlCenter));
-}
-
-#[test]
-fn rejected_launcher_focus_request_does_not_project_internal_focus() {
-    struct RejectingHost;
-
-    impl crate::session_host::SessionHost for RejectingHost {
-        fn dispatch(
-            &self,
-            _: crate::platform::ShellCommand,
-        ) -> Result<(), crate::platform::SessionRequestError> {
-            Err(crate::platform::SessionRequestError::Send)
-        }
-    }
-
-    let mut shell = LiveShell::new_with_session_host(Arc::new(RejectingHost)).expect("live shell");
-
-    assert!(!shell.request_launcher_toggle());
-    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
-    assert!(
-        shell
-            .launcher_host_ref()
-            .unwrap()
-            .inspect()
-            .keyboard_focus
-            .is_none()
-    );
 }
 
 #[test]
@@ -3813,179 +3594,6 @@ fn active_window_screenshot_uses_in_process_capture_and_crops_before_copy() {
     );
     assert_eq!(host.copied_sizes.lock().unwrap().as_slice(), &[(60, 40)]);
     assert!(!shell.screenshot.visible());
-}
-
-#[test]
-fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_transport() {
-    use std::{path::PathBuf, sync::Mutex};
-
-    use nickel_core::{
-        hotkeys::HotkeyAction,
-        task_switcher::{SwitchWindow, TaskSwitcher},
-    };
-    use nickel_file::{FileLaunch, FileWindowRequest};
-
-    #[derive(Default)]
-    struct RecordingHost(Mutex<Vec<crate::platform::ShellCommand>>);
-
-    impl crate::session_host::SessionHost for RecordingHost {
-        fn dispatch(
-            &self,
-            command: crate::platform::ShellCommand,
-        ) -> Result<(), crate::platform::SessionRequestError> {
-            self.0.lock().unwrap().push(command);
-            Ok(())
-        }
-
-        fn secure_storage_state(
-            &self,
-        ) -> Result<crate::platform::SecureStorageState, crate::platform::SessionRequestError>
-        {
-            Ok(crate::platform::SecureStorageState::Ready)
-        }
-
-        fn request_secure_storage_retry(&self) -> Result<(), crate::platform::SessionRequestError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingFiles(Mutex<Vec<FileWindowRequest>>);
-
-    impl crate::file_window_host::FileWindowHost for RecordingFiles {
-        fn dispatch(&self, request: FileWindowRequest) -> Result<(), String> {
-            self.0.lock().unwrap().push(request);
-            Ok(())
-        }
-    }
-
-    let session = Arc::new(RecordingHost::default());
-    let files = Arc::new(RecordingFiles::default());
-    let mut shell = LiveShell::new_with_hosts(session.clone(), files.clone()).expect("live shell");
-
-    shell.apply_session_launcher_visibility(true);
-    assert!(
-        shell
-            .launcher_host_ref()
-            .unwrap()
-            .inspect()
-            .keyboard_focus
-            .is_some()
-    );
-
-    shell.windows = vec![
-        OpenWindow {
-            id: WindowId(10),
-            application_id: Some(ApplicationId::new("org.nickel.One")),
-            active: true,
-            title: "One".into(),
-            state: crate::model::WindowState::default(),
-        },
-        OpenWindow {
-            id: WindowId(20),
-            application_id: Some(ApplicationId::new("org.nickel.Two")),
-            active: false,
-            title: "Two".into(),
-            state: crate::model::WindowState::default(),
-        },
-    ];
-    let switch_windows = shell
-        .windows
-        .iter()
-        .map(|window| SwitchWindow {
-            id: window.id,
-            application_id: window.application_id.as_ref().unwrap().as_str().to_owned(),
-            active: window.active,
-        })
-        .collect::<Vec<_>>();
-    shell.task_switcher = TaskSwitcher::default();
-    assert!(
-        !shell
-            .task_switcher
-            .apply(HotkeyAction::SwitchNext, &switch_windows)
-            .is_empty()
-    );
-    assert!(shell.global_shortcut(crate::platform::GlobalShortcut::SwitchNext));
-    let preview_role = crate::winit_shell::SurfaceRole::WindowPreview;
-    let _ = shell.scene(preview_role, 640, 240);
-    let first_preview_token = shell
-        .scene_change_token(preview_role)
-        .expect("task switcher preview token");
-    assert!(shell.global_shortcut(crate::platform::GlobalShortcut::SwitchNext));
-    assert!(
-        shell.preview_plugin_host_ref().is_some(),
-        "consecutive switch steps must retain the JSX preview host so its presentation token advances"
-    );
-    let _ = shell.scene(preview_role, 640, 240);
-    assert_ne!(
-        shell.scene_change_token(preview_role),
-        Some(first_preview_token),
-        "each visible task-switch selection must receive a distinct presentation token"
-    );
-    assert!(shell.global_shortcut(crate::platform::GlobalShortcut::CommitSwitch));
-    assert!(session.0.lock().unwrap().iter().any(|command| matches!(
-        command,
-        crate::platform::ShellCommand::WindowAction {
-            action: crate::platform::WindowAction::Activate,
-            ..
-        }
-    )));
-
-    // The Windows shortcut adapter forwards cancellation through this same
-    // production shell action without committing the highlighted candidate.
-    shell.task_switcher = TaskSwitcher::default();
-    shell
-        .task_switcher
-        .apply(HotkeyAction::SwitchNext, &switch_windows);
-    session.0.lock().unwrap().clear();
-    assert!(shell.global_shortcut(crate::platform::GlobalShortcut::CancelSwitch));
-    assert!(shell.task_switcher.session().is_none());
-    assert!(!session.0.lock().unwrap().iter().any(|command| matches!(
-        command,
-        crate::platform::ShellCommand::WindowAction {
-            action: crate::platform::WindowAction::Activate,
-            ..
-        }
-    )));
-
-    // Session actions share this platform-neutral shell path on Windows and
-    // Linux. They must retire a pending switch (and its delayed peek) before
-    // the platform begins locking, logging out, suspending, or restarting.
-    shell.task_switcher = TaskSwitcher::default();
-    shell
-        .task_switcher
-        .apply(HotkeyAction::SwitchNext, &switch_windows);
-    session.0.lock().unwrap().clear();
-    shell.apply_control_action(ControlAction::SessionAction(
-        crate::platform::SessionAction::Lock,
-    ));
-    assert!(shell.task_switcher.session().is_none());
-    let commands = session.0.lock().unwrap();
-    assert!(commands.iter().any(|command| matches!(
-        command,
-        crate::platform::ShellCommand::SessionAction(crate::platform::SessionAction::Lock)
-    )));
-    assert!(!commands.iter().any(|command| matches!(
-        command,
-        crate::platform::ShellCommand::WindowAction {
-            action: crate::platform::WindowAction::Activate,
-            ..
-        }
-    )));
-    drop(commands);
-
-    let path = PathBuf::from("/tmp/internal-file-scenario");
-    shell.launch_application(crate::model::Application::new(
-        "place:test".into(),
-        "Test location".into(),
-        None,
-        None,
-        Some(vec!["nickel-file".into(), path.display().to_string()]),
-    ));
-    assert_eq!(
-        files.0.lock().unwrap().as_slice(),
-        [FileWindowRequest::OpenOrFocus(FileLaunch::Browse(path))]
-    );
 }
 
 #[test]

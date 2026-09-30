@@ -175,16 +175,15 @@ mod platform {
         PluginPackage, PluginSlotContract, PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::{
-        PluginPanelApplication, codex_projects_manifest, control_center_manifest,
-        launcher_manifest, manifest, notification_manifest, on_screen_keyboard_manifest,
-        run_manifest, taskbar_manifest, volume_osd_manifest, window_preview_manifest,
+        PluginPanelApplication, codex_projects_manifest, control_center_manifest, manifest,
+        notification_manifest, on_screen_keyboard_manifest, run_manifest, taskbar_manifest,
+        volume_osd_manifest, window_preview_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
         [
             manifest(),
             taskbar_manifest(),
-            launcher_manifest(),
             notification_manifest(),
             run_manifest(),
             control_center_manifest(),
@@ -1020,35 +1019,6 @@ mod platform {
         }
 
         #[test]
-        fn stages_bundled_shell_sources_without_installing_duplicate_packages() {
-            let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
-            for name in ["launcher", "taskbar"] {
-                let directory = root.join(name);
-                let package = PluginPackage::load(&directory).unwrap();
-                let profile = tempfile::tempdir().unwrap();
-                stage(&package, &directory, profile.path()).unwrap();
-                let staged = profile
-                    .path()
-                    .join("bundled-source")
-                    .join(&package.manifest.id);
-                assert_eq!(
-                    std::fs::read_to_string(staged.join(&package.manifest.entry)).unwrap(),
-                    package.source
-                );
-                assert!(
-                    !staged_config_directory(profile.path())
-                        .join("plugins")
-                        .join(&package.manifest.id)
-                        .exists()
-                );
-                if name == "taskbar" {
-                    assert!(staged.join("menu.js").is_file());
-                    assert!(staged.join("window-menu.js").is_file());
-                }
-            }
-        }
-
-        #[test]
         fn stages_and_watches_bundled_auxiliary_jsx() {
             if Command::new(tsc_executable())
                 .arg("--version")
@@ -1119,12 +1089,12 @@ mod platform {
             let directory = tempfile::tempdir().unwrap();
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/launcher"
+                "/../../assets/plugins/run"
             ));
             let manifest = std::fs::read_to_string(root.join("plugin.json")).unwrap();
             std::fs::write(
                 directory.path().join("plugin.json"),
-                manifest.replace("Nickel Launcher", "Renamed Launcher"),
+                manifest.replace("Nickel Run", "Renamed Run"),
             )
             .unwrap();
             std::fs::copy(root.join("main.js"), directory.path().join("main.js")).unwrap();

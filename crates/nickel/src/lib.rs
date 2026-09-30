@@ -127,7 +127,6 @@ mod icons;
 mod internal_codex;
 #[allow(clippy::manual_is_multiple_of, dead_code)]
 mod launcher;
-mod launcher_actions;
 mod launcher_icon_cache;
 #[cfg(target_os = "linux")]
 mod lock_auth;

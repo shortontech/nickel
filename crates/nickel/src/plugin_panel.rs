@@ -43,8 +43,7 @@ use nickel_codex_ui::{ProjectMenuProjection, ProjectMenuRevision};
 use nickel_core::display_projection::ProjectionMode;
 use nickel_plugin_presentation::css::StyleSheet;
 
-pub use crate::launcher::LauncherView;
-use crate::launcher::{Application, DashboardSection, Launcher, LauncherMode, TaskbarApplication};
+use crate::launcher::TaskbarApplication;
 use crate::notification::DesktopNotification;
 use crate::window_preview::PreviewAction;
 
@@ -71,29 +70,6 @@ pub fn surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     nickel_core::plugins::PluginSurfaceKey {
         plugin_id: manifest().id.clone(),
         surface_id: surface().id.clone(),
-    }
-}
-
-pub fn launcher_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!("../../../assets/plugins/launcher/plugin.json"))
-            .expect("bundled launcher plugin manifest must be valid")
-    })
-}
-
-pub fn launcher_surface() -> &'static PluginSurface {
-    launcher_manifest()
-        .surfaces
-        .first()
-        .expect("bundled launcher needs a surface")
-}
-
-pub fn launcher_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    let manifest = launcher_manifest();
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: manifest.id.clone(),
-        surface_id: launcher_surface().id.clone(),
     }
 }
 
@@ -343,10 +319,6 @@ pub fn taskbar_enabled() -> bool {
     true
 }
 
-pub fn launcher_enabled() -> bool {
-    true
-}
-
 pub fn bottom_offset() -> u32 {
     std::env::var("NICKEL_DEV_PLUGIN_PANEL_BOTTOM")
         .ok()
@@ -518,29 +490,15 @@ pub enum PluginEffect {
         token: String,
         revision: ProjectMenuRevision,
     },
-    SetLauncherQuery(String),
-    SetLauncherPage {
-        dashboard: bool,
-        page: usize,
-    },
-    ActivateLauncherResult {
-        index: usize,
-        id: String,
-    },
+
     LaunchApplication {
         id: String,
     },
-    SetLauncherView(LauncherView),
     ToggleApplicationPin {
         id: String,
     },
     RetryApplicationPinSave,
-    DismissLauncher,
-    LauncherOpenProject {
-        id: String,
-    },
-    LauncherSeeAllProjects,
-    LauncherRequestLogout,
+
     SessionOperation {
         plugin_id: String,
         request: crate::session_capabilities::Request,
@@ -760,40 +718,6 @@ fn control_request(effect: &Value) -> Result<(ControlAction, PluginCapability), 
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LauncherPluginResult {
-    pub index: usize,
-    pub id: String,
-    pub name: String,
-    pub pinned: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LauncherPluginProject {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LauncherPluginProjection {
-    pub query: String,
-    pub status: Option<String>,
-    pub pin_save_failed: bool,
-    pub dashboard_visible: bool,
-    pub view: LauncherView,
-    pub result_page: usize,
-    pub result_page_count: usize,
-    pub dashboard_page: usize,
-    pub dashboard_page_count: usize,
-    pub results: Vec<LauncherPluginResult>,
-    pub dashboard: Vec<LauncherPluginResult>,
-    pub places: Vec<LauncherPluginResult>,
-    pub projects: Vec<LauncherPluginProject>,
-    pub codex_available: bool,
-    pub account_name: String,
-    pub logout_available: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskbarPluginItem {
     pub index: usize,
     pub id: String,
@@ -982,139 +906,6 @@ pub fn taskbar_item_matches(groups: &[TaskbarApplication], index: usize, id: &st
         .is_some_and(|group| taskbar_item_id(group) == id)
 }
 
-impl LauncherPluginProjection {
-    pub(crate) fn from_launcher(launcher: &Launcher) -> Self {
-        Self::from_launcher_pages(launcher, 0, 0)
-    }
-
-    pub(crate) fn from_launcher_pages(
-        launcher: &Launcher,
-        result_page: usize,
-        dashboard_page: usize,
-    ) -> Self {
-        const SEARCH_PAGE_SIZE: usize = 12;
-        const DASHBOARD_PAGE_SIZE: usize = 48;
-        let count = launcher.result_count();
-        let result_page_count = count.div_ceil(SEARCH_PAGE_SIZE).max(1);
-        let dashboard_page_count = count.div_ceil(DASHBOARD_PAGE_SIZE).max(1);
-        let result_page = result_page.min(result_page_count - 1);
-        let dashboard_page = dashboard_page.min(dashboard_page_count - 1);
-        let result_start = result_page * SEARCH_PAGE_SIZE;
-        let dashboard_start = dashboard_page * DASHBOARD_PAGE_SIZE;
-        let results = (result_start..count.min(result_start + SEARCH_PAGE_SIZE))
-            .filter_map(|index| {
-                launcher
-                    .result_at(index)
-                    .and_then(|application| launcher_plugin_result(launcher, index, application))
-            })
-            .collect();
-        Self {
-            query: launcher.query().to_owned(),
-            status: None,
-            pin_save_failed: false,
-            dashboard_visible: launcher.mode() == LauncherMode::Dashboard,
-            view: launcher.view(),
-            result_page,
-            result_page_count,
-            dashboard_page,
-            dashboard_page_count,
-            results,
-            dashboard: (dashboard_start..count.min(dashboard_start + DASHBOARD_PAGE_SIZE))
-                .filter_map(|index| {
-                    launcher.result_at(index).and_then(|application| {
-                        launcher_plugin_result(launcher, index, application)
-                    })
-                })
-                .collect(),
-            places: launcher
-                .place_applications()
-                .take(12)
-                .enumerate()
-                .filter_map(|(index, application)| {
-                    launcher_plugin_result(launcher, index, application)
-                })
-                .collect(),
-            projects: match launcher.dashboard_projects() {
-                DashboardSection::Ready(projects) if launcher.codex_available() => {
-                    let mut recent = projects
-                        .iter()
-                        .filter(|project| {
-                            project.last_used_at.is_some()
-                                && !project.id.is_empty()
-                                && project.id.len() <= 256
-                        })
-                        .collect::<Vec<_>>();
-                    recent.sort_by_key(|project| std::cmp::Reverse(project.last_used_at));
-                    recent
-                        .into_iter()
-                        .take(3)
-                        .map(|project| LauncherPluginProject {
-                            id: project.id.clone(),
-                            name: project.name.chars().take(120).collect(),
-                        })
-                        .collect()
-                }
-                _ => Vec::new(),
-            },
-            codex_available: launcher.codex_available(),
-            account_name: match launcher.dashboard_account() {
-                DashboardSection::Ready(account) => {
-                    account.display_name.chars().take(120).collect()
-                }
-                _ => "Local session".into(),
-            },
-            logout_available: launcher.logout_available(),
-        }
-    }
-
-    pub(crate) fn with_status(mut self, status: Option<String>) -> Self {
-        self.pin_save_failed = status
-            .as_deref()
-            .is_some_and(|status| status.starts_with("Launcher preferences could not be saved:"));
-        self.status = status.map(|status| status.chars().take(160).collect());
-        self
-    }
-
-    pub(crate) fn to_json(&self) -> String {
-        let results = self.results.iter().map(|result| {
-            serde_json::json!({"index": result.index, "id": result.id, "name": result.name, "pinned": result.pinned})
-        }).collect::<Vec<_>>();
-        let items = |items: &[LauncherPluginResult]| {
-            items.iter().map(|item| {
-            serde_json::json!({"index": item.index, "id": item.id, "name": item.name, "pinned": item.pinned})
-        }).collect::<Vec<_>>()
-        };
-        let view = match self.view {
-            LauncherView::Favorites => "favorites",
-            LauncherView::Applications => "applications",
-            LauncherView::Places => "places",
-        };
-        serde_json::json!({"query": self.query, "status": self.status, "pinSaveFailed": self.pin_save_failed, "dashboardVisible": self.dashboard_visible, "view": view,
-            "resultPage": self.result_page, "resultPageCount": self.result_page_count,
-            "dashboardPage": self.dashboard_page, "dashboardPageCount": self.dashboard_page_count,
-            "results": results,
-            "dashboard": items(&self.dashboard), "places": items(&self.places),
-            "projects": self.projects.iter().map(|project| serde_json::json!({"id": project.id, "name": project.name})).collect::<Vec<_>>(),
-            "codexAvailable": self.codex_available, "accountName": self.account_name,
-            "logoutAvailable": self.logout_available})
-        .to_string()
-    }
-}
-
-fn launcher_plugin_result(
-    launcher: &Launcher,
-    index: usize,
-    application: &Application,
-) -> Option<LauncherPluginResult> {
-    let id = application.id();
-    (!id.is_empty() && id.len() <= 256).then(|| LauncherPluginResult {
-        index,
-        id: id.to_owned(),
-        name: application.name().chars().take(120).collect(),
-        pinned: launcher.is_pinned(id),
-    })
-}
-
 /// A package may supply synthetic data for each surface's initial validation tree.
 fn validation_surface_projection(
     package: &PluginPackage,
@@ -1215,42 +1006,16 @@ impl PluginPanelApplication {
         source: &'static str,
         stylesheet: Option<&'static str>,
         data: String,
-        runtime: Option<std::rc::Rc<std::cell::RefCell<JsxRuntime>>>,
-        runtime_surface_id: &str,
-        register_entry: bool,
     ) -> Result<Self, String> {
         let source = bundled_source(manifest, entry, source)?;
-        if register_entry {
-            runtime
-                .as_ref()
-                .ok_or("a shared entry requires a runtime")?
-                .borrow_mut()
-                .register_surface_entry(runtime_surface_id, source.as_ref())?;
+        let mut application = Self::new_with_manifest(source.as_ref(), manifest, Some(data))?;
+        if let Some(stylesheet) = stylesheet {
+            application.stylesheet = bundled_stylesheet(manifest, stylesheet)?;
         }
-        let entry_runtime = register_entry.then(|| runtime.as_ref().unwrap().clone());
-        let result = (|| {
-            let mut application = Self::new_with_manifest_for_surface_and_scope(
-                source.as_ref(),
-                manifest,
-                Some(data),
-                None,
-                runtime,
-                runtime_surface_id,
-            )?;
-            if let Some(stylesheet) = stylesheet {
-                application.stylesheet = bundled_stylesheet(manifest, stylesheet)?;
-            }
-            if let [surface] = manifest.surfaces.as_slice() {
-                application.resolved_surface(surface)?;
-            }
-            Ok(application)
-        })();
-        if result.is_err() {
-            if let Some(runtime) = entry_runtime {
-                let _ = runtime.borrow_mut().drop_surface(runtime_surface_id);
-            }
+        if let [surface] = manifest.surfaces.as_slice() {
+            application.resolved_surface(surface)?;
         }
-        result
+        Ok(application)
     }
 
     /// Bundled source selection is packaging; rendering and data refresh use
@@ -1261,56 +1026,7 @@ impl PluginPanelApplication {
         data: String,
     ) -> Result<Self, String> {
         let (source, stylesheet) = crate::bundled_plugin_assets::resolve(&manifest.id, entry)?;
-        Self::bundled_application(
-            manifest,
-            entry,
-            source,
-            Some(stylesheet),
-            data,
-            None,
-            "default",
-            false,
-        )
-    }
-
-    pub(crate) fn bundled_with_shared_runtime(
-        manifest: &PluginManifest,
-        entry: &str,
-        data: String,
-        runtime_surface_id: &str,
-        runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
-    ) -> Result<Self, String> {
-        let (source, stylesheet) = crate::bundled_plugin_assets::resolve(&manifest.id, entry)?;
-        Self::bundled_application(
-            manifest,
-            entry,
-            source,
-            Some(stylesheet),
-            data,
-            Some(runtime),
-            runtime_surface_id,
-            false,
-        )
-    }
-
-    pub(crate) fn bundled_with_shared_entry_runtime(
-        manifest: &PluginManifest,
-        entry: &str,
-        data: String,
-        runtime_surface_id: &str,
-        runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
-    ) -> Result<Self, String> {
-        let (source, stylesheet) = crate::bundled_plugin_assets::resolve(&manifest.id, entry)?;
-        Self::bundled_application(
-            manifest,
-            entry,
-            source,
-            Some(stylesheet),
-            data,
-            Some(runtime),
-            runtime_surface_id,
-            true,
-        )
+        Self::bundled_application(manifest, entry, source, Some(stylesheet), data)
     }
 
     pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
@@ -1773,14 +1489,6 @@ impl PluginPanelApplication {
             PluginSlotContract::Action => self.action_contributions().map(|_| ()),
             PluginSlotContract::Section => self.section_contributions().map(|_| ()),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn launcher_with_test_source(
-        source: &str,
-        projection: &LauncherPluginProjection,
-    ) -> Result<Self, String> {
-        Self::new_with_manifest(source, launcher_manifest(), Some(projection.to_json()))
     }
 
     #[cfg(test)]
@@ -2729,14 +2437,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         {
                             approved.push(PluginEffect::ShowLauncher);
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("dismiss-launcher")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::LauncherShow) =>
-                        {
-                            approved.push(PluginEffect::DismissLauncher);
-                        }
+
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("show-settings")
                             && effect_manifest
@@ -3759,74 +3460,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 }
                             }
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-set-query")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ApplicationsRead) =>
-                        {
-                            let Some(query) = effect.get("query").and_then(Value::as_str) else {
-                                self.last_error = Some("launcher query must be text".into());
-                                return;
-                            };
-                            if query.chars().count() > 512 {
-                                self.last_error =
-                                    Some("launcher query exceeds 512 characters".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::SetLauncherQuery(query.to_owned()));
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-set-page")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ApplicationsRead) =>
-                        {
-                            let Some(page) = effect
-                                .get("page")
-                                .and_then(Value::as_u64)
-                                .and_then(|page| usize::try_from(page).ok())
-                            else {
-                                self.last_error = Some("launcher page is invalid".into());
-                                return;
-                            };
-                            if page > 10_000 {
-                                self.last_error = Some("launcher page exceeds limit".into());
-                                return;
-                            }
-                            let dashboard = match effect.get("view").and_then(Value::as_str) {
-                                Some("dashboard") => true,
-                                Some("search") => false,
-                                _ => {
-                                    self.last_error = Some("launcher page view is invalid".into());
-                                    return;
-                                }
-                            };
-                            approved.push(PluginEffect::SetLauncherPage { dashboard, page });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-activate-result")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ApplicationsLaunch) =>
-                        {
-                            let Some(index) = effect
-                                .get("index")
-                                .and_then(Value::as_u64)
-                                .and_then(|index| usize::try_from(index).ok())
-                            else {
-                                self.last_error = Some("launcher result index is invalid".into());
-                                return;
-                            };
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error = Some("launcher result ID is missing".into());
-                                return;
-                            };
-                            approved.push(PluginEffect::ActivateLauncherResult {
-                                index,
-                                id: id.to_owned(),
-                            });
-                        }
+
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("applications.launch")
                             && effect_manifest
@@ -3843,23 +3477,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             };
                             approved.push(PluginEffect::LaunchApplication { id: id.to_owned() });
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-set-view")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ApplicationsRead) =>
-                        {
-                            let view = match effect.get("view").and_then(Value::as_str) {
-                                Some("favorites") => LauncherView::Favorites,
-                                Some("applications") => LauncherView::Applications,
-                                Some("places") => LauncherView::Places,
-                                _ => {
-                                    self.last_error = Some("launcher view is invalid".into());
-                                    return;
-                                }
-                            };
-                            approved.push(PluginEffect::SetLauncherView(view));
-                        }
+
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("applications.togglePin")
                             && effect_manifest
@@ -3884,38 +3502,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         {
                             approved.push(PluginEffect::RetryApplicationPinSave);
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-open-project")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ProjectsOpen) =>
-                        {
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error = Some("project ID is missing".into());
-                                return;
-                            };
-                            if id.is_empty() || id.len() > 256 {
-                                self.last_error = Some("project ID is invalid".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::LauncherOpenProject { id: id.to_owned() });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-see-all-projects")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ProjectsRead) =>
-                        {
-                            approved.push(PluginEffect::LauncherSeeAllProjects);
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("launcher-request-logout")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::SessionLogoutRequest) =>
-                        {
-                            approved.push(PluginEffect::LauncherRequestLogout);
-                        }
+
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("notification-invoke")
                             && effect_manifest
@@ -4574,28 +4161,10 @@ mod tests {
     }
 
     #[test]
-    fn staged_bundled_source_reads_isolated_profile() {
-        let root = tempfile::tempdir().unwrap();
-        let plugin = root.path().join(&launcher_manifest().id);
-        std::fs::create_dir_all(&plugin).unwrap();
-        std::fs::write(
-            plugin.join("main.js"),
-            "function App() { return h(Panel, {}); }",
-        )
-        .unwrap();
-        assert_eq!(
-            read_bundled_source(root.path(), launcher_manifest(), "main.js").unwrap(),
-            "function App() { return h(Panel, {}); }"
-        );
-        assert!(read_bundled_source(root.path(), launcher_manifest(), "menu.js").is_err());
-    }
-
-    #[test]
     fn bundled_plugin_packages_validate_with_manifest_sample_data() {
         for name in [
             "hello-panel",
             "taskbar",
-            "launcher",
             "notification",
             "run",
             "control-center",
@@ -4994,134 +4563,6 @@ mod tests {
             .join("../../target/nickel-ui-snapshots/keyboard-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         image.save(output).unwrap();
-    }
-
-    #[test]
-    fn bundled_launcher_visual_snapshot() {
-        let launcher = Launcher::default();
-        let projection = LauncherPluginProjection::from_launcher(&launcher);
-        let mut application = PluginPanelApplication::bundled_with_data(
-            launcher_manifest(),
-            "main.js",
-            projection.to_json(),
-        )
-        .unwrap();
-        let surface = application
-            .resolved_surface(&launcher_manifest().surfaces[0])
-            .unwrap();
-        assert_eq!((surface.width, surface.height), (620, 548));
-        let placeholder = crate::live_shell::launcher_placeholder_icon();
-        application.sync_images(
-            projection
-                .dashboard
-                .iter()
-                .map(|item| {
-                    (
-                        format!("dashboard:{}", item.index),
-                        (placeholder.0, Arc::clone(&placeholder.1)),
-                    )
-                })
-                .collect(),
-        );
-        let host = nickel_ui::UiHost::new(application, 620, 548);
-        assert_eq!(host.application().title(), "Nickel Launcher");
-        let firefox = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Firefox".into(),
-            })
-            .unwrap();
-        let files = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Files".into(),
-            })
-            .unwrap();
-        assert!(firefox.bounds.size.width >= 40.0);
-        assert!(files.bounds.origin.x > firefox.bounds.origin.x + firefox.bounds.size.width);
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(620, 548, 1.0);
-        host.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(620, 548, |x, y| {
-            let pixel = renderer.pixels()[(y * 620 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/launcher-shared.png");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image.save(output).unwrap();
-    }
-
-    #[test]
-    fn bundled_launcher_css_tracks_light_and_dark_palettes() {
-        let launcher = Launcher::default();
-        let mut app = PluginPanelApplication::bundled_with_data(
-            launcher_manifest(),
-            "main.js",
-            LauncherPluginProjection::from_launcher(&launcher).to_json(),
-        )
-        .unwrap();
-        let dark = nickel_core::theme::ThemePalette::from_appearance(
-            nickel_core::theme::Appearance::default(),
-        );
-        let light =
-            nickel_core::theme::ThemePalette::from_appearance(nickel_core::theme::Appearance {
-                mode: nickel_core::theme::ThemeMode::Light,
-                ..nickel_core::theme::Appearance::default()
-            });
-        let background = |app: &PluginPanelApplication| {
-            app.stylesheet
-                .resolve("window", None, Some("launcher-window"))
-                .background
-        };
-        let dark_background = background(&app).expect("dark window background");
-        assert_eq!(
-            app.stylesheet.resolve("text", None, None).color,
-            Some(0xff00_0000 | dark.text)
-        );
-        assert!(app.sync_theme_palette(light).unwrap());
-        let light_background = background(&app).expect("light window background");
-        assert_ne!(dark_background, light_background);
-        assert_eq!(
-            app.stylesheet.resolve("text", None, None).color,
-            Some(0xff00_0000 | light.text)
-        );
-        let host = nickel_ui::UiHost::new(app, 920, 680);
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(920, 680, 1.0);
-        host.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(920, 680, |x, y| {
-            let pixel = renderer.pixels()[(y * 920 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/launcher-light.png");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image.save(output).unwrap();
-    }
-
-    #[test]
-    fn bundled_launcher_grid_reflows_with_a_narrow_host() {
-        let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                launcher_manifest(),
-                "main.js",
-                LauncherPluginProjection::from_launcher(&Launcher::default()).to_json(),
-            )
-            .unwrap(),
-            600,
-            600,
-        );
-        for name in ["Firefox", "Files", "Nickel Terminal", "Discover"] {
-            let button = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: SemanticRole::Button,
-                    name: name.into(),
-                })
-                .unwrap();
-            assert!(
-                button.bounds.origin.x + button.bounds.size.width <= 600.0,
-                "{name} overflowed: {button:?}"
-            );
-        }
     }
 
     #[test]
@@ -8068,30 +7509,6 @@ mod tests {
     }
 
     #[test]
-    fn external_launcher_dismiss_requires_capability() {
-        let mut external_manifest = manifest().clone();
-        external_manifest.id = "org.example.launcher-dismiss".into();
-        external_manifest.capabilities.clear();
-        let mut package = PluginPackage {
-            modules: Vec::new(),
-            manifest: external_manifest,
-            images: Default::default(),
-            stylesheet: String::new(),
-            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%', onEscape: () => nickel.request({type: 'dismiss-launcher'})}); }".into(),
-        };
-        let mut denied = PluginPanelApplication::from_package(&package).unwrap();
-        denied.shortcut_outcome(Shortcut::Escape);
-        assert!(denied.take_effects().is_empty());
-        package
-            .manifest
-            .capabilities
-            .push(PluginCapability::LauncherShow);
-        let mut granted = PluginPanelApplication::from_package(&package).unwrap();
-        granted.shortcut_outcome(Shortcut::Escape);
-        assert_eq!(granted.take_effects(), vec![PluginEffect::DismissLauncher]);
-    }
-
-    #[test]
     fn external_control_center_toggle_requires_capability() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.control-toggle".into();
@@ -8257,51 +7674,6 @@ mod tests {
     }
 
     #[test]
-    fn launcher_plugin_submit_does_not_bypass_open_menu() {
-        let mut launcher = Launcher::new(vec![crate::launcher::Application::new(
-            "org.nickel.demo".into(),
-            "Demo".into(),
-            None,
-            None,
-            None,
-        )]);
-        launcher.set_query("demo");
-        let mut panel = PluginPanelApplication::bundled_with_data(
-            launcher_manifest(),
-            "main.js",
-            LauncherPluginProjection::from_launcher(&launcher).to_json(),
-        )
-        .unwrap();
-        panel.set_overlay_open(true);
-        assert_eq!(
-            panel.shortcut_outcome(Shortcut::Submit).disposition,
-            nickel_ui::EventDisposition::Unhandled
-        );
-        assert!(panel.take_effects().is_empty());
-    }
-
-    #[test]
-    fn launcher_plugin_renders_bounded_host_status_updates() {
-        let launcher = Launcher::new(Vec::new());
-        let projection = LauncherPluginProjection::from_launcher(&launcher)
-            .with_status(Some("Could not launch Demo".repeat(30)));
-        assert_eq!(projection.status.as_ref().unwrap().chars().count(), 160);
-        let mut panel = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::launcher_manifest(),
-            "main.js",
-            projection.to_json(),
-        )
-        .unwrap();
-        assert!(format!("{:?}", panel.node).contains("Could not launch Demo"));
-        assert!(
-            panel
-                .sync_serialized_data(LauncherPluginProjection::from_launcher(&launcher).to_json())
-                .unwrap()
-        );
-        assert!(!format!("{:?}", panel.node).contains("Could not launch Demo"));
-    }
-
-    #[test]
     fn application_pin_save_retry_requires_pin_capability() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.pin-retry".into();
@@ -8389,126 +7761,6 @@ mod tests {
         assert!(x(&rtl, "Row first") > x(&rtl, "Row second"));
         assert!(x(&ltr, "Grid first") < x(&ltr, "Grid second"));
         assert!(x(&rtl, "Grid first") > x(&rtl, "Grid second"));
-    }
-
-    #[test]
-    fn external_plugins_use_launcher_actions_by_capability() {
-        for (name, action, capability, expected) in [
-            (
-                "page",
-                "{type: 'launcher-set-page', view: 'dashboard', page: 1}",
-                PluginCapability::ApplicationsRead,
-                PluginEffect::SetLauncherPage {
-                    dashboard: true,
-                    page: 1,
-                },
-            ),
-            (
-                "launch",
-                "{type: 'applications.launch', id: 'org.example.app'}",
-                PluginCapability::ApplicationsLaunch,
-                PluginEffect::LaunchApplication {
-                    id: "org.example.app".into(),
-                },
-            ),
-            (
-                "view",
-                "{type: 'launcher-set-view', view: 'applications'}",
-                PluginCapability::ApplicationsRead,
-                PluginEffect::SetLauncherView(LauncherView::Applications),
-            ),
-            (
-                "pin",
-                "{type: 'applications.togglePin', id: 'org.example.app'}",
-                PluginCapability::ApplicationsPin,
-                PluginEffect::ToggleApplicationPin {
-                    id: "org.example.app".into(),
-                },
-            ),
-            (
-                "project",
-                "{type: 'launcher-open-project', id: 'project'}",
-                PluginCapability::ProjectsOpen,
-                PluginEffect::LauncherOpenProject {
-                    id: "project".into(),
-                },
-            ),
-            (
-                "projects",
-                "{type: 'launcher-see-all-projects'}",
-                PluginCapability::ProjectsRead,
-                PluginEffect::LauncherSeeAllProjects,
-            ),
-            (
-                "logout",
-                "{type: 'launcher-request-logout'}",
-                PluginCapability::SessionLogoutRequest,
-                PluginEffect::LauncherRequestLogout,
-            ),
-        ] {
-            let mut external_manifest = manifest().clone();
-            external_manifest.id = format!("org.example.launcher-action-{name}");
-            external_manifest.capabilities.clear();
-            let mut package = PluginPackage {
-                modules: Vec::new(),
-                manifest: external_manifest,
-                images: Default::default(),
-                stylesheet: String::new(),
-                source: format!(
-                    "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%', onEscape: () => nickel.request({action})}}); }}"
-                ),
-            };
-            let mut denied = PluginPanelApplication::from_package(&package).unwrap();
-            denied.shortcut_outcome(Shortcut::Escape);
-            assert!(denied.take_effects().is_empty(), "{name}");
-            package.manifest.capabilities.push(capability);
-            let mut granted = PluginPanelApplication::from_package(&package).unwrap();
-            granted.shortcut_outcome(Shortcut::Escape);
-            assert_eq!(granted.take_effects(), vec![expected], "{name}");
-        }
-    }
-
-    #[test]
-    fn failed_launcher_save_exposes_retry_in_jsx_menu() {
-        let launcher = Launcher::default();
-        let projection = LauncherPluginProjection::from_launcher(&launcher).with_status(Some(
-            "Launcher preferences could not be saved: storage unavailable".into(),
-        ));
-        let mut host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                launcher_manifest(),
-                "main.js",
-                projection.to_json(),
-            )
-            .unwrap(),
-            920,
-            680,
-        );
-        let app = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Firefox".into(),
-            })
-            .unwrap();
-        let outcome = host.perform_accessibility_action(
-            app.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::ContextMenu),
-        );
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        let retry = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::MenuItem,
-                name: "Retry saving favorites".into(),
-            })
-            .unwrap();
-        host.perform_accessibility_action(
-            retry.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-        );
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::RetryApplicationPinSave]
-        );
     }
 
     #[test]
@@ -8676,49 +7928,6 @@ mod tests {
     }
 
     #[test]
-    fn launcher_plugin_uses_window_root_and_keeps_nested_controls_reachable() {
-        let launcher = Launcher::new(Vec::new());
-        let mut panel = PluginPanelApplication::bundled_with_data(
-            launcher_manifest(),
-            "main.js",
-            LauncherPluginProjection::from_launcher(&launcher).to_json(),
-        )
-        .unwrap();
-        assert!(!panel.shortcut_outcome(Shortcut::Submit).changed);
-        assert!(panel.take_effects().is_empty());
-        assert!(matches!(
-            &panel.node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        assert!(panel.node.button_action("launcher-settings").is_some());
-        panel.update(panel.button_message("launcher-settings").unwrap());
-        assert_eq!(
-            panel.take_effects(),
-            vec![PluginEffect::ShowSettings(Some("appearance".into()))]
-        );
-        panel.update(panel.button_message("launcher-account").unwrap());
-        assert_eq!(panel.take_effects(), vec![PluginEffect::ShowControlCenter]);
-        assert!(panel.node.dialog("launcher-logout-dialog").is_some());
-        let host = nickel_ui::UiHost::new(panel, 620, 548);
-        let settings = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Settings".into(),
-            })
-            .unwrap();
-        let search = host
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-            .unwrap();
-        assert!(
-            settings.bounds.origin.y > search.bounds.origin.y + search.bounds.size.height,
-            "{settings:?} overlaps {search:?}"
-        );
-    }
-
-    #[test]
     fn notification_plugin_uses_styled_window_root() {
         let item = NotificationPluginItem {
             id: 7,
@@ -8768,27 +7977,6 @@ mod tests {
                 Some(0xf22b303c)
             );
         }
-    }
-
-    #[test]
-    fn launcher_scroll_area_shrinks_with_the_popup() {
-        let launcher = Launcher::new(Vec::new());
-        let app = PluginPanelApplication::bundled_with_data(
-            launcher_manifest(),
-            "main.js",
-            LauncherPluginProjection::from_launcher(&launcher).to_json(),
-        )
-        .unwrap();
-        let mut host = nickel_ui::UiHost::new(app, 920, 680);
-        let large = host.scroll_extent(&PluginMessage::Scroll).unwrap();
-        host.step(nickel_ui::HostBatch {
-            surface_size: Some((500, 260)),
-            ..Default::default()
-        });
-        let small = host.scroll_extent(&PluginMessage::Scroll).unwrap();
-        assert!(small.viewport.height < large.viewport.height);
-        assert!(small.viewport.height <= 220.0);
-        assert!(small.viewport.height > 0.0);
     }
 
     #[test]

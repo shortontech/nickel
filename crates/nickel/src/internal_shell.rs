@@ -349,9 +349,6 @@ impl InternalShellCoordinator {
                 if role == SurfaceRole::Launcher
                     && !self
                         .shell
-                        .plugin_surface_matches(&crate::plugin_panel::launcher_surface_key())
-                    && !self
-                        .shell
                         .plugin_surface_matches(&crate::plugin_panel::run_surface_key())
                 {
                     continue;
@@ -1931,26 +1928,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn launcher_slot_uses_its_plugin_manifest_size() {
-        let mut shell = coordinator();
-        shell.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "test".into(),
-            width: 1280,
-            height: 800,
-            scale: 1.0,
-        }]);
-        let launcher = shell.surface(SurfaceRole::Launcher, None).unwrap();
-        let declared = crate::plugin_panel::launcher_surface();
-        assert_eq!(launcher.size, (declared.width, declared.height));
-        assert_eq!(
-            shell.surfaces.get(launcher.id).unwrap().logical_size(),
-            launcher.size
-        );
-    }
-
     struct StorageHost(Arc<AtomicU8>);
 
     #[cfg(target_os = "linux")]
@@ -2660,49 +2637,6 @@ mod tests {
             coordinator.set_outputs(&[output.clone()]);
             assert_ne!(coordinator.surface(role, None).unwrap().id, initial);
         }
-    }
-
-    #[test]
-    fn shared_launcher_surface_retires_only_when_launcher_and_run_are_disabled() {
-        let mut coordinator = coordinator();
-        let output = InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        };
-        coordinator.set_outputs(&[output.clone()]);
-        let initial = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-        let launcher = crate::plugin_panel::launcher_manifest().id.clone();
-        let run = crate::plugin_panel::run_manifest().id.clone();
-        coordinator
-            .shell_mut()
-            .set_plugin_enabled(&launcher, false)
-            .unwrap();
-        coordinator.set_outputs(&[output.clone()]);
-        assert_eq!(
-            coordinator.surface(SurfaceRole::Launcher, None).unwrap().id,
-            initial
-        );
-
-        coordinator
-            .shell_mut()
-            .set_plugin_enabled(&run, false)
-            .unwrap();
-        coordinator.set_outputs(&[output.clone()]);
-        assert!(coordinator.surface(SurfaceRole::Launcher, None).is_none());
-
-        coordinator
-            .shell_mut()
-            .set_plugin_enabled(&run, true)
-            .unwrap();
-        coordinator.set_outputs(&[output]);
-        assert_ne!(
-            coordinator.surface(SurfaceRole::Launcher, None).unwrap().id,
-            initial
-        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
-use nickel_ui::{ActionKind, ControllerFamily, ReadingDirection, SemanticRole};
+use nickel_ui::{ActionKind, ControllerFamily, SemanticRole};
 use nickel_ui_testkit::{
     DEFAULT_ACCESSIBILITY, DEFAULT_LOCALE, DEFAULT_SCALE, Fixture, FixtureMetadata,
     FixtureProvider, FixtureRegistry, FixtureSource, FixtureTheme, FixtureVariant, RegistryError,
@@ -12,13 +12,12 @@ use nickel_codex_ui::ChatApplication;
 
 use crate::{
     control_view::ControlCenterApp,
-    launcher::{Launcher, LauncherInput},
     live_shell::{DesktopApplication, LockApplication},
     notification::{DesktopNotification, NotificationAction},
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
     plugin_panel::{
-        LauncherPluginProjection, NotificationPluginProjection, PluginImages,
-        PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection, TaskbarPluginTrayItem,
+        NotificationPluginProjection, PluginImages, PluginPanelApplication, TaskbarPluginItem,
+        TaskbarPluginProjection, TaskbarPluginTrayItem,
     },
     screenshot::ScreenshotApp,
 };
@@ -90,12 +89,6 @@ const PROJECT_VARIANTS: &[FixtureVariant] = &[
     variant("search", "Search", 920, 680),
     variant("empty", "Empty", 920, 680),
 ];
-const SEARCH_VARIANTS: &[FixtureVariant] = &[
-    variant("empty-query", "Empty query", 920, 680),
-    variant("results", "Results", 920, 680),
-    variant("no-results", "No results", 920, 680),
-    variant("scroll", "Scroll", 920, 680),
-];
 
 const RTL_LOCALE: nickel_ui_testkit::LocalePreset = nickel_ui_testkit::LocalePreset {
     id: "ar-SA",
@@ -112,120 +105,6 @@ const HIGH_CONTRAST: nickel_ui_testkit::AccessibilityPreset =
         reduced_motion: false,
         reduced_transparency: true,
     };
-const LAUNCHER_DASHBOARD_VARIANTS: &[FixtureVariant] = &[
-    FixtureVariant {
-        id: "populated-wide-ltr-dark-1x-pointer",
-        title: "Populated pointer",
-        viewport: ViewportPreset {
-            id: "wide",
-            width: 920,
-            height: 680,
-        },
-        theme: FixtureTheme::Dark,
-        locale: DEFAULT_LOCALE,
-        scale: DEFAULT_SCALE,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "empty-narrow-rtl-light-2x-keyboard",
-        title: "Empty keyboard",
-        viewport: ViewportPreset {
-            id: "narrow",
-            width: 540,
-            height: 680,
-        },
-        theme: FixtureTheme::Light,
-        locale: RTL_LOCALE,
-        scale: SCALE_2X,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "loading-wide-ltr-high-contrast-1x-controller-playstation",
-        title: "Loading PlayStation",
-        viewport: ViewportPreset {
-            id: "wide",
-            width: 920,
-            height: 680,
-        },
-        theme: FixtureTheme::HighContrast,
-        locale: DEFAULT_LOCALE,
-        scale: DEFAULT_SCALE,
-        controller_family: ControllerFamily::PlayStation,
-        accessibility: HIGH_CONTRAST,
-    },
-    FixtureVariant {
-        id: "partial-failure-narrow-rtl-dark-2x-a11y",
-        title: "Partial failure accessibility",
-        viewport: ViewportPreset {
-            id: "narrow",
-            width: 540,
-            height: 680,
-        },
-        theme: FixtureTheme::Dark,
-        locale: RTL_LOCALE,
-        scale: SCALE_2X,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "populated-narrow-ltr-light-1x-controller-xbox",
-        title: "Populated Xbox",
-        viewport: ViewportPreset {
-            id: "narrow",
-            width: 540,
-            height: 680,
-        },
-        theme: FixtureTheme::Light,
-        locale: DEFAULT_LOCALE,
-        scale: DEFAULT_SCALE,
-        controller_family: ControllerFamily::Xbox,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "empty-wide-rtl-high-contrast-2x-controller-switch",
-        title: "Empty Switch",
-        viewport: ViewportPreset {
-            id: "wide",
-            width: 920,
-            height: 680,
-        },
-        theme: FixtureTheme::HighContrast,
-        locale: RTL_LOCALE,
-        scale: SCALE_2X,
-        controller_family: ControllerFamily::Switch,
-        accessibility: HIGH_CONTRAST,
-    },
-    FixtureVariant {
-        id: "loading-narrow-ltr-dark-2x-pointer",
-        title: "Loading pointer",
-        viewport: ViewportPreset {
-            id: "narrow",
-            width: 540,
-            height: 680,
-        },
-        theme: FixtureTheme::Dark,
-        locale: DEFAULT_LOCALE,
-        scale: SCALE_2X,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "partial-failure-wide-rtl-light-1x-keyboard",
-        title: "Partial failure keyboard",
-        viewport: ViewportPreset {
-            id: "wide",
-            width: 920,
-            height: 680,
-        },
-        theme: FixtureTheme::Light,
-        locale: RTL_LOCALE,
-        scale: DEFAULT_SCALE,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-];
 
 macro_rules! metadata {
     ($name:ident, $id:literal, $title:literal, $description:literal, $variants:ident, $tags:expr) => {
@@ -254,14 +133,7 @@ metadata!(
     RUNTIME_VARIANTS,
     &["shell", "runtime", "lifecycle", "context-interactive"]
 );
-metadata!(
-    LAUNCHER_DASHBOARD_METADATA,
-    "shell.launcher-dashboard",
-    "Launcher dashboard",
-    "Bundled JSX launcher dashboard state, appearance, direction, scale, and modality matrix",
-    LAUNCHER_DASHBOARD_VARIANTS,
-    &["shell", "launcher", "dashboard", "matrix", "jsx"]
-);
+
 metadata!(
     DESKTOP_METADATA,
     "shell.desktop",
@@ -332,14 +204,6 @@ metadata!(
     PROJECT_VARIANTS,
     &["shell", "codex", "projects"]
 );
-metadata!(
-    SEARCH_METADATA,
-    "shell.launcher-search",
-    "Launcher search",
-    "Bundled JSX launcher search surface",
-    SEARCH_VARIANTS,
-    &["shell", "launcher", "search", "jsx"]
-);
 
 fn palette() -> ThemePalette {
     ThemePalette::from_appearance(Appearance::default())
@@ -354,8 +218,6 @@ pub struct ScreenshotFixture;
 pub struct WindowPreviewFixture;
 pub struct ControlCenterFixture;
 pub struct CodexProjectMenuFixture;
-pub struct LauncherSearchFixture;
-pub struct LauncherDashboardFixture;
 
 fn fixture_palette(theme: FixtureTheme) -> ThemePalette {
     match theme {
@@ -707,31 +569,6 @@ impl Fixture for ControlCenterFixture {
     }
 }
 
-fn launcher_search_application(kind: &str) -> PluginPanelApplication {
-    let mut launcher = Launcher::default();
-    match kind {
-        "search-results" => {
-            launcher.reduce_input(LauncherInput::Text("fi".into()));
-        }
-        "search-none" => {
-            launcher.reduce_input(LauncherInput::Text("no-such-application".into()));
-        }
-        "search-scroll" => {
-            launcher.reduce_input(LauncherInput::Text("a".into()));
-        }
-        "search-empty" => {
-            launcher.reduce_input(LauncherInput::Text(String::new()));
-        }
-        _ => {}
-    }
-    PluginPanelApplication::bundled_with_data(
-        crate::plugin_panel::launcher_manifest(),
-        "main.js",
-        LauncherPluginProjection::from_launcher(&launcher).to_json(),
-    )
-    .expect("bundled JSX launcher search fixture")
-}
-
 impl Fixture for CodexProjectMenuFixture {
     type App = ChatApplication;
     fn metadata() -> &'static FixtureMetadata {
@@ -751,100 +588,6 @@ impl Fixture for CodexProjectMenuFixture {
     }
 }
 
-impl Fixture for LauncherSearchFixture {
-    type App = PluginPanelApplication;
-    fn metadata() -> &'static FixtureMetadata {
-        &SEARCH_METADATA
-    }
-    fn create() -> Self::App {
-        launcher_search_application("search-results")
-    }
-    fn create_variant(v: &FixtureVariant) -> Self::App {
-        launcher_search_application(match v.id {
-            "results" => "search-results",
-            "no-results" => "search-none",
-            "scroll" => "search-scroll",
-            _ => "search-empty",
-        })
-    }
-    fn surface_size() -> (u32, u32) {
-        (920, 680)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(SemanticRole::Button, "Firefox"))
-    }
-}
-
-impl Fixture for LauncherDashboardFixture {
-    type App = PluginPanelApplication;
-    fn metadata() -> &'static FixtureMetadata {
-        &LAUNCHER_DASHBOARD_METADATA
-    }
-    fn create() -> Self::App {
-        Self::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[0])
-    }
-    fn create_variant(v: &FixtureVariant) -> Self::App {
-        let populated = v.id.starts_with("populated");
-        let mut launcher = if populated {
-            Launcher::default()
-        } else {
-            Launcher::new(Vec::new())
-        };
-        launcher.set_codex_available(true);
-        use crate::launcher::{
-            DashboardAccount, DashboardProject, DashboardSection, ProjectActivity,
-        };
-        if v.id.starts_with("partial-failure") {
-            launcher.set_dashboard_projects(DashboardSection::Failed {
-                message: "Project service unavailable".into(),
-                recoverable: true,
-            });
-            launcher.set_dashboard_account(DashboardSection::Ready(DashboardAccount {
-                display_name: "Local user".into(),
-                supporting_text: "Offline".into(),
-            }));
-        } else if v.id.starts_with("loading") {
-            launcher.set_dashboard_projects(DashboardSection::Loading);
-            launcher.set_dashboard_account(DashboardSection::Loading);
-        } else if v.id.starts_with("empty") {
-            launcher.set_dashboard_projects(DashboardSection::Empty);
-            launcher.set_dashboard_account(DashboardSection::Empty);
-        } else {
-            launcher.set_dashboard_projects(DashboardSection::Ready(vec![DashboardProject {
-                id: "nickel".into(),
-                name: "Nickel".into(),
-                roots: Vec::new(),
-                chat_count: Some(2),
-                activity: ProjectActivity::Active,
-                last_used_at: Some(1),
-            }]));
-            launcher.set_dashboard_account(DashboardSection::Ready(DashboardAccount {
-                display_name: "Nickel user".into(),
-                supporting_text: "Local session".into(),
-            }));
-        }
-        let mut app = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::launcher_manifest(),
-            "main.js",
-            LauncherPluginProjection::from_launcher(&launcher).to_json(),
-        )
-        .expect("bundled JSX launcher dashboard fixture");
-        app.sync_theme_palette(fixture_palette(v.theme))
-            .expect("dashboard fixture palette resolves");
-        app.sync_reading_direction(match v.locale.direction {
-            nickel_ui_testkit::FixtureDirection::LeftToRight => ReadingDirection::LeftToRight,
-            nickel_ui_testkit::FixtureDirection::RightToLeft => ReadingDirection::RightToLeft,
-        });
-        app
-    }
-    fn surface_size() -> (u32, u32) {
-        (920, 680)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(SemanticRole::Button, "Firefox"))
-    }
-}
-
 impl FixtureProvider for ShellFixtureProvider {
     fn register(&self, registry: &mut FixtureRegistry) -> Result<(), RegistryError> {
         registry.register::<RuntimeFixture>()?;
@@ -856,9 +599,7 @@ impl FixtureProvider for ShellFixtureProvider {
         registry.register::<WindowPreviewFixture>()?;
         registry.register::<ControlCenterFixture>()?;
         registry.register::<CodexProjectMenuFixture>()?;
-        registry
-            .register::<LauncherSearchFixture>()
-            .and_then(|()| registry.register::<LauncherDashboardFixture>())
+        Ok(())
     }
 }
 
@@ -881,8 +622,6 @@ mod tests {
                 "shell.codex-project-menu",
                 "shell.control-center",
                 "shell.desktop",
-                "shell.launcher-dashboard",
-                "shell.launcher-search",
                 "shell.lock",
                 "shell.notification",
                 "shell.panel",
@@ -891,100 +630,5 @@ mod tests {
                 "shell.window-preview",
             ]
         );
-    }
-
-    #[test]
-    fn launcher_search_fixture_uses_bundled_jsx_results_and_empty_state() {
-        let results = nickel_ui::UiHost::new(LauncherSearchFixture::create(), 920, 680);
-        assert_eq!(
-            nickel_ui::Application::title(results.application()),
-            "Nickel Launcher"
-        );
-        assert!(
-            results
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: SemanticRole::Button,
-                    name: "Firefox".into(),
-                })
-                .is_ok()
-        );
-
-        let empty = nickel_ui::UiHost::new(
-            LauncherSearchFixture::create_variant(&SEARCH_VARIANTS[2]),
-            920,
-            680,
-        );
-        assert!(
-            empty
-                .accessibility_nodes()
-                .iter()
-                .any(|node| node.label.as_deref() == Some("No applications found"))
-        );
-    }
-
-    #[test]
-    fn populated_jsx_dashboard_menu_pins_a_catalog_application() {
-        let mut host = nickel_ui::UiHost::new(LauncherDashboardFixture::create(), 920, 680);
-        let firefox = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Firefox".into(),
-            })
-            .expect("Firefox dashboard button");
-        let outcome = host.perform_accessibility_action(
-            firefox.id,
-            nickel_ui::SemanticAction::Invoke(ActionKind::ContextMenu),
-        );
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        let pin = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::MenuItem,
-                name: "Pin to Nickel Bar".into(),
-            })
-            .expect("JSX application menu pin action");
-        let outcome = host.perform_accessibility_action(
-            pin.id,
-            nickel_ui::SemanticAction::Invoke(ActionKind::Activate),
-        );
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![crate::plugin_panel::PluginEffect::ToggleApplicationPin {
-                id: "firefox".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn jsx_dashboard_fixture_mirrors_tabs_and_uses_light_palette() {
-        let ltr = nickel_ui::UiHost::new(
-            LauncherDashboardFixture::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[0]),
-            920,
-            680,
-        );
-        let rtl = nickel_ui::UiHost::new(
-            LauncherDashboardFixture::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[1]),
-            540,
-            680,
-        );
-        let tab_x = |host: &nickel_ui::UiHost<PluginPanelApplication>, name: &str| {
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: name.into(),
-            })
-            .unwrap()
-            .bounds
-            .origin
-            .x
-        };
-        assert!(tab_x(&ltr, "Pinned & recent") < tab_x(&ltr, "All applications"));
-        assert!(tab_x(&rtl, "Pinned & recent") > tab_x(&rtl, "All applications"));
-
-        let pixel = |host: &nickel_ui::UiHost<PluginPanelApplication>, width: u32| {
-            let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(width, 680, 1.0);
-            host.render_software(&mut renderer);
-            renderer.pixels()[(20 * width + 10) as usize]
-        };
-        assert_ne!(pixel(&ltr, 920), pixel(&rtl, 540));
     }
 }

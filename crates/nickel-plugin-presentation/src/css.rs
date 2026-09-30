@@ -1462,8 +1462,8 @@ mod tests {
     }
 
     #[test]
-    fn bundled_launcher_stylesheet_compiles() {
-        let source = include_str!("../../../assets/plugins/launcher/ui.css");
+    fn stock_shell_launcher_stylesheet_compiles() {
+        let source = include_str!("../../../assets/plugins/nickel-default/src/styles/launcher.css");
         StyleSheet::compile(source).unwrap();
     }
 }

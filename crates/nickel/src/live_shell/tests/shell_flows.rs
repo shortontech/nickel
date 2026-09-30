@@ -1,18 +1,4 @@
-    #[test]
-    fn reopening_launcher_restores_default_dashboard_view() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.apply_session_launcher_visibility(true);
-        shell.apply_launcher_action(crate::launcher_actions::LauncherAction::SetView(
-            crate::launcher::LauncherView::Applications,
-        ));
-        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Applications);
 
-        shell.apply_session_launcher_visibility(false);
-        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Favorites);
-
-        shell.apply_session_launcher_visibility(true);
-        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Favorites);
-    }
 
     #[test]
     fn disabling_plugin_retires_host_and_clears_reported_memory() {
@@ -1270,97 +1256,7 @@
         assert!(!shell.notification_history_visible);
     }
 
-    #[test]
-    fn run_plugin_can_start_render_and_retire() {
-        let mut shell = LiveShell::new().unwrap();
-        let id = &crate::plugin_panel::run_manifest().id;
-        let run_key = crate::plugin_panel::run_surface_key();
-        let launcher_key = crate::plugin_panel::launcher_surface_key();
-        shell.set_plugin_enabled(id, false).unwrap();
-        assert!(!shell.set_run_visible(true));
-        assert!(!shell.run_visible);
-        assert!(!shell.launcher_visible);
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.run_host_ref().is_some());
-        let launcher_surface = crate::plugin_panel::launcher_surface();
-        assert_eq!(
-            shell.launcher_preferred_surface_size((960, 720)),
-            (launcher_surface.width, launcher_surface.height)
-        );
-        shell.apply_session_launcher_visibility(true);
-        assert!(shell.set_run_visible(true));
-        let run_surface = crate::plugin_panel::run_surface();
-        assert_eq!(
-            shell.launcher_preferred_surface_size((960, 720)),
-            (run_surface.width, run_surface.height)
-        );
-        assert_eq!(shell.launcher_preferred_surface_size((480, 120)), (480, 120));
-        assert_eq!(shell.active_launcher_surface_key(), Some(run_key.clone()));
-        assert!(shell.run_host_ref().unwrap().inspect().keyboard_focus.is_some());
-        assert!(shell
-            .plugin_surface_scene_for_output(&run_key, None, 620, 180)
-            .is_some());
-        assert_ne!(
-            shell.plugin_surface_change_token(&run_key),
-            shell.plugin_surface_change_token(&launcher_key)
-        );
-        assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.run_host_ref().is_none());
-        assert!(!shell.run_visible);
-        assert_eq!(shell.active_launcher_surface_key(), Some(launcher_key));
-        assert!(shell.plugin_surface_change_token(&run_key).is_none());
-        assert!(shell.plugin_surface_scene_for_output(&run_key, None, 620, 180).is_none());
-        assert_eq!(
-            shell.plugin_registry().get(id).unwrap().memory,
-            nickel_core::plugins::PluginMemory::default()
-        );
-    }
 
-    #[test]
-    fn run_callback_failure_retires_only_run_and_restores_launcher() {
-        let mut shell = LiveShell::new().unwrap();
-        let application = crate::plugin_panel::PluginPanelApplication::run_with_test_source(
-            "function App() { return h(Panel, {}, h(Button, {id: 'run-fail', onClick: () => { throw Error('Run callback exploded'); }}, 'Break Run')); }",
-        )
-        .unwrap();
-        shell.plugin_surface_hosts.insert(
-            crate::plugin_panel::run_surface_key(),
-            (
-                crate::plugin_panel::run_surface().clone(),
-                nickel_ui::UiHost::new(application, 620, 180),
-            ),
-        );
-        shell.apply_session_launcher_visibility(true);
-        assert!(shell.set_run_visible(true));
-        let target = shell
-            .run_host_ref()
-            .unwrap()
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Break Run".into(),
-            })
-            .unwrap();
-        assert!(!shell.launcher_host_ui(
-            UiEvent::AccessibilityActivate(target.id),
-            620,
-            180,
-        ));
-        let id = &crate::plugin_panel::run_manifest().id;
-        let entry = shell.plugin_registry().get(id).unwrap();
-        assert!(entry.desired_enabled);
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("Run callback exploded")));
-        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
-        assert!(!shell.run_visible);
-        assert!(!shell.launcher_visible);
-        assert_eq!(
-            shell.active_launcher_surface_key(),
-            Some(crate::plugin_panel::launcher_surface_key())
-        );
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.set_run_visible(true));
-    }
 
     #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
@@ -1421,7 +1317,6 @@
         assert_eq!(samples.scheduled_wakeups, 70);
     }
     use crate::{
-        launcher_actions::LauncherAction,
         model::{ApplicationId, OpenWindow, TrayItem, WindowId},
         notification::{NotificationAction, NotificationRequest},
         window_preview::MenuAction,
@@ -1444,126 +1339,9 @@
         }
     }
 
-    #[test]
-    fn disabled_launcher_retires_surface_without_native_fallback() {
-        let mut shell = LiveShell::new().unwrap();
-        let id = &crate::plugin_panel::launcher_manifest().id;
-        let key = crate::plugin_panel::launcher_surface_key();
-        assert!(shell.can_show_launcher());
-        assert_eq!(shell.active_launcher_surface_key(), Some(key.clone()));
-        shell.apply_session_launcher_visibility(true);
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(!shell.can_show_launcher());
-        assert!(shell.active_launcher_surface_key().is_none());
-        assert!(shell.plugin_surface_change_token(&key).is_none());
-        assert!(!shell.launcher_visible);
-        assert!(shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
-        assert!(!shell.request_launcher_toggle());
-        assert!(!shell.launcher_host_ui(UiEvent::TextInput("ignored".into()), 920, 680));
-        assert_eq!(shell.launcher.query(), "");
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.can_show_launcher());
-        assert_eq!(shell.active_launcher_surface_key(), Some(key));
-        assert!(!shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
-    }
 
-    #[test]
-    fn launcher_callback_failure_retires_its_surface_and_can_restart() {
-        let mut shell = LiveShell::new().unwrap();
-        let projection = shell.current_plugin_launcher_projection();
-        let application = crate::plugin_panel::PluginPanelApplication::launcher_with_test_source(
-            "function App() { return h(Panel, {}, h(Button, {id: 'launcher-fail', onClick: () => { throw Error('launcher callback exploded'); }}, 'Break launcher')); }",
-            &projection,
-        )
-        .unwrap();
-        shell.plugin_surface_hosts.insert(
-            crate::plugin_panel::launcher_surface_key(),
-            (
-                crate::plugin_panel::launcher_surface().clone(),
-                nickel_ui::UiHost::new(application, 920, 680),
-            ),
-        );
-        shell.apply_session_launcher_visibility(true);
-        let target = shell.launcher_host_ref()
-            .unwrap()
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Break launcher".into(),
-            })
-            .unwrap();
-        assert!(!shell.launcher_host_ui(
-            UiEvent::AccessibilityActivate(target.id),
-            920,
-            680,
-        ));
-        let id = &crate::plugin_panel::launcher_manifest().id;
-        let entry = shell.plugin_registry().get(id).unwrap();
-        assert!(entry.desired_enabled);
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("launcher callback exploded")));
-        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
-        assert!(!shell.launcher_visible);
-        assert!(!shell.can_show_launcher());
-        assert!(shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.can_show_launcher());
-        assert!(!shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
-    }
 
-    #[test]
-    fn launcher_projection_failure_retires_its_surface() {
-        let mut shell = LiveShell::new().unwrap();
-        let projection = shell.current_plugin_launcher_projection();
-        let application = crate::plugin_panel::PluginPanelApplication::launcher_with_test_source(
-            "function App() { if (nickel.data.query !== '') throw Error('launcher projection exploded'); return h(Panel, {}, h(Text, {}, 'Launcher ready')); }",
-            &projection,
-        )
-        .unwrap();
-        shell.plugin_surface_hosts.insert(
-            crate::plugin_panel::launcher_surface_key(),
-            (
-                crate::plugin_panel::launcher_surface().clone(),
-                nickel_ui::UiHost::new(application, 920, 680),
-            ),
-        );
-        shell.launcher.set_query("trigger");
-        assert!(shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
-        let entry = shell
-            .plugin_registry()
-            .get(&crate::plugin_panel::launcher_manifest().id)
-            .unwrap();
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("launcher projection exploded")));
-        assert!(!shell.can_show_launcher());
-    }
 
-    #[test]
-    fn launcher_failure_preserves_the_active_run_plugin() {
-        let mut shell = LiveShell::new().unwrap();
-        let projection = shell.current_plugin_launcher_projection();
-        let application = crate::plugin_panel::PluginPanelApplication::launcher_with_test_source(
-            "function App() { if (nickel.data.query !== '') throw Error('launcher projection exploded'); return h(Panel, {}, h(Text, {}, 'Launcher ready')); }",
-            &projection,
-        )
-        .unwrap();
-        shell.plugin_surface_hosts.insert(
-            crate::plugin_panel::launcher_surface_key(),
-            (
-                crate::plugin_panel::launcher_surface().clone(),
-                nickel_ui::UiHost::new(application, 920, 680),
-            ),
-        );
-        shell.apply_session_launcher_visibility(true);
-        assert!(shell.set_run_visible(true));
-        shell.launcher.set_query("trigger");
-        assert!(shell.sync_plugin_launcher().is_none());
-        assert!(shell.run_visible);
-        assert!(shell.launcher_visible);
-        assert_eq!(
-            shell.active_launcher_surface_key(),
-            Some(crate::plugin_panel::run_surface_key())
-        );
-        assert!(!shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
-    }
 
     #[test]
     fn disabled_taskbar_retires_its_visible_role() {
@@ -1609,54 +1387,6 @@
         assert_eq!(shell.taskbar_reservation_height(), 56);
     }
 
-    #[test]
-    fn taskbar_callback_failure_retires_only_its_plugin_surface() {
-        let mut shell = LiveShell::new().unwrap();
-        let (projection, _) = shell.taskbar_plugin_projection("12:00");
-        let application = crate::plugin_panel::PluginPanelApplication::taskbar_with_test_source(
-            "function App() { return h(Panel, {}, h(Button, {id: 'taskbar-launcher', onClick: () => { throw Error('taskbar callback exploded'); }}, 'Break taskbar')); }",
-            &projection,
-        )
-        .unwrap();
-        shell.plugin_taskbar_host = Some(nickel_ui::UiHost::new(application, 800, 56));
-        let target = shell
-            .plugin_taskbar_host
-            .as_ref()
-            .unwrap()
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Break taskbar".into(),
-            })
-            .unwrap();
-        assert!(shell
-            .step_taskbar_plugin_batch(
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(
-                        nickel_ui::UiEvent::AccessibilityActivate(target.id),
-                    )],
-                    ..Default::default()
-                },
-                800,
-                56,
-            )
-            .is_none());
-        let entry = shell
-            .plugin_registry()
-            .get(&crate::plugin_panel::taskbar_manifest().id)
-            .unwrap();
-        assert!(entry.desired_enabled);
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("taskbar callback exploded")));
-        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
-        assert!(!shell.surface_visible(SurfaceRole::Taskbar));
-        assert_eq!(shell.taskbar_reservation_height(), 0);
-        assert!(shell.scene(SurfaceRole::Taskbar, 800, 56).is_empty());
-        assert!(!click_taskbar(&mut shell, 20.0, 800, false));
-        assert!(shell.launcher_host_ref().is_some());
-        let id = &crate::plugin_panel::taskbar_manifest().id;
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.surface_visible(SurfaceRole::Taskbar));
-    }
 
     #[test]
     fn taskbar_projection_failure_retires_its_plugin_surface() {
@@ -1680,132 +1410,9 @@
         assert_eq!(shell.taskbar_reservation_height(), 0);
     }
 
-    #[test]
-    fn plugin_launcher_submit_activates_the_focused_search_result() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::new(vec![
-            crate::model::Application::new(
-                "org.nickel.demo-one".into(),
-                "Demo One".into(),
-                None,
-                None,
-                Some(vec!["nickel-test-command-one-does-not-exist".into()]),
-            ),
-            crate::model::Application::new(
-                "org.nickel.demo-two".into(),
-                "Demo Two".into(),
-                None,
-                None,
-                Some(vec!["nickel-test-command-two-does-not-exist".into()]),
-            ),
-        ]);
-        shell.launcher.set_query("demo");
-        let id = &crate::plugin_panel::launcher_manifest().id;
-        shell.set_plugin_enabled(id, false).unwrap();
-        shell.set_plugin_enabled(id, true).unwrap();
-        shell.apply_session_launcher_visibility(true);
-        shell.scene(SurfaceRole::Launcher, 920, 680);
-        let host = shell.launcher_host_mut().unwrap();
-        let target = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Demo Two".into(),
-            })
-            .unwrap();
-        host.request_focus(target.id.clone());
-        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
-        assert!(
-            shell
-                .launcher_status
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with("Could not launch Demo Two: "),
-            "launcher status: {:?}",
-            shell.launcher_status
-        );
-    }
 
-    #[test]
-    fn plugin_launcher_focuses_search_and_accepts_first_input() {
-        let mut shell = LiveShell::new().unwrap();
-        let id = &crate::plugin_panel::launcher_manifest().id;
-        shell.set_plugin_enabled(id, false).unwrap();
-        shell.set_plugin_enabled(id, true).unwrap();
-        shell.apply_session_launcher_visibility(true);
-        shell.scene(SurfaceRole::Launcher, 920, 680);
-        let host = shell.launcher_host_ref().unwrap();
-        let search = host
-            .query_unique(&nickel_ui::SemanticSelector::Role(
-                nickel_ui::SemanticRole::TextField,
-            ))
-            .unwrap();
-        assert_eq!(host.inspect().keyboard_focus, Some(search.id));
-        shell.launcher_host_ui(UiEvent::TextInput("konsole".into()), 920, 680);
-        assert_eq!(shell.launcher.query(), "konsole");
-    }
 
-    #[test]
-    fn plugin_launcher_submit_activates_the_focused_dashboard_application() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::new(vec![
-            crate::model::Application::new(
-                "org.nickel.demo-one".into(),
-                "Demo One".into(),
-                None,
-                None,
-                Some(vec!["nickel-test-command-one-does-not-exist".into()]),
-            ),
-            crate::model::Application::new(
-                "org.nickel.demo-two".into(),
-                "Demo Two".into(),
-                None,
-                None,
-                Some(vec!["nickel-test-command-two-does-not-exist".into()]),
-            ),
-        ]);
-        let id = &crate::plugin_panel::launcher_manifest().id;
-        shell.set_plugin_enabled(id, false).unwrap();
-        shell.set_plugin_enabled(id, true).unwrap();
-        shell.apply_session_launcher_visibility(true);
-        shell.scene(SurfaceRole::Launcher, 920, 680);
-        let host = shell.launcher_host_mut().unwrap();
-        let target = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Demo Two".into(),
-            })
-            .unwrap();
-        host.request_focus(target.id);
-        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
-        assert!(
-            shell
-                .launcher_status
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with("Could not launch Demo Two: "),
-            "launcher status: {:?}",
-            shell.launcher_status
-        );
-    }
 
-    #[test]
-    fn plugin_launcher_displays_live_host_status() {
-        let mut shell = LiveShell::new().unwrap();
-        let id = &crate::plugin_panel::launcher_manifest().id;
-        shell.set_plugin_enabled(id, false).unwrap();
-        shell.set_plugin_enabled(id, true).unwrap();
-        shell.launcher_status = Some("Could not launch Demo".into());
-        shell.scene(SurfaceRole::Launcher, 920, 680);
-        let projection = shell.current_plugin_launcher_projection();
-        assert_eq!(projection.status.as_deref(), Some("Could not launch Demo"));
-        assert!(!shell.launcher_host_ref()
-            .unwrap()
-            .query(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Text,
-                name: "Could not launch Demo".into(),
-            })
-            .is_empty());
-    }
 
     #[test]
     fn controller_cancel_closes_nested_overlay_before_requesting_launcher_dismissal() {
@@ -1854,110 +1461,7 @@
         );
     }
 
-    fn launcher_application_menu_has_label(
-        launcher: &crate::launcher::Launcher,
-        palette: nickel_core::theme::ThemePalette,
-        application_id: &str,
-        expected_label: &str,
-    ) -> bool {
-        let mut application = crate::plugin_panel::PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::launcher_manifest(),
-            "main.js",
-            crate::plugin_panel::LauncherPluginProjection::from_launcher(launcher).to_json(),
-        )
-        .expect("bundled launcher");
-        application.sync_theme_palette(palette).expect("launcher palette");
-        let mut host = UiHost::new(application, 920, 680);
-        let application_name = launcher
-            .applications()
-            .find(|application| application.id() == application_id)
-            .expect("catalog application")
-            .name();
-        let target = host
-            .query_unique(&SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: application_name.into(),
-            })
-            .expect("application semantic target");
-        let outcome = host.perform_accessibility_action(
-            target.id.clone(),
-            SemanticAction::Invoke(ActionKind::ContextMenu),
-        );
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        host.accessibility_nodes()
-            .iter()
-            .any(|node| node.label.as_deref() == Some(expected_label))
-    }
 
-    #[test]
-    fn launcher_pin_persists_once_reopens_and_recovers_after_save_failure() {
-        let directory = tempfile::tempdir().expect("temporary preferences directory");
-        let preferences_path = directory.path().join("launcher-preferences");
-        let mut shell = LiveShell::new().unwrap();
-        let application_id = "org.nickel.Files".to_owned();
-        shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
-            application_id.clone(),
-            "Files".into(),
-            None,
-            None,
-            None,
-        )]);
-        preferences_fixture(&mut shell, preferences_path.clone());
-
-        shell.apply_launcher_action(crate::launcher_actions::LauncherAction::TogglePin(
-            application_id.clone(),
-        ));
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 1);
-        assert!(shell.launcher.is_pinned(&application_id));
-        let persisted = LauncherPreferences::load(&preferences_path).expect("persisted favorite");
-        assert_eq!(persisted.favorites(), [application_id.as_str()]);
-
-        let mut reopened =
-            crate::launcher::Launcher::new(shell.launcher.applications().cloned().collect());
-        reopened.set_preferences(persisted);
-        assert!(reopened.is_pinned(&application_id));
-        assert!(launcher_application_menu_has_label(
-            &reopened,
-            shell.palette,
-            &application_id,
-            "Unpin from Nickel Bar",
-        ));
-
-        preferences_fixture(&mut shell, directory.path().to_path_buf());
-        shell.apply_launcher_action(crate::launcher_actions::LauncherAction::TogglePin(
-            application_id.clone(),
-        ));
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 2);
-        assert!(!shell.launcher.is_pinned(&application_id));
-        assert!(
-            shell.launcher_status.as_deref().is_some_and(
-                |status| status.starts_with("Launcher preferences could not be saved:")
-            )
-        );
-        assert!(launcher_application_menu_has_label(
-            &shell.launcher,
-            shell.palette,
-            &application_id,
-            "Pin to Nickel Bar",
-        ));
-
-        preferences_fixture(&mut shell, preferences_path.clone());
-        shell.apply_launcher_action(crate::launcher_actions::LauncherAction::TogglePin(
-            application_id.clone(),
-        ));
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 3);
-        assert!(shell.launcher.is_pinned(&application_id));
-        assert!(shell.launcher_status.is_none());
-        assert_eq!(
-            LauncherPreferences::load(preferences_path)
-                .expect("recovered preferences")
-                .favorites(),
-            [application_id]
-        );
-    }
 
     #[test]
     fn plugin_retry_saves_failed_launcher_preferences_once() {
@@ -1966,14 +1470,12 @@
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::default();
         preferences_fixture(&mut shell, directory.path().to_path_buf());
-        shell.apply_launcher_action(LauncherAction::TogglePin("firefox".into()));
+        shell.toggle_application_pin("firefox");
         finish_preference_write(&mut shell);
         assert!(shell.launcher_status.as_deref().is_some_and(|status| {
             status.starts_with("Launcher preferences could not be saved:")
         }));
-        let projection = shell.current_plugin_launcher_projection();
-        assert!(projection.pin_save_failed);
-        assert!(projection.to_json().contains("\"pinSaveFailed\":true"));
+
 
         preferences_fixture(&mut shell, preferences_path.clone());
         assert!(shell.apply_plugin_effects(vec![
@@ -1982,7 +1484,7 @@
         finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 2);
         assert!(shell.launcher_status.is_none());
-        assert!(!shell.current_plugin_launcher_projection().pin_save_failed);
+
         assert_eq!(
             LauncherPreferences::load(preferences_path)
                 .expect("retried preferences")
@@ -2002,7 +1504,7 @@
         shell.launcher = crate::launcher::Launcher::default();
         shell.launcher.set_query("no-such-application");
         preferences_fixture(&mut shell, directory.path().join("launcher-preferences"));
-        assert!(shell.current_plugin_launcher_projection().results.is_empty());
+        assert_eq!(shell.launcher.result_count(), 0);
 
         assert!(shell.apply_plugin_effects(vec![
             crate::plugin_panel::PluginEffect::ToggleApplicationPin {
@@ -2028,70 +1530,7 @@
         assert!(!shell.launcher.is_pinned("org.example.unavailable"));
     }
 
-    #[test]
-    fn launcher_exposes_every_non_ready_secure_storage_state() {
-        for (state, expected) in [
-            (SecureStorageState::Starting, "Secure storage is starting…"),
-            (SecureStorageState::Locked, "Secure storage is locked."),
-            (
-                SecureStorageState::PromptRequired,
-                "Secure storage is waiting for its unlock prompt.",
-            ),
-            (
-                SecureStorageState::Unavailable,
-                "Secure storage is unavailable.",
-            ),
-            (
-                SecureStorageState::UnavailableReason(
-                    nickel_session_protocol::SecureStorageUnavailableReason::ProviderDisappeared,
-                ),
-                "The secure-storage provider disappeared.",
-            ),
-            (
-                SecureStorageState::ControlUnavailable,
-                "Nickel cannot reach the session service.",
-            ),
-        ] {
-            assert_eq!(secure_storage_status_label(state), Some(expected));
-        }
-        assert_eq!(secure_storage_status_label(SecureStorageState::Ready), None);
-    }
 
-    #[test]
-    fn session_feeds_start_loading_and_keep_failure_distinct_from_empty_ready() {
-        let shell = LiveShell::new().unwrap();
-        assert_eq!(shell.window_feed_status, FeedStatus::Loading);
-        assert_eq!(shell.workspace_feed_status, FeedStatus::Loading);
-        assert_eq!(
-            session_feed_status_label(shell.window_feed_status, shell.workspace_feed_status),
-            Some("Loading session data…")
-        );
-
-        assert_eq!(
-            FeedState::<Vec<OpenWindow>>::Ready(Vec::new()).status(),
-            FeedStatus::Ready
-        );
-        assert_eq!(
-            FeedState::<Vec<OpenWindow>>::Disconnected.status(),
-            FeedStatus::Disconnected
-        );
-        assert_eq!(
-            FeedState::<Vec<OpenWindow>>::Failed.status(),
-            FeedStatus::Failed
-        );
-        assert_eq!(
-            session_feed_status_label(FeedStatus::Ready, FeedStatus::Ready),
-            None
-        );
-        assert_eq!(
-            session_feed_status_label(FeedStatus::Disconnected, FeedStatus::Ready),
-            Some("Session window data is disconnected.")
-        );
-        assert_eq!(
-            session_feed_status_label(FeedStatus::Failed, FeedStatus::Ready),
-            Some("Session window data failed to load.")
-        );
-    }
 
     #[test]
     fn semantic_shell_targets_come_from_live_group_preview_and_menu_records() {

@@ -174,15 +174,7 @@ impl LiveShell {
                     Err("Run plugin is unavailable".into())
                 }
             }
-            SurfaceRole::Launcher => {
-                if let Some(host) = self.launcher_host_ref() {
-                    plugin_projection(host, |leaf, action| {
-                        leaf == "launcher-query" && action == nickel_ui::ActionKind::SetValue
-                    })
-                } else {
-                    Err("Launcher plugin is unavailable".into())
-                }
-            }
+            SurfaceRole::Launcher => Err("native Run is unavailable".into()),
             SurfaceRole::ControlCenter => {
                 if self.control_plugin_active() {
                     Ok(observe_only(plugin_projection(
@@ -402,37 +394,7 @@ impl LiveShell {
                 }
                 outcome?
             }
-            SurfaceRole::Launcher if self.launcher_host_ref().is_some() => {
-                let plugin = self.launcher_host_mut().expect("launcher plugin exists");
-                let outcome = mutate(plugin, generation, node, action, clipboard_limit);
-                let requested = plugin.application_mut().take_effects();
-                if let Some(error) = plugin.application_mut().take_runtime_failure() {
-                    self.fail_launcher_plugin_runtime(error);
-                    return Err("launcher plugin failed".into());
-                }
-                let outcome = outcome?;
-                let [crate::plugin_panel::PluginEffect::SetLauncherQuery(query)] =
-                    requested.as_slice()
-                else {
-                    return Err("launcher plugin requested an unguarded effect".into());
-                };
-                self.apply_launcher_action(LauncherAction::SetQuery(query.clone()));
-                if self
-                    .sync_plugin_launcher()
-                    .ok_or("launcher plugin failed")?
-                    && let Some(plugin) = self.launcher_host_mut()
-                {
-                    plugin.step(HostBatch {
-                        application_changed: true,
-                        ..HostBatch::default()
-                    });
-                    if let Some(error) = plugin.application_mut().take_runtime_failure() {
-                        self.fail_launcher_plugin_runtime(error);
-                        return Err("launcher plugin failed".into());
-                    }
-                }
-                outcome
-            }
+
             SurfaceRole::Launcher => return Err("Launcher plugin is unavailable".into()),
             SurfaceRole::ControlCenter => {
                 if self.control_plugin_active() {
@@ -554,53 +516,6 @@ impl LiveShell {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bundled_taskbar_remote_controls_use_the_jsx_tree_and_guarded_effects() {
-        let mut shell = LiveShell::new().expect("live shell");
-        let _ = shell.scene(SurfaceRole::Taskbar, 1280, 56);
-        let key = crate::plugin_panel::taskbar_surface_key();
-        let (generation, nodes) = shell
-            .bounded_plugin_panel_semantics(&key, None)
-            .expect("active taskbar semantics");
-        let launcher = nodes
-            .iter()
-            .position(|node| node.id.as_str().ends_with("/taskbar-launcher"))
-            .expect("JSX launcher button");
-        assert_eq!(
-            nodes[launcher].actions,
-            vec![nickel_ui::ActionKind::Activate]
-        );
-        assert!(nodes.iter().any(|node| {
-            node.id.as_str().ends_with("/taskbar-control")
-                && node.actions == [nickel_ui::ActionKind::Activate]
-        }));
-        assert!(nodes.iter().all(|node| {
-            !node.id.as_str().contains("/taskbar-item-") || node.actions.is_empty()
-        }));
-        assert!(
-            shell
-                .bounded_plugin_panel_semantics(&crate::plugin_panel::launcher_surface_key(), None)
-                .is_err()
-        );
-        let outcome = shell
-            .perform_bounded_plugin_panel_action(
-                &key,
-                None,
-                generation,
-                launcher,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-                2048,
-            )
-            .expect("guarded plugin action");
-        assert!(matches!(
-            outcome.effects.as_slice(),
-            [RemoteShellEffect::Panel(TaskbarAction::Launcher, None)]
-        ));
-        let id = &crate::plugin_panel::taskbar_manifest().id;
-        shell.set_plugin_enabled(id, false).unwrap();
-        assert!(shell.bounded_plugin_panel_semantics(&key, None).is_err());
-    }
 
     #[test]
     fn bundled_run_remote_text_mutation_uses_the_jsx_form() {

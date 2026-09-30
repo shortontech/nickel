@@ -120,7 +120,6 @@ use crate::{
     control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
     file_window_host::{FileWindowHost, default_file_window_host},
     launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherView},
-    launcher_actions::{LauncherAction, LauncherShellEffect, reduce_launcher_action},
     launcher_icon_cache::LauncherIconCache,
     model::{Application, OpenWindow, TrayItem, WindowGroup},
     notification::DesktopNotification,
@@ -775,8 +774,7 @@ pub struct LiveShell {
     display_preview: Option<DisplayPreview>,
     launcher_icons: LauncherIconCache,
     launcher_icon_revision: u64,
-    launcher_plugin_result_page: usize,
-    launcher_plugin_dashboard_page: usize,
+
     launcher_status: Option<String>,
     #[cfg(target_os = "windows")]
     launcher_catalog_generation: u64,
@@ -1079,33 +1077,6 @@ pub(crate) fn launcher_placeholder_icon() -> (u16, Arc<image::RgbaImage>) {
             )
         })),
     )
-}
-
-fn launcher_plugin_images(
-    launcher: &Launcher,
-    icons: &mut LauncherIconCache,
-    projection: &crate::plugin_panel::LauncherPluginProjection,
-) -> crate::plugin_panel::PluginImages {
-    let mut images = crate::plugin_panel::PluginImages::new();
-    for (slot, items) in [
-        ("search", projection.results.as_slice()),
-        ("dashboard", projection.dashboard.as_slice()),
-        ("place", projection.places.as_slice()),
-    ] {
-        for item in items {
-            let application = if slot == "place" {
-                launcher.place_applications().nth(item.index)
-            } else {
-                launcher.result_at(item.index)
-            };
-            let icon = application
-                .filter(|application| application.id() == item.id)
-                .and_then(|application| icons.resolve(application))
-                .unwrap_or_else(launcher_placeholder_icon);
-            images.insert(format!("{slot}:{}", item.index), icon);
-        }
-    }
-    images
 }
 
 fn step_plugin_host(
@@ -1809,8 +1780,7 @@ impl LiveShell {
             display_preview: None,
             launcher_icons,
             launcher_icon_revision,
-            launcher_plugin_result_page: 0,
-            launcher_plugin_dashboard_page: 0,
+
             launcher_status: application_status,
             #[cfg(target_os = "windows")]
             launcher_catalog_generation: 1,
@@ -2532,7 +2502,7 @@ impl LiveShell {
                 .run_host_ref()
                 .is_none_or(|host| host.remote_access_protected()),
             SurfaceRole::Launcher => self
-                .launcher_host_ref()
+                .run_host_ref()
                 .is_none_or(|host| host.remote_access_protected()),
             SurfaceRole::ControlCenter => self
                 .control_plugin_active()
@@ -2606,7 +2576,7 @@ impl LiveShell {
             SurfaceRole::Launcher if self.run_visible => {
                 self.run_host_ref().map(|host| host.layout_snapshot())
             }
-            SurfaceRole::Launcher => self.launcher_host_ref().map(|host| host.layout_snapshot()),
+            SurfaceRole::Launcher => self.run_host_ref().map(|host| host.layout_snapshot()),
             SurfaceRole::ControlCenter => self
                 .control_plugin_host_ref()
                 .map(|host| host.layout_snapshot())
@@ -2649,7 +2619,7 @@ impl LiveShell {
                 .plugin_panel_scene(&crate::plugin_panel::run_surface_key(), width, height)
                 .unwrap_or_default(),
             SurfaceRole::Launcher => self
-                .plugin_panel_scene(&crate::plugin_panel::launcher_surface_key(), width, height)
+                .plugin_panel_scene(&crate::plugin_panel::run_surface_key(), width, height)
                 .unwrap_or_default(),
             SurfaceRole::ControlCenter => {
                 if self.control_plugin_active() {
@@ -5409,23 +5379,6 @@ impl LiveShell {
         true
     }
 
-    fn retire_launcher_plugin_state(&mut self) {
-        self.retire_extra_panel_plugin_state(&crate::plugin_panel::launcher_manifest().id);
-        self.launcher_plugin_result_page = 0;
-        self.launcher_plugin_dashboard_page = 0;
-        if self.launcher_visible && !self.run_visible {
-            self.set_launcher_visible(false);
-        }
-    }
-
-    fn fail_launcher_plugin_runtime(&mut self, error: String) {
-        self.fail_bundled_plugin_runtime(
-            &crate::plugin_panel::launcher_manifest().id,
-            error,
-            Self::retire_launcher_plugin_state,
-        );
-    }
-
     fn retire_run_plugin_state(&mut self) {
         self.retire_extra_panel_plugin_state(&crate::plugin_panel::run_manifest().id);
         if self.run_visible {
@@ -5941,7 +5894,7 @@ impl LiveShell {
 
     pub(crate) fn launcher_preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
         let size = self.launcher_surface_size().unwrap_or_else(|| {
-            let surface = crate::plugin_panel::launcher_surface();
+            let surface = crate::plugin_panel::run_surface();
             (surface.width, surface.height)
         });
         (size.0.min(maximum.0), size.1.min(maximum.1))
@@ -6031,9 +5984,7 @@ impl LiveShell {
             SurfaceRole::Launcher if self.run_visible => {
                 self.run_host_ref().map(|host| host_token(host.inspect()))
             }
-            SurfaceRole::Launcher => self
-                .launcher_host_ref()
-                .map(|host| host_token(host.inspect())),
+            SurfaceRole::Launcher => self.run_host_ref().map(|host| host_token(host.inspect())),
             SurfaceRole::ControlCenter => self
                 .control_plugin_active()
                 .then(|| host_token(self.control_plugin_host_ref().unwrap().inspect()))
@@ -6076,6 +6027,8 @@ impl LiveShell {
         }
     }
 
+    /// The historical launcher role hosts only native Run; shell launcher input
+    /// follows the ordinary package surface path.
     pub fn launcher_host_input(
         &mut self,
         input: nickel_input::InputEvent,
@@ -6083,19 +6036,13 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> nickel_ui::HostEventOutcome {
-        if !self.run_visible && self.launcher_host_ref().is_none() {
+        if !self.run_visible {
             return nickel_ui::HostEventOutcome::default();
         }
-        let recipient = if self.run_visible {
-            let Some(host) = self.run_host_ref() else {
-                return nickel_ui::HostEventOutcome::default();
-            };
-            host.inspect()
-        } else if let Some(host) = self.launcher_host_ref() {
-            host.inspect()
-        } else {
+        let Some(host) = self.run_host_ref() else {
             return nickel_ui::HostEventOutcome::default();
         };
+        let recipient = host.inspect();
         let (event, authority) =
             internal_normalized_ingress(input, clipboard_text, "launcher", recipient, None);
         self.launcher_host_event_with_authority(event, width, height, None, Some(authority))
@@ -6119,7 +6066,7 @@ impl LiveShell {
         limit: Option<usize>,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
-        if !self.run_visible && self.launcher_host_ref().is_none() {
+        if !self.run_visible {
             return nickel_ui::HostEventOutcome::default();
         }
         if self.run_visible {
@@ -6142,55 +6089,7 @@ impl LiveShell {
             }
             return nickel_ui::HostEventOutcome::default();
         }
-        if self.launcher_host_ref().is_some() {
-            let Some(application_changed) = self.sync_plugin_launcher() else {
-                return nickel_ui::HostEventOutcome::default();
-            };
-            let host = self
-                .launcher_host_mut()
-                .expect("launcher plugin host exists");
-            let overlay_open = host.inspect().open_overlay.is_some();
-            host.application_mut().set_overlay_open(overlay_open);
-            let event = match event {
-                HostEvent::Shortcut(Shortcut::Escape) if overlay_open => {
-                    HostEvent::Ui(UiEvent::Dismiss)
-                }
-                HostEvent::Shortcut(Shortcut::Submit) if overlay_open => {
-                    HostEvent::Ui(UiEvent::KeyboardNavigateActivate)
-                }
-                HostEvent::Shortcut(Shortcut::Submit) => {
-                    let inspection = host.inspect();
-                    let focused_button = inspection
-                        .keyboard_focus
-                        .into_iter()
-                        .chain(inspection.controller_target)
-                        .find(|id| {
-                            host.query_unique(&nickel_ui::SemanticSelector::Id(id.clone()))
-                                .is_ok_and(|target| target.role == Some(SemanticRole::Button))
-                        });
-                    focused_button.map_or(HostEvent::Shortcut(Shortcut::Submit), |target| {
-                        HostEvent::Ui(UiEvent::AccessibilityActivate(target))
-                    })
-                }
-                event => event,
-            };
-            let outcome = host.step(HostBatch {
-                clipboard_text_limit: limit,
-                surface_size: Some((width, height)),
-                application_changed,
-                events: vec![event],
-                normalized_authorities: authority.into_iter().collect(),
-                ..HostBatch::default()
-            });
-            let effects = host.application_mut().take_effects();
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                self.fail_launcher_plugin_runtime(error);
-                return nickel_ui::HostEventOutcome::default();
-            }
-            self.apply_plugin_effects(effects);
-            self.host_runtime_samples.record(outcome.telemetry);
-            return outcome;
-        }
+
         nickel_ui::HostEventOutcome::default()
     }
 
@@ -6200,7 +6099,7 @@ impl LiveShell {
         action: ControllerAction,
         _family: nickel_ui::ControllerFamily,
     ) -> bool {
-        if !self.run_visible && self.launcher_host_ref().is_none() {
+        if !self.run_visible {
             return false;
         }
         if self.run_visible {
@@ -6228,37 +6127,7 @@ impl LiveShell {
             }
             return false;
         }
-        if self.launcher_host_ref().is_some() {
-            let Some(application_changed) = self.sync_plugin_launcher() else {
-                return false;
-            };
-            let host = self
-                .launcher_host_mut()
-                .expect("launcher plugin host exists");
-            let overlay_open = host.inspect().open_overlay.is_some();
-            host.application_mut().set_overlay_open(overlay_open);
-            let event =
-                launcher_controller_host_event(action, host.inspect().open_overlay.is_some());
-            let outcome = host.step(HostBatch {
-                application_changed,
-                events: vec![event],
-                ..HostBatch::default()
-            });
-            let show_keyboard = action == ControllerAction::Confirm
-                && outcome.text_input_active
-                && host.controller_targets_text_input();
-            let effects = host.application_mut().take_effects();
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                self.fail_launcher_plugin_runtime(error);
-                return false;
-            }
-            if show_keyboard {
-                self.set_keyboard_visible(true);
-            }
-            self.apply_plugin_effects(effects);
-            self.host_runtime_samples.record(outcome.telemetry);
-            return outcome.changed;
-        }
+
         false
     }
 
@@ -6613,18 +6482,6 @@ impl LiveShell {
         &mut self,
     ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_panel_host_for(&crate::plugin_panel::run_surface_key())
-    }
-
-    fn launcher_host_ref(
-        &self,
-    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_ref(&crate::plugin_panel::launcher_surface_key())
-    }
-
-    fn launcher_host_mut(
-        &mut self,
-    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_for(&crate::plugin_panel::launcher_surface_key())
     }
 
     fn control_plugin_host_ref(
@@ -7348,49 +7205,7 @@ impl LiveShell {
                         changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::SetLauncherQuery(query) => {
-                    self.apply_launcher_action(LauncherAction::SetQuery(query));
-                    changed = true;
-                }
-                crate::plugin_panel::PluginEffect::SetLauncherPage { dashboard, page } => {
-                    let matching_view = (self.launcher.mode()
-                        == crate::launcher::LauncherMode::Dashboard)
-                        == dashboard;
-                    if matching_view {
-                        let projection = self.current_plugin_launcher_projection();
-                        let count = if dashboard {
-                            projection.dashboard_page_count
-                        } else {
-                            projection.result_page_count
-                        };
-                        if page < count {
-                            let current = if dashboard {
-                                &mut self.launcher_plugin_dashboard_page
-                            } else {
-                                &mut self.launcher_plugin_result_page
-                            };
-                            changed |= *current != page;
-                            *current = page;
-                        }
-                    }
-                }
-                crate::plugin_panel::PluginEffect::DismissLauncher => {
-                    if self.launcher_visible {
-                        self.apply_launcher_action(LauncherAction::Dismiss);
-                        changed = true;
-                    }
-                }
-                crate::plugin_panel::PluginEffect::ActivateLauncherResult { index, id } => {
-                    if self
-                        .current_plugin_launcher_projection()
-                        .results
-                        .iter()
-                        .any(|result| result.index == index && result.id == id)
-                    {
-                        self.apply_launcher_action(LauncherAction::ActivateResult(index));
-                        changed = true;
-                    }
-                }
+
                 crate::plugin_panel::PluginEffect::SearchApplications { plugin_id, query } => {
                     let granted = self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
                         entry.desired_enabled
@@ -7417,12 +7232,7 @@ impl LiveShell {
                         changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::SetLauncherView(view) => {
-                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard {
-                        self.apply_launcher_action(LauncherAction::SetView(view));
-                        changed = true;
-                    }
-                }
+
                 crate::plugin_panel::PluginEffect::ToggleApplicationPin { id } => {
                     if self.launcher.is_pinned(&id)
                         || self
@@ -7443,7 +7253,7 @@ impl LiveShell {
                                     .as_ref()
                                     .is_some_and(|application| application.as_str() == id)
                             });
-                        self.apply_launcher_action(LauncherAction::TogglePin(id));
+                        self.toggle_application_pin(&id);
                         if dismiss_menu {
                             self.dismiss_window_menu();
                         }
@@ -7454,25 +7264,11 @@ impl LiveShell {
                     if self.launcher_status.as_deref().is_some_and(|status| {
                         status.starts_with("Launcher preferences could not be saved:")
                     }) {
-                        self.apply_launcher_action(LauncherAction::RetryPreferencePersistence);
+                        self.persist_launcher_preferences();
                         changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::LauncherOpenProject { id } => {
-                    let projection = self.current_plugin_launcher_projection();
-                    if projection.dashboard_visible
-                        && projection.projects.iter().any(|project| project.id == id)
-                    {
-                        self.apply_launcher_action(LauncherAction::OpenProject(id));
-                        changed = true;
-                    }
-                }
-                crate::plugin_panel::PluginEffect::LauncherSeeAllProjects => {
-                    if self.launcher.codex_available() {
-                        self.apply_launcher_action(LauncherAction::SeeAllProjects);
-                        changed = true;
-                    }
-                }
+
                 crate::plugin_panel::PluginEffect::SessionOperation { plugin_id, request } => {
                     let admitted = self
                         .plugin_registry
@@ -7498,14 +7294,7 @@ impl LiveShell {
                         );
                     }
                 }
-                crate::plugin_panel::PluginEffect::LauncherRequestLogout => {
-                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard
-                        && self.launcher.logout_available()
-                    {
-                        self.apply_launcher_action(LauncherAction::RequestLogout);
-                        changed = true;
-                    }
-                }
+
                 crate::plugin_panel::PluginEffect::InvokeNotification { id, key } => {
                     if !self.notification_history_visible
                         && !self.trusted_notification_id(id)
@@ -7708,48 +7497,6 @@ impl LiveShell {
         changed
     }
 
-    fn sync_plugin_launcher(&mut self) -> Option<bool> {
-        if self.launcher_host_ref().is_none() {
-            return None;
-        }
-        let projection = self.current_plugin_launcher_projection();
-        self.launcher_plugin_result_page = projection.result_page;
-        self.launcher_plugin_dashboard_page = projection.dashboard_page;
-        let images = launcher_plugin_images(&self.launcher, &mut self.launcher_icons, &projection);
-        let palette = self.palette;
-        let host = self
-            .launcher_host_mut()
-            .expect("launcher plugin host exists");
-        let palette_changed = match host.application_mut().sync_theme_palette(palette) {
-            Ok(changed) => changed,
-            Err(error) => {
-                self.fail_launcher_plugin_runtime(error);
-                return None;
-            }
-        };
-        let image_changed = host.application_mut().sync_images(images);
-        let projection_changed = match host
-            .application_mut()
-            .sync_serialized_data(projection.to_json())
-        {
-            Ok(changed) => changed,
-            Err(error) => {
-                self.fail_launcher_plugin_runtime(error);
-                return None;
-            }
-        };
-        Some(palette_changed || image_changed || projection_changed)
-    }
-
-    fn current_plugin_launcher_projection(&self) -> crate::plugin_panel::LauncherPluginProjection {
-        crate::plugin_panel::LauncherPluginProjection::from_launcher_pages(
-            &self.launcher,
-            self.launcher_plugin_result_page,
-            self.launcher_plugin_dashboard_page,
-        )
-        .with_status(self.launcher_status_text())
-    }
-
     pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
         self.launcher_host_event_with_clipboard_limit(HostEvent::Ui(event), width, height, None)
             .changed
@@ -7800,7 +7547,7 @@ impl LiveShell {
     pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(nickel_ui::UiId, u64)> {
         let inspection = match role {
             SurfaceRole::Launcher if self.run_visible => self.run_host_ref()?.inspect(),
-            SurfaceRole::Launcher => self.launcher_host_ref()?.inspect(),
+            SurfaceRole::Launcher => self.run_host_ref()?.inspect(),
             SurfaceRole::ControlCenter => self
                 .control_plugin_active()
                 .then(|| self.control_plugin_host_ref().unwrap().inspect())
@@ -8923,9 +8670,7 @@ impl LiveShell {
                 {
                     return;
                 }
-                self.apply_launcher_action(LauncherAction::TogglePin(
-                    application.as_str().to_owned(),
-                ));
+                self.toggle_application_pin(application.as_str());
                 self.dismiss_window_menu();
             }
             ApplicationMenuAction::CloseAll => {
@@ -9787,7 +9532,7 @@ impl LiveShell {
         }
 
         let visible = !self.launcher_visible;
-        if visible && self.launcher_host_ref().is_none() {
+        if visible && self.run_host_ref().is_none() {
             return false;
         }
         let command = if visible {
@@ -10111,7 +9856,7 @@ impl LiveShell {
     }
 
     pub fn focus_launcher(&mut self) -> bool {
-        if !self.run_visible && self.launcher_host_ref().is_none() {
+        if !self.run_visible {
             return false;
         }
         if self.run_visible {
@@ -10128,31 +9873,7 @@ impl LiveShell {
             }
             return false;
         }
-        if self.launcher_host_ref().is_some() {
-            let Some(application_changed) = self.sync_plugin_launcher() else {
-                return false;
-            };
-            let host = self
-                .launcher_host_mut()
-                .expect("launcher plugin host exists");
-            let mut changed = host
-                .step(HostBatch {
-                    application_changed,
-                    window_focused: Some(true),
-                    ..HostBatch::default()
-                })
-                .changed;
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                self.fail_launcher_plugin_runtime(error);
-                return false;
-            }
-            if let Ok(search) =
-                host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-            {
-                changed |= host.request_focus(search.id).changed;
-            }
-            return changed;
-        }
+
         false
     }
 
@@ -10322,13 +10043,6 @@ impl LiveShell {
             return true;
         }
         false
-    }
-
-    fn launch_result(&mut self, index: usize) {
-        let Some(application) = self.launcher.result_at(index).cloned() else {
-            return;
-        };
-        self.launch_application(application);
     }
 
     fn launch_application_by_id(&mut self, id: &str) {
@@ -11554,18 +11268,6 @@ impl LiveShell {
         Vec::new()
     }
 
-    fn launcher_status_text(&self) -> Option<String> {
-        self.launcher_status
-            .as_deref()
-            .or(self.shortcut_action_status.as_deref())
-            .or(self.shortcut_capability_status.as_deref())
-            .or_else(|| secure_storage_status_label(self.secure_storage_state))
-            .or_else(|| {
-                session_feed_status_label(self.window_feed_status, self.workspace_feed_status)
-            })
-            .map(str::to_owned)
-    }
-
     pub fn set_global_shortcut_capability(
         &mut self,
         capability: &nickel_input::global::ShortcutCapability,
@@ -12130,52 +11832,9 @@ impl LiveShell {
         }
     }
 
-    fn apply_launcher_action(&mut self, action: LauncherAction) {
-        match &action {
-            LauncherAction::SetQuery(_) => self.launcher_plugin_result_page = 0,
-            LauncherAction::SetView(_) => self.launcher_plugin_dashboard_page = 0,
-            _ => {}
-        }
-        let Some(effect) = reduce_launcher_action(&mut self.launcher, action) else {
-            return;
-        };
-        self.apply_launcher_effect(effect);
-    }
-
-    fn apply_launcher_effect(&mut self, effect: LauncherShellEffect) {
-        match effect {
-            LauncherShellEffect::ActivateResult(index) => self.launch_result(index),
-            LauncherShellEffect::TogglePin(id) => {
-                self.launcher.toggle_pin(&id);
-                self.persist_launcher_preferences();
-            }
-            LauncherShellEffect::RetryPreferencePersistence => {
-                self.persist_launcher_preferences();
-            }
-            LauncherShellEffect::OpenProject(id) => {
-                self.set_launcher_visible(false);
-                self.requested_codex_project = Some(id);
-            }
-            LauncherShellEffect::SeeAllProjects => {
-                self.set_launcher_visible(false);
-                self.codex_project_menu_visible =
-                    self.plugin_surface_matches(&crate::plugin_panel::codex_projects_surface_key());
-            }
-            LauncherShellEffect::RequestLogout => {
-                self.set_control_visible(true);
-                if self.control_visible {
-                    self.set_launcher_visible(false);
-                    self.control_host
-                        .application_mut()
-                        .request_session_action(platform::SessionAction::LogOut);
-                    self.step_control_host(HostBatch {
-                        events: vec![HostEvent::Poll],
-                        ..HostBatch::default()
-                    });
-                }
-            }
-            LauncherShellEffect::Dismiss => self.set_launcher_visible(false),
-        }
+    fn toggle_application_pin(&mut self, id: &str) {
+        self.launcher.toggle_pin(id);
+        self.persist_launcher_preferences();
     }
 
     fn persist_launcher_preferences(&mut self) {
@@ -12688,43 +12347,6 @@ fn log_control_result(operation: &'static str, succeeded: bool) {
     }
 }
 
-fn secure_storage_status_label(state: platform::SecureStorageState) -> Option<&'static str> {
-    match state {
-        platform::SecureStorageState::Starting => Some("Secure storage is starting…"),
-        platform::SecureStorageState::Locked => Some("Secure storage is locked."),
-        platform::SecureStorageState::PromptRequired => {
-            Some("Secure storage is waiting for its unlock prompt.")
-        }
-        platform::SecureStorageState::Unavailable => Some("Secure storage is unavailable."),
-        platform::SecureStorageState::UnavailableReason(reason) => Some(match reason {
-            nickel_session_protocol::SecureStorageUnavailableReason::Connection => {
-                "Secure storage cannot connect to the session bus."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::MissingDefaultCollection => {
-                "Secure storage has no default collection."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::PromptTimedOut => {
-                "The secure-storage unlock prompt timed out."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::ProviderDisappeared => {
-                "The secure-storage provider disappeared."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::ProviderConfiguration
-            | nickel_session_protocol::SecureStorageUnavailableReason::UnexpectedProvider => {
-                "The secure-storage provider configuration is invalid."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::Protocol
-            | nickel_session_protocol::SecureStorageUnavailableReason::ReadinessCheck => {
-                "Secure storage failed its readiness check."
-            }
-        }),
-        platform::SecureStorageState::ControlUnavailable => {
-            Some("Nickel cannot reach the session service.")
-        }
-        platform::SecureStorageState::Ready => None,
-    }
-}
-
 fn update_feed_status(current: &mut FeedStatus, next: FeedStatus, feed: &'static str) -> bool {
     if *current == next {
         return false;
@@ -12732,22 +12354,6 @@ fn update_feed_status(current: &mut FeedStatus, next: FeedStatus, feed: &'static
     tracing::info!(feed, status = ?next, "shell feed state changed");
     *current = next;
     true
-}
-
-fn session_feed_status_label(
-    window_status: FeedStatus,
-    workspace_status: FeedStatus,
-) -> Option<&'static str> {
-    match (window_status, workspace_status) {
-        (FeedStatus::Loading, FeedStatus::Loading) => Some("Loading session data…"),
-        (FeedStatus::Loading, _) => Some("Loading session windows…"),
-        (_, FeedStatus::Loading) => Some("Loading session workspaces…"),
-        (FeedStatus::Disconnected, _) => Some("Session window data is disconnected."),
-        (_, FeedStatus::Disconnected) => Some("Session workspace data is disconnected."),
-        (FeedStatus::Failed, _) => Some("Session window data failed to load."),
-        (_, FeedStatus::Failed) => Some("Session workspace data failed to load."),
-        (FeedStatus::Ready, FeedStatus::Ready) => None,
-    }
 }
 
 fn application_discovery_status_label(
