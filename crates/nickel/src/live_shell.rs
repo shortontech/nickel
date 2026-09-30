@@ -3164,14 +3164,7 @@ impl LiveShell {
                 .iter()
                 .filter(|(key, _)| {
                     **key != self.primary_panel_key()
-                        && **key != crate::plugin_panel::codex_projects_surface_key()
-                        && **key != crate::plugin_panel::on_screen_keyboard_surface_key()
-                        && **key != crate::plugin_panel::volume_osd_surface_key()
-                        && **key != crate::plugin_panel::run_surface_key()
-                        && **key != crate::plugin_panel::launcher_surface_key()
-                        && **key != crate::plugin_panel::control_center_surface_key()
-                        && **key != crate::plugin_panel::notification_surface_key()
-                        && **key != crate::plugin_panel::window_preview_surface_key()
+                        && self.external_plugin_packages.contains_key(&key.plugin_id)
                 })
                 .map(|(key, (surface, _))| (key.clone(), surface.clone())),
         );
