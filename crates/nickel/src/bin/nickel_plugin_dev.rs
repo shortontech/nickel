@@ -856,6 +856,54 @@ mod platform {
         }
 
         #[test]
+        fn default_launcher_owns_paging_query_and_launches_stable_search_identities() {
+            std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+                use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
+                let directory = tempfile::tempdir().unwrap();
+                std::fs::create_dir(directory.path().join("styles")).unwrap();
+                std::fs::write(directory.path().join("Launcher.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/Launcher.jsx")).unwrap();
+                std::fs::write(directory.path().join("styles/launcher.css"), include_str!("../../../../assets/plugins/nickel-default/src/styles/launcher.css")).unwrap();
+                std::fs::write(directory.path().join("main.jsx"), "import {Launcher} from './Launcher.js'; export default Launcher;").unwrap();
+                let (source, modules) = super::super::compile_jsx_modules(directory.path(), "main.js", Path::new("main.jsx")).unwrap();
+                let graph = JsxModuleGraph::new("main.js", modules.iter().map(|module|ModuleSource {path:&module.path,source:&module.source})).unwrap();
+                let apps = (0..14).map(|index|serde_json::json!({"id":format!("application-{index}"),"name":format!("Editor {index}"),"icon":format!("application:icon-{index}"),"pinned":false,"pinOrder":null,"recentOrder":null,"kind":"application"})).collect::<Vec<_>>();
+                let mut data = serde_json::json!({"applications":apps,"applicationSearch":{"available":true,"query":"","results":[],"total":0}});
+                let mut runtime = JsxRuntime::new_modules(&graph, Some(&data.to_string())).unwrap();
+                fn action(node: &serde_json::Value, id: &str) -> Option<u64> {
+                    if node["id"].as_str() == Some(id) {return node["action"].as_u64();}
+                    node["children"].as_array()?.iter().find_map(|child|action(child,id))
+                }
+                let tree = runtime.render("__nickelRender()", |node|Ok(node.clone())).unwrap();
+                let next = action(&tree,"launcher-dashboard-next").unwrap();
+                let page = runtime.render(&format!("__nickelDispatch({next})"), |node|Ok(node.clone())).unwrap();
+                runtime.finish_event(true).unwrap();
+                assert!(runtime.take_effects().unwrap().is_empty());
+                assert!(action(&page,"launcher-dashboard-application:icon-12").is_some());
+                assert!(action(&page,"launcher-dashboard-application:icon-0").is_none());
+                let input = action(&page,"launcher-query").unwrap();
+                runtime.render(&format!("__nickelDispatch({input}, 'ed')"), |node|Ok(node.clone())).unwrap();
+                runtime.finish_event(true).unwrap();
+                assert_eq!(runtime.take_effects().unwrap(),vec![serde_json::json!({"type":"applications.search","query":"ed"})]);
+                data["applicationSearch"] = serde_json::json!({"available":true,"query":"ed","total":1,"results":[{"id":"native-editor","name":"Native Editor","icon":"application:native-editor","pinned":false}]});
+                runtime.set_data(&data.to_string()).unwrap();
+                let results = runtime.render("__nickelRender()", |node|Ok(node.clone())).unwrap();
+                let launch = action(&results,"launcher-result-application:native-editor").unwrap();
+                runtime.render(&format!("__nickelDispatch({launch})"), |node|Ok(node.clone())).unwrap();
+                runtime.finish_event(true).unwrap();
+                assert_eq!(runtime.take_effects().unwrap(),vec![serde_json::json!({"type":"applications.launch","id":"native-editor"}),serde_json::json!({"type":"surface.hide","surfaceId":"launcher"})]);
+                let mut manifest = PluginManifest::from_json(include_str!("../../../../assets/plugins/nickel-default/plugin.json")).unwrap();
+                manifest.entry = "main.js".into();
+                manifest.composition = None;
+                manifest.surfaces.retain(|surface|surface.id=="launcher");
+                let package = PluginPackage {manifest,source,modules,stylesheet:String::new(),images:Default::default()};
+                let mut app = PluginPanelApplication::from_package(&package).unwrap();
+                app.sync_data(&data).unwrap();
+                let host = nickel_ui::UiHost::new(app,620,548);
+                assert!(host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Button,name:"Pinned & recent".into()}).is_ok());
+            }).unwrap().join().unwrap();
+        }
+
+        #[test]
         fn development_compiles_and_stages_imported_jsx_modules() {
             if Command::new(tsc_executable())
                 .arg("--version")

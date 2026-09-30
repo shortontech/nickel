@@ -272,6 +272,12 @@ const nickel = Object.freeze({
     }),
     applications: Object.freeze({
         list() { return __nickelResource('applications', []); },
+        search(query) {
+            if (typeof query !== 'string' || Array.from(query).length > 512 || query.includes('\0')) throw TypeError('invalid application search query');
+            __effects.push({type:'applications.search',query});
+        },
+        searchResults() { return __nickelResource('applicationSearch', {available:false, query:'', results:[], total:0, reason:'Application search is unavailable'}); },
+        retryPinSave() { __effects.push({type:'applications-retry-pin-save'}); },
         launch(id) { __effects.push({type:'applications.launch',id:__nickelIdentity(id)}); },
         togglePin(id) { __effects.push({type:'applications.togglePin',id:__nickelIdentity(id)}); },
         movePin(id, direction) {

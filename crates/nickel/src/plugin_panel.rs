@@ -408,6 +408,10 @@ pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, St
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
+    SearchApplications {
+        plugin_id: String,
+        query: String,
+    },
     MoveApplicationPin {
         id: String,
         direction: i8,
@@ -1983,6 +1987,13 @@ impl PluginPanelApplication {
         changed
     }
 
+    pub(crate) fn sync_application_images(&mut self, images: PluginImages) -> bool {
+        let mut combined = self.images.clone();
+        combined.retain(|key, _| !key.starts_with("application:"));
+        combined.extend(images);
+        self.sync_images(combined)
+    }
+
     pub fn retained_image_bytes(&self) -> u64 {
         let mut seen = std::collections::HashSet::new();
         self.retained_image_allocations()
@@ -2022,6 +2033,7 @@ impl PluginPanelApplication {
                 "slots"
                     | "windows"
                     | "applications"
+                    | "applicationSearch"
                     | "notifications"
                     | "audio"
                     | "displays"
@@ -2060,7 +2072,9 @@ impl PluginPanelApplication {
         {
             return Err("window data requires windows-read".into());
         }
-        if fields.iter().any(|(field, _)| *field == "applications")
+        if fields
+            .iter()
+            .any(|(field, _)| matches!(*field, "applications" | "applicationSearch"))
             && !self
                 .manifest
                 .capabilities
@@ -3455,6 +3469,37 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 _ => {
                                     self.last_error =
                                         Some(format!("menu {id:?} is not declared and open"));
+                                    return;
+                                }
+                            }
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("applications.search") =>
+                        {
+                            let request = effect["query"]
+                                .as_str()
+                                .ok_or("application search query must be text")
+                                .and_then(|query| {
+                                    crate::application_capabilities::validate_query(query)
+                                        .map(|()| query)
+                                        .map_err(|_| "application search query exceeds its bounds")
+                                });
+                            if !self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsRead)
+                            {
+                                self.last_error =
+                                    Some("application search requires applications-read".into());
+                                return;
+                            }
+                            match request {
+                                Ok(query) => approved.push(PluginEffect::SearchApplications {
+                                    plugin_id: self.manifest.id.clone(),
+                                    query: query.into(),
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error.into());
                                     return;
                                 }
                             }
@@ -6480,6 +6525,38 @@ mod tests {
         granted.update(granted.button_message("connect").unwrap());
         assert!(granted.take_effects().is_empty());
         assert!(granted.last_error().is_some());
+    }
+
+    #[test]
+    fn application_search_requires_read_grants_and_keeps_package_identity() {
+        let mut manifest = manifest().clone();
+        manifest.id = "search-owner".into();
+        manifest.capabilities.clear();
+        let source = "function App() { return h(Panel, {}, h(Button, {id:'search',onClick:()=>nickel.applications.search('editor')}, 'Search')); }";
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        assert!(
+            denied
+                .sync_host_data_field("applicationSearch", &serde_json::json!({"results":[]}))
+                .is_err()
+        );
+        denied.update(denied.button_message("search").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest
+            .capabilities
+            .push(PluginCapability::ApplicationsRead);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        granted.update(granted.button_message("search").unwrap());
+        assert_eq!(
+            granted.take_effects(),
+            vec![PluginEffect::SearchApplications {
+                plugin_id: "search-owner".into(),
+                query: "editor".into()
+            }]
+        );
     }
 
     #[test]

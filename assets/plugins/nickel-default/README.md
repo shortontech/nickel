@@ -39,6 +39,21 @@ and `settings.pages` as the semantic contribution mount points owned by these
 components. The actual contribution renderer remains a runtime dependency; the
 copied components still read today's bounded slot data until that API lands.
 
+## Application search
+
+`nickel.applications.search(query)` requests native fuzzy search for the calling
+package. `nickel.applications.searchResults()` returns a copied snapshot with
+`query`, `results`, `total`, and `truncated`. Both inventory and search reads
+require `applications-read`. Queries accept at most 512 characters, and a
+snapshot contains at most 256 applications. The query echoed in the snapshot
+lets a component distinguish pending search from an empty result.
+
+Applications carry stable `id`, `icon`, `kind`, `pinOrder`, and `recentOrder`
+metadata. Launch and pin actions use `id`; `icon` is a bounded stable asset key.
+The default Launcher owns its query, tabs, pagination, and menus. It does not
+change the native launcher's query. Native project overview remains an explicit
+entry point until project capabilities replace it.
+
 ## Runtime dependencies before activation
 
 1. The shared module graph host now accepts relative JSX and CSS imports and

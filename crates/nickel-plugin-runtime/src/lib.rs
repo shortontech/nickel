@@ -324,6 +324,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn application_search_client_emits_bounded_requests_and_copies_results() {
+        let mut runtime = super::JsxRuntime::new("", Some(r#"{"applicationSearch":{"available":true,"query":"ed","results":[{"id":"editor","name":"Editor"}],"total":1}}"#)).unwrap();
+        runtime.eval("nickel.applications.searchResults().results[0].name='mutated'; nickel.applications.search('ed');").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>(
+                    "JSON.stringify(nickel.applications.searchResults().results[0].name)"
+                )
+                .unwrap(),
+            "Editor"
+        );
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![serde_json::json!({"type":"applications.search","query":"ed"})]
+        );
+        assert!(
+            runtime
+                .eval("nickel.applications.search('x'.repeat(513))")
+                .is_err()
+        );
+        assert!(runtime.eval("nickel.applications.search(12)").is_err());
+    }
+
     use super::*;
 
     #[test]

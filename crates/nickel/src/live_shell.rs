@@ -665,6 +665,7 @@ pub struct LiveShell {
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
     external_plugin_packages:
         std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageSource>,
+    application_search: crate::application_capabilities::ApplicationSearch,
     primary_panel_key: nickel_core::plugins::PluginSurfaceKey,
     plugin_activation_generation: u64,
     #[cfg(target_os = "linux")]
@@ -1762,6 +1763,7 @@ impl LiveShell {
             package_settings_invoking: false,
             plugin_settings,
             external_plugin_packages,
+            application_search: Default::default(),
             primary_panel_key: crate::plugin_panel::surface_key(),
             plugin_activation_generation: 1,
             #[cfg(target_os = "linux")]
@@ -3579,21 +3581,59 @@ impl LiveShell {
         {
             return None;
         }
-        Some(serde_json::Value::Array(
-            self.launcher
+        Some(crate::application_capabilities::list(&self.launcher))
+    }
+
+    fn plugin_application_search(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        self.external_plugin_applications(plugin_id)?;
+        let mut snapshot = self.application_search.snapshot(&self.launcher, plugin_id);
+        snapshot["status"] = self
+            .launcher_status
+            .as_ref()
+            .map(|status| status.chars().take(160).collect::<String>())
+            .into();
+        snapshot["pinSaveFailed"] = self
+            .launcher_status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Launcher preferences could not be saved:"))
+            .into();
+        Some(snapshot)
+    }
+
+    fn plugin_application_images(
+        &mut self,
+        catalog: Option<&serde_json::Value>,
+        search: Option<&serde_json::Value>,
+    ) -> crate::plugin_panel::PluginImages {
+        let mut images = crate::plugin_panel::PluginImages::new();
+        let items = catalog
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .chain(
+                search
+                    .and_then(|snapshot| snapshot["results"].as_array())
+                    .into_iter()
+                    .flatten(),
+            );
+        for item in items {
+            let Some(id) = item["id"].as_str() else {
+                continue;
+            };
+            let Some(application) = self
+                .launcher
                 .applications()
-                .take(256)
-                .filter(|application| !application.id().is_empty() && application.id().len() <= 256)
-                .map(|application| {
-                    serde_json::json!({
-                        "id": application.id(),
-                        "name": application.name().chars().take(120).collect::<String>(),
-                        "pinned": self.launcher.is_pinned(application.id()),
-                        "pinOrder": self.launcher.preferences().favorites().iter().position(|id| application.matches_native_id(id)),
-                    })
-                })
-                .collect(),
-        ))
+                .find(|application| application.id() == id)
+            else {
+                continue;
+            };
+            let icon = self
+                .launcher_icons
+                .resolve(application)
+                .unwrap_or_else(launcher_placeholder_icon);
+            images.insert(crate::application_capabilities::icon_asset(id), icon);
+        }
+        images
     }
 
     fn preferences_catalog(&self) -> Result<crate::preferences_capabilities::Catalog, String> {
@@ -4032,6 +4072,9 @@ impl LiveShell {
         let slots = self.plugin_slot_projection(&key.plugin_id);
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
+        let application_search = self.plugin_application_search(&key.plugin_id);
+        let application_images =
+            self.plugin_application_images(applications.as_ref(), application_search.as_ref());
         let notifications = self.external_plugin_notifications(&key.plugin_id);
         let tray = self.plugin_registry.get(&key.plugin_id)
             .filter(|entry| entry.manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::TrayRead))
@@ -4075,6 +4118,7 @@ impl LiveShell {
                     ("slots", slots.as_ref()),
                     ("windows", windows.as_ref()),
                     ("applications", applications.as_ref()),
+                    ("applicationSearch", application_search.as_ref()),
                     ("notifications", notifications.as_ref()),
                     ("audio", audio.as_ref()),
                     ("tray", tray.as_ref()),
@@ -4090,11 +4134,18 @@ impl LiveShell {
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
                 .collect::<Vec<_>>();
                 let resource_changed = host.application_mut().sync_host_data_fields(&fields)?;
+                let application_images_changed = if applications.is_some() {
+                    host.application_mut()
+                        .sync_application_images(application_images)
+                } else {
+                    false
+                };
                 Ok(preview_changed
                     || control_changed
                     || notification_changed
                     || keyboard_changed
-                    || resource_changed)
+                    || resource_changed
+                    || application_images_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
@@ -4963,6 +5014,7 @@ impl LiveShell {
         tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
         self.package_runtimes.remove(id);
+        self.application_search.retire(id);
         if self
             .plugin_slot_hosts
             .remove(id)
@@ -5036,6 +5088,7 @@ impl LiveShell {
         }
         tracing::warn!(plugin = id, %error, "bundled plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
+        self.application_search.retire(id);
         retire(self);
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
@@ -5369,6 +5422,7 @@ impl LiveShell {
         }
         if !enabled {
             self.package_runtimes.remove(id);
+            self.application_search.retire(id);
             if self.plugin_slot_hosts.remove(id).is_some_and(|host| {
                 host.contract == nickel_core::plugins::PluginSlotContract::Action
             }) {
@@ -7074,6 +7128,22 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::SearchApplications { plugin_id, query } => {
+                    let granted = self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
+                        entry.desired_enabled
+                            && entry.health == nickel_core::plugins::PluginHealth::Running
+                            && entry
+                                .manifest
+                                .capabilities
+                                .contains(&nickel_core::plugins::PluginCapability::ApplicationsRead)
+                    });
+                    if granted && !self.locked {
+                        match self.application_search.set_query(&plugin_id, query) {
+                            Ok(()) => changed = true,
+                            Err(error) => tracing::warn!(%error, "application search rejected"),
+                        }
+                    }
+                }
                 crate::plugin_panel::PluginEffect::LaunchApplication { id } => {
                     if self
                         .launcher
@@ -7135,9 +7205,7 @@ impl LiveShell {
                     }
                 }
                 crate::plugin_panel::PluginEffect::LauncherSeeAllProjects => {
-                    if self.launcher.mode() == crate::launcher::LauncherMode::Dashboard
-                        && self.launcher.codex_available()
-                    {
+                    if self.launcher.codex_available() {
                         self.apply_launcher_action(LauncherAction::SeeAllProjects);
                         changed = true;
                     }
