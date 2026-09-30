@@ -342,6 +342,7 @@ fn exercise(
         return Err(format!("preview plugin surface is missing: {surfaces:?}"));
     }
     verify_layout_snapshot(test_input, &environment, "org.nickel.taskbar/main")?;
+    verify_taskbar_control_layout(test_input, &environment, &surfaces)?;
     verify_native_layout_snapshot(test_input, &environment, "Desktop")?;
     let plugin_output = checked(test_input, &environment, &["plugins"])?;
     let plugins: nickel_session_protocol::PluginStatusSnapshot =
@@ -1378,6 +1379,25 @@ fn click_plugin_control(
     control_id: &str,
     window_origin: (i32, i32),
 ) -> Result<(), String> {
+    let [x, y, width, height] =
+        plugin_control_geometry(test_input, environment, plugin_surface, control_id)?;
+    if width <= 0.0 || height <= 0.0 {
+        return Err(format!("{control_id} has no clickable area"));
+    }
+    click_at(
+        test_input,
+        environment,
+        window_origin.0 + (x + width / 2.0).round() as i32,
+        window_origin.1 + (y + height / 2.0).round() as i32,
+    )
+}
+
+fn plugin_control_geometry(
+    test_input: &Path,
+    environment: &[(String, String)],
+    plugin_surface: &str,
+    control_id: &str,
+) -> Result<[f32; 4], String> {
     let layouts = checked(test_input, environment, &["layouts"])?;
     let surface = layouts
         .lines()
@@ -1406,15 +1426,35 @@ fn click_plugin_control(
     let [x, y, width, height] = geometry.as_slice() else {
         return Err(format!("{control_id} has incomplete geometry: {node}"));
     };
-    if *width <= 0.0 || *height <= 0.0 {
-        return Err(format!("{control_id} has no clickable area: {node}"));
+    Ok([*x, *y, *width, *height])
+}
+
+fn verify_taskbar_control_layout(
+    test_input: &Path,
+    environment: &[(String, String)],
+    surfaces: &str,
+) -> Result<(), String> {
+    const TASKBAR: &str = "org.nickel.taskbar/main";
+    let (_, _, panel_width, panel_height) =
+        panel_geometry(surfaces, TASKBAR).ok_or("taskbar has no panel geometry")?;
+    let launcher = plugin_control_geometry(test_input, environment, TASKBAR, "taskbar-launcher")?;
+    let control = plugin_control_geometry(test_input, environment, TASKBAR, "taskbar-control")?;
+    for (name, [x, y, width, height]) in [("launcher", launcher), ("control", control)] {
+        if ![x, y, width, height].iter().all(|value| value.is_finite())
+            || width <= 0.0
+            || height <= 0.0
+            || x < 0.0
+            || y < 0.0
+            || x + width > panel_width as f32 + 1.0
+            || y + height > panel_height as f32 + 1.0
+        {
+            return Err(format!("taskbar {name} is outside its panel: {x},{y},{width},{height} in {panel_width}x{panel_height}"));
+        }
     }
-    click_at(
-        test_input,
-        environment,
-        window_origin.0 + (x + width / 2.0).round() as i32,
-        window_origin.1 + (y + height / 2.0).round() as i32,
-    )
+    if launcher[0] + launcher[2] > control[0] {
+        return Err(format!("taskbar launcher overlaps its control area: {launcher:?}, {control:?}"));
+    }
+    Ok(())
 }
 
 fn wait_for_component_dialog_memory(
