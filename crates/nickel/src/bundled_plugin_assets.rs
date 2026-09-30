@@ -22,10 +22,6 @@ pub(crate) fn resolve(
             include_str!("../../../assets/plugins/volume-osd/main.js"),
             include_str!("../../../assets/plugins/volume-osd/ui.css"),
         ),
-        ("org.nickel.control-center", "main.js") => (
-            include_str!("../../../assets/plugins/control-center/main.js"),
-            include_str!("../../../assets/plugins/control-center/ui.css"),
-        ),
         ("org.nickel.codex-projects", "main.js") => (
             include_str!("../../../assets/plugins/codex-projects/main.js"),
             include_str!("../../../assets/plugins/codex-projects/ui.css"),

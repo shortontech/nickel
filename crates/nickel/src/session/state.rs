@@ -5452,7 +5452,7 @@ impl NickelSession {
             );
             if let Some(key) = surface.plugin.as_ref() {
                 adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
-                if *key == crate::plugin_panel::control_center_surface_key()
+                if *key == shell.active_shell_surface_key("quick-settings")
                     || *key == crate::plugin_panel::codex_projects_surface_key()
                 {
                     let preferred = match shell.panel_edge() {
@@ -5465,7 +5465,7 @@ impl NickelSession {
                     };
                     if let Some((role, anchor)) = shell.popover_anchor(preferred)
                         && ((role == nickel_session_protocol::ShellRole::ControlCenter
-                            && *key == crate::plugin_panel::control_center_surface_key())
+                            && *key == shell.active_shell_surface_key("quick-settings"))
                             || (role == nickel_session_protocol::ShellRole::ProjectMenu
                                 && *key == crate::plugin_panel::codex_projects_surface_key()))
                     {
@@ -6977,7 +6977,7 @@ impl NickelSession {
             shell.surfaces().iter().any(|surface| {
                 (surface.role == SurfaceRole::ControlCenter
                     || surface.plugin.as_ref()
-                        == Some(&crate::plugin_panel::control_center_surface_key()))
+                        == Some(&shell.active_shell_surface_key("quick-settings")))
                     && shell.visible(surface.id)
                     && self
                         .internal_shell_surfaces
@@ -7348,7 +7348,7 @@ impl NickelSession {
                     | crate::winit_shell::SurfaceRole::ControlCenter
                     | crate::winit_shell::SurfaceRole::Screenshot
             ) || surface.plugin.as_ref()
-                == Some(&crate::plugin_panel::control_center_surface_key())
+                == Some(&shell.active_shell_surface_key("quick-settings"))
             {
                 surface.size = (placement.geometry.2, placement.geometry.3);
                 resized = shell.set_surface_size(surface.id, surface.size);
@@ -10755,9 +10755,10 @@ impl NickelSession {
             if changed {
                 self.sync_internal_shell();
                 if let Some(key) = match action {
-                    nickel_session_protocol::ShortcutAction::ShowControlCenter => {
-                        Some(crate::plugin_panel::control_center_surface_key())
-                    }
+                    nickel_session_protocol::ShortcutAction::ShowControlCenter => self
+                        .internal_shell
+                        .as_ref()
+                        .map(|shell| shell.active_shell_surface_key("quick-settings")),
                     _ => None,
                 } {
                     self.focus_plugin_surface(&key.plugin_id, &key.surface_id);

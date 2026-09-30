@@ -175,9 +175,8 @@ mod platform {
         PluginPackage, PluginSlotContract, PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::{
-        PluginPanelApplication, codex_projects_manifest, control_center_manifest, manifest,
-        on_screen_keyboard_manifest, run_manifest, taskbar_manifest, volume_osd_manifest,
-        window_preview_manifest,
+        PluginPanelApplication, codex_projects_manifest, manifest, on_screen_keyboard_manifest,
+        run_manifest, taskbar_manifest, volume_osd_manifest, window_preview_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
@@ -185,7 +184,6 @@ mod platform {
             manifest(),
             taskbar_manifest(),
             run_manifest(),
-            control_center_manifest(),
             codex_projects_manifest(),
             on_screen_keyboard_manifest(),
             window_preview_manifest(),
@@ -242,7 +240,13 @@ mod platform {
                     | (_, _, PluginSlotContract::Widget)
                     | (_, _, PluginSlotContract::Action))
                     && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
-        if !bundled && !panel && !extension {
+        let composition_extension = package.manifest.surfaces.is_empty()
+            && package
+                .manifest
+                .composition
+                .as_ref()
+                .is_some_and(|composition| !composition.contributions.is_empty());
+        if !bundled && !panel && !extension && !composition_extension {
             return Err(
                 "dev needs an unchanged bundled manifest, a panel, dock, or window that may declare dialogs, or one supported surface-free contribution"
                     .into(),
@@ -854,6 +858,37 @@ mod platform {
         }
 
         #[test]
+        fn quick_settings_uses_public_revision_bound_workspace_and_display_clients() {
+            std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+                use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
+                let directory=tempfile::tempdir().unwrap();
+                std::fs::create_dir(directory.path().join("styles")).unwrap();
+                std::fs::write(directory.path().join("QuickSettings.jsx"),include_str!("../../../../assets/plugins/nickel-default/src/QuickSettings.jsx")).unwrap();
+                std::fs::write(directory.path().join("styles/quick-settings.css"),include_str!("../../../../assets/plugins/nickel-default/src/styles/quick-settings.css")).unwrap();
+                std::fs::write(directory.path().join("main.jsx"),"import {QuickSettings} from './QuickSettings.js'; export default QuickSettings;").unwrap();
+                let (source,modules)=super::super::compile_jsx_modules(directory.path(),"main.js",Path::new("main.jsx")).unwrap();
+                let graph=JsxModuleGraph::new("main.js",modules.iter().map(|module|ModuleSource{path:&module.path,source:&module.source})).unwrap();
+                let revision="a".repeat(64);
+                let data=serde_json::json!({"workspaces":{"available":true,"revision":revision,"workspaces":[{"id":"9","active":true},{"id":"44","active":false}],"activeWorkspace":"9","operations":{"switch":true,"create":true,"remove":true}},"desktop":{"operations":{"toggleShowDesktop":true}},"displays":{"available":true,"revision":"0123456789abcdef","projectionModes":[{"id":"extend","label":"Extend"}],"outputs":[]}});
+                let mut runtime=JsxRuntime::new_modules(&graph,Some(&data.to_string())).unwrap();
+                fn action(node:&serde_json::Value,id:&str)->Option<u64>{if node["id"]==id {return node["action"].as_u64();}node["children"].as_array()?.iter().find_map(|child|action(child,id))}
+                for (id,expected) in [("workspace-44",serde_json::json!({"type":"workspaces.switch","id":"44","revision":revision})),("projection-extend",serde_json::json!({"type":"displays.previewProjection","mode":"extend","revision":"0123456789abcdef"})),("show-desktop",serde_json::json!({"type":"desktop.toggleShowDesktop"}))] {
+                    let tree=runtime.render("__nickelRender()",|node|Ok(node.clone())).unwrap();
+                    let action=action(&tree,id).unwrap();
+                    runtime.render(&format!("__nickelDispatch({action})"),|node|Ok(node.clone())).unwrap(); runtime.finish_event(true).unwrap();
+                    assert_eq!(runtime.take_effects().unwrap(),vec![expected]);
+                }
+                let mut manifest=PluginManifest::from_json(include_str!("../../../../assets/plugins/nickel-default/plugin.json")).unwrap(); manifest.composition=None; manifest.entry="main.js".into(); manifest.surfaces.retain(|surface|surface.id=="quick-settings");
+                let package=PluginPackage{manifest,source,modules,stylesheet:String::new(),images:Default::default()};
+                let mut app=PluginPanelApplication::from_package(&package).unwrap(); app.sync_data(&data).unwrap();
+                let mut host=nickel_ui::UiHost::new(app,420,600);
+                let target=host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Button,name:"2".into()}).unwrap();
+                host.perform_semantic_action(target.id,nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate));
+                assert!(matches!(host.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Workspace{..}]));
+            }).unwrap().join().unwrap();
+        }
+
+        #[test]
         fn feature_settings_confirm_destructive_preferences_and_render_public_shortcuts() {
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
                 use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
@@ -993,7 +1028,15 @@ mod platform {
             ] {
                 let package = load_dev_package(&root.join(name)).unwrap();
                 assert!(package.manifest.surfaces.is_empty());
-                assert_eq!(package.manifest.contributes.len(), 1);
+                if name == "example-control-section" {
+                    assert!(package.manifest.contributes.is_empty());
+                    assert_eq!(
+                        package.manifest.composition.as_ref().unwrap().contributions[0].collection,
+                        "system.controls"
+                    );
+                } else {
+                    assert_eq!(package.manifest.contributes.len(), 1);
+                }
             }
         }
 

@@ -664,7 +664,7 @@ impl InternalShellCoordinator {
             || (roles.contains(&SurfaceRole::Taskbar) && self.is_taskbar_surface(surface))
             || (roles.contains(&SurfaceRole::ControlCenter)
                 && surface.plugin.as_ref()
-                    == Some(&crate::plugin_panel::control_center_surface_key()))
+                    == Some(&self.shell.active_shell_surface_key("quick-settings")))
             || (roles.contains(&SurfaceRole::OnScreenKeyboard)
                 && surface.plugin.as_ref()
                     == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()))
@@ -1370,6 +1370,13 @@ impl InternalShellCoordinator {
 
     pub(crate) fn can_show_launcher(&self) -> bool {
         self.shell.can_show_launcher()
+    }
+
+    pub(crate) fn active_shell_surface_key(
+        &self,
+        surface: &str,
+    ) -> nickel_core::plugins::PluginSurfaceKey {
+        self.shell.active_shell_surface_key(surface)
     }
 
     pub(crate) fn can_show_control_center(&self) -> bool {
@@ -3027,90 +3034,6 @@ mod tests {
                 .taskbar_has_application("org.kde.konsole")
         );
         assert!(!coordinator.apply_session_snapshot(snapshot));
-    }
-
-    #[test]
-    fn system_feed_changes_only_invalidate_their_visible_consumers() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let desktop = coordinator
-            .surface(SurfaceRole::Desktop, Some("nested"))
-            .unwrap()
-            .id;
-        let panel = coordinator
-            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
-            .unwrap()
-            .id;
-        let control = coordinator
-            .surface(SurfaceRole::ControlCenter, None)
-            .unwrap()
-            .id;
-        let plugin_control = coordinator
-            .plugin_surface(&crate::plugin_panel::control_center_surface_key(), "nested")
-            .unwrap()
-            .id;
-        let osd = coordinator
-            .surface(SurfaceRole::VolumeOsd, None)
-            .unwrap()
-            .id;
-        coordinator.scene(desktop);
-        coordinator.scene(panel);
-        coordinator.apply_system_status_update(crate::platform::SystemStatusUpdate::Audio(
-            crate::platform::AudioStatus {
-                available: false,
-                devices: Vec::new(),
-                volume_percent: 0,
-                muted: false,
-            },
-        ));
-        let audio = crate::platform::SystemStatusUpdate::Audio(crate::platform::AudioStatus {
-            available: true,
-            devices: Vec::new(),
-            volume_percent: 73,
-            muted: true,
-        });
-        let changes = coordinator.apply_system_status_update(audio.clone());
-        assert_eq!(changes, vec![plugin_control, control, osd]);
-        for id in changes {
-            coordinator.scene(id);
-        }
-        assert!(coordinator.apply_system_status_update(audio).is_empty());
-        let network =
-            crate::platform::SystemStatusUpdate::Network(crate::platform::NetworkStatus {
-                available: true,
-                enabled: true,
-                connected: true,
-                name: "Audit Network".into(),
-                signal_percent: 53,
-                networks: Vec::new(),
-                ..Default::default()
-            });
-        assert_eq!(
-            coordinator.apply_system_status_update(network.clone()),
-            vec![plugin_control, control]
-        );
-        assert!(coordinator.apply_system_status_update(network).is_empty());
-        assert_eq!(
-            coordinator
-                .surface(SurfaceRole::Desktop, Some("nested"))
-                .unwrap()
-                .scene_generation,
-            1
-        );
-        assert_eq!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
-                .unwrap()
-                .scene_generation,
-            1
-        );
     }
 
     #[test]

@@ -3898,25 +3898,6 @@ mod tests {
     }
 
     #[test]
-    fn bundled_control_center_starts_hidden_at_its_declared_corner() {
-        let geometry = DisplayGeometry {
-            x: 100,
-            y: 200,
-            width: 1920,
-            height: 1080,
-            scale: 1.0,
-        };
-        let (_, x, y, width, height, hidden) = super::surface_geometry_for_panel(
-            SurfaceRole::Panel,
-            geometry,
-            PanelEdge::Bottom,
-            crate::plugin_panel::control_center_surface(),
-        );
-        assert_eq!((x, y, width, height), (1582, 608, 420, 600));
-        assert!(hidden);
-    }
-
-    #[test]
     fn hotplug_requires_output_chrome_even_when_the_existing_panel_is_healthy() {
         let before = desired_output_surfaces(
             &["DP-1".to_owned()],

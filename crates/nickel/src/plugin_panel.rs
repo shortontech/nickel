@@ -37,8 +37,6 @@ use nickel_ui::{
 use nickel_ui::{Length, Point, SemanticRole};
 use serde_json::Value;
 
-use crate::control_view::ControlAction;
-use crate::platform::SessionAction;
 use nickel_codex_ui::{ProjectMenuProjection, ProjectMenuRevision};
 use nickel_core::display_projection::ProjectionMode;
 use nickel_plugin_presentation::css::StyleSheet;
@@ -117,32 +115,6 @@ pub fn volume_osd_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     nickel_core::plugins::PluginSurfaceKey {
         plugin_id: volume_osd_manifest().id.clone(),
         surface_id: volume_osd_surface().id.clone(),
-    }
-}
-
-pub fn control_center_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!(
-            "../../../assets/plugins/control-center/plugin.json"
-        ))
-        .expect("bundled control center plugin manifest must be valid")
-    })
-}
-
-pub fn control_center_surface() -> &'static PluginSurface {
-    let surface = control_center_manifest()
-        .surfaces
-        .first()
-        .expect("bundled Control Center needs a surface");
-    assert_eq!(surface.kind, PluginSurfaceKind::Overlay);
-    surface
-}
-
-pub fn control_center_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: control_center_manifest().id.clone(),
-        surface_id: control_center_surface().id.clone(),
     }
 }
 
@@ -518,7 +490,18 @@ pub enum PluginEffect {
         plugin_id: String,
         id: u32,
     },
-    Control(ControlAction),
+    Workspace {
+        plugin_id: String,
+        effect: crate::workspace_capabilities::WorkspaceEffect,
+    },
+    ToggleShowDesktop {
+        plugin_id: String,
+    },
+    PreviewDisplayProjection {
+        plugin_id: String,
+        mode: ProjectionMode,
+        revision: String,
+    },
     Preview(PreviewAction),
 }
 
@@ -547,142 +530,6 @@ fn preview_request(effect: &Value) -> Result<(PreviewAction, PluginCapability), 
             PluginCapability::WindowsContext,
         )),
         _ => Err("unknown preview action".into()),
-    }
-}
-
-fn control_request(effect: &Value) -> Result<(ControlAction, PluginCapability), String> {
-    let action = effect
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or("control action is missing")?;
-    let boolean = || {
-        effect
-            .get("value")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| "control value must be a boolean".to_owned())
-    };
-    let id = || {
-        effect
-            .get("value")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty() && id.len() <= 256)
-            .map(str::to_owned)
-            .ok_or_else(|| "control item ID is invalid".to_owned())
-    };
-    let workspace = || {
-        effect
-            .get("value")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "workspace ID is invalid".to_owned())
-    };
-    match action {
-        "wifi-power" => Ok((
-            ControlAction::SetWifiEnabled(boolean()?),
-            PluginCapability::NetworkControl,
-        )),
-        "wifi-activate" => Ok((
-            ControlAction::ActivateWifi { id: id()? },
-            PluginCapability::NetworkControl,
-        )),
-        "bluetooth-power" => Ok((
-            ControlAction::SetBluetoothPowered(boolean()?),
-            PluginCapability::BluetoothControl,
-        )),
-        "bluetooth-scan" => Ok((
-            ControlAction::SetBluetoothDiscovery(boolean()?),
-            PluginCapability::BluetoothControl,
-        )),
-        "bluetooth-device" => Ok((
-            ControlAction::ToggleBluetoothDevice { id: id()? },
-            PluginCapability::BluetoothControl,
-        )),
-        "audio-mute" => Ok((
-            ControlAction::SetAudioMuted(boolean()?),
-            PluginCapability::AudioControl,
-        )),
-        "audio-volume" => {
-            let percent = effect
-                .get("value")
-                .and_then(Value::as_u64)
-                .filter(|value| *value <= 100)
-                .ok_or("audio volume must be 0 to 100")? as u8;
-            Ok((
-                ControlAction::SetAudioVolume(percent),
-                PluginCapability::AudioControl,
-            ))
-        }
-        "audio-device" => Ok((
-            ControlAction::SelectAudioDevice { id: id()? },
-            PluginCapability::AudioControl,
-        )),
-        "workspace-switch" => Ok((
-            ControlAction::SwitchWorkspace(workspace()?),
-            PluginCapability::WorkspacesSwitch,
-        )),
-        "workspace-create" => Ok((
-            ControlAction::CreateWorkspace,
-            PluginCapability::WorkspacesSwitch,
-        )),
-        "workspace-remove" => Ok((
-            ControlAction::RemoveWorkspace(workspace()?),
-            PluginCapability::WorkspacesSwitch,
-        )),
-        "show-desktop" => Ok((
-            ControlAction::ToggleShowDesktop,
-            PluginCapability::DesktopControl,
-        )),
-        "show-notifications" => Ok((
-            ControlAction::ShowNotifications,
-            PluginCapability::NotificationsRead,
-        )),
-        "projection-preview" => {
-            let mode = match effect.get("value").and_then(Value::as_str) {
-                Some("internal") => ProjectionMode::InternalOnly,
-                Some("duplicate") => ProjectionMode::Duplicate,
-                Some("extend") => ProjectionMode::Extend,
-                Some("external") => ProjectionMode::ExternalOnly,
-                _ => return Err("display mode is invalid".into()),
-            };
-            Ok((
-                ControlAction::PreviewProjection(mode),
-                PluginCapability::DisplayControl,
-            ))
-        }
-        "projection-confirm" => Ok((
-            ControlAction::ConfirmProjection,
-            PluginCapability::DisplayControl,
-        )),
-        "projection-cancel" => Ok((
-            ControlAction::CancelProjection,
-            PluginCapability::DisplayControl,
-        )),
-        "session-lock" => Ok((
-            ControlAction::SessionAction(SessionAction::Lock),
-            PluginCapability::SessionControl,
-        )),
-        "session-prepare" => {
-            let action = match effect.get("value").and_then(Value::as_str) {
-                Some("suspend") => SessionAction::Suspend,
-                Some("restart-shell") => SessionAction::RestartShell,
-                Some("logout") => SessionAction::LogOut,
-                Some("reboot") => SessionAction::Reboot,
-                Some("poweroff") => SessionAction::PowerOff,
-                _ => return Err("session action is invalid".into()),
-            };
-            Ok((
-                ControlAction::RequestSessionAction(action),
-                PluginCapability::SessionControl,
-            ))
-        }
-        "session-confirm" => Ok((
-            ControlAction::ConfirmSessionAction,
-            PluginCapability::SessionControl,
-        )),
-        "session-cancel" => Ok((
-            ControlAction::CancelSessionAction,
-            PluginCapability::SessionControl,
-        )),
-        _ => Err("unknown control action".into()),
     }
 }
 
@@ -1401,14 +1248,6 @@ impl PluginPanelApplication {
     }
 
     #[cfg(test)]
-    pub(crate) fn control_center_with_test_source(
-        source: &str,
-        data: &Value,
-    ) -> Result<Self, String> {
-        Self::new_with_manifest(source, control_center_manifest(), Some(data.to_string()))
-    }
-
-    #[cfg(test)]
     pub(crate) fn on_screen_keyboard_with_test_source(
         source: &str,
         data: &Value,
@@ -1695,6 +1534,8 @@ impl PluginPanelApplication {
                     | "features"
                     | "shortcuts"
                     | "notifications"
+                    | "workspaces"
+                    | "desktop"
                     | "audio"
                     | "displays"
                     | "tray"
@@ -1749,6 +1590,16 @@ impl PluginPanelApplication {
                 .contains(&PluginCapability::ApplicationsRead)
         {
             return Err("application data requires applications-read".into());
+        }
+        for (field, capability) in [
+            ("workspaces", PluginCapability::WorkspacesRead),
+            ("desktop", PluginCapability::DesktopControl),
+        ] {
+            if fields.iter().any(|(name, _)| *name == field)
+                && !manifest.capabilities.contains(&capability)
+            {
+                return Err(format!("{field} read is not granted"));
+            }
         }
         if fields.iter().any(|(field, _)| *field == "audio")
             && !manifest.capabilities.contains(&PluginCapability::AudioRead)
@@ -2845,24 +2696,72 @@ impl PluginPanelApplication {
                                 }
                             }
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("control-action") =>
+                        _ if effect["type"]
+                            .as_str()
+                            .is_some_and(|kind| kind.starts_with("workspaces.")) =>
                         {
-                            match control_request(&effect) {
-                                Ok((action, capability))
-                                    if effect_manifest.capabilities.contains(&capability) =>
-                                {
-                                    approved.push(PluginEffect::Control(action));
-                                }
-                                Ok(_) => {
-                                    self.last_error = Some("control action is not granted".into());
-                                    return;
-                                }
+                            let parsed =
+                                crate::workspace_capabilities::WorkspaceEffect::parse(&effect)
+                                    .and_then(|request| {
+                                        if !effect_manifest
+                                            .capabilities
+                                            .contains(&request.capability())
+                                        {
+                                            return Err("workspace control is not granted".into());
+                                        }
+                                        let data: Value = self
+                                            .projection_data
+                                            .as_deref()
+                                            .and_then(|data| serde_json::from_str(data).ok())
+                                            .ok_or("workspace observation unavailable")?;
+                                        request.validate(&data["workspaces"])?;
+                                        Ok(request)
+                                    });
+                            match parsed {
+                                Ok(effect) => approved.push(PluginEffect::Workspace {
+                                    plugin_id: effect_manifest.id.clone(),
+                                    effect,
+                                }),
                                 Err(error) => {
                                     self.last_error = Some(error);
                                     return;
                                 }
                             }
+                        }
+                        _ if effect["type"] == "desktop.toggleShowDesktop" => {
+                            if !effect_manifest
+                                .capabilities
+                                .contains(&PluginCapability::DesktopControl)
+                            {
+                                self.last_error = Some("desktop control is not granted".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::ToggleShowDesktop {
+                                plugin_id: effect_manifest.id.clone(),
+                            });
+                        }
+                        _ if effect["type"] == "displays.previewProjection" => {
+                            let mode = effect["mode"]
+                                .as_str()
+                                .and_then(crate::display_capabilities::projection_mode);
+                            let revision = effect["revision"]
+                                .as_str()
+                                .filter(|revision| revision.len() == 16);
+                            if !effect_manifest
+                                .capabilities
+                                .contains(&PluginCapability::DisplayControl)
+                                || mode.is_none()
+                                || revision.is_none()
+                            {
+                                self.last_error =
+                                    Some("display projection unavailable or invalid".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::PreviewDisplayProjection {
+                                plugin_id: effect_manifest.id.clone(),
+                                mode: mode.unwrap(),
+                                revision: revision.unwrap().into(),
+                            });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("codex-project-refresh")
@@ -4207,7 +4106,6 @@ mod tests {
             "taskbar",
             "notification",
             "run",
-            "control-center",
             "window-preview",
             "volume-osd",
         ] {
@@ -4404,60 +4302,6 @@ mod tests {
     }
 
     #[test]
-    fn bundled_control_center_uses_shared_window_and_keeps_controls() {
-        let package = PluginPackage::load(format!(
-            "{}/../../assets/plugins/control-center",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
-        let data = validation_surface_projection(&package, control_center_surface()).unwrap();
-        let mut host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::control_center_manifest(),
-                "main.js",
-                data.to_string(),
-            )
-            .unwrap(),
-            420,
-            600,
-        );
-        assert!(matches!(
-            host.application().node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        for name in ["Mute", "Show desktop", "Lock", "Restart Nickel"] {
-            assert!(
-                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: SemanticRole::Button,
-                    name: name.into(),
-                })
-                .is_ok()
-            );
-        }
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(420, 600, 1.0);
-        host.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(420, 600, |x, y| {
-            let pixel = renderer.pixels()[(y * 420 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/control-center-shared.png");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image.save(output).unwrap();
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Shortcut(Shortcut::Escape)],
-            ..Default::default()
-        });
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::ToggleControlCenter]
-        );
-    }
-
-    #[test]
     fn bundled_keyboard_uses_shared_window_and_keeps_key_actions() {
         let package = PluginPackage::load(format!(
             "{}/../../assets/plugins/on-screen-keyboard",
@@ -4537,25 +4381,6 @@ mod tests {
     }
 
     #[test]
-    fn control_section_contribution_dispatches_its_own_granted_callback() {
-        let package = PluginPackage::load(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/plugins/example-control-section"
-        ))
-        .unwrap();
-        PluginPanelApplication::validate_package(&package).unwrap();
-        let mut application = PluginPanelApplication::from_package(&package).unwrap();
-        assert_eq!(
-            application.section_contributions().unwrap()[0].id,
-            "find-apps"
-        );
-        assert!(application.activate_section("find-apps"));
-        assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
-        assert!(!application.activate_section("missing"));
-        assert!(application.take_effects().is_empty());
-    }
-
-    #[test]
     fn contribution_callbacks_work_inside_generic_component_containers() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins");
         let mut action = PluginPackage::load(format!("{root}/example-task-action")).unwrap();
@@ -4579,48 +4404,6 @@ mod tests {
         );
         assert!(application.activate_action("find-apps", "org.nickel.mail"));
         assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
-
-        let mut section = PluginPackage::load(format!("{root}/example-control-section")).unwrap();
-        section.source = r#"
-            function App() {
-                return h(Div, {}, h(Column, {},
-                    h(Section, {id: 'find-apps', label: 'Applications', value: 'Search',
-                        onClick: () => nickel.request('show-launcher')})));
-            }
-        "#
-        .into();
-        let mut application = PluginPanelApplication::from_package(&section).unwrap();
-        assert_eq!(
-            application.section_contributions().unwrap()[0].id,
-            "find-apps"
-        );
-        assert!(application.activate_section("find-apps"));
-        assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
-
-        let mut badge = PluginPackage::load(format!("{root}/example-task-badge")).unwrap();
-        badge.source = r#"
-            function App() {
-                return h(Div, {}, h(Badge,
-                    {item: 'org.example.mail', label: 'Unread mail', count: 3}));
-            }
-        "#
-        .into();
-        let application = PluginPanelApplication::from_package(&badge).unwrap();
-        assert_eq!(application.badge_contributions().unwrap()[0].2, 3);
-
-        let mut widget = PluginPackage::load(format!("{root}/example-widget-contributor")).unwrap();
-        widget.source = r#"
-            function App() {
-                return h(Div, {}, h(Widget,
-                    {label: 'Unread mail', value: '3', percent: 50}));
-            }
-        "#
-        .into();
-        let application = PluginPanelApplication::from_package(&widget).unwrap();
-        assert_eq!(
-            application.widget_contributions().unwrap()[0].label,
-            "Unread mail"
-        );
     }
 
     #[test]
@@ -6397,6 +6180,54 @@ mod tests {
     }
 
     #[test]
+    fn public_workspace_requests_require_grants_and_reject_retired_private_control_actions() {
+        let mut manifest = manifest().clone();
+        manifest.capabilities.clear();
+        let snapshot = crate::workspace_capabilities::snapshot(
+            &[
+                crate::platform::WorkspaceSummary {
+                    id: 9,
+                    active: true,
+                },
+                crate::platform::WorkspaceSummary {
+                    id: 44,
+                    active: false,
+                },
+            ],
+            true,
+        );
+        let data = serde_json::json!({"workspaces":snapshot}).to_string();
+        let source = "function App(){return h(Panel,{},h(Button,{id:'go',onClick:()=>nickel.workspaces.switch('44')},'Go'));}";
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        assert!(
+            denied
+                .sync_host_data_field("workspaces", &snapshot)
+                .is_err()
+        );
+        denied.update(denied.button_message("go").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest.capabilities.extend([
+            PluginCapability::WorkspacesRead,
+            PluginCapability::WorkspacesSwitch,
+        ]);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data)).unwrap();
+        granted.update(granted.button_message("go").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::Workspace { .. }]
+        ));
+        let obsolete = "function App(){return h(Panel,{},h(Button,{id:'go',onClick:()=>nickel.request({type:'control-action',action:'workspace-switch',value:44})},'Go'));}";
+        let mut retired =
+            PluginPanelApplication::new_with_manifest(obsolete, &manifest, Some("{}".into()))
+                .unwrap();
+        retired.update(retired.button_message("go").unwrap());
+        assert!(retired.take_effects().is_empty());
+    }
+
+    #[test]
     fn optional_feature_effects_require_grants_and_the_current_native_snapshot() {
         let mut manifest = manifest().clone();
         manifest.capabilities.clear();
@@ -7566,19 +7397,12 @@ mod tests {
     }
 
     #[test]
-    fn external_preview_and_control_actions_use_grants_instead_of_plugin_identity() {
-        for (request, capability, expected) in [
-            (
-                "{type: 'preview-action', action: 'activate', window: '71'}",
-                PluginCapability::WindowsFocus,
-                PluginEffect::Preview(PreviewAction::Activate(crate::model::WindowId(71))),
-            ),
-            (
-                "{type: 'control-action', action: 'audio-volume', value: 25}",
-                PluginCapability::AudioControl,
-                PluginEffect::Control(ControlAction::SetAudioVolume(25)),
-            ),
-        ] {
+    fn external_preview_actions_use_grants_instead_of_plugin_identity() {
+        for (request, capability, expected) in [(
+            "{type: 'preview-action', action: 'activate', window: '71'}",
+            PluginCapability::WindowsFocus,
+            PluginEffect::Preview(PreviewAction::Activate(crate::model::WindowId(71))),
+        )] {
             let mut external_manifest = manifest().clone();
             external_manifest.id = "org.example.desktop-controls".into();
             external_manifest.capabilities.clear();

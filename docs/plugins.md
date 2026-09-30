@@ -441,18 +441,14 @@ declared capabilities and current host validation. The
 Any provider can declare a `section` slot and read bounded
 `{pluginId, id, label, value}` entries from `nickel.data.slots[slotId]`.
 Control Center provides the `control-section` slot. An extension can return
-`h(Section, { id: "find-apps", label: "Applications", value: "Search the catalog", onClick: () => nickel.request("show-launcher") })`.
-On click, a provider requests `{type: "invoke-plugin-slot-section", slot,
-pluginId, id}`. Nickel checks the current projection and executes the callback
-in the contributor's JS host under its own grants. Up to four sections appear
-in Control Center's scrollable JSX view. Replacement selection and additive
-ordering match the other slots. The
-[example control section](../assets/plugins/example-control-section/) is a
-working package.
-For a quick edit loop, run
-`nickel-plugin dev assets/plugins/example-control-section` (or use the
-[task action example](../assets/plugins/example-task-action/)). The command
-stages the extension in an isolated profile and reloads it after edits.
+Quick Settings renders ordinary components from the `system.controls`
+composition collection. Each callback runs in its contributor's own package
+context and keeps that package's grants. The
+[example control section](../assets/plugins/example-control-section/) declares
+an ordinary module export and a semantic composition contribution. It uses
+`nickel.surfaces.show("launcher")` through its `launcher-show` grant. Legacy
+`control-section` slots and indexed section callbacks are retired.
+
 Nickel measures the retained native component tree in each extension's own
 account. The target plugin's rendered UI measurement also includes contributed
 nodes, so these category totals overlap; they should not be added to estimate
@@ -512,3 +508,22 @@ reference IDs, keys, scopes and actual global registration availability. Its
 `editable` value is false: Nickel currently has no native shortcut remapping
 service. Ordinary Settings pages register with `registerSettingsPage`; these
 clients do not expose page indexes or native page views.
+
+### Workspaces, desktop and display presets
+
+`nickel.workspaces.get()` requires `workspaces-read`. It returns copied workspace
+rows with stable decimal string IDs, the active ID, an opaque revision and
+operation availability. `switch(id)`, `create()` and `remove(id)` require
+`workspaces-switch` and capture the current revision. Nickel checks the current
+inventory, grant and session lock before dispatching to the native owner.
+`nickel.desktop.get()` and `toggleShowDesktop()` require `desktop-control`.
+Workspace and show-desktop operations currently report unavailable on Windows.
+
+`nickel.displays.previewProjection(mode)` accepts an ID from
+`nickel.displays.get().projectionModes`. It requires `display-control` and uses
+the same revision, ownership, 15-second recovery and `confirm()`/`revert()`
+service as a full display layout. Presets preserve output modes and transforms.
+Windows currently exposes an empty preset list. Super+P opens the trusted native
+display recovery chooser independently of the selected shell's Quick Settings
+component. Ordinary Quick Settings is an ordinary JSX surface; retired
+`control-action` requests are unavailable.

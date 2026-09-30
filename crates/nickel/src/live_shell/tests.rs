@@ -435,11 +435,11 @@ use nickel_ui::{
 use nickel_ui_testkit::{Scenario, Selector};
 
 use super::{
-    ControlAction, HostRuntimeSamples, LiveShell, desktop_label_foreground, initial_wallpaper,
+    HostRuntimeSamples, LiveShell, desktop_label_foreground, initial_wallpaper,
     panel_status_layout, panel_tray_icons,
     platform::{
-        AudioStatus, BluetoothStatus, FeedState, FeedStatus, GlobalShortcut, NetworkStatus,
-        SecureStorageState, SystemStatusUpdate,
+        AudioStatus, BluetoothStatus, GlobalShortcut, NetworkStatus, SecureStorageState,
+        SystemStatusUpdate,
     },
     preview_refresh_due, retain_unchanged_desktop_icons, shortcut_capability_status,
     visible_tray_item, window_belongs_to_panel,

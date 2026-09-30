@@ -3,14 +3,25 @@
   "id": "org.nickel.example-control-section",
   "name": "Example control section",
   "author": "Nickel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entry": "main.js",
   "surfaces": [],
-  "capabilities": ["launcher-show"],
-  "contributes": [{
-    "target_plugin": "org.nickel.control-center",
-    "target_slot": "control-section",
-    "contract": "section",
-    "mode": "add"
-  }]
+  "capabilities": [
+    "launcher-show"
+  ],
+  "composition": {
+    "api_version": 1,
+    "id": "org.nickel.example-control-section",
+    "version": "0.2.0",
+    "exports": {
+      "example.controls.applications": "./main.js#ControlSection"
+    },
+    "contributions": [
+      {
+        "collection": "system.controls",
+        "id": "find-apps",
+        "implementation": "./main.js#ControlSection"
+      }
+    ]
+  }
 }

@@ -1,6 +1,6 @@
 window.control-center {
-    background: #222730f1;
-    border: 1px solid #657188;
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
     border-radius: 16px;
     padding: 12px;
 }
@@ -19,7 +19,7 @@ window.control-center row {
 }
 
 window.control-center text {
-    color: #f3f5f8;
+    color: var(--nickel-text);
     font-size: 14px;
     line-height: 20px;
 }
@@ -37,15 +37,15 @@ text.control-section-title {
 window.control-center button {
     min-height: 34px;
     padding: 6px 10px;
-    background: #353c4b;
-    border: 1px solid #596274;
+    background: var(--nickel-surface-hover);
+    border: 1px solid var(--nickel-border);
     border-radius: 8px;
-    color: #f3f5f8;
+    color: var(--nickel-text);
     font-size: 14px;
 }
 
 progress.audio-progress {
-    background: #4a5262;
-    color: #7ba6ff;
+    background: var(--nickel-surface-hover);
+    color: var(--nickel-accent);
     border-radius: 4px;
 }

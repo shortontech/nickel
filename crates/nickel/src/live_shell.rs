@@ -117,7 +117,7 @@ use nickel_ui::{
 use crate::notification::{NotificationAction, NotificationRequest};
 
 use crate::{
-    control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
+    control_view::ControlAction,
     file_window_host::{FileWindowHost, default_file_window_host},
     launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherView},
     launcher_icon_cache::LauncherIconCache,
@@ -128,6 +128,7 @@ use crate::{
         self, AudioStatus, BluetoothStatus, FeedState, FeedStatus, NetworkStatus, NotificationFeed,
         NotificationSource, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed,
     },
+    projection_recovery::{ProjectionRecoveryApp, ProjectionRecoveryHost},
     screenshot::ScreenshotTool,
     session_host::{SessionHost, default_session_host},
     window_preview::{
@@ -772,7 +773,7 @@ pub struct LiveShell {
     notification_host: NotificationHost,
     panel_origin_x: i32,
     panel_origin_y: i32,
-    control_host: ControlCenterHost,
+    control_host: ProjectionRecoveryHost,
     control_change_token: HostChangeToken,
     control_deadline: Option<Instant>,
     projection_chooser: nickel_core::display_projection::ProjectionChooser,
@@ -1427,16 +1428,7 @@ impl LiveShell {
             };
         #[cfg(not(target_os = "linux"))]
         let secure_storage_state = platform::SecureStorageState::Ready;
-        let control_host = ControlCenterHost::new(
-            ControlCenterApp::new(
-                network.clone(),
-                bluetooth.clone(),
-                audio.clone(),
-                workspaces.clone(),
-            ),
-            380,
-            650,
-        );
+        let control_host = ProjectionRecoveryHost::new(ProjectionRecoveryApp::new(), 380, 650);
         let notification_host = NotificationHost::new(NotificationApp::new(palette), 420, 180);
         let desktop_host = nickel_ui::UiHost::new(
             DesktopApplication::new(wallpaper.clone(), palette, file_window_host.clone()),
@@ -2492,9 +2484,9 @@ impl LiveShell {
                 .run_host_ref()
                 .is_none_or(|host| host.remote_access_protected()),
             SurfaceRole::ControlCenter => self
-                .control_plugin_active()
+                .quick_settings_surface_active()
                 .then(|| {
-                    self.control_plugin_host_ref()
+                    self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
                         .unwrap()
                         .remote_access_protected()
                 })
@@ -2562,7 +2554,7 @@ impl LiveShell {
             }
             SurfaceRole::Launcher => self.run_host_ref().map(|host| host.layout_snapshot()),
             SurfaceRole::ControlCenter => self
-                .control_plugin_host_ref()
+                .plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
                 .map(|host| host.layout_snapshot())
                 .or_else(|| Some(self.control_host.layout_snapshot())),
             SurfaceRole::Notification => Some(self.notification_host.layout_snapshot()),
@@ -2603,9 +2595,9 @@ impl LiveShell {
                 .plugin_panel_scene(&crate::plugin_panel::run_surface_key(), width, height)
                 .unwrap_or_default(),
             SurfaceRole::ControlCenter => {
-                if self.control_plugin_active() {
+                if self.quick_settings_surface_active() {
                     self.plugin_panel_scene(
-                        &crate::plugin_panel::control_center_surface_key(),
+                        &self.active_shell_surface_key("quick-settings"),
                         width,
                         height,
                     )
@@ -3182,7 +3174,10 @@ impl LiveShell {
         }
     }
 
-    fn active_shell_surface_key(&self, surface: &str) -> nickel_core::plugins::PluginSurfaceKey {
+    pub(crate) fn active_shell_surface_key(
+        &self,
+        surface: &str,
+    ) -> nickel_core::plugins::PluginSurfaceKey {
         nickel_core::plugins::PluginSurfaceKey {
             plugin_id: self.active_shell_package_id.clone(),
             surface_id: surface.into(),
@@ -4032,6 +4027,46 @@ impl LiveShell {
             .then(|| self.audio_plugin_data())
     }
 
+    fn plugin_workspace_snapshot(&self, id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(id)
+            .map(|package| &package.manifest)
+            .or_else(|| self.plugin_registry.get(id).map(|entry| &entry.manifest))?;
+        manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::WorkspacesRead)
+            .then(|| {
+                crate::workspace_capabilities::snapshot(
+                    &self.workspaces,
+                    cfg!(target_os = "linux")
+                        && !self.locked
+                        && manifest
+                            .capabilities
+                            .contains(&nickel_core::plugins::PluginCapability::WorkspacesSwitch),
+                )
+            })
+    }
+    fn plugin_desktop_snapshot(&self, id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(id)
+            .map(|package| &package.manifest)
+            .or_else(|| self.plugin_registry.get(id).map(|entry| &entry.manifest))?;
+        manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::DesktopControl).then(||serde_json::json!({"available":cfg!(target_os="linux"),"operations":{"toggleShowDesktop":cfg!(target_os="linux")&&!self.locked}}))
+    }
+    fn public_native_granted(
+        &self,
+        id: &str,
+        capability: nickel_core::plugins::PluginCapability,
+    ) -> bool {
+        !self.locked
+            && self.plugin_registry.get(id).is_some_and(|entry| {
+                entry.desired_enabled
+                    && entry.health == nickel_core::plugins::PluginHealth::Running
+                    && entry.manifest.capabilities.contains(&capability)
+            })
+    }
     fn plugin_displays(&self, plugin_id: &str) -> Option<serde_json::Value> {
         let manifest = self
             .external_plugin_packages
@@ -4053,6 +4088,7 @@ impl LiveShell {
             return Some(match self.session_host.projection_outputs() {
                 Ok(outputs) => serde_json::json!({"available": true, "outputs": outputs,
                     "revision": crate::display_capabilities::revision(&outputs),
+                    "projectionModes": if !self.control_host.application().view_state().projection_only {crate::display_capabilities::projection_modes(&outputs)} else {serde_json::json!([])},
                     "application_scale": self.application_scale_service.snapshot(),
                     "operations": {"setOrientation": true, "setApplicationScale": true, "identify": true},
                     "pending_confirmation": self.display_preview.is_some(),
@@ -4071,6 +4107,7 @@ impl LiveShell {
                 "available": read.available,
                 "reason": read.reason,
                 "outputs": read.outputs,
+                "projectionModes": [],
                 "revision": read.revision,
                 "pending_confirmation": read.pending_confirmation,
                 "can_confirm": read.can_confirm,
@@ -4344,6 +4381,8 @@ impl LiveShell {
             ("wifi", self.plugin_connectivity(id, true)),
             ("bluetooth", self.plugin_connectivity(id, false)),
             ("displays", self.plugin_displays(id)),
+            ("workspaces", self.plugin_workspace_snapshot(id)),
+            ("desktop", self.plugin_desktop_snapshot(id)),
         ]
         .into_iter()
         .filter_map(|(name, value)| value.map(|value| (name, value)))
@@ -4401,6 +4440,8 @@ impl LiveShell {
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
         let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
         let displays = self.plugin_displays(&key.plugin_id);
+        let workspaces = self.plugin_workspace_snapshot(&key.plugin_id);
+        let desktop = self.plugin_desktop_snapshot(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
         let result = (|| {
@@ -4440,6 +4481,8 @@ impl LiveShell {
                     ("wifi", wifi.as_ref()),
                     ("bluetooth", bluetooth.as_ref()),
                     ("displays", displays.as_ref()),
+                    ("workspaces", workspaces.as_ref()),
+                    ("desktop", desktop.as_ref()),
                 ]
                 .into_iter()
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
@@ -5589,21 +5632,6 @@ impl LiveShell {
         );
     }
 
-    fn retire_control_plugin_state(&mut self) {
-        self.retire_extra_panel_plugin_state(&crate::plugin_panel::control_center_manifest().id);
-        if self.control_visible && !self.control_surface_available() {
-            self.set_control_visible(false);
-        }
-    }
-
-    fn fail_control_plugin_runtime(&mut self, error: String) {
-        self.fail_bundled_plugin_runtime(
-            &crate::plugin_panel::control_center_manifest().id,
-            error,
-            Self::retire_control_plugin_state,
-        );
-    }
-
     fn retire_volume_osd_plugin_state(&mut self) {
         let key = crate::plugin_panel::volume_osd_surface_key();
         self.plugin_surface_hosts.remove(&key);
@@ -6111,7 +6139,7 @@ impl LiveShell {
         push(
             "control",
             self.control_deadline.or_else(|| {
-                self.control_plugin_host_ref()
+                self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
                     .and_then(|host| host.next_deadline())
             }),
         );
@@ -6155,8 +6183,16 @@ impl LiveShell {
             }
             SurfaceRole::Launcher => self.run_host_ref().map(|host| host_token(host.inspect())),
             SurfaceRole::ControlCenter => self
-                .control_plugin_active()
-                .then(|| host_token(self.control_plugin_host_ref().unwrap().inspect()))
+                .quick_settings_surface_active()
+                .then(|| {
+                    host_token(
+                        self.plugin_panel_host_ref(
+                            &self.active_shell_surface_key("quick-settings"),
+                        )
+                        .unwrap()
+                        .inspect(),
+                    )
+                })
                 .or(Some(self.control_change_token)),
             SurfaceRole::Notification => {
                 let trusted = self.trusted_notification_visible();
@@ -6610,18 +6646,6 @@ impl LiveShell {
         self.plugin_panel_host_for(&crate::plugin_panel::run_surface_key())
     }
 
-    fn control_plugin_host_ref(
-        &self,
-    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_ref(&crate::plugin_panel::control_center_surface_key())
-    }
-
-    fn control_plugin_host_mut(
-        &mut self,
-    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_for(&crate::plugin_panel::control_center_surface_key())
-    }
-
     fn preview_plugin_host_ref(
         &self,
     ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
@@ -7034,7 +7058,7 @@ impl LiveShell {
                     changed = true;
                 }
                 crate::plugin_panel::PluginEffect::ShowControlCenter => {
-                    self.control_host.application_mut().show_control_center();
+                    self.control_host.application_mut().dismiss();
                     self.set_control_visible(true);
                     if self.control_visible {
                         self.set_launcher_visible(false);
@@ -7585,11 +7609,60 @@ impl LiveShell {
                         }
                     }
                 }
-                crate::plugin_panel::PluginEffect::Control(action) => {
-                    if self.control_plugin_action_allowed(&action) {
-                        self.control_host.application_mut().update(action);
-                        self.apply_control_effects();
-                        changed = true;
+                crate::plugin_panel::PluginEffect::Workspace { plugin_id, effect } => {
+                    if self.public_native_granted(&plugin_id, effect.capability())
+                        && self
+                            .plugin_workspace_snapshot(&plugin_id)
+                            .is_some_and(|snapshot| effect.validate(&snapshot).is_ok())
+                    {
+                        let command = match effect.operation.as_str() {
+                            "workspaces.switch" => {
+                                ShellCommand::SwitchWorkspace(effect.id.unwrap())
+                            }
+                            "workspaces.create" => ShellCommand::CreateWorkspace,
+                            "workspaces.remove" => {
+                                ShellCommand::RemoveWorkspace(effect.id.unwrap())
+                            }
+                            _ => continue,
+                        };
+                        changed |= self.send_session_command("plugin-workspaces", command);
+                        changed |= self.refresh();
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ToggleShowDesktop { plugin_id } => {
+                    if cfg!(target_os = "linux")
+                        && self.public_native_granted(
+                            &plugin_id,
+                            nickel_core::plugins::PluginCapability::DesktopControl,
+                        )
+                    {
+                        changed |= self.send_session_command(
+                            "plugin-show-desktop",
+                            ShellCommand::ToggleShowDesktop,
+                        );
+                        changed |= self.refresh();
+                    }
+                }
+                crate::plugin_panel::PluginEffect::PreviewDisplayProjection {
+                    plugin_id,
+                    mode,
+                    revision,
+                } => {
+                    if self.plugin_display_control_granted(&plugin_id)
+                        && !self.locked
+                        && self.projection_chooser.pending().is_none()
+                    {
+                        #[cfg(target_os = "linux")]
+                        if let Ok(outputs) = self.session_host.projection_outputs() {
+                            if let Some(layout) =
+                                crate::display_capabilities::projection_layout(&outputs, mode)
+                            {
+                                changed |= self
+                                    .preview_plugin_display_layout(plugin_id, layout, &revision);
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        let _ = (mode, revision);
                     }
                 }
                 crate::plugin_panel::PluginEffect::Preview(action) => {
@@ -7627,8 +7700,14 @@ impl LiveShell {
         if !self.control_visible {
             return Default::default();
         }
-        if self.control_plugin_active() {
-            return self.control_plugin_event(event, size, limit, authority);
+        if self.quick_settings_surface_active() {
+            return self.plugin_surface_host_event(
+                &self.active_shell_surface_key("quick-settings"),
+                event,
+                size,
+                limit,
+                authority,
+            );
         }
         if !self.control_host.application().view_state().projection_only {
             return Default::default();
@@ -7655,8 +7734,12 @@ impl LiveShell {
             SurfaceRole::Launcher if self.run_visible => self.run_host_ref()?.inspect(),
             SurfaceRole::Launcher => self.run_host_ref()?.inspect(),
             SurfaceRole::ControlCenter => self
-                .control_plugin_active()
-                .then(|| self.control_plugin_host_ref().unwrap().inspect())
+                .quick_settings_surface_active()
+                .then(|| {
+                    self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
+                        .unwrap()
+                        .inspect()
+                })
                 .or_else(|| {
                     self.control_host
                         .application()
@@ -7692,9 +7775,15 @@ impl LiveShell {
                 if !self.control_visible || !self.control_surface_available() {
                     return false;
                 }
-                if self.control_plugin_active() {
+                if self.quick_settings_surface_active() {
                     return self
-                        .control_plugin_event(HostEvent::Ui(event), (width, height), None, None)
+                        .plugin_surface_host_event(
+                            &self.active_shell_surface_key("quick-settings"),
+                            HostEvent::Ui(event),
+                            (width, height),
+                            None,
+                            None,
+                        )
                         .changed;
                 }
                 self.sync_control_host(width, height);
@@ -8150,16 +8239,15 @@ impl LiveShell {
                 if !self.control_visible {
                     return None;
                 }
-                let bounds = if self.control_plugin_active() {
-                    taskbar_plugin_control_bounds(self.control_plugin_host_ref()?, "session-lock")?
+                let bounds = if self.quick_settings_surface_active() {
+                    taskbar_plugin_control_bounds(
+                        self.plugin_panel_host_ref(
+                            &self.active_shell_surface_key("quick-settings"),
+                        )?,
+                        "session-lock",
+                    )?
                 } else {
-                    self.control_host
-                        .semantic_targets_for_message(&ControlAction::SessionAction(
-                            crate::platform::SessionAction::Lock,
-                        ))
-                        .into_iter()
-                        .next()?
-                        .bounds
+                    return None;
                 };
                 Some(ResolvedShellTarget {
                     role: ShellRole::ControlCenter,
@@ -9345,7 +9433,7 @@ impl LiveShell {
             platform::GlobalShortcut::OpenFiles => self.launch_named_application("Nickel File"),
             platform::GlobalShortcut::OpenSettings => self.launch_settings(None),
             platform::GlobalShortcut::ShowControlCenter => {
-                self.control_host.application_mut().show_control_center();
+                self.control_host.application_mut().dismiss();
                 self.set_control_visible(true);
                 true
             }
@@ -9365,6 +9453,8 @@ impl LiveShell {
                 self.send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop)
             }
             platform::GlobalShortcut::ProjectDisplays => {
+                self.rollback_projection();
+                self.revert_plugin_display_layout(None);
                 self.control_host
                     .application_mut()
                     .show_projection_chooser();
@@ -9604,7 +9694,7 @@ impl LiveShell {
             || self.notification_host.pointer_interaction_active()
             || self.control_host.pointer_interaction_active()
             || self
-                .control_plugin_host_ref()
+                .plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
                 .is_some_and(|host| host.pointer_interaction_active())
             || self.keyboard_host.pointer_interaction_active()
             || self.keyboard_resize.is_some()
@@ -9900,9 +9990,9 @@ impl LiveShell {
         if !self.send_session_command(
             "control-center-focus",
             if visible {
-                if self.control_plugin_active() {
+                if self.quick_settings_surface_active() {
                     ShellCommand::FocusPluginSurface {
-                        key: crate::plugin_panel::control_center_surface_key(),
+                        key: self.active_shell_surface_key("quick-settings"),
                     }
                 } else {
                     ShellCommand::FocusControlCenter
@@ -9923,7 +10013,7 @@ impl LiveShell {
     pub(crate) fn apply_control_visibility(&mut self, visible: bool) {
         self.control_visible = visible;
         if !visible {
-            self.control_host.application_mut().show_control_center();
+            self.control_host.application_mut().dismiss();
         }
     }
 
@@ -9974,15 +10064,17 @@ impl LiveShell {
         if !self.control_surface_available() {
             return false;
         }
-        if self.control_plugin_active() {
+        if self.quick_settings_surface_active() {
             let point = Point { x, y };
-            let pressed = self.control_plugin_event(
+            let pressed = self.plugin_surface_host_event(
+                &self.active_shell_surface_key("quick-settings"),
                 HostEvent::Ui(UiEvent::PointerPressed(point)),
                 (width, height),
                 None,
                 None,
             );
-            let released = self.control_plugin_event(
+            let released = self.plugin_surface_host_event(
+                &self.active_shell_surface_key("quick-settings"),
                 HostEvent::Ui(UiEvent::PointerReleased(point)),
                 (width, height),
                 None,
@@ -10020,9 +10112,15 @@ impl LiveShell {
             Some(KeyCode::Enter | KeyCode::NumpadEnter) => ControllerAction::Confirm,
             _ => return false,
         };
-        if self.control_plugin_active() {
+        if self.quick_settings_surface_active() {
             return self
-                .control_plugin_event(HostEvent::Controller(action), (width, height), None, None)
+                .plugin_surface_host_event(
+                    &self.active_shell_surface_key("quick-settings"),
+                    HostEvent::Controller(action),
+                    (width, height),
+                    None,
+                    None,
+                )
                 .changed;
         }
         self.step_control_host(HostBatch {
@@ -10042,9 +10140,15 @@ impl LiveShell {
         if !self.control_visible || !self.control_surface_available() {
             return false;
         }
-        if self.control_plugin_active() {
+        if self.quick_settings_surface_active() {
             let changed = self
-                .control_plugin_event(HostEvent::Controller(action), (width, height), None, None)
+                .plugin_surface_host_event(
+                    &self.active_shell_surface_key("quick-settings"),
+                    HostEvent::Controller(action),
+                    (width, height),
+                    None,
+                    None,
+                )
                 .changed;
             let dismissed = action == ControllerAction::Cancel && self.control_visible;
             if dismissed {
@@ -10080,7 +10184,7 @@ impl LiveShell {
                 true
             }
             SurfaceRole::ControlCenter => {
-                self.control_host.application_mut().show_control_center();
+                self.control_host.application_mut().dismiss();
                 std::mem::replace(&mut self.control_visible, false)
             }
             SurfaceRole::CodexProjectMenu => {
@@ -11745,13 +11849,9 @@ impl LiveShell {
             .application_mut()
             .set_palette(self.palette);
         let supported_projection_modes = supported_projection_modes(self.session_host.as_ref());
-        self.control_host.application_mut().sync(
-            &self.network,
-            &self.bluetooth,
-            &self.audio,
-            &self.workspaces,
-            &supported_projection_modes,
-        );
+        self.control_host
+            .application_mut()
+            .sync_projection_modes(&supported_projection_modes);
         self.step_control_host(HostBatch {
             surface_size: Some((width, height)),
             events: vec![HostEvent::Poll],
@@ -11759,150 +11859,9 @@ impl LiveShell {
         });
     }
 
-    fn control_plugin_action_allowed(&self, action: &ControlAction) -> bool {
-        if !self.control_visible || self.control_plugin_host_ref().is_none() {
-            return false;
-        }
-        match action {
-            ControlAction::SetWifiEnabled(enabled) => {
-                self.network.available && *enabled != self.network.enabled
-            }
-            ControlAction::ActivateWifi { id } => self
-                .network
-                .networks
-                .iter()
-                .take(8)
-                .any(|item| item.id == *id && item.saved && !item.connected),
-            ControlAction::SetBluetoothPowered(powered) => {
-                self.bluetooth.available && *powered != self.bluetooth.powered
-            }
-            ControlAction::SetBluetoothDiscovery(discovering) => {
-                self.bluetooth.available
-                    && self.bluetooth.powered
-                    && *discovering != self.bluetooth.discovering
-            }
-            ControlAction::ToggleBluetoothDevice { id } => {
-                self.bluetooth.devices.iter().take(8).any(|item| {
-                    item.id == *id
-                        && if cfg!(target_os = "windows") {
-                            !item.paired
-                        } else {
-                            item.paired
-                        }
-                })
-            }
-            ControlAction::SetAudioMuted(muted) => {
-                self.audio.available && *muted != self.audio.muted
-            }
-            ControlAction::SetAudioVolume(percent) => self.audio.available && *percent <= 100,
-            ControlAction::SelectAudioDevice { id } => {
-                self.audio.devices.iter().take(8).any(|item| item.id == *id)
-            }
-            ControlAction::SwitchWorkspace(id) => {
-                self.workspaces.iter().take(10).any(|item| item.id == *id)
-            }
-            ControlAction::CreateWorkspace => true,
-            ControlAction::RemoveWorkspace(id) => {
-                self.workspaces.len() > 1
-                    && self
-                        .workspaces
-                        .iter()
-                        .any(|item| item.id == *id && item.active)
-            }
-            ControlAction::ToggleShowDesktop | ControlAction::ShowNotifications => true,
-            ControlAction::PreviewProjection(mode) => {
-                self.control_host
-                    .application()
-                    .view_state()
-                    .pending_projection
-                    .is_none()
-                    && supported_projection_modes(self.session_host.as_ref()).contains(mode)
-            }
-            ControlAction::ConfirmProjection | ControlAction::CancelProjection => self
-                .control_host
-                .application()
-                .view_state()
-                .pending_projection
-                .is_some(),
-            ControlAction::SessionAction(platform::SessionAction::Lock) => true,
-            ControlAction::RequestSessionAction(_) => self
-                .control_host
-                .application()
-                .view_state()
-                .pending_session_action
-                .is_none(),
-            ControlAction::ConfirmSessionAction | ControlAction::CancelSessionAction => self
-                .control_host
-                .application()
-                .view_state()
-                .pending_session_action
-                .is_some(),
-            _ => false,
-        }
-    }
-
-    fn control_plugin_data(&self, height: u32) -> serde_json::Value {
-        use nickel_core::display_projection::ProjectionMode;
-        let bounded = |value: &str| value.chars().take(120).collect::<String>();
-        let slots = self
-            .plugin_slot_projection(&crate::plugin_panel::control_center_manifest().id)
-            .unwrap_or_else(|| serde_json::json!({}));
-        let modes = supported_projection_modes(self.session_host.as_ref())
-            .into_iter()
-            .map(|mode| match mode {
-                ProjectionMode::InternalOnly => {
-                    serde_json::json!({"id":"internal","label":"Internal"})
-                }
-                ProjectionMode::Duplicate => {
-                    serde_json::json!({"id":"duplicate","label":"Duplicate"})
-                }
-                ProjectionMode::Extend => serde_json::json!({"id":"extend","label":"Extend"}),
-                ProjectionMode::ExternalOnly => {
-                    serde_json::json!({"id":"external","label":"External"})
-                }
-            })
-            .collect::<Vec<_>>();
-        serde_json::json!({
-            "height": height.clamp(1, 8192),
-            "scrollHeight": height.saturating_sub(64).clamp(1, 8192),
-            "network": {
-                "available": self.network.available,
-                "enabled": self.network.enabled,
-                "networks": self.network.networks.iter().take(8).filter(|item| !item.id.is_empty() && item.id.len() <= 256).map(|item| serde_json::json!({
-                    "id": item.id, "name": bounded(&item.name),
-                    "saved": item.saved, "connected": item.connected,
-                })).collect::<Vec<_>>(),
-            },
-            "bluetooth": {
-                "available": self.bluetooth.available,
-                "powered": self.bluetooth.powered,
-                "discovering": self.bluetooth.discovering,
-                "devices": self.bluetooth.devices.iter().take(8).filter(|item| !item.id.is_empty() && item.id.len() <= 256).map(|item| serde_json::json!({
-                    "id": item.id, "name": bounded(&item.name),
-                    "paired": item.paired, "connected": item.connected,
-                })).collect::<Vec<_>>(),
-            },
-            "audio": {
-                "available": self.audio.available,
-                "percent": self.audio.volume_percent.min(100),
-                "muted": self.audio.muted,
-                "devices": self.audio.devices.iter().take(8).filter(|item| !item.id.is_empty() && item.id.len() <= 256).map(|item| serde_json::json!({
-                    "id": item.id, "name": bounded(&item.name),
-                    "isDefault": item.is_default,
-                })).collect::<Vec<_>>(),
-            },
-            "workspaces": self.workspaces.iter().take(10).map(|item| serde_json::json!({
-                "id": item.id, "active": item.active,
-            })).collect::<Vec<_>>(),
-            "activeWorkspace": self.workspaces.iter().find(|item| item.active).map(|item| item.id),
-            "projectionModes": modes,
-            "pendingProjection": self.control_host.application().view_state().pending_projection.is_some(),
-            "slots": slots,
-        })
-    }
-
-    fn control_plugin_active(&self) -> bool {
-        self.control_plugin_host_ref().is_some()
+    fn quick_settings_surface_active(&self) -> bool {
+        self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
+            .is_some()
             && !self.control_host.application().view_state().projection_only
     }
 
@@ -11911,26 +11870,19 @@ impl LiveShell {
             || self.control_host.application().view_state().projection_only
     }
 
-    fn control_plugin_event(
+    fn plugin_surface_host_event(
         &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
         event: HostEvent,
         size: (u32, u32),
         limit: Option<usize>,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
-        let data = self.control_plugin_data(size.1);
-        let Some(host) = self.control_plugin_host_mut() else {
+        let _ = self.plugin_panel_scene(key, size.0, size.1);
+        let Some(host) = self.plugin_panel_host_for(key) else {
             return nickel_ui::HostEventOutcome::default();
         };
-        let changed = match host.application_mut().sync_data(&data) {
-            Ok(changed) => changed,
-            Err(error) => {
-                self.fail_control_plugin_runtime(error);
-                return nickel_ui::HostEventOutcome::default();
-            }
-        };
         let mut outcome = host.step(HostBatch {
-            application_changed: changed,
             surface_size: Some(size),
             clipboard_text_limit: limit,
             events: vec![event],
@@ -11939,7 +11891,7 @@ impl LiveShell {
         });
         let effects = host.application_mut().take_effects();
         if let Some(error) = host.application_mut().take_runtime_failure() {
-            self.fail_control_plugin_runtime(error);
+            self.fail_plugin_panel_runtime(&key.plugin_id, error);
             return nickel_ui::HostEventOutcome::default();
         }
         outcome.changed |= self.apply_plugin_effects(effects);
@@ -12077,72 +12029,6 @@ impl LiveShell {
 
     fn apply_control_action(&mut self, action: ControlAction) {
         match action {
-            ControlAction::ToggleWifiSection | ControlAction::WifiScroll => {}
-            ControlAction::SetWifiEnabled(enabled) => {
-                log_control_result("set-wifi-enabled", platform::set_wifi_enabled(enabled));
-            }
-            ControlAction::ActivateWifi { id } => {
-                log_control_result(
-                    "activate-wifi-network",
-                    platform::activate_wifi_network(&id),
-                );
-            }
-            ControlAction::ToggleBluetoothSection | ControlAction::BluetoothScroll => {}
-            ControlAction::SetBluetoothPowered(powered) => {
-                log_control_result(
-                    "set-bluetooth-powered",
-                    platform::set_bluetooth_powered(powered),
-                );
-            }
-            ControlAction::SetBluetoothDiscovery(discovering) => {
-                log_control_result(
-                    "set-bluetooth-discovery",
-                    platform::set_bluetooth_discovery(discovering),
-                );
-            }
-            ControlAction::ToggleBluetoothDevice { id } => {
-                log_control_result(
-                    "toggle-bluetooth-device",
-                    platform::toggle_bluetooth_device(&id),
-                );
-            }
-            ControlAction::ToggleAudioSection | ControlAction::AudioScroll => {}
-            ControlAction::SetAudioMuted(muted) => {
-                if platform::audio_status().muted != muted {
-                    platform::handle_consumer_control(
-                        nickel_session_protocol::ConsumerControl::VolumeMute,
-                    );
-                }
-            }
-            ControlAction::SetAudioVolume(volume) => {
-                log_control_result("set-audio-volume", platform::set_audio_volume(volume));
-            }
-            ControlAction::SelectAudioDevice { id } => {
-                log_control_result("select-audio-device", platform::select_audio_device(&id));
-            }
-            ControlAction::SwitchWorkspace(workspace) => {
-                let _ = self.send_session_command(
-                    "switch-workspace",
-                    ShellCommand::SwitchWorkspace(workspace),
-                );
-            }
-            ControlAction::CreateWorkspace => {
-                let _ =
-                    self.send_session_command("create-workspace", ShellCommand::CreateWorkspace);
-            }
-            ControlAction::ToggleShowDesktop => {
-                let _ = self
-                    .send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop);
-            }
-            ControlAction::ShowNotifications => {
-                self.global_shortcut(platform::GlobalShortcut::ShowNotifications);
-            }
-            ControlAction::RemoveWorkspace(workspace) => {
-                let _ = self.send_session_command(
-                    "remove-workspace",
-                    ShellCommand::RemoveWorkspace(workspace),
-                );
-            }
             ControlAction::PreviewProjection(mode) => {
                 if !self.preview_projection(mode) {
                     self.control_host
@@ -12155,16 +12041,7 @@ impl LiveShell {
                 self.projection_rollback_deadline = None;
             }
             ControlAction::CancelProjection => self.rollback_projection(),
-            ControlAction::RequestSessionAction(_)
-            | ControlAction::CancelSessionAction
-            | ControlAction::ConfirmSessionAction => {}
-            ControlAction::SessionAction(action) => {
-                if self.task_switcher.session().is_some() {
-                    self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
-                }
-                let _ = self
-                    .send_session_command("session-action", ShellCommand::SessionAction(action));
-            }
+            _ => {}
         }
         let _ = self.refresh();
     }
@@ -12316,7 +12193,10 @@ impl LiveShell {
     ) -> bool {
         #[cfg(target_os = "linux")]
         {
-            if self.display_preview.is_some() || self.projection_rollback_deadline.is_some() {
+            if self.control_host.application().view_state().projection_only
+                || self.display_preview.is_some()
+                || self.projection_rollback_deadline.is_some()
+            {
                 return false;
             }
             let Ok(outputs) = self.session_host.projection_outputs() else {

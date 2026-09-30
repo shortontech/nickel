@@ -11,13 +11,12 @@ use nickel_ui_testkit::{
 use nickel_codex_ui::ChatApplication;
 
 use crate::{
-    control_view::ControlCenterApp,
     live_shell::{DesktopApplication, LockApplication},
-    platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
     plugin_panel::{
         PluginImages, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
         TaskbarPluginTrayItem,
     },
+    projection_recovery::ProjectionRecoveryApp,
     screenshot::ScreenshotApp,
 };
 
@@ -170,11 +169,11 @@ metadata!(
 );
 metadata!(
     CONTROL_METADATA,
-    "shell.control-center",
-    "Control Center",
-    "Production control center application",
+    "shell.projection-recovery",
+    "Display recovery",
+    "Trusted display recovery chooser",
     CONTROL_VARIANTS,
-    &["shell", "control-center"]
+    &["shell", "display", "recovery"]
 );
 metadata!(
     PROJECT_METADATA,
@@ -196,7 +195,7 @@ pub struct PanelFixture;
 pub struct LockFixture;
 pub struct ScreenshotFixture;
 pub struct WindowPreviewFixture;
-pub struct ControlCenterFixture;
+pub struct ProjectionRecoveryFixture;
 pub struct CodexProjectMenuFixture;
 
 fn fixture_palette(theme: FixtureTheme) -> ThemePalette {
@@ -453,8 +452,8 @@ impl Fixture for WindowPreviewFixture {
     }
 }
 
-impl Fixture for ControlCenterFixture {
-    type App = ControlCenterApp;
+impl Fixture for ProjectionRecoveryFixture {
+    type App = ProjectionRecoveryApp;
     fn metadata() -> &'static FixtureMetadata {
         &CONTROL_METADATA
     }
@@ -462,42 +461,21 @@ impl Fixture for ControlCenterFixture {
         Self::create_variant(&CONTROL_VARIANTS[0])
     }
     fn create_variant(v: &FixtureVariant) -> Self::App {
-        let available = v.id != "unavailable";
-        let network = NetworkStatus {
-            available,
-            enabled: available,
-            connected: available,
-            name: "Nickel Wi-Fi".into(),
-            signal_percent: 82,
-            ..Default::default()
-        };
-        let bluetooth = BluetoothStatus {
-            available,
-            powered: available,
-            ..Default::default()
-        };
-        let audio = AudioStatus {
-            available,
-            volume_percent: 64,
-            ..Default::default()
-        };
-        let mut app = ControlCenterApp::new(
-            network,
-            bluetooth,
-            audio,
-            vec![
-                WorkspaceSummary {
-                    id: 1,
-                    active: true,
-                },
-                WorkspaceSummary {
-                    id: 2,
-                    active: false,
-                },
-            ],
-        );
+        let mut app = ProjectionRecoveryApp::new();
+        if v.id != "unavailable" {
+            app.sync_projection_modes(&[
+                nickel_core::display_projection::ProjectionMode::Duplicate,
+                nickel_core::display_projection::ProjectionMode::Extend,
+            ]);
+        }
+        app.show_projection_chooser();
         if v.id == "confirmation" {
-            app.request_session_action(crate::platform::SessionAction::LogOut);
+            nickel_ui::Application::update(
+                &mut app,
+                crate::control_view::ControlAction::PreviewProjection(
+                    nickel_core::display_projection::ProjectionMode::Extend,
+                ),
+            );
         }
         app
     }
@@ -505,7 +483,7 @@ impl Fixture for ControlCenterFixture {
         (380, 650)
     }
     fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(SemanticRole::Switch, "wifi-power"))
+        None
     }
 }
 
@@ -536,7 +514,7 @@ impl FixtureProvider for ShellFixtureProvider {
         registry.register::<LockFixture>()?;
         registry.register::<ScreenshotFixture>()?;
         registry.register::<WindowPreviewFixture>()?;
-        registry.register::<ControlCenterFixture>()?;
+        registry.register::<ProjectionRecoveryFixture>()?;
         registry.register::<CodexProjectMenuFixture>()?;
         Ok(())
     }
@@ -559,10 +537,10 @@ mod tests {
             ids,
             vec![
                 "shell.codex-project-menu",
-                "shell.control-center",
                 "shell.desktop",
                 "shell.lock",
                 "shell.panel",
+                "shell.projection-recovery",
                 "shell.runtime",
                 "shell.screenshot",
                 "shell.window-preview",

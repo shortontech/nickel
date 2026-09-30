@@ -1,9 +1,8 @@
-// @jsx h
-function App() {
-    return h(Section, {
-        id: "find-apps",
-        label: "Applications",
-        value: "Search Nickel's catalog",
-        onClick: () => nickel.request("show-launcher")
-    });
+// Ordinary component executed in the contributor's own capability context.
+export function ControlSection() {
+    return h(Column, {id:"find-apps"},
+        h(Text, {}, "Applications"),
+        h(Text, {}, "Search Nickel's catalog"),
+        h(Button, {onClick:()=>nickel.surfaces.show("launcher")}, "Open launcher"));
 }
+export default ControlSection;

@@ -82,32 +82,10 @@ fn plugin_projection(
 
 fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
     match action {
-        ControlAction::ToggleWifiSection
-        | ControlAction::SetWifiEnabled(_)
-        | ControlAction::ActivateWifi { .. }
-        | ControlAction::ToggleBluetoothSection
-        | ControlAction::SetBluetoothPowered(_)
-        | ControlAction::SetBluetoothDiscovery(_)
-        | ControlAction::ToggleBluetoothDevice { .. }
-        | ControlAction::ToggleAudioSection
-        | ControlAction::SetAudioVolume(_)
-        | ControlAction::SetAudioMuted(_)
-        | ControlAction::SelectAudioDevice { .. }
-        | ControlAction::RequestSessionAction(_)
-        | ControlAction::CancelSessionAction => RemoteActionDisposition::Guarded,
-        ControlAction::SwitchWorkspace(_)
-        | ControlAction::WifiScroll
-        | ControlAction::BluetoothScroll
-        | ControlAction::AudioScroll
-        | ControlAction::CreateWorkspace
-        | ControlAction::ToggleShowDesktop
-        | ControlAction::ShowNotifications
-        | ControlAction::RemoveWorkspace(_)
-        | ControlAction::PreviewProjection(_)
+        ControlAction::PreviewProjection(_)
         | ControlAction::ConfirmProjection
-        | ControlAction::CancelProjection
-        | ControlAction::ConfirmSessionAction
-        | ControlAction::SessionAction(_) => RemoteActionDisposition::Unavailable,
+        | ControlAction::CancelProjection => RemoteActionDisposition::Unavailable,
+        _ => RemoteActionDisposition::Guarded,
     }
 }
 
@@ -176,9 +154,12 @@ impl LiveShell {
             }
             SurfaceRole::Launcher => Err("native Run is unavailable".into()),
             SurfaceRole::ControlCenter => {
-                if self.control_plugin_active() {
+                if self.quick_settings_surface_active() {
                     Ok(observe_only(plugin_projection(
-                        self.control_plugin_host_ref().unwrap(),
+                        self.plugin_panel_host_ref(
+                            &self.active_shell_surface_key("quick-settings"),
+                        )
+                        .unwrap(),
                         |_, _| false,
                     )?))
                 } else if self.control_host.application().view_state().projection_only {
@@ -395,7 +376,7 @@ impl LiveShell {
 
             SurfaceRole::Launcher => return Err("Launcher plugin is unavailable".into()),
             SurfaceRole::ControlCenter => {
-                if self.control_plugin_active() {
+                if self.quick_settings_surface_active() {
                     return Err("control center plugin actions require shell input".into());
                 }
                 if !self.control_host.application().view_state().projection_only {
@@ -489,13 +470,6 @@ impl LiveShell {
                 self.panel_change_token = token;
                 Ok(())
             }
-            RemoteShellEffect::Control(
-                ControlAction::ToggleWifiSection
-                | ControlAction::ToggleBluetoothSection
-                | ControlAction::ToggleAudioSection
-                | ControlAction::CancelSessionAction
-                | ControlAction::RequestSessionAction(_),
-            ) => Ok(()),
             RemoteShellEffect::Panel(action, output) => {
                 drop((action, output));
                 Err("panel native effect requires guarded delivery".into())

@@ -8267,7 +8267,11 @@ fn control_center_hides_on_client_or_internal_focus_transfer_and_stays_hidden() 
             .as_ref()
             .unwrap()
             .plugin_surface(
-                &crate::plugin_panel::control_center_surface_key(),
+                &session
+                    .internal_shell
+                    .as_ref()
+                    .unwrap()
+                    .active_shell_surface_key("quick-settings"),
                 "file-test",
             )
             .unwrap()

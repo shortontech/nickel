@@ -469,10 +469,32 @@ const nickel = Object.freeze({
     request(effect) { __effects.push(effect); },
     openDialog(id) { __effects.push(`open-dialog:${id}`); },
     openMenu(id) { __effects.push(`open-menu:${id}`); },
+    workspaces: Object.freeze({
+        get() { return __nickelResource('workspaces',{available:false,workspaces:[],operations:{}}); },
+        switch(id) { this.perform('switch',id); },
+        create() { this.perform('create'); },
+        remove(id) { this.perform('remove',id); },
+        perform(operation,id) {
+            const snapshot = this.get();
+            if (!snapshot.available || !snapshot.operations[operation]) throw Error('workspace operation unavailable');
+            const effect = {type:'workspaces.'+operation,revision:snapshot.revision};
+            if (operation !== 'create') {id=__nickelIdentity(id); if (!snapshot.workspaces.some(workspace=>workspace.id===id)) throw Error('unknown workspace'); effect.id=id;}
+            __effects.push(effect);
+        }
+    }),
+    desktop: Object.freeze({
+        get() { return __nickelResource('desktop',{available:false,operations:{}}); },
+        toggleShowDesktop() { if (!this.get().operations.toggleShowDesktop) throw Error('show desktop unavailable'); __effects.push({type:'desktop.toggleShowDesktop'}); }
+    }),
     displays: Object.freeze({
         get() {
             const snapshot = __nickelData.displays;
             return snapshot === undefined ? undefined : JSON.parse(JSON.stringify(snapshot));
+        },
+        previewProjection(mode) {
+            const snapshot = this.get();
+            if (!snapshot?.projectionModes?.some(entry=>entry.id===mode) || snapshot.pending_confirmation) throw Error('display projection unavailable');
+            __effects.push({type:'displays.previewProjection',mode,revision:snapshot.revision});
         },
         getApplicationScale() { return __nickelResource('displays', {}).application_scale || {available:false,reason:'Application scale capability is unavailable'}; },
         setApplicationScale(policy, expectedRevision) {

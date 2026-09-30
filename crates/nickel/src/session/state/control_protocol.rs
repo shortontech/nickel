@@ -1899,7 +1899,10 @@ impl NickelSession {
                         "plugin surface is unavailable for focus",
                     );
                 }
-                if key == crate::plugin_panel::control_center_surface_key()
+                if self
+                    .internal_shell
+                    .as_ref()
+                    .is_some_and(|shell| key == shell.active_shell_surface_key("quick-settings"))
                     && let Some(shell) = self.internal_shell.as_mut()
                 {
                     shell.apply_control_visibility(true);

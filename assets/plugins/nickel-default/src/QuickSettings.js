@@ -1,8 +1,11 @@
 // @jsx h
 import "./styles/quick-settings.css";
 // Nickel owns status snapshots and validates every requested system action.
-export function QuickSettings(props) {
-    const data = { ...{ scrollHeight: 552, network: { available: false, enabled: false, networks: [] }, bluetooth: { available: false, powered: false, discovering: false, devices: [] }, audio: { muted: false, percent: 0, devices: [] }, workspaces: [], projectionModes: [] }, ...props?.data, audio: props?.data?.audio || nickel.audio.get(), network: nickel.wifi.get(), bluetooth: nickel.bluetooth.get() };
+export function QuickSettings() {
+    const workspaces = nickel.workspaces.get();
+    const displays = nickel.displays.get() || { projectionModes: [] };
+    const desktop = nickel.desktop.get();
+    const data = { network: nickel.wifi.get(), bluetooth: nickel.bluetooth.get(), audio: nickel.audio.get() };
     const session = nickel.session.get();
     const sessionOperations = { suspend: "suspend", logout: "logout", "restart-shell": "restartShell", reboot: "reboot", poweroff: "powerOff" };
     const sections = nickel.contributions("system.controls");
@@ -10,15 +13,14 @@ export function QuickSettings(props) {
     const [bluetoothOpen, setBluetoothOpen] = useState(false);
     const [audioOpen, setAudioOpen] = useState(false);
     const [confirming, setConfirming] = useState(null);
-    const request = (action, value) => nickel.request({ type: "control-action", action, value });
     const prepare = action => {
         setConfirming(action);
         nickel.openDialog("session-confirm-dialog");
     };
     return h(FixedWindow, { id: "quick-settings", edge: "right", width: 420, height: "100%", className: "control-center", onEscape: () => nickel.surfaces.hide("quick-settings") },
-        h(Column, { className: "control-content" },
+        h(Column, { className: "control-content", height: "100%" },
             h(Text, { className: "control-title" }, "Control Center"),
-            h(ScrollView, { id: "control-center-scroll", height: data.scrollHeight },
+            h(ScrollView, { id: "control-center-scroll", grow: true },
                 h(Column, { className: "control-sections" },
                     h(Row, null,
                         h(Text, null, "Wi-Fi: " + (data.network.available ? data.network.enabled ? "On" : "Off" : "Unavailable")),
@@ -43,19 +45,19 @@ export function QuickSettings(props) {
                     audioOpen ? data.audio.devices.map(device => h(Button, { key: device.id, id: "audio-" + device.id, onClick: () => nickel.audio.selectOutput(device.id) }, device.name + (device.isDefault ? " · Default" : ""))) : null,
                     h(Text, { className: "control-section-title" }, "Workspaces"),
                     h(Row, null,
-                        data.workspaces.map((workspace, index) => h(Button, { key: workspace.id, id: "workspace-" + workspace.id, onClick: () => request("workspace-switch", workspace.id) }, (index + 1) + (workspace.active ? " ●" : ""))),
-                        h(Button, { id: "workspace-create", onClick: () => request("workspace-create") }, "+"),
-                        data.workspaces.length > 1 ? h(Button, { id: "workspace-remove", onClick: () => request("workspace-remove", data.activeWorkspace) }, "\u2212") : null),
+                        workspaces.workspaces.map((workspace, index) => h(Button, { key: workspace.id, id: "workspace-" + workspace.id, disabled: !workspaces.operations.switch, onClick: () => nickel.workspaces.switch(workspace.id) }, (index + 1) + (workspace.active ? " ●" : ""))),
+                        h(Button, { id: "workspace-create", disabled: !workspaces.operations.create, onClick: () => nickel.workspaces.create() }, "+"),
+                        workspaces.workspaces.length > 1 ? h(Button, { id: "workspace-remove", disabled: !workspaces.operations.remove, onClick: () => nickel.workspaces.remove(workspaces.activeWorkspace) }, "\u2212") : null),
                     h(Row, null,
-                        h(Button, { id: "show-desktop", onClick: () => request("show-desktop") }, "Show desktop"),
+                        h(Button, { id: "show-desktop", disabled: !desktop.operations.toggleShowDesktop, onClick: () => nickel.desktop.toggleShowDesktop() }, "Show desktop"),
                         h(Button, { id: "show-notifications", onClick: () => nickel.surfaces.show("notifications") }, "Notifications")),
                     sections.length ? h(Text, { className: "control-section-title" }, "Extensions") : null,
                     sections.map(entry => h(entry.component, { key: entry.key })),
                     h(Text, { className: "control-section-title" }, "Displays"),
-                    data.pendingProjection ? h(Row, null,
+                    displays.pending_confirmation ? h(Row, null,
                         h(Text, null, "Keep display settings?"),
-                        h(Button, { id: "projection-revert", onClick: () => request("projection-cancel") }, "Revert"),
-                        h(Button, { id: "projection-keep", onClick: () => request("projection-confirm") }, "Keep")) : h(Row, null, data.projectionModes.map(mode => h(Button, { key: mode.id, id: "projection-" + mode.id, onClick: () => request("projection-preview", mode.id) }, mode.label))),
+                        h(Button, { id: "projection-revert", disabled: !displays.can_revert, onClick: () => nickel.displays.revert() }, "Revert"),
+                        h(Button, { id: "projection-keep", disabled: !displays.can_confirm, onClick: () => nickel.displays.confirm() }, "Keep")) : h(Row, null, (displays.projectionModes || []).map(mode => h(Button, { key: mode.id, id: "projection-" + mode.id, onClick: () => nickel.displays.previewProjection(mode.id) }, mode.label))),
                     h(Text, { className: "control-section-title" }, "Session"),
                     h(Row, null,
                         h(Button, { id: "session-lock", disabled: !session.support.lock, onClick: () => nickel.session.lock() }, "Lock"),

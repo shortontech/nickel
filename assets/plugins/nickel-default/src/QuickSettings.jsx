@@ -1,8 +1,11 @@
 // @jsx h
 import "./styles/quick-settings.css";
 // Nickel owns status snapshots and validates every requested system action.
-export function QuickSettings(props) {
-    const data = {...{scrollHeight:552,network:{available:false,enabled:false,networks:[]},bluetooth:{available:false,powered:false,discovering:false,devices:[]},audio:{muted:false,percent:0,devices:[]},workspaces:[],projectionModes:[]}, ...props?.data, audio:props?.data?.audio || nickel.audio.get(), network:nickel.wifi.get(), bluetooth:nickel.bluetooth.get()};
+export function QuickSettings() {
+    const workspaces = nickel.workspaces.get();
+    const displays = nickel.displays.get() || {projectionModes:[]};
+    const desktop = nickel.desktop.get();
+    const data = {network:nickel.wifi.get(),bluetooth:nickel.bluetooth.get(),audio:nickel.audio.get()};
     const session = nickel.session.get();
     const sessionOperations = {suspend:"suspend",logout:"logout","restart-shell":"restartShell",reboot:"reboot",poweroff:"powerOff"};
     const sections = nickel.contributions("system.controls");
@@ -10,16 +13,15 @@ export function QuickSettings(props) {
     const [bluetoothOpen, setBluetoothOpen] = useState(false);
     const [audioOpen, setAudioOpen] = useState(false);
     const [confirming, setConfirming] = useState(null);
-    const request = (action, value) => nickel.request({type: "control-action", action, value});
     const prepare = action => {
         setConfirming(action);
         nickel.openDialog("session-confirm-dialog");
     };
     return <FixedWindow id="quick-settings" edge="right" width={420} height="100%" className="control-center"
         onEscape={() => nickel.surfaces.hide("quick-settings")}>
-        <Column className="control-content">
+        <Column className="control-content" height="100%">
             <Text className="control-title">Control Center</Text>
-            <ScrollView id="control-center-scroll" height={data.scrollHeight}>
+            <ScrollView id="control-center-scroll" grow={true}>
                 <Column className="control-sections">
                     <Row>
                         <Text>{"Wi-Fi: " + (data.network.available ? data.network.enabled ? "On" : "Off" : "Unavailable")}</Text>
@@ -58,26 +60,26 @@ export function QuickSettings(props) {
                         onClick={() => nickel.audio.selectOutput(device.id)}>{device.name + (device.isDefault ? " · Default" : "")}</Button>) : null}
                     <Text className="control-section-title">Workspaces</Text>
                     <Row>
-                        {data.workspaces.map((workspace, index) => <Button key={workspace.id} id={"workspace-" + workspace.id}
-                            onClick={() => request("workspace-switch", workspace.id)}>{(index + 1) + (workspace.active ? " ●" : "")}</Button>)}
-                        <Button id="workspace-create" onClick={() => request("workspace-create")}>+</Button>
-                        {data.workspaces.length > 1 ? <Button id="workspace-remove"
-                            onClick={() => request("workspace-remove", data.activeWorkspace)}>−</Button> : null}
+                        {workspaces.workspaces.map((workspace, index) => <Button key={workspace.id} id={"workspace-" + workspace.id} disabled={!workspaces.operations.switch}
+                            onClick={() => nickel.workspaces.switch(workspace.id)}>{(index + 1) + (workspace.active ? " ●" : "")}</Button>)}
+                        <Button id="workspace-create" disabled={!workspaces.operations.create} onClick={() => nickel.workspaces.create()}>+</Button>
+                        {workspaces.workspaces.length > 1 ? <Button id="workspace-remove" disabled={!workspaces.operations.remove}
+                            onClick={() => nickel.workspaces.remove(workspaces.activeWorkspace)}>−</Button> : null}
                     </Row>
                     <Row>
-                        <Button id="show-desktop" onClick={() => request("show-desktop")}>Show desktop</Button>
+                        <Button id="show-desktop" disabled={!desktop.operations.toggleShowDesktop} onClick={() => nickel.desktop.toggleShowDesktop()}>Show desktop</Button>
                         <Button id="show-notifications" onClick={() => nickel.surfaces.show("notifications")}>Notifications</Button>
                     </Row>
                     {sections.length ? <Text className="control-section-title">Extensions</Text> : null}
                     {sections.map(entry => <entry.component key={entry.key} />)}
                     <Text className="control-section-title">Displays</Text>
-                    {data.pendingProjection ? <Row>
+                    {displays.pending_confirmation ? <Row>
                         <Text>Keep display settings?</Text>
-                        <Button id="projection-revert" onClick={() => request("projection-cancel")}>Revert</Button>
-                        <Button id="projection-keep" onClick={() => request("projection-confirm")}>Keep</Button>
+                        <Button id="projection-revert" disabled={!displays.can_revert} onClick={() => nickel.displays.revert()}>Revert</Button>
+                        <Button id="projection-keep" disabled={!displays.can_confirm} onClick={() => nickel.displays.confirm()}>Keep</Button>
                     </Row> : <Row>
-                        {data.projectionModes.map(mode => <Button key={mode.id} id={"projection-" + mode.id}
-                            onClick={() => request("projection-preview", mode.id)}>{mode.label}</Button>)}
+                        {(displays.projectionModes || []).map(mode => <Button key={mode.id} id={"projection-" + mode.id}
+                            onClick={() => nickel.displays.previewProjection(mode.id)}>{mode.label}</Button>)}
                     </Row>}
                     <Text className="control-section-title">Session</Text>
                     <Row>

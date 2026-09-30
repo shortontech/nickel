@@ -152,6 +152,7 @@ mod platform;
 pub mod plugin_panel;
 pub mod plugins_capabilities;
 pub mod preferences_capabilities;
+mod projection_recovery;
 mod screenshot;
 mod session_host;
 mod shortcut_capabilities;
@@ -166,6 +167,7 @@ mod windows_launch_broker;
 mod windows_uwu;
 #[allow(dead_code)]
 mod winit_shell;
+pub mod workspace_capabilities;
 
 #[cfg(feature = "workbench-fixtures")]
 mod workbench_fixtures;
@@ -1310,7 +1312,8 @@ fn render_role(
             surface.role() == wanted
                 || (wanted == SurfaceRole::Taskbar && surface.is_taskbar_plugin())
                 || (wanted == SurfaceRole::ControlCenter
-                    && surface.plugin_key() == Some(&plugin_panel::control_center_surface_key()))
+                    && surface.plugin_key()
+                        == Some(&state.active_shell_surface_key("quick-settings")))
         })
         .map(|surface| {
             let (logical_width, logical_height) = surface.window().size();
@@ -1579,13 +1582,13 @@ fn sync_panel_popover_anchor(shell: &WinitShell, state: &LiveShell) {
     if role == nickel_session_protocol::ShellRole::ControlCenter
         && state.native_surface_visible(
             SurfaceRole::Panel,
-            Some(&plugin_panel::control_center_surface_key()),
+            Some(&state.active_shell_surface_key("quick-settings")),
         )
     {
         let _ = state.dispatch_session_command(
             "place-anchored-plugin-popover",
             platform::ShellCommand::ShowAnchoredPluginSurface {
-                key: plugin_panel::control_center_surface_key(),
+                key: state.active_shell_surface_key("quick-settings"),
                 anchor,
             },
         );
@@ -1679,9 +1682,9 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
     #[cfg(target_os = "windows")]
     if state.native_surface_visible(
         SurfaceRole::Panel,
-        Some(&plugin_panel::control_center_surface_key()),
+        Some(&state.active_shell_surface_key("quick-settings")),
     ) {
-        shell.raise_plugin_surface(&plugin_panel::control_center_surface_key());
+        shell.raise_plugin_surface(&state.active_shell_surface_key("quick-settings"));
     }
     #[cfg(target_os = "windows")]
     if state.native_surface_visible(
