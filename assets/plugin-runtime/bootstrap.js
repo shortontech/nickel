@@ -163,7 +163,24 @@ function __nickelRetireSettings() {
     __settingsPagesSnapshot = {generation: 0, pages: []};
 }
 
+function __nickelResource(name, fallback) {
+    return JSON.parse(JSON.stringify(__nickelData[name] === undefined ? fallback : __nickelData[name]));
+}
+function __nickelIdentity(id) {
+    if (typeof id !== 'string' || !id.length || id.length > 512) throw TypeError('invalid capability identity');
+    return id;
+}
 const nickel = Object.freeze({
+    windows: Object.freeze({
+        list() { return __nickelResource('windows', []); },
+        activate(id) { __effects.push({type:'windows.focus',id:__nickelIdentity(id)}); },
+        close(id) { __effects.push({type:'windows.close',id:__nickelIdentity(id)}); }
+    }),
+    applications: Object.freeze({
+        list() { return __nickelResource('applications', []); },
+        launch(id) { __effects.push({type:'applications.launch',id:__nickelIdentity(id)}); },
+        togglePin(id) { __effects.push({type:'applications.togglePin',id:__nickelIdentity(id)}); }
+    }),
     registerSetting, registerSettingsPage, readPluginSettings, readSettingsPages, readPluginSettingsPages,
     request(effect) { __effects.push(effect); },
     openDialog(id) { __effects.push(`open-dialog:${id}`); },

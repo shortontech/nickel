@@ -1845,6 +1845,14 @@ impl PluginPanelApplication {
         {
             return Err("notification data requires notifications.read".into());
         }
+        if fields.iter().any(|(field, _)| *field == "windows")
+            && !self
+                .manifest
+                .capabilities
+                .contains(&PluginCapability::WindowsRead)
+        {
+            return Err("window data requires windows-read".into());
+        }
         if fields.iter().any(|(field, _)| *field == "applications")
             && !self
                 .manifest

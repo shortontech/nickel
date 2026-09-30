@@ -120,6 +120,26 @@ impl JsxRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_clients_copy_snapshots_and_emit_stable_identity_actions() {
+        let mut runtime = super::JsxRuntime::new(
+            "",
+            Some(r#"{"windows":[{"id":"42","title":"Editor"}],"applications":[{"id":"editor"}]}"#),
+        )
+        .unwrap();
+        runtime.eval("nickel.windows.list()[0].title = 'changed'; nickel.windows.activate('42'); nickel.applications.launch('editor');").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>("JSON.stringify(nickel.windows.list()[0].title)")
+                .unwrap(),
+            "Editor"
+        );
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(effects[0]["type"], "windows.focus");
+        assert_eq!(effects[1]["id"], "editor");
+        assert!(runtime.eval("nickel.windows.activate(42)").is_err());
+    }
+
     use super::*;
 
     #[test]
