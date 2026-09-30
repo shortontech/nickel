@@ -1,3 +1,4 @@
+pub mod appearance_service;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod remote_default_associations;
 mod remote_indicator;
@@ -12,6 +13,7 @@ mod remote_terminal_launch_policy;
 mod settings_plugin_report;
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod trusted_accessibility;
+pub mod wallpaper_service;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_application_registry;
 #[cfg(any(test, target_os = "windows"))]
