@@ -3059,12 +3059,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                             let request =
                                 crate::plugins_capabilities::PluginsEffect::parse(&effect)
                                     .and_then(|request| {
-                                        if !self
-                                            .manifest
+                                        if !effect_manifest
                                             .capabilities
                                             .contains(&PluginCapability::PluginsRead)
-                                            || !self
-                                                .manifest
+                                            || !effect_manifest
                                                 .capabilities
                                                 .contains(&PluginCapability::PluginsControl)
                                         {
@@ -3082,7 +3080,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                     });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::Plugins {
-                                    plugin_id: self.manifest.id.clone(),
+                                    plugin_id: effect_manifest.id.clone(),
                                     effect,
                                 }),
                                 Err(error) => {
