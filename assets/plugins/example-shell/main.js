@@ -5,7 +5,7 @@ registerSetting({ id: "show-title", group: "Example shell", label: "Show shell t
     onChange: value => showTitle = value });
 export function Taskbar() {
     const windows = nickel.windows.list();
-    return h(Panel, { className: "example-taskbar" },
+    return h(FixedWindow, { id: "taskbar", output: "all", edge: "bottom", reserveWorkArea: true, className: "example-taskbar" },
         h(Row, null,
             showTitle !== false ? h(Text, null, "Example shell") : null,
             windows.map(window => h(Button, { key: window.id, id: "example-window-" + window.id, disabled: window.canActivate === false, onClick: () => nickel.windows.activate(window.id) }, window.title || "Window")),

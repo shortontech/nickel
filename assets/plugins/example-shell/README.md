@@ -2,7 +2,7 @@
 
 This package extends `nickel-default` version `^0.2` and uses its public exports.
 It replaces `shell.taskbar`, explicitly reuses `shell.quickSettings`, and keeps
-`shell.settings`. Its small `shell` entry selects a public component for each
+`shell.settings`. Its taskbar uses an ordinary `FixedWindow`. Its small `shell` entry selects a public component for each
 of its three declared surfaces. It imports no default-shell source files.
 
 The taskbar reads and activates native windows using its own `windows-read`
@@ -32,8 +32,9 @@ target/debug/nickel-plugin validate /tmp/my-nickel-shell
 target/debug/nickel-plugin dev /tmp/my-nickel-shell
 ```
 
-In the live shell, open Settings → Plugins and select **Example Derived Shell**
-as the active shell. Quick Settings opens from its taskbar button. Open Settings
+In the live shell, open Settings → Plugins and choose **Preview shell** for **Example Derived Shell**.
+Choose **Keep this shell** in the native recovery window before the 15-second
+timer expires; an unconfirmed preview restores the previous shell. Quick Settings opens from its taskbar button. Open Settings
 and select **Show shell title** in **Example shell** to exercise the owner callback.
 Live edits are compiled and validated before activation. The default dependency
 must remain installed and enabled; selecting another shell retires this shell's

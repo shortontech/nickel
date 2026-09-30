@@ -6,7 +6,7 @@ registerSetting({id:"show-title",group:"Example shell",label:"Show shell title",
 
 export function Taskbar() {
     const windows = nickel.windows.list();
-    return <Panel className="example-taskbar">
+    return <FixedWindow id="taskbar" output="all" edge="bottom" reserveWorkArea={true} className="example-taskbar">
         <Row>
             {showTitle !== false ? <Text>Example shell</Text> : null}
             {windows.map(window => <Button key={window.id} id={"example-window-" + window.id}
@@ -15,7 +15,7 @@ export function Taskbar() {
             <Button id="example-quick-settings" onClick={() => nickel.surfaces.show("quick-settings")}>Quick Settings</Button>
             <Button id="example-settings" onClick={() => nickel.surfaces.show("settings")}>Settings</Button>
         </Row>
-    </Panel>;
+    </FixedWindow>;
 }
 
 export function Shell() {
