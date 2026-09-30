@@ -101,6 +101,7 @@ struct PackageRuntime {
     runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
     data: Value,
     exports: BTreeMap<String, String>,
+    assets: BTreeMap<String, String>,
 }
 struct MountState {
     reference: ComponentReference,
@@ -184,6 +185,7 @@ impl ShellCompositionRuntime {
                 )
             })
             .collect::<serde_json::Map<_, _>>();
+        let mut asset_count = 0usize;
         let mut source_bytes = 0usize;
         for owner in host.resolution.inheritance_chain.clone() {
             let package = &catalog[&owner.id];
@@ -281,12 +283,21 @@ impl ShellCompositionRuntime {
                 &graph,
                 Some(&data.to_string()),
             )?));
+            let assets = package
+                .images
+                .keys()
+                .map(|name| {
+                    asset_count += 1;
+                    (name.clone(), format!("composition.asset.{asset_count}"))
+                })
+                .collect();
             host.packages.insert(
                 owner.clone(),
                 PackageRuntime {
                     runtime,
                     data,
                     exports: export_keys,
+                    assets,
                 },
             );
             host.drain_effects(&owner, 0, 0, false)?;
@@ -626,6 +637,19 @@ impl ShellCompositionRuntime {
                 depth + 1,
             );
         }
+        if let Value::Object(object) = &mut node {
+            let owner = &self.mounts[&source_mount].reference.owner;
+            for field in ["asset", "icon"] {
+                if let Some(Value::String(name)) = object.get_mut(field) {
+                    if name.starts_with("composition.asset.") {
+                        return Err("reserved native asset reference".into());
+                    }
+                    if let Some(alias) = self.asset_key(owner, name) {
+                        *name = alias.into();
+                    }
+                }
+            }
+        }
         match &mut node {
             Value::Array(values) => {
                 for (index, value) in values.iter_mut().enumerate() {
@@ -796,6 +820,15 @@ impl ShellCompositionRuntime {
                 .map(Value::Array),
             _ => Ok(value.clone()),
         }
+    }
+
+    /// Native resource alias for an asset declared by this exact live owner.
+    pub fn asset_key(&self, owner: &PackageIdentity, name: &str) -> Option<&str> {
+        self.packages
+            .get(owner)?
+            .assets
+            .get(name)
+            .map(String::as_str)
     }
 
     /// Return the host-owned data projection for an exact, live package owner.

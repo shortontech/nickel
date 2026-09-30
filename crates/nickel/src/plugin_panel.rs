@@ -1160,6 +1160,25 @@ impl PluginPanelApplication {
             let mount = host_ref.mount(&reference)?;
             (runtime, mount, stylesheet, manifests)
         };
+        let images = {
+            let host = host.borrow();
+            let mut images = PluginImages::new();
+            let mut pixels = 0_u64;
+            for owner in &host.resolution().inheritance_chain {
+                for (name, (_, image)) in package_images(&catalog[&owner.id])? {
+                    pixels =
+                        pixels.saturating_add(u64::from(image.width()) * u64::from(image.height()));
+                    if pixels > 4_000_000 || images.len() >= 0x5fff {
+                        return Err("composed package images exceed resource budget".into());
+                    }
+                    let alias = host
+                        .asset_key(owner, &name)
+                        .ok_or("missing composed asset owner")?;
+                    images.insert(alias.into(), ((images.len() + 1) as u16, image));
+                }
+            }
+            images
+        };
         let rendered =
             host.borrow_mut()
                 .render_expanded(&mount, &serde_json::json!({}), |value| {
@@ -1193,7 +1212,7 @@ impl PluginPanelApplication {
             projection_data,
             overlay_open: false,
             dispatch_removed_focus: false,
-            images: PluginImages::new(),
+            images,
             stylesheet,
             composition: Some(CompositionPanelState {
                 host,
@@ -3884,9 +3903,9 @@ mod tests {
             }
         }
         for granted in [true, false] {
-            let base = package(
+            let mut base = package(
                 "base-shell",
-                "globalThis.origin = 'base';\nexport function Shell() { return h(Window, {id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'}, h(nickel.component('shell.taskbar'), {onChange:()=>nickel.request('show-launcher')}, h(Button,{id:'owned-child',onClick:()=>nickel.request('show-launcher')},'Owned child')), nickel.contributions('taskbar.items').map(entry => h(entry.component, {key:entry.key}))); }\nexport function Taskbar() { return h(Button, {id:'base',onClick:()=>nickel.request('show-launcher')}, origin); }\nexport default Shell;",
+                "globalThis.origin = 'base';\nexport function Shell() { return h(Window, {id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'}, h(nickel.component('shell.taskbar'), {onChange:()=>nickel.request('show-launcher')}, h(Button,{id:'owned-child',icon:'shared',onClick:()=>nickel.request('show-launcher')},'Owned child')), nickel.contributions('taskbar.items').map(entry => h(entry.component, {key:entry.key}))); }\nexport function Taskbar() { return h(Button, {id:'base',onClick:()=>nickel.request('show-launcher')}, origin); }\nexport default Shell;",
                 None,
                 vec![
                     PluginCapability::LauncherShow,
@@ -3895,7 +3914,7 @@ mod tests {
             );
             let mut child = package(
                 "derived-shell",
-                "globalThis.origin = 'derived';\nexport function Taskbar(props) { const [count,setCount] = useState(0); return h(Column,null,h(Button,{id:'callback-control',onClick:()=>props.onChange('changed')},'Callback'),h(Button, {id:'replacement',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count),...props.children); }\nexport function Widget() { return h(Button, {id:'contribution',onClick:()=>nickel.request('show-launcher')}, 'Owned contribution'); }\nexport default Taskbar;",
+                "globalThis.origin = 'derived';\nexport function Taskbar(props) { const [count,setCount] = useState(0); return h(Column,null,h(Button,{id:'callback-control',onClick:()=>props.onChange('changed')},'Callback'),h(Button, {id:'replacement',icon:'shared',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count),...props.children); }\nexport function Widget() { return h(Button, {id:'contribution',onClick:()=>nickel.request('show-launcher')}, 'Owned contribution'); }\nexport default Taskbar;",
                 Some("base-shell"),
                 if granted {
                     vec![PluginCapability::LauncherShow]
@@ -3915,6 +3934,16 @@ mod tests {
                     implementation: "./main.js#Widget".into(),
                     priority: 10,
                 });
+            fn png(color: [u8; 4]) -> Vec<u8> {
+                let image = image::RgbaImage::from_pixel(1, 1, image::Rgba(color));
+                let mut output = std::io::Cursor::new(Vec::new());
+                image::DynamicImage::ImageRgba8(image)
+                    .write_to(&mut output, image::ImageFormat::Png)
+                    .unwrap();
+                output.into_inner()
+            }
+            base.images.insert("shared".into(), png([255, 0, 0, 255]));
+            child.images.insert("shared".into(), png([0, 0, 255, 255]));
             let surface = child.manifest.surfaces[0].clone();
             let catalog = std::collections::BTreeMap::from([
                 ("base-shell".into(), base),
@@ -3928,6 +3957,24 @@ mod tests {
                 None,
             )
             .unwrap();
+            assert_eq!(application.images.len(), 2);
+            assert_eq!(
+                application.images["composition.asset.1"]
+                    .1
+                    .get_pixel(0, 0)
+                    .0,
+                [255, 0, 0, 255]
+            );
+            assert_eq!(
+                application.images["composition.asset.2"]
+                    .1
+                    .get_pixel(0, 0)
+                    .0,
+                [0, 0, 255, 255]
+            );
+            let native_tree = format!("{:?}", application.node);
+            assert!(native_tree.contains("composition.asset.1"));
+            assert!(native_tree.contains("composition.asset.2"));
             let windows = serde_json::json!([{"id":"observed"}]);
             assert!(
                 application
