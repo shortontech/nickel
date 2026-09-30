@@ -2817,12 +2817,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                             let request =
                                 crate::preferences_capabilities::PreferencesEffect::parse(&effect)
                                     .and_then(|request| {
-                                        if !self
-                                            .manifest
+                                        if !effect_manifest
                                             .capabilities
                                             .contains(&request.capability())
-                                            || !self
-                                                .manifest
+                                            || !effect_manifest
                                                 .capabilities
                                                 .contains(&PluginCapability::PreferencesRead)
                                         {
@@ -2841,7 +2839,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                     });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::Preferences {
-                                    plugin_id: self.manifest.id.clone(),
+                                    plugin_id: effect_manifest.id.clone(),
                                     effect,
                                 }),
                                 Err(error) => {
@@ -3279,8 +3277,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             let request =
                                 crate::feature_capabilities::FeatureEffect::parse(&effect)
                                     .and_then(|request| {
-                                        if !self
-                                            .manifest
+                                        if !effect_manifest
                                             .capabilities
                                             .contains(&PluginCapability::FeaturesControl)
                                         {
@@ -3296,7 +3293,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                     });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::Feature {
-                                    plugin_id: self.manifest.id.clone(),
+                                    plugin_id: effect_manifest.id.clone(),
                                     effect,
                                 }),
                                 Err(error) => {
