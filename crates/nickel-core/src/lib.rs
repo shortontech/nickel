@@ -17,6 +17,7 @@ pub mod quick_settings;
 pub mod resource_owner;
 pub mod run;
 pub mod scenario;
+pub mod settings_registry;
 pub mod shell_settings;
 pub mod task_switcher;
 pub mod terminal_settings;
