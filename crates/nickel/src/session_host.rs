@@ -450,6 +450,7 @@ impl SessionHost for InProcessSessionHost {
                         "internal capture authority is unavailable".into(),
                     ));
                 }
+                tracing::trace!(?output, "native screenshot capture command queued");
                 DesktopCapturePoll::Pending
             }
             InternalCaptureState::Pending(path) => {
@@ -457,6 +458,10 @@ impl SessionHost for InProcessSessionHost {
                 DesktopCapturePoll::Pending
             }
             InternalCaptureState::Complete(path, result) => {
+                tracing::trace!(
+                    saved = matches!(result, nickel_session_protocol::CaptureResult::Saved { .. }),
+                    "native screenshot capture completion consumed"
+                );
                 let answer = match result {
                     nickel_session_protocol::CaptureResult::Saved { .. } => image::open(&path)
                         .map(|image| platform::DesktopCapture {

@@ -762,9 +762,13 @@ impl InternalShellCoordinator {
             .map(|surface| self.visible(surface.id))
             .collect::<Vec<_>>();
         let mut outcome = self.shell.poll_deadlines(now);
-        if outcome.capture_screenshot && self.shell.capture_screenshot() {
-            outcome.visibility_changed = true;
-            outcome.redraw.push(SurfaceRole::Screenshot);
+        if outcome.capture_screenshot {
+            let completed = self.shell.capture_screenshot();
+            tracing::trace!(completed, "native screenshot capture deadline polled");
+            if completed {
+                outcome.visibility_changed = true;
+                outcome.redraw.push(SurfaceRole::Screenshot);
+            }
         }
         self.deadline_changes(&outcome, &visibility)
     }

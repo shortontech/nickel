@@ -253,6 +253,9 @@ pub fn init_winit(
                             &mut pending_output_capture,
                             requested_output_capture,
                         );
+                    if request_another_frame || output_capture_path.is_some() {
+                        tracing::trace!(request_another_frame, ready = output_capture_path.is_some(), "nested native capture frame phase");
+                    }
                     if request_another_frame {
                         // Capture the following fully rendered frame. This prevents a surface
                         // commit queued beside the capture request (notably an overlay unmap)
@@ -747,6 +750,7 @@ pub fn init_winit(
                             size,
                             &path,
                         );
+                        tracing::trace!(saved = matches!(result, nickel_session_protocol::CaptureResult::Saved { .. }), "nested native capture framebuffer completed");
                         state.complete_output_capture(&path, result);
                     }
 

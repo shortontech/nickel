@@ -1918,6 +1918,11 @@ impl NickelSession {
             }
             SessionCommand::IdentifyOutputs => self.begin_output_identification(),
             SessionCommand::CaptureOutput { path, output } => {
+                tracing::trace!(
+                    ?output,
+                    internal = source.is_none(),
+                    "native output capture command received"
+                );
                 if path.is_empty() {
                     return protocol_error(ErrorCode::InvalidRequest, "capture path is empty");
                 }
@@ -2097,6 +2102,7 @@ impl NickelSession {
                     false
                 }
             };
+            tracing::trace!(completed, "native output capture completion delivered");
             if completed {
                 self.wake_internal_shell();
             }
