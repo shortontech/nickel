@@ -209,7 +209,7 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .set_plugin_enabled("org.example.priority-badge", true)
             .unwrap()
     );
-    assert_eq!(shell.plugin_badge_slot_hosts.len(), 2);
+    assert_eq!(shell.plugin_slot_hosts.len(), 2);
 
     shell.windows = vec![crate::model::OpenWindow {
         id: crate::model::WindowId(71),
@@ -320,13 +320,13 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .set_plugin_enabled("org.example.mail-badge", false)
             .unwrap()
     );
-    assert_eq!(shell.plugin_badge_slot_hosts.len(), 1);
+    assert_eq!(shell.plugin_slot_hosts.len(), 1);
     assert!(
         shell
             .set_plugin_enabled("org.example.priority-badge", false)
             .unwrap()
     );
-    assert!(shell.plugin_badge_slot_hosts.is_empty());
+    assert!(shell.plugin_slot_hosts.is_empty());
     assert_eq!(
         shell
             .plugin_registry

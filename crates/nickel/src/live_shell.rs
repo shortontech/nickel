@@ -521,46 +521,7 @@ pub struct LiveShell {
     plugin_launcher_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_run_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
-    plugin_badge_slot_hosts: std::collections::BTreeMap<
-        String,
-        (
-            String,
-            String,
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
-    plugin_section_slot_hosts: std::collections::BTreeMap<
-        String,
-        (
-            String,
-            String,
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
-    plugin_widget_slot_hosts: std::collections::BTreeMap<
-        String,
-        (
-            String,
-            String,
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
-    plugin_action_slot_hosts: std::collections::BTreeMap<
-        String,
-        (
-            String,
-            String,
-            i16,
-            nickel_core::plugins::PluginContributionMode,
-            crate::plugin_panel::PluginPanelApplication,
-        ),
-    >,
+    plugin_slot_hosts: std::collections::BTreeMap<String, PluginSlotHost>,
     plugin_notification_host:
         Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_taskbar_hosts:
@@ -819,38 +780,33 @@ fn taskbar_plugin_data(
     (projection, images)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExecutableExtensionKind {
-    PluginBadge,
-    PluginSection,
-    PluginWidget,
-    PluginAction,
+struct PluginSlotHost {
+    target_plugin: String,
+    target_slot: String,
+    contract: nickel_core::plugins::PluginSlotContract,
+    priority: i16,
+    mode: nickel_core::plugins::PluginContributionMode,
+    application: crate::plugin_panel::PluginPanelApplication,
 }
 
 fn should_auto_start_installed_plugin(desired_enabled: bool, safe_mode: bool) -> bool {
     desired_enabled && !safe_mode
 }
 
-fn executable_extension_priority(
+fn validated_extension_contract(
     manifest: &nickel_core::plugins::PluginManifest,
     registry: &nickel_core::plugins::PluginRegistry,
 ) -> Result<
     (
-        ExecutableExtensionKind,
+        nickel_core::plugins::PluginSlotContract,
         i16,
         nickel_core::plugins::PluginContributionMode,
     ),
     String,
 > {
-    use nickel_core::plugins::{PluginContributionMode, PluginSlotContract};
+    use nickel_core::plugins::PluginContributionMode;
     let [contribution] = manifest.contributes.as_slice() else {
         return Err("extension needs exactly one contribution".into());
-    };
-    let kind = match contribution.contract {
-        PluginSlotContract::Badge => ExecutableExtensionKind::PluginBadge,
-        PluginSlotContract::Section => ExecutableExtensionKind::PluginSection,
-        PluginSlotContract::Widget => ExecutableExtensionKind::PluginWidget,
-        PluginSlotContract::Action => ExecutableExtensionKind::PluginAction,
     };
     if !manifest.surfaces.is_empty() {
         return Err("extension must not declare a surface".into());
@@ -867,7 +823,11 @@ fn executable_extension_priority(
     if contribution.mode == PluginContributionMode::Replace && !slot.replaceable {
         return Err("extension target does not allow replacement".into());
     }
-    Ok((kind, contribution.priority, contribution.mode))
+    Ok((
+        contribution.contract,
+        contribution.priority,
+        contribution.mode,
+    ))
 }
 
 fn external_plugin_settings(
@@ -1574,10 +1534,7 @@ impl LiveShell {
             plugin_launcher_host,
             plugin_run_host,
             plugin_taskbar_host,
-            plugin_badge_slot_hosts: std::collections::BTreeMap::new(),
-            plugin_section_slot_hosts: std::collections::BTreeMap::new(),
-            plugin_widget_slot_hosts: std::collections::BTreeMap::new(),
-            plugin_action_slot_hosts: std::collections::BTreeMap::new(),
+            plugin_slot_hosts: std::collections::BTreeMap::new(),
             plugin_notification_host,
             plugin_taskbar_hosts: HashMap::new(),
             plugin_taskbar_memory: HashMap::new(),
@@ -3599,30 +3556,30 @@ impl LiveShell {
                 PluginSlotContract::Widget => 8,
                 PluginSlotContract::Section => 4,
             };
-            let hosts = match slot.contract {
-                PluginSlotContract::Badge => &self.plugin_badge_slot_hosts,
-                PluginSlotContract::Section => &self.plugin_section_slot_hosts,
-                PluginSlotContract::Widget => &self.plugin_widget_slot_hosts,
-                PluginSlotContract::Action => &self.plugin_action_slot_hosts,
-            };
-            let mut contributors = hosts
+            let mut contributors = self
+                .plugin_slot_hosts
                 .iter()
-                .filter(|(_, (plugin, name, _, _, _))| plugin == target_id && name == &slot.id)
+                .filter(|(_, host)| {
+                    host.target_plugin == target_id
+                        && host.target_slot == slot.id
+                        && host.contract == slot.contract
+                })
                 .collect::<Vec<_>>();
-            contributors.sort_by_key(|(id, (_, _, priority, _, _))| (*priority, id.as_str()));
+            contributors.sort_by_key(|(id, host)| (host.priority, id.as_str()));
             let replacement = contributors
                 .iter()
                 .rev()
-                .find(|(_, (_, _, _, mode, _))| *mode == PluginContributionMode::Replace)
+                .find(|(_, host)| host.mode == PluginContributionMode::Replace)
                 .copied();
             let mut ordered = replacement.into_iter().collect::<Vec<_>>();
             ordered.extend(
                 contributors
                     .into_iter()
-                    .filter(|(_, (_, _, _, mode, _))| *mode == PluginContributionMode::Add),
+                    .filter(|(_, host)| host.mode == PluginContributionMode::Add),
             );
             let mut items: Vec<serde_json::Value> = Vec::new();
-            for (id, (_, _, _, _, application)) in ordered {
+            for (id, host) in ordered {
+                let application = &host.application;
                 match slot.contract {
                     PluginSlotContract::Badge => {
                         if let Ok(badges) = application.badge_contributions() {
@@ -4159,19 +4116,15 @@ impl LiveShell {
                                     if entry.desired_enabled
                                         && contribution.mode == PluginContributionMode::Replace
                                         && self
-                                            .plugin_badge_slot_hosts
+                                            .plugin_slot_hosts
                                             .iter()
-                                            .chain(self.plugin_section_slot_hosts.iter())
-                                            .chain(self.plugin_widget_slot_hosts.iter())
-                                            .chain(self.plugin_action_slot_hosts.iter())
-                                            .filter(|(_, (target, slot, _, mode, _))| {
-                                                target == &contribution.target_plugin
-                                                    && slot == &contribution.target_slot
-                                                    && *mode == PluginContributionMode::Replace
+                                            .filter(|(_, host)| {
+                                                host.target_plugin == contribution.target_plugin
+                                                    && host.target_slot == contribution.target_slot
+                                                    && host.contract == contribution.contract
+                                                    && host.mode == PluginContributionMode::Replace
                                             })
-                                            .max_by_key(|(id, (_, _, priority, _, _))| {
-                                                (*priority, id.as_str())
-                                            })
+                                            .max_by_key(|(id, host)| (host.priority, id.as_str()))
                                             .is_some_and(|(winner, _)| winner != &entry.manifest.id)
                                     {
                                         " (superseded by another replacement)"
@@ -4357,26 +4310,12 @@ impl LiveShell {
                             );
                         }
                     }
-                } else if let Some((_, _, _, _, current)) = self.plugin_badge_slot_hosts.get_mut(id)
-                {
+                } else if let Some(host) = self.plugin_slot_hosts.get_mut(id) {
                     extension_bytes = Some(application.retained_contribution_bytes());
-                    *current = application;
-                } else if let Some((_, _, _, _, current)) =
-                    self.plugin_widget_slot_hosts.get_mut(id)
-                {
-                    extension_bytes = Some(application.retained_contribution_bytes());
-                    *current = application;
-                } else if let Some((_, _, _, _, current)) =
-                    self.plugin_action_slot_hosts.get_mut(id)
-                {
-                    extension_bytes = Some(application.retained_contribution_bytes());
-                    *current = application;
-                    self.application_menu_plugin_host = None;
-                } else if let Some((_, _, _, _, current)) =
-                    self.plugin_section_slot_hosts.get_mut(id)
-                {
-                    extension_bytes = Some(application.retained_contribution_bytes());
-                    *current = application;
+                    host.application = application;
+                    if host.contract == nickel_core::plugins::PluginSlotContract::Action {
+                        self.application_menu_plugin_host = None;
+                    }
                 }
             }
             if let Some(bytes) = extension_bytes {
@@ -4402,20 +4341,8 @@ impl LiveShell {
         }
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
-        if let Some((target, _, _, _, _)) = self.plugin_badge_slot_hosts.get(id) {
-            let target = target.clone();
-            self.refresh_plugin_slot_hosts(&target);
-        }
-        if let Some((target, _, _, _, _)) = self.plugin_section_slot_hosts.get(id) {
-            let target = target.clone();
-            self.refresh_plugin_slot_hosts(&target);
-        }
-        if let Some((target, _, _, _, _)) = self.plugin_widget_slot_hosts.get(id) {
-            let target = target.clone();
-            self.refresh_plugin_slot_hosts(&target);
-        }
-        if let Some((target, _, _, _, _)) = self.plugin_action_slot_hosts.get(id) {
-            let target = target.clone();
+        if let Some(host) = self.plugin_slot_hosts.get(id) {
+            let target = host.target_plugin.clone();
             self.refresh_plugin_slot_hosts(&target);
         }
         if replaced_panels {
@@ -4448,12 +4375,13 @@ impl LiveShell {
             .map(|contribution| contribution.target_plugin.clone());
         tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
-        self.plugin_badge_slot_hosts.remove(id);
-        self.plugin_widget_slot_hosts.remove(id);
-        if self.plugin_action_slot_hosts.remove(id).is_some() {
+        if self
+            .plugin_slot_hosts
+            .remove(id)
+            .is_some_and(|host| host.contract == nickel_core::plugins::PluginSlotContract::Action)
+        {
             self.application_menu_plugin_host = None;
         }
-        self.plugin_section_slot_hosts.remove(id);
         self.plugin_panel_extra_hosts
             .retain(|key, _| key.plugin_id != id);
         self.plugin_panel_memory
@@ -4675,7 +4603,7 @@ impl LiveShell {
         });
         let external_extension = if enabled && !entry.manifest.contributes.is_empty() {
             let (kind, priority, mode) =
-                executable_extension_priority(&entry.manifest, &self.plugin_registry)?;
+                validated_extension_contract(&entry.manifest, &self.plugin_registry)?;
             let descriptor = self
                 .external_plugin_packages
                 .get(id)
@@ -4784,12 +4712,11 @@ impl LiveShell {
             return Ok(true);
         }
         if !enabled {
-            self.plugin_badge_slot_hosts.remove(id);
-            self.plugin_widget_slot_hosts.remove(id);
-            if self.plugin_action_slot_hosts.remove(id).is_some() {
+            if self.plugin_slot_hosts.remove(id).is_some_and(|host| {
+                host.contract == nickel_core::plugins::PluginSlotContract::Action
+            }) {
                 self.application_menu_plugin_host = None;
             }
-            self.plugin_section_slot_hosts.remove(id);
             self.plugin_panel_extra_hosts
                 .retain(|key, _| key.plugin_id != id);
             self.plugin_panel_memory
@@ -4826,45 +4753,23 @@ impl LiveShell {
         let extension_bytes = external_extension
             .as_ref()
             .map(|(_, _, _, application)| application.retained_contribution_bytes());
-        let started = if let Some((kind, priority, mode, application)) = external_extension {
-            match kind {
-                ExecutableExtensionKind::PluginBadge => {
-                    let (target_plugin, target_slot) = extension_target
-                        .clone()
-                        .expect("validated extension has a target");
-                    self.plugin_badge_slot_hosts.insert(
-                        id.to_owned(),
-                        (target_plugin, target_slot, priority, mode, application),
-                    );
-                }
-                ExecutableExtensionKind::PluginSection => {
-                    let (target_plugin, target_slot) = extension_target
-                        .clone()
-                        .expect("validated extension has a target");
-                    self.plugin_section_slot_hosts.insert(
-                        id.to_owned(),
-                        (target_plugin, target_slot, priority, mode, application),
-                    );
-                }
-                ExecutableExtensionKind::PluginWidget => {
-                    let (target_plugin, target_slot) = extension_target
-                        .clone()
-                        .expect("validated extension has a target");
-                    self.plugin_widget_slot_hosts.insert(
-                        id.to_owned(),
-                        (target_plugin, target_slot, priority, mode, application),
-                    );
-                }
-                ExecutableExtensionKind::PluginAction => {
-                    let (target_plugin, target_slot) = extension_target
-                        .clone()
-                        .expect("validated extension has a target");
-                    self.plugin_action_slot_hosts.insert(
-                        id.to_owned(),
-                        (target_plugin, target_slot, priority, mode, application),
-                    );
-                    self.application_menu_plugin_host = None;
-                }
+        let started = if let Some((contract, priority, mode, application)) = external_extension {
+            let (target_plugin, target_slot) = extension_target
+                .clone()
+                .expect("validated extension has a target");
+            self.plugin_slot_hosts.insert(
+                id.to_owned(),
+                PluginSlotHost {
+                    target_plugin,
+                    target_slot,
+                    contract,
+                    priority,
+                    mode,
+                    application,
+                },
+            );
+            if contract == nickel_core::plugins::PluginSlotContract::Action {
+                self.application_menu_plugin_host = None;
             }
             Ok(())
         } else if let Some(external_panel) = external_panel {
@@ -6180,17 +6085,20 @@ impl LiveShell {
                     if !visible {
                         continue;
                     }
-                    let Some((target, slot, _, _, extension)) =
-                        self.plugin_action_slot_hosts.get_mut(&plugin_id)
-                    else {
+                    let Some(host) = self.plugin_slot_hosts.get_mut(&plugin_id) else {
                         continue;
                     };
-                    if target != &target_plugin || slot != &slot_id {
+                    if host.target_plugin != target_plugin
+                        || host.target_slot != slot_id
+                        || host.contract != nickel_core::plugins::PluginSlotContract::Action
+                    {
                         continue;
                     }
-                    let handled = extension.activate_action(&id, item.as_deref().unwrap_or(""));
-                    let extension_effects = extension.take_effects();
-                    let retained_bytes = extension.retained_contribution_bytes();
+                    let handled = host
+                        .application
+                        .activate_action(&id, item.as_deref().unwrap_or(""));
+                    let extension_effects = host.application.take_effects();
+                    let retained_bytes = host.application.retained_contribution_bytes();
                     if handled {
                         let _ = self.plugin_registry.record_memory(
                             &plugin_id,
@@ -6236,17 +6144,18 @@ impl LiveShell {
                     if !visible {
                         continue;
                     }
-                    let Some((target, slot, _, _, extension)) =
-                        self.plugin_section_slot_hosts.get_mut(&plugin_id)
-                    else {
+                    let Some(host) = self.plugin_slot_hosts.get_mut(&plugin_id) else {
                         continue;
                     };
-                    if target != &target_plugin || slot != &slot_id {
+                    if host.target_plugin != target_plugin
+                        || host.target_slot != slot_id
+                        || host.contract != nickel_core::plugins::PluginSlotContract::Section
+                    {
                         continue;
                     }
-                    let handled = extension.activate_section(&id);
-                    let extension_effects = extension.take_effects();
-                    let retained_bytes = extension.retained_contribution_bytes();
+                    let handled = host.application.activate_section(&id);
+                    let extension_effects = host.application.take_effects();
+                    let retained_bytes = host.application.retained_contribution_bytes();
                     if handled {
                         let _ = self.plugin_registry.record_memory(
                             &plugin_id,
