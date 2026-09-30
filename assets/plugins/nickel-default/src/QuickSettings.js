@@ -2,10 +2,10 @@
 import "./styles/quick-settings.css";
 // Nickel owns status snapshots and validates every requested system action.
 export function QuickSettings(props) {
-    const data = { ...{ scrollHeight: 552, network: { available: false, enabled: false, networks: [] }, bluetooth: { available: false, powered: false, discovering: false, devices: [] }, audio: { muted: false, percent: 0, devices: [] }, workspaces: [], projectionModes: [], slots: {} }, ...props?.data, audio: props?.data?.audio || nickel.audio.get(), network: nickel.wifi.get(), bluetooth: nickel.bluetooth.get() };
+    const data = { ...{ scrollHeight: 552, network: { available: false, enabled: false, networks: [] }, bluetooth: { available: false, powered: false, discovering: false, devices: [] }, audio: { muted: false, percent: 0, devices: [] }, workspaces: [], projectionModes: [] }, ...props?.data, audio: props?.data?.audio || nickel.audio.get(), network: nickel.wifi.get(), bluetooth: nickel.bluetooth.get() };
     const session = nickel.session.get();
     const sessionOperations = { suspend: "suspend", logout: "logout", "restart-shell": "restartShell", reboot: "reboot", poweroff: "powerOff" };
-    const sections = (data.slots && data.slots["control-section"]) || [];
+    const sections = nickel.contributions("system.controls");
     const [wifiOpen, setWifiOpen] = useState(false);
     const [bluetoothOpen, setBluetoothOpen] = useState(false);
     const [audioOpen, setAudioOpen] = useState(false);
@@ -50,12 +50,7 @@ export function QuickSettings(props) {
                         h(Button, { id: "show-desktop", onClick: () => request("show-desktop") }, "Show desktop"),
                         h(Button, { id: "show-notifications", onClick: () => nickel.surfaces.show("notifications") }, "Notifications")),
                     sections.length ? h(Text, { className: "control-section-title" }, "Extensions") : null,
-                    sections.map((section, index) => h(Row, { key: `${section.pluginId}:${section.id}` },
-                        h(Text, null, section.label + ": " + section.value),
-                        h(Button, { id: `control-extension-${index}`, onClick: () => nickel.request({
-                                type: "invoke-plugin-slot-section", slot: "control-section",
-                                pluginId: section.pluginId, id: section.id
-                            }) }, "Open"))),
+                    sections.map(entry => h(entry.component, { key: entry.key })),
                     h(Text, { className: "control-section-title" }, "Displays"),
                     data.pendingProjection ? h(Row, null,
                         h(Text, null, "Keep display settings?"),

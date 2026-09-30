@@ -78,21 +78,17 @@ function TrayItem(props) {
 }
 
 export function Taskbar(props) {
-    const data = {...{items:[],tray:[],slots:{},clock:'',codexAvailable:false,keyboardEnabled:false}, ...props?.data};
+    const data = {...{items:[],tray:[],clock:'',codexAvailable:false,keyboardEnabled:false}, ...props?.data};
     const items = props?.data?.items || taskItems(nickel.applications.list(), nickel.windows.list());
     const tray = props?.data?.tray || nickel.tray.list();
-    const badges = (data.slots && data.slots["task-badge"]) || [];
+    const contributions = nickel.contributions("taskbar.items");
     return <FixedWindow id="taskbar" output="all" edge="bottom"
         reserveWorkArea={true} className="taskbar">
         <div className="taskbar-content">
             <Button id="taskbar-launcher" className="launcher-button" icon="logo" accessibilityLabel="Open Nickel Start"
                 onClick={() => nickel.surfaces.show("launcher")}>Nickel</Button>
-            {items.flatMap(item => [
-                <Task key={item.id} item={item} />,
-                ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) =>
-                    <Badge key={badge.pluginId + ":" + item.id + ":" + index} className="task-badge"
-                        label={badge.label} count={badge.count} color={badge.color} />)
-            ])}
+            {items.map(item => <Task key={item.id} item={item} />)}
+            {contributions.map(entry => <entry.component key={entry.key} />)}
             <Spacer className="taskbar-spacer" />
             {data.keyboardEnabled ? <Button id="taskbar-keyboard" className="utility-button" accessibilityLabel="On-screen keyboard"
                 onClick={() => nickel.request({type: "toggle-on-screen-keyboard"})}>⌨</Button> : null}

@@ -21,6 +21,7 @@ pub struct JsxModuleGraph {
     stylesheets: BTreeMap<String, String>,
     public_exports: BTreeMap<String, (String, String)>,
     component_bridge: bool,
+    contribution_catalog: serde_json::Value,
 }
 
 impl JsxModuleGraph {
@@ -56,6 +57,7 @@ impl JsxModuleGraph {
             stylesheets,
             public_exports: BTreeMap::new(),
             component_bridge: false,
+            contribution_catalog: serde_json::json!({}),
         };
         graph.validate_reachable()?;
         Ok(graph)
@@ -63,7 +65,8 @@ impl JsxModuleGraph {
 
     /// Public component lookups become declarative host mount requests. The
     /// host resolves the contract outside JavaScript and invokes its owner.
-    pub(crate) fn with_component_bridge(mut self) -> Self {
+    pub(crate) fn with_component_bridge(mut self, contributions: serde_json::Value) -> Self {
+        self.contribution_catalog = contributions;
         self.component_bridge = true;
         self
     }
@@ -145,9 +148,12 @@ impl JsxModuleGraph {
                factory(module, module.exports, __nickelRequireModule); return module.exports;\n}\n",
         );
         if self.component_bridge {
+            output.push_str(&format!(
+                "const __nickelContributionCatalog = {};\n",
+                self.contribution_catalog
+            ));
             output.push_str(r#"
-const __nickelCompositionClient = Object.freeze({...nickel, get data() { return nickel.data; }, component(contract) {
-    if (typeof contract !== 'string') throw TypeError('invalid component contract');
+function __nickelComponentProxy(selection) {
     return function HostComponent(props) {
         function check(value) {
             if (typeof value === 'function' || typeof value === 'symbol')
@@ -159,9 +165,21 @@ const __nickelCompositionClient = Object.freeze({...nickel, get data() { return 
             }
         }
         check(props);
-        return {kind:'__packageComponent', contract, props};
+        return {kind:'__packageComponent', ...selection, props};
     };
-}});
+}
+const __nickelCompositionClient = Object.freeze({...nickel, get data() { return nickel.data; },
+    component(contract) {
+        if (typeof contract !== 'string') throw TypeError('invalid component contract');
+        return __nickelComponentProxy({contract});
+    },
+    contributions(collection) {
+        if (typeof collection !== 'string') throw TypeError('invalid contribution collection');
+        return Object.freeze((__nickelContributionCatalog[collection] || []).map(entry => Object.freeze({
+            ...entry, component: __nickelComponentProxy({contribution:entry.key})
+        })));
+    }
+});
 "#);
         }
         for path in order {

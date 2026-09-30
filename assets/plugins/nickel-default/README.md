@@ -34,10 +34,11 @@ request enums, `<Slot id="settings-content">`, or separate host lifecycle.
 - `SettingsNavigation` / `shell.settings.navigation`
 - `SettingControl` / `shell.settings.controls`
 
-The package advertises `taskbar.items`, `launcher.providers`, `notifications`,
-and `settings.pages` as the semantic contribution mount points owned by these
-components. The actual contribution renderer remains a runtime dependency; the
-copied components still read today's bounded slot data until that API lands.
+The Taskbar renders `nickel.contributions("taskbar.items")`; Quick Settings
+renders `nickel.contributions("system.controls")`. Each entry exposes `id`,
+`provider`, `version`, a stable `key`, and a `component` suitable for JSX.
+The native host resolves and invokes that component in its owning package
+context, retaining its callbacks and validating effects against its own grants.
 
 ## Application search
 

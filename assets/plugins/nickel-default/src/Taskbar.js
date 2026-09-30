@@ -65,17 +65,15 @@ function TrayItem(props) {
     return h(Button, { id: "taskbar-tray-" + item.id, className: "tray-button", accessibilityLabel: item.title, icon: item.icon ? "tray:" + item.id : null, onContextMenu: () => nickel.tray.contextMenu(item.id), onClick: () => nickel.tray.activate(item.id) }, item.title.charAt(0).toUpperCase() || "?");
 }
 export function Taskbar(props) {
-    const data = { ...{ items: [], tray: [], slots: {}, clock: '', codexAvailable: false, keyboardEnabled: false }, ...props?.data };
+    const data = { ...{ items: [], tray: [], clock: '', codexAvailable: false, keyboardEnabled: false }, ...props?.data };
     const items = props?.data?.items || taskItems(nickel.applications.list(), nickel.windows.list());
     const tray = props?.data?.tray || nickel.tray.list();
-    const badges = (data.slots && data.slots["task-badge"]) || [];
+    const contributions = nickel.contributions("taskbar.items");
     return h(FixedWindow, { id: "taskbar", output: "all", edge: "bottom", reserveWorkArea: true, className: "taskbar" },
         h("div", { className: "taskbar-content" },
             h(Button, { id: "taskbar-launcher", className: "launcher-button", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.surfaces.show("launcher") }, "Nickel"),
-            items.flatMap(item => [
-                h(Task, { key: item.id, item: item }),
-                ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) => h(Badge, { key: badge.pluginId + ":" + item.id + ":" + index, className: "task-badge", label: badge.label, count: badge.count, color: badge.color }))
-            ]),
+            items.map(item => h(Task, { key: item.id, item: item })),
+            contributions.map(entry => h(entry.component, { key: entry.key })),
             h(Spacer, { className: "taskbar-spacer" }),
             data.keyboardEnabled ? h(Button, { id: "taskbar-keyboard", className: "utility-button", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.request({ type: "toggle-on-screen-keyboard" }) }, "\u2328") : null,
             data.codexAvailable ? h(Button, { id: "taskbar-codex", className: "utility-button", icon: "codex", accessibilityLabel: "Codex projects", onClick: () => nickel.request({ type: "toggle-projects-menu" }) }, "Codex") : null,

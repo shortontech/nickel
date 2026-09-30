@@ -318,6 +318,12 @@ const nickel = Object.freeze({
             __effects.push({type:'surface.setPlacement',surfaceId:__nickelIdentity(id),anchor,offsetX,offsetY});
         }
     }),
+    // Ordinary package validation has no installed composition catalog. The
+    // native composed host replaces this client with resolved owned entries.
+    contributions(collection) {
+        if (typeof collection !== 'string') throw TypeError('invalid contribution collection');
+        return Object.freeze([]);
+    },
     component(contract) {
         const component = __nickelPublicComponents.get(contract);
         if (!component) throw Error(`unknown public component ${contract}`);

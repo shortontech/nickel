@@ -137,6 +137,28 @@ impl ShellCompositionRuntime {
             effects: Vec::new(),
             nested_mounts: BTreeMap::new(),
         };
+        let contribution_catalog = host
+            .resolution
+            .contributions
+            .iter()
+            .map(|(collection, entries)| {
+                (
+                    collection.clone(),
+                    Value::Array(
+                        entries
+                            .iter()
+                            .map(|entry| {
+                                serde_json::json!({
+                                    "id":entry.id, "provider":entry.contributed_by.id,
+                                    "version":entry.contributed_by.version.to_string(),
+                                    "key":Self::contribution_key(entry),
+                                })
+                            })
+                            .collect(),
+                    ),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
         let mut source_bytes = 0usize;
         for owner in host.resolution.inheritance_chain.clone() {
             let package = &catalog[&owner.id];
@@ -194,7 +216,7 @@ impl ShellCompositionRuntime {
                     })),
             )?
             .with_public_exports(&exports)?
-            .with_component_bridge();
+            .with_component_bridge(Value::Object(contribution_catalog.clone()));
             let data = snapshots
                 .get(&owner)
                 .cloned()
@@ -246,6 +268,26 @@ impl ShellCompositionRuntime {
                 runtime: self.id,
                 owner: export.implemented_by.clone(),
                 implementation: export.implementation.clone(),
+            })
+    }
+
+    fn contribution_key(entry: &nickel_core::package_composition::ResolvedContribution) -> String {
+        format!(
+            "{}/{}@{}/{}",
+            entry.collection, entry.contributed_by.id, entry.contributed_by.version, entry.id
+        )
+    }
+
+    fn contribution(&self, key: &str) -> Option<ComponentReference> {
+        self.resolution
+            .contributions
+            .values()
+            .flatten()
+            .find(|entry| Self::contribution_key(entry) == key)
+            .map(|entry| ComponentReference {
+                runtime: self.id,
+                owner: entry.contributed_by.clone(),
+                implementation: entry.implementation.clone(),
             })
     }
 
@@ -440,14 +482,25 @@ impl ShellCompositionRuntime {
             return Err("composition expansion exceeds limits".into());
         }
         if node.get("kind").and_then(Value::as_str) == Some("__packageComponent") {
-            let contract = node
-                .get("contract")
-                .and_then(Value::as_str)
-                .ok_or("missing public component contract")?;
-            let reference = self
-                .component(contract)
-                .ok_or("unknown public component contract")?;
-            let key = format!("{path}/{contract}");
+            let (selection, reference) =
+                if let Some(contract) = node.get("contract").and_then(Value::as_str) {
+                    (
+                        format!("export:{contract}"),
+                        self.component(contract)
+                            .ok_or("unknown public component contract")?,
+                    )
+                } else {
+                    let key = node
+                        .get("contribution")
+                        .and_then(Value::as_str)
+                        .ok_or("missing public component selection")?;
+                    (
+                        format!("contribution:{key}"),
+                        self.contribution(key)
+                            .ok_or("unknown public contribution")?,
+                    )
+                };
+            let key = format!("{path}/{selection}");
             expansion.visited.insert(key.clone());
             let identity = (expansion.root, key.clone());
             let mount = if let Some(mount) = self.nested_mounts.get(&identity) {

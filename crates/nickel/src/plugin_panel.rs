@@ -4286,16 +4286,16 @@ mod tests {
         for granted in [true, false] {
             let base = package(
                 "base-shell",
-                "globalThis.origin = 'base';\nexport function Shell() { return h(Window, {id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'}, h(nickel.component('shell.taskbar'), null)); }\nexport function Taskbar() { return h(Button, {id:'base',onClick:()=>nickel.request('show-launcher')}, origin); }\nexport default Shell;",
+                "globalThis.origin = 'base';\nexport function Shell() { return h(Window, {id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'}, h(nickel.component('shell.taskbar'), null), nickel.contributions('taskbar.items').map(entry => h(entry.component, {key:entry.key}))); }\nexport function Taskbar() { return h(Button, {id:'base',onClick:()=>nickel.request('show-launcher')}, origin); }\nexport default Shell;",
                 None,
                 vec![
                     PluginCapability::LauncherShow,
                     PluginCapability::WindowsRead,
                 ],
             );
-            let child = package(
+            let mut child = package(
                 "derived-shell",
-                "globalThis.origin = 'derived';\nexport function Taskbar() { const [count,setCount] = useState(0); return h(Button, {id:'replacement',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count); }\nexport default Taskbar;",
+                "globalThis.origin = 'derived';\nexport function Taskbar() { const [count,setCount] = useState(0); return h(Button, {id:'replacement',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count); }\nexport function Widget() { return h(Button, {id:'contribution',onClick:()=>nickel.request('show-launcher')}, 'Owned contribution'); }\nexport default Taskbar;",
                 Some("base-shell"),
                 if granted {
                     vec![PluginCapability::LauncherShow]
@@ -4303,6 +4303,18 @@ mod tests {
                     Vec::new()
                 },
             );
+            child
+                .manifest
+                .composition
+                .as_mut()
+                .unwrap()
+                .contributions
+                .push(nickel_core::package_composition::SemanticContribution {
+                    collection: "taskbar.items".into(),
+                    id: "widget".into(),
+                    implementation: "./main.js#Widget".into(),
+                    priority: 10,
+                });
             let surface = child.manifest.surfaces[0].clone();
             let catalog = std::collections::BTreeMap::from([
                 ("base-shell".into(), base),
@@ -4357,6 +4369,9 @@ mod tests {
             if granted {
                 assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
                 assert!(application.last_error().is_none());
+                application.update(application.button_message("contribution").unwrap());
+                assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
+
                 let host = application.shared_composition_runtime().unwrap();
                 let owner = host.borrow().resolution().active.clone();
                 let mut data = host.borrow().snapshot(&owner).unwrap().clone();
