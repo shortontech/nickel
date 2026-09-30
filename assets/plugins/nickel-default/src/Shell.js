@@ -4,6 +4,7 @@ import "./DefaultApps.js";
 import "./Displays.js";
 import "./Wifi.js";
 import "./Bluetooth.js";
+import "./Preferences.js";
 // @jsx h
 import { Taskbar } from "./Taskbar.js";
 import { Launcher } from "./Launcher.js";
