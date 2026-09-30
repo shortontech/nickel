@@ -477,6 +477,7 @@ pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
     plugin: Option<nickel_core::plugins::PluginSurfaceKey>,
+    plugin_surface: Option<nickel_core::plugins::PluginSurface>,
     passive_overlay: bool,
     application_id: String,
     display_index: usize,
@@ -1079,6 +1080,7 @@ impl WinitShell {
                 }) {
                     existing.display_index = display_index;
                     existing.display_connected = true;
+                    existing.plugin_surface = Some(panel.clone());
                     let (_, x, y, width, height, _) = surface_geometry_for_panel(
                         SurfaceRole::Panel,
                         geometry,
@@ -1427,6 +1429,7 @@ impl WinitShell {
                     .window
                     .request_inner_size(LogicalSize::new(width, height));
             }
+            existing.plugin_surface = Some(current.clone());
         }
         self.rebuild_surface_indices();
         #[cfg(target_os = "linux")]
@@ -1860,6 +1863,7 @@ impl WinitShell {
             id,
             role: SurfaceRole::CodexChat,
             plugin: None,
+            plugin_surface: None,
             passive_overlay: false,
             application_id: application_id.to_owned(),
             display_index: 0,
@@ -1933,6 +1937,7 @@ impl WinitShell {
             id,
             role: SurfaceRole::TrustedControl,
             plugin: None,
+            plugin_surface: None,
             passive_overlay: false,
             application_id: "nickel.trusted-remote-control".to_owned(),
             display_index,
@@ -2352,21 +2357,8 @@ impl WinitShell {
             .or_else(|| self.displays.first().map(|(geometry, _)| *geometry))
             .ok_or_else(|| "cannot recreate a shell surface without an output".to_owned())?;
         let panel = surface
-            .plugin
+            .plugin_surface
             .as_ref()
-            .and_then(|key| {
-                if self.taskbar_panel_enabled && key == &crate::plugin_panel::taskbar_surface_key()
-                {
-                    Some(crate::plugin_panel::taskbar_surface())
-                } else if self.plugin_panel_enabled
-                    && key.plugin_id == self.plugin_panel_owner
-                    && key.surface_id == self.plugin_panel_surface.id
-                {
-                    Some(&self.plugin_panel_surface)
-                } else {
-                    self.extra_plugin_panels.get(key)
-                }
-            })
             .unwrap_or(&self.plugin_panel_surface);
         let (base_title, x, y, width, height, _) =
             surface_geometry_for_panel(surface.role, geometry, self.options.panel_edge, panel);
@@ -2393,13 +2385,7 @@ impl WinitShell {
             ))
             .with_visible(true)
             .with_name(&surface.application_id, &surface.application_id);
-        let attributes = if surface.role == SurfaceRole::Panel
-            && matches!(
-                panel.kind,
-                nickel_core::plugins::PluginSurfaceKind::Panel
-                    | nickel_core::plugins::PluginSurfaceKind::Dock
-                    | nickel_core::plugins::PluginSurfaceKind::Overlay
-            ) {
+        let attributes = if surface.plugin.is_some() {
             attributes.with_transparent(true)
         } else {
             attributes
@@ -2848,13 +2834,7 @@ impl WinitShell {
                     | SurfaceRole::OnScreenKeyboard
             ))
             .with_visible(!hidden || cfg!(target_os = "linux"));
-        let attributes = if role == SurfaceRole::Panel
-            && matches!(
-                panel.kind,
-                nickel_core::plugins::PluginSurfaceKind::Panel
-                    | nickel_core::plugins::PluginSurfaceKind::Dock
-                    | nickel_core::plugins::PluginSurfaceKind::Overlay
-            ) {
+        let attributes = if plugin_key.is_some() {
             attributes.with_transparent(true)
         } else {
             attributes
@@ -2984,6 +2964,7 @@ impl WinitShell {
         self.surfaces.push(ShellSurface {
             id,
             role,
+            plugin_surface: plugin_key.as_ref().map(|_| panel.clone()),
             plugin: plugin_key,
             passive_overlay: role == SurfaceRole::Panel && panel.passive,
             application_id,
