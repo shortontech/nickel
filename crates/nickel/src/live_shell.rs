@@ -6699,20 +6699,9 @@ impl LiveShell {
     ) -> bool {
         match role {
             SurfaceRole::Taskbar => self.panel_host_ui(event, width),
-            SurfaceRole::Panel => {
-                let Some(host) = self.plugin_panel_host.as_mut() else {
-                    return false;
-                };
-                let changed = host
-                    .step(HostBatch {
-                        surface_size: Some((width, height)),
-                        events: vec![HostEvent::Ui(event)],
-                        ..HostBatch::default()
-                    })
-                    .changed;
-                let effects = host.application_mut().take_effects();
-                changed | self.apply_plugin_effects(effects)
-            }
+            // Plugin panels always carry a surface key and use
+            // `plugin_panel_host_ui_for` at the compositor boundary.
+            SurfaceRole::Panel => false,
             SurfaceRole::Launcher => self.launcher_host_ui(event, width, height),
             SurfaceRole::ControlCenter => {
                 if !self.control_visible || !self.control_surface_available() {

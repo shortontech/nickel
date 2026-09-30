@@ -198,6 +198,43 @@
     }
 
     #[test]
+    fn primary_panel_events_use_the_keyed_plugin_host() {
+        let mut shell = LiveShell::new().unwrap();
+        let grant = crate::plugin_panel::surface();
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: shell.plugin_panel_owner.clone(),
+            surface_id: grant.id.clone(),
+        };
+        shell.plugin_panel_host = Some(nickel_ui::UiHost::new(
+            crate::plugin_panel::PluginPanelApplication::bundled().unwrap(),
+            grant.width,
+            grant.height,
+        ));
+        let target = shell
+            .plugin_panel_host_ref(&key)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open dialog".into(),
+            })
+            .unwrap();
+        let event = UiEvent::AccessibilityActivate(target.id);
+        assert!(!shell.shell_role_host_ui(
+            SurfaceRole::Panel,
+            event.clone(),
+            grant.width,
+            grant.height,
+        ));
+        assert!(shell.plugin_panel_host_ui_for(&key, event, grant.width, grant.height));
+        assert!(shell
+            .plugin_panel_host_ref(&key)
+            .unwrap()
+            .inspect()
+            .open_overlay
+            .is_some());
+    }
+
+    #[test]
     fn taskbar_keyed_controller_activates_focused_launcher_button() {
         let mut shell = LiveShell::new().unwrap();
         let key = shell.taskbar_surface_key().unwrap();
