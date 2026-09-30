@@ -121,7 +121,7 @@ pub fn init_winit(
             .request_user_attention(Some(UserAttentionType::Critical));
         backend.window().focus_window();
     }
-    state.set_winit_redraw_window(backend.window());
+    state.set_winit_redraw_window(backend.window(), winit.wake_proxy());
     state.advertise_dmabuf_formats(backend.renderer().dmabuf_formats().iter().copied(), None);
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
@@ -200,13 +200,13 @@ pub fn init_winit(
                     state.reconcile_internal_shell_outputs();
                     state.reconcile_stationary_pointer_after_topology_change();
                     let _ = display.flush_clients();
-                    backend.window().request_redraw();
+                    state.request_output_redraw();
                     eprintln!("nickel: output resized to {}x{}", size.w, size.h);
                 }
                 WinitEvent::Input(event) => {
                     let _ = state.process_input_event(event);
                     let _ = display.flush_clients();
-                    backend.window().request_redraw();
+                    state.request_output_redraw();
                 }
                 WinitEvent::Focus(false) => {
                     state.release_pressed_keys_on_host_focus_loss();
@@ -260,7 +260,7 @@ pub fn init_winit(
                         // Capture the following fully rendered frame. This prevents a surface
                         // commit queued beside the capture request (notably an overlay unmap)
                         // from exposing a compositor transition buffer to the screenshot.
-                        backend.window().request_redraw();
+                        state.request_output_redraw();
                     }
                     let capture_requested = image_copy_requested || output_capture_path.is_some();
                     if capture_requested {
@@ -819,7 +819,7 @@ pub fn init_winit(
                     // After startup, commits and explicit state changes request
                     // frames and an unchanged desktop stays idle.
                     if Instant::now() < startup_frame_pump_until {
-                        backend.window().request_redraw();
+                        state.request_output_redraw();
                     }
                 }
                 WinitEvent::CloseRequested => {

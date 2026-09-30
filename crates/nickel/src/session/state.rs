@@ -2962,6 +2962,8 @@ pub struct NickelSession {
     deferred_focus_restore: channel::Sender<WindowId>,
     #[cfg(feature = "backend-winit")]
     winit_redraw_window: Option<*const dyn smithay::reexports::winit::window::Window>,
+    #[cfg(feature = "backend-winit")]
+    winit_redraw_proxy: Option<smithay::reexports::winit::event_loop::EventLoopProxy>,
 }
 
 mod control_protocol;
@@ -8987,6 +8989,8 @@ impl NickelSession {
             deferred_focus_restore,
             #[cfg(feature = "backend-winit")]
             winit_redraw_window: None,
+            #[cfg(feature = "backend-winit")]
+            winit_redraw_proxy: None,
         };
         // Hosted applications must receive the compositor's clipboard bound
         // before their first pointer action. Waiting for a keyboard paste to
@@ -9009,8 +9013,10 @@ impl NickelSession {
     pub fn set_winit_redraw_window(
         &mut self,
         window: &dyn smithay::reexports::winit::window::Window,
+        proxy: smithay::reexports::winit::event_loop::EventLoopProxy,
     ) {
         self.winit_redraw_window = Some(std::ptr::from_ref(window));
+        self.winit_redraw_proxy = Some(proxy);
     }
 
     #[cfg(feature = "backend-winit")]
@@ -9022,6 +9028,12 @@ impl NickelSession {
         // of the winit backend and this session state. Moving the backend does
         // not move the Arc allocation, and all calls occur on the event thread.
         unsafe { &*window }.request_redraw();
+        // A coalesced Window::request_redraw does not ping winit again. The nested loop is
+        // dispatched from calloop rather than continuously pumped, so always wake its poll FD
+        // for a compositor-originated frame (including asynchronous native capture requests).
+        if let Some(proxy) = &self.winit_redraw_proxy {
+            proxy.wake_up();
+        }
     }
 
     #[cfg(not(feature = "backend-winit"))]

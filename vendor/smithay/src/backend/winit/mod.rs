@@ -409,6 +409,12 @@ pub struct WinitEventLoop {
 }
 
 impl WinitEventLoop {
+    /// Explicitly wakes a registered winit loop for compositor-originated redraws.
+    /// Window redraw requests may already be coalesced while host frame callbacks are pending.
+    pub fn wake_proxy(&self) -> winit::event_loop::EventLoopProxy {
+        self.event_loop.get_ref().create_proxy()
+    }
+
     /// Processes new events of the underlying event loop and calls the provided callback.
     ///
     /// You need to periodically call this function to keep the underlying event loop and
