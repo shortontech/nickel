@@ -904,6 +904,25 @@ fn launcher_plugin_images(
     images
 }
 
+fn render_plugin_host(
+    host: &mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    data: Option<String>,
+    mut batch: HostBatch,
+) -> Result<(Vec<PaintCommand>, u64), String> {
+    if let Some(data) = data {
+        batch.application_changed |= host.application_mut().sync_serialized_data(data)?;
+    }
+    let outcome = host.step(batch);
+    if let Some(error) = host.application_mut().take_runtime_failure() {
+        return Err(error);
+    }
+    Ok((
+        host.commands().to_vec(),
+        (outcome.telemetry.retained_frame_bytes as u64)
+            .saturating_add(host.application().retained_image_bytes()),
+    ))
+}
+
 // This shared shell implementation includes the compositor-facing API. The
 // Windows winit owner calls its own subset and leaves those Linux methods idle.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -3766,20 +3785,15 @@ impl LiveShell {
                 Ok(changed) => changed,
                 Err(error) => return Some(Err(error)),
             };
-            let outcome = host.step(HostBatch {
-                application_changed: projected,
-                surface_size: Some((width, height)),
-                ..HostBatch::default()
-            });
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                return Some(Err(error));
-            }
-            let commands = host.commands().to_vec();
-            let image_bytes = host.application_mut().retained_image_bytes();
-            Some(Ok((
-                commands,
-                (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
-            )))
+            Some(render_plugin_host(
+                host,
+                None,
+                HostBatch {
+                    application_changed: projected,
+                    surface_size: Some((width, height)),
+                    ..HostBatch::default()
+                },
+            ))
         })()?;
         match result {
             Ok((commands, bytes)) => {
@@ -9639,30 +9653,24 @@ impl LiveShell {
     fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         let projection = self.volume_osd_projection();
         if let Some(host) = self.plugin_volume_osd_host.as_mut() {
-            let changed = match host
-                .application_mut()
-                .sync_serialized_data(projection.to_json())
-            {
-                Ok(changed) => changed,
+            let (commands, bytes) = match render_plugin_host(
+                host,
+                Some(projection.to_json()),
+                HostBatch {
+                    surface_size: Some((width, height)),
+                    ..HostBatch::default()
+                },
+            ) {
+                Ok(frame) => frame,
                 Err(error) => {
                     self.fail_volume_osd_plugin_runtime(error);
                     return Vec::new();
                 }
             };
-            let outcome = host.step(HostBatch {
-                application_changed: changed,
-                surface_size: Some((width, height)),
-                ..HostBatch::default()
-            });
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                self.fail_volume_osd_plugin_runtime(error);
-                return Vec::new();
-            }
-            let commands = host.commands().to_vec();
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::volume_osd_manifest().id,
                 nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    native_ui_bytes: Some(bytes),
                     ..nickel_core::plugins::PluginMemory::default()
                 },
             );
@@ -10840,25 +10848,27 @@ impl LiveShell {
                 .plugin_launcher_host
                 .as_mut()
                 .expect("launcher plugin host exists");
-            let outcome = host.step(HostBatch {
-                surface_size: Some((width, height)),
-                application_changed: changed,
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-            let commands = host.commands().to_vec();
+            let (commands, bytes) = match render_plugin_host(
+                host,
+                None,
+                HostBatch {
+                    surface_size: Some((width, height)),
+                    application_changed: changed,
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                },
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.fail_launcher_plugin_runtime(error);
+                    return Vec::new();
+                }
+            };
             let effects = host.application_mut().take_effects();
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                self.fail_launcher_plugin_runtime(error);
-                return Vec::new();
-            }
-            let image_bytes = host.application().retained_image_bytes();
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::launcher_manifest().id,
                 nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(
-                        (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
-                    ),
+                    native_ui_bytes: Some(bytes),
                     ..nickel_core::plugins::PluginMemory::default()
                 },
             );
@@ -10870,20 +10880,25 @@ impl LiveShell {
 
     fn run_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         if let Some(host) = self.plugin_run_host.as_mut() {
-            let outcome = host.step(HostBatch {
-                surface_size: Some((width, height)),
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                self.fail_run_plugin_runtime(error);
-                return Vec::new();
-            }
-            let commands = host.commands().to_vec();
+            let (commands, bytes) = match render_plugin_host(
+                host,
+                None,
+                HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                },
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.fail_run_plugin_runtime(error);
+                    return Vec::new();
+                }
+            };
             let _ = self.plugin_registry.record_memory(
                 &crate::plugin_panel::run_manifest().id,
                 nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                    native_ui_bytes: Some(bytes),
                     ..nickel_core::plugins::PluginMemory::default()
                 },
             );
@@ -11411,28 +11426,25 @@ impl LiveShell {
         let Some(host) = self.plugin_control_host.as_mut() else {
             return Vec::new();
         };
-        let changed = match host.application_mut().sync_data(&data) {
-            Ok(changed) => changed,
+        let (commands, bytes) = match render_plugin_host(
+            host,
+            Some(data.to_string()),
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            },
+        ) {
+            Ok(frame) => frame,
             Err(error) => {
                 self.fail_control_plugin_runtime(error);
                 return Vec::new();
             }
         };
-        let outcome = host.step(HostBatch {
-            application_changed: changed,
-            surface_size: Some((width, height)),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        if let Some(error) = host.application_mut().take_runtime_failure() {
-            self.fail_control_plugin_runtime(error);
-            return Vec::new();
-        }
-        let commands = host.commands().to_vec();
         let _ = self.plugin_registry.record_memory(
             &crate::plugin_panel::control_center_manifest().id,
             nickel_core::plugins::PluginMemory {
-                native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                native_ui_bytes: Some(bytes),
                 ..nickel_core::plugins::PluginMemory::default()
             },
         );
