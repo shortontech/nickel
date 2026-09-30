@@ -144,6 +144,7 @@ impl LiveShell {
         for surface in common {
             let _ = self.show_plugin_window(id, &surface);
         }
+        #[cfg(target_os = "linux")]
         let _ = self.send_session_command(
             "shell-preview-recovery-focus",
             ShellCommand::FocusControlCenter,
