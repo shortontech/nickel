@@ -142,37 +142,6 @@ use nickel_input::KeyCode;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-fn bundled_surface_host(
-    manifest: &nickel_core::plugins::PluginManifest,
-    data: String,
-    images: crate::plugin_panel::PluginImages,
-) -> Result<
-    (
-        nickel_core::plugins::PluginSurfaceKey,
-        nickel_core::plugins::PluginSurface,
-        nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
-    ),
-    String,
-> {
-    let mut application = crate::plugin_panel::PluginPanelApplication::bundled_with_data(
-        manifest,
-        &manifest.entry,
-        data,
-    )?;
-    application.sync_images(images);
-    let surface = manifest
-        .surfaces
-        .first()
-        .ok_or_else(|| format!("bundled plugin {} has no surface", manifest.id))?
-        .clone();
-    let key = nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: manifest.id.clone(),
-        surface_id: surface.id.clone(),
-    };
-    let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
-    Ok((key, surface, host))
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CodexApprovalOwner {
     // Internal surfaces are owned by the Linux compositor. Windows retains
@@ -4828,18 +4797,6 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
-    fn retire_extra_panel_plugin_state(&mut self, id: &str) {
-        if self.is_shell_package(id) {
-            self.cancel_keyboard_gestures();
-        }
-        self.plugin_surface_hosts
-            .retain(|key, _| key.plugin_id != id);
-        self.plugin_panel_memory
-            .retain(|key, _| key.plugin_id != id);
-        self.plugin_window_placement_overrides
-            .retain(|key, _| key.plugin_id != id);
-    }
-
     fn retire_development_panel_plugin_state(&mut self) {
         let id = &crate::plugin_panel::manifest().id;
         self.plugin_surface_hosts
@@ -5285,34 +5242,6 @@ impl LiveShell {
         }
         self.maybe_publish_plugin_status();
         result
-    }
-
-    fn install_bundled_surface(
-        &mut self,
-        manifest: &nickel_core::plugins::PluginManifest,
-        data: String,
-        images: crate::plugin_panel::PluginImages,
-    ) -> Result<(), String> {
-        let (key, surface, host) = bundled_surface_host(manifest, data, images)?;
-        self.plugin_surface_hosts.insert(key, (surface, host));
-        Ok(())
-    }
-
-    fn start_initial_bundled_surface(
-        &mut self,
-        manifest: &nickel_core::plugins::PluginManifest,
-        data: String,
-    ) -> Result<(), String> {
-        let id = &manifest.id;
-        self.plugin_registry.set_enabled(id, true)?;
-        match self.install_bundled_surface(manifest, data, crate::plugin_panel::PluginImages::new())
-        {
-            Ok(()) => self.plugin_registry.mark_running(id),
-            Err(error) => {
-                tracing::error!(plugin = id, %error, "plugin failed to start");
-                self.plugin_registry.mark_failed(id, error)
-            }
-        }
     }
 
     pub fn next_host_deadline(&self) -> Option<Instant> {

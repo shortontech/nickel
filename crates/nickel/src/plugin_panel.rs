@@ -444,35 +444,6 @@ impl PluginPanelApplication {
             .map(|surface| surface.unwrap_or_else(|| grant.clone()))
     }
 
-    fn bundled_application(
-        manifest: &PluginManifest,
-        entry: &str,
-        source: &'static str,
-        stylesheet: Option<&'static str>,
-        data: String,
-    ) -> Result<Self, String> {
-        let source = bundled_source(manifest, entry, source)?;
-        let mut application = Self::new_with_manifest(source.as_ref(), manifest, Some(data))?;
-        if let Some(stylesheet) = stylesheet {
-            application.stylesheet = bundled_stylesheet(manifest, stylesheet)?;
-        }
-        if let [surface] = manifest.surfaces.as_slice() {
-            application.resolved_surface(surface)?;
-        }
-        Ok(application)
-    }
-
-    /// Bundled source selection is packaging; rendering and data refresh use
-    /// the same path as an installed plugin after the asset has been selected.
-    pub(crate) fn bundled_with_data(
-        manifest: &PluginManifest,
-        entry: &str,
-        data: String,
-    ) -> Result<Self, String> {
-        let (source, stylesheet) = crate::bundled_plugin_assets::resolve(&manifest.id, entry)?;
-        Self::bundled_application(manifest, entry, source, Some(stylesheet), data)
-    }
-
     pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
         self.node.button_action(id).map(PluginMessage::Click)
     }
