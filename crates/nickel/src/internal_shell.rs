@@ -206,11 +206,6 @@ impl InternalShellCoordinator {
         self.shell.surface_visible(SurfaceRole::CodexProjectMenu)
     }
 
-    pub(crate) fn codex_menu_plugin_active(&self) -> bool {
-        self.shell
-            .plugin_surface_matches(&crate::plugin_panel::codex_projects_surface_key())
-    }
-
     pub(crate) fn close_codex_project_menu(&mut self) -> bool {
         self.shell.hide_overlay(SurfaceRole::CodexProjectMenu)
     }
@@ -224,13 +219,6 @@ impl InternalShellCoordinator {
         projection: nickel_core::optional_features::CodexAvailabilityProjection,
     ) -> bool {
         self.shell.apply_codex_projection(projection)
-    }
-
-    pub(crate) fn apply_codex_menu_projection(
-        &mut self,
-        projection: &nickel_codex_ui::ProjectMenuProjection,
-    ) -> bool {
-        self.shell.apply_codex_menu_projection(projection)
     }
 
     pub(crate) fn codex_projection(
@@ -284,10 +272,6 @@ impl InternalShellCoordinator {
 
     pub fn take_requested_codex_project(&mut self) -> Option<String> {
         self.shell.take_requested_codex_project()
-    }
-
-    pub(crate) fn take_codex_menu_requests(&mut self) -> Vec<crate::live_shell::CodexMenuRequest> {
-        self.shell.take_codex_menu_requests()
     }
 
     #[cfg(test)]

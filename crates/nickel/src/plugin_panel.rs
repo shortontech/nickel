@@ -33,7 +33,6 @@ use nickel_ui::{
 use nickel_ui::{Length, Point, SemanticRole};
 use serde_json::Value;
 
-use nickel_codex_ui::{ProjectMenuProjection, ProjectMenuRevision};
 use nickel_core::display_projection::ProjectionMode;
 use nickel_plugin_presentation::css::StyleSheet;
 
@@ -62,23 +61,6 @@ pub fn surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     nickel_core::plugins::PluginSurfaceKey {
         plugin_id: manifest().id.clone(),
         surface_id: surface().id.clone(),
-    }
-}
-
-pub fn codex_projects_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!(
-            "../../../assets/plugins/codex-projects/plugin.json"
-        ))
-        .expect("bundled Codex projects plugin manifest must be valid")
-    })
-}
-
-pub fn codex_projects_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: codex_projects_manifest().id.clone(),
-        surface_id: codex_projects_manifest().surfaces[0].id.clone(),
     }
 }
 
@@ -341,12 +323,6 @@ pub enum PluginEffect {
     ProjectsVisibility {
         plugin_id: String,
         toggle: bool,
-    },
-    CodexProjectRefresh,
-    CodexProjectClose,
-    CodexProjectOpen {
-        token: String,
-        revision: ProjectMenuRevision,
     },
 
     LaunchApplication {
@@ -972,15 +948,6 @@ impl PluginPanelApplication {
             on_screen_keyboard_manifest(),
             Some(data.to_string()),
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn codex_projects_with_test_source(
-        source: &str,
-        projection: &ProjectMenuProjection,
-    ) -> Result<Self, String> {
-        let data = serde_json::to_string(projection).map_err(|error| error.to_string())?;
-        Self::new_with_manifest(source, codex_projects_manifest(), Some(data))
     }
 
     /// Refresh the plugin's host-owned data using the same render transaction
@@ -2443,66 +2410,6 @@ impl PluginPanelApplication {
                                 plugin_id: effect_manifest.id.clone(),
                                 mode: mode.unwrap(),
                                 revision: revision.unwrap().into(),
-                            });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("codex-project-refresh")
-                            && effect_manifest.id == codex_projects_manifest().id
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ProjectsRead) =>
-                        {
-                            approved.push(PluginEffect::CodexProjectRefresh);
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("codex-project-close")
-                            && effect_manifest.id == codex_projects_manifest().id =>
-                        {
-                            approved.push(PluginEffect::CodexProjectClose);
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("codex-project-open")
-                            && effect_manifest.id == codex_projects_manifest().id
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ProjectsOpen) =>
-                        {
-                            let token = effect.get("id").and_then(Value::as_str);
-                            let revision = effect.get("revision").cloned().and_then(|value| {
-                                serde_json::from_value::<ProjectMenuRevision>(value).ok()
-                            });
-                            let projected = self
-                                .projection_data
-                                .as_deref()
-                                .and_then(|data| serde_json::from_str::<Value>(data).ok());
-                            let valid = token.is_some_and(|token| {
-                                token.len() <= 3
-                                    && token.parse::<usize>().ok().is_some_and(|index| index < 100)
-                                    && projected.as_ref().is_some_and(|data| {
-                                        data.get("status").and_then(Value::as_str) == Some("ready")
-                                            && data.get("revision").cloned().and_then(|value| {
-                                                serde_json::from_value::<ProjectMenuRevision>(value)
-                                                    .ok()
-                                            }) == revision
-                                            && data
-                                                .get("projects")
-                                                .and_then(Value::as_array)
-                                                .is_some_and(|projects| {
-                                                    projects.iter().any(|project| {
-                                                        project.get("id").and_then(Value::as_str)
-                                                            == Some(token)
-                                                    })
-                                                })
-                                    })
-                            });
-                            if !valid {
-                                self.last_error =
-                                    Some("Codex project request is stale or invalid".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::CodexProjectOpen {
-                                token: token.unwrap().to_owned(),
-                                revision: revision.unwrap(),
                             });
                         }
                         _ if effect_manifest
@@ -6884,105 +6791,6 @@ mod tests {
         assert!(x(&rtl, "Row first") > x(&rtl, "Row second"));
         assert!(x(&ltr, "Grid first") < x(&ltr, "Grid second"));
         assert!(x(&rtl, "Grid first") > x(&rtl, "Grid second"));
-    }
-
-    #[test]
-    fn bundled_codex_project_menu_renders_only_the_bounded_projection() {
-        let package = PluginPackage::load(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/plugins/codex-projects"
-        ))
-        .unwrap();
-        PluginPanelApplication::validate_package(&package).unwrap();
-        let projection = ProjectMenuProjection {
-            revision: nickel_codex_ui::ProjectMenuRevision {
-                connection: 3,
-                projects: 7,
-            },
-            status: "ready",
-            projects: vec![nickel_codex_ui::ProjectMenuEntry {
-                id: "0".into(),
-                name: "Example project".into(),
-            }],
-        };
-        let mut panel = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::codex_projects_manifest(),
-            "main.js",
-            serde_json::to_string(&projection).unwrap(),
-        )
-        .unwrap();
-        assert!(matches!(
-            panel.node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        let rendered = format!("{:?}", panel.node);
-        assert!(rendered.contains("Example project"));
-        assert!(!rendered.contains("/private/work"));
-        assert!(
-            !panel
-                .sync_serialized_data(serde_json::to_string(&projection).unwrap())
-                .unwrap()
-        );
-        let mut disconnected = projection.clone();
-        disconnected.status = "disconnected";
-        disconnected.projects.clear();
-        assert!(
-            panel
-                .sync_serialized_data(serde_json::to_string(&disconnected).unwrap())
-                .unwrap()
-        );
-        assert!(!format!("{:?}", panel.node).contains("Example project"));
-
-        let mut host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::codex_projects_manifest(),
-                "main.js",
-                serde_json::to_string(&projection).unwrap(),
-            )
-            .unwrap(),
-            520,
-            680,
-        );
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(520, 680, 1.0);
-        host.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(520, 680, |x, y| {
-            let pixel = renderer.pixels()[(y * 520 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/codex-projects-shared.png");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image.save(output).unwrap();
-        let open = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Example project".into(),
-            })
-            .unwrap();
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(open.id),
-            )],
-            ..Default::default()
-        });
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::CodexProjectOpen {
-                token: "0".into(),
-                revision: projection.revision,
-            }]
-        );
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Shortcut(Shortcut::Escape)],
-            ..Default::default()
-        });
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::CodexProjectClose]
-        );
     }
 
     #[test]

@@ -175,17 +175,13 @@ mod platform {
         PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::{
-        PluginPanelApplication, codex_projects_manifest, manifest, on_screen_keyboard_manifest,
+        PluginPanelApplication, manifest, on_screen_keyboard_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
-        [
-            manifest(),
-            codex_projects_manifest(),
-            on_screen_keyboard_manifest(),
-        ]
-        .into_iter()
-        .find(|manifest| manifest.id == id)
+        [manifest(), on_screen_keyboard_manifest()]
+            .into_iter()
+            .find(|manifest| manifest.id == id)
     }
 
     fn staged_config_directory(root: &Path) -> PathBuf {
@@ -988,17 +984,6 @@ mod platform {
         }
 
         #[test]
-        fn codex_project_menu_uses_the_bundled_dev_path() {
-            let root = Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/codex-projects"
-            ));
-            let package = load_dev_package(root).unwrap();
-            assert_eq!(package.manifest.id, "org.nickel.codex-projects");
-            assert_eq!(package.manifest.surfaces.len(), 1);
-        }
-
-        #[test]
         fn keyboard_uses_the_bundled_dev_path() {
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -1014,12 +999,12 @@ mod platform {
             let directory = tempfile::tempdir().unwrap();
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/codex-projects"
+                "/../../assets/plugins/on-screen-keyboard"
             ));
             let manifest = std::fs::read_to_string(root.join("plugin.json")).unwrap();
             std::fs::write(
                 directory.path().join("plugin.json"),
-                manifest.replace("Nickel Codex Projects", "Renamed Projects"),
+                manifest.replace("Nickel On-Screen Keyboard", "Renamed Keyboard"),
             )
             .unwrap();
             std::fs::copy(root.join("main.js"), directory.path().join("main.js")).unwrap();

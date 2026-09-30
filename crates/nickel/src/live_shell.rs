@@ -413,15 +413,6 @@ struct PanelTaskProjection {
     groups: Arc<Vec<crate::launcher::TaskbarApplication>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CodexMenuRequest {
-    Refresh,
-    Open {
-        token: String,
-        revision: nickel_codex_ui::ProjectMenuRevision,
-    },
-}
-
 struct DisplayPreview {
     owner: String,
     previous: nickel_session_protocol::OutputLayout,
@@ -766,7 +757,6 @@ pub struct LiveShell {
     #[cfg(target_os = "linux")]
     secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
     requested_codex_project: Option<String>,
-    codex_menu_requests: Vec<CodexMenuRequest>,
     screenshot: ScreenshotTool,
     keyboard_host: nickel_ui::UiHost<nickel_ui::on_screen_keyboard::KeyboardApp>,
     keyboard_plugin_generation: u64,
@@ -1019,7 +1009,6 @@ impl LiveShell {
         if projection.presentation() == nickel_core::optional_features::CodexPresentation::Hidden {
             self.codex_project_menu_visible = false;
             self.requested_codex_project = None;
-            self.codex_menu_requests.clear();
         }
         self.launcher.apply_codex_projection(projection)
     }
@@ -1036,53 +1025,6 @@ impl LiveShell {
         } else {
             self.requested_codex_project = None;
             None
-        }
-    }
-
-    pub(crate) fn apply_codex_menu_projection(
-        &mut self,
-        projection: &nickel_codex_ui::ProjectMenuProjection,
-    ) -> bool {
-        let key = crate::plugin_panel::codex_projects_surface_key();
-        let data = match serde_json::to_string(projection) {
-            Ok(data) => data,
-            Err(error) => {
-                self.fail_plugin_panel_runtime(&key.plugin_id, error.to_string());
-                return false;
-            }
-        };
-        let Some((_, host)) = self.plugin_surface_hosts.get_mut(&key) else {
-            return false;
-        };
-        let changed = match host.application_mut().sync_serialized_data(data) {
-            Ok(changed) => changed,
-            Err(error) => {
-                self.fail_plugin_panel_runtime(&key.plugin_id, error);
-                return false;
-            }
-        };
-        if !changed {
-            return false;
-        }
-        let outcome = host.step(HostBatch {
-            application_changed: true,
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        let failure = host.application_mut().take_runtime_failure();
-        if let Some(error) = failure {
-            self.fail_plugin_panel_runtime(&key.plugin_id, error);
-            return false;
-        }
-        outcome.changed
-    }
-
-    pub(crate) fn take_codex_menu_requests(&mut self) -> Vec<CodexMenuRequest> {
-        if self.launcher.codex_available() {
-            std::mem::take(&mut self.codex_menu_requests)
-        } else {
-            self.codex_menu_requests.clear();
-            Vec::new()
         }
     }
 
@@ -1282,7 +1224,6 @@ impl LiveShell {
         let launcher_icons = LauncherIconCache::new();
         let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
         plugin_registry.register(crate::plugin_panel::manifest().clone())?;
-        plugin_registry.register(crate::plugin_panel::codex_projects_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::on_screen_keyboard_manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
@@ -1542,7 +1483,6 @@ impl LiveShell {
             #[cfg(target_os = "linux")]
             secure_storage_query_error,
             requested_codex_project: None,
-            codex_menu_requests: Vec::new(),
             screenshot: ScreenshotTool::default().with_session_host(session_host),
             keyboard_host: nickel_ui::UiHost::new(
                 nickel_ui::on_screen_keyboard::KeyboardApp::new(palette),
@@ -1566,29 +1506,6 @@ impl LiveShell {
         };
         if plugin_activation.desired_enabled("nickel-default", true) || safe_mode {
             shell.set_plugin_enabled("nickel-default", true)?;
-        }
-        if plugin_activation
-            .desired_enabled(&crate::plugin_panel::codex_projects_manifest().id, true)
-        {
-            let id = &crate::plugin_panel::codex_projects_manifest().id;
-            shell.plugin_registry.set_enabled(id, true)?;
-            let projection = nickel_codex_ui::ProjectMenuProjection::from_state(
-                &nickel_codex_ui::ChatState::default(),
-            );
-            match serde_json::to_string(&projection)
-                .map_err(|error| error.to_string())
-                .and_then(|data| {
-                    shell.start_initial_bundled_surface(
-                        crate::plugin_panel::codex_projects_manifest(),
-                        data,
-                    )
-                }) {
-                Ok(()) => {}
-                Err(error) => {
-                    tracing::error!(plugin = id, %error, "plugin failed to start");
-                    shell.plugin_registry.mark_failed(id, error)?;
-                }
-            }
         }
         if plugin_activation
             .desired_enabled(&crate::plugin_panel::on_screen_keyboard_manifest().id, true)
@@ -2837,11 +2754,6 @@ impl LiveShell {
         role: SurfaceRole,
         key: Option<&nickel_core::plugins::PluginSurfaceKey>,
     ) -> bool {
-        if key == Some(&crate::plugin_panel::codex_projects_surface_key()) {
-            return role == SurfaceRole::Panel
-                && self.codex_project_menu_visible
-                && self.plugin_surface_matches(&crate::plugin_panel::codex_projects_surface_key());
-        }
         if key == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()) {
             return role == SurfaceRole::Panel
                 && self.keyboard_visible
@@ -2849,7 +2761,9 @@ impl LiveShell {
                 && self.plugin_surface_matches(&crate::plugin_panel::on_screen_keyboard_surface_key());
         }
         if role == SurfaceRole::CodexProjectMenu {
-            return false;
+            return self.codex_project_menu_visible
+                && self.launcher.codex_available()
+                && !self.locked;
         }
         if role == SurfaceRole::ControlCenter {
             return self.control_visible
@@ -3119,10 +3033,6 @@ impl LiveShell {
     )> {
         let mut panels = Vec::new();
         panels.extend(self.plugin_panels());
-        let codex_key = crate::plugin_panel::codex_projects_surface_key();
-        if let Some((surface, _)) = self.plugin_surface_hosts.get(&codex_key) {
-            panels.push((codex_key, surface.clone()));
-        }
         let keyboard_key = crate::plugin_panel::on_screen_keyboard_surface_key();
         if let Some((surface, _)) = self.plugin_surface_hosts.get(&keyboard_key) {
             panels.push((keyboard_key, surface.clone()));
@@ -4983,16 +4893,6 @@ impl LiveShell {
             .retain(|key, _| key.plugin_id != id);
         self.plugin_window_placement_overrides
             .retain(|key, _| key.plugin_id != id);
-        if id == crate::plugin_panel::codex_projects_manifest().id {
-            self.codex_project_menu_visible = false;
-            self.codex_menu_requests.clear();
-        } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
-            self.keyboard_gesture_leases.clear();
-        }
-    }
-
-    fn retire_codex_projects_plugin_state(&mut self) {
-        self.retire_extra_panel_plugin_state(&crate::plugin_panel::codex_projects_manifest().id);
     }
 
     fn retire_keyboard_plugin_state(&mut self) {
@@ -5012,8 +4912,6 @@ impl LiveShell {
     fn fail_plugin_panel_runtime(&mut self, id: &str, error: String) -> bool {
         let retire = if id == crate::plugin_panel::manifest().id {
             Self::retire_development_panel_plugin_state as fn(&mut Self)
-        } else if id == crate::plugin_panel::codex_projects_manifest().id {
-            Self::retire_codex_projects_plugin_state as fn(&mut Self)
         } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
             Self::retire_keyboard_plugin_state
         } else {
@@ -5383,8 +5281,6 @@ impl LiveShell {
                 .retain(|key, _| key.plugin_id != id);
             if id == self.primary_panel_key.plugin_id {
                 self.primary_panel_key = crate::plugin_panel::surface_key();
-            } else if id == crate::plugin_panel::codex_projects_manifest().id {
-                self.retire_codex_projects_plugin_state();
             } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
                 self.retire_keyboard_plugin_state();
             }
@@ -5427,19 +5323,6 @@ impl LiveShell {
                     (surface, host),
                 );
             })
-        } else if id == crate::plugin_panel::codex_projects_manifest().id {
-            let projection = nickel_codex_ui::ProjectMenuProjection::from_state(
-                &nickel_codex_ui::ChatState::default(),
-            );
-            serde_json::to_string(&projection)
-                .map_err(|error| error.to_string())
-                .and_then(|data| {
-                    self.install_bundled_surface(
-                        crate::plugin_panel::codex_projects_manifest(),
-                        data,
-                        crate::plugin_panel::PluginImages::new(),
-                    )
-                })
         } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
             let data = self.keyboard_plugin_data();
             self.install_bundled_surface(
@@ -6485,27 +6368,6 @@ impl LiveShell {
                         changed |= self.show_projects_menu(toggle);
                     }
                 }
-                crate::plugin_panel::PluginEffect::CodexProjectRefresh => {
-                    if self.codex_project_menu_visible && self.codex_menu_requests.len() < 8 {
-                        self.codex_menu_requests.push(CodexMenuRequest::Refresh);
-                        changed = true;
-                    }
-                }
-                crate::plugin_panel::PluginEffect::CodexProjectClose => {
-                    if self.codex_project_menu_visible {
-                        self.codex_project_menu_visible = false;
-                        self.codex_menu_requests.clear();
-                        changed = true;
-                    }
-                }
-                crate::plugin_panel::PluginEffect::CodexProjectOpen { token, revision } => {
-                    if self.codex_project_menu_visible && self.codex_menu_requests.len() < 8 {
-                        self.codex_menu_requests
-                            .push(CodexMenuRequest::Open { token, revision });
-                        changed = true;
-                    }
-                }
-
                 crate::plugin_panel::PluginEffect::MoveApplicationPin { id, direction } => {
                     if matches!(direction, -1 | 1)
                         && self.launcher.is_pinned(&id)
@@ -9545,9 +9407,7 @@ impl LiveShell {
     }
 
     fn show_projects_menu(&mut self, toggle: bool) -> bool {
-        if !self.launcher.codex_available()
-            || !self.plugin_surface_matches(&crate::plugin_panel::codex_projects_surface_key())
-        {
+        if !self.launcher.codex_available() || self.locked {
             return false;
         }
         let visible = !toggle || !self.codex_project_menu_visible;

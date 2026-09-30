@@ -158,7 +158,7 @@ impl NickelSession {
                 shell.semantic_theme(),
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             );
-            host.ensure_project_menu()?;
+            host.ensure_project_menu(&mut self.internal_ui)?;
             if let Some(shell) = self.internal_shell.as_mut() {
                 shell.apply_codex_projection(CodexAvailabilityProjection::new(
                     FeatureSupport::Supported,
@@ -168,18 +168,18 @@ impl NickelSession {
                     settings.codex_generation,
                     Some("Checking the selected Codex backend…".into()),
                 ));
-                host.sync_shell_projection(shell);
+                host.sync_shell_projection(shell, &self.internal_ui);
             }
             self.internal_codex = Some(host);
         }
         // Reusing the native service also permits an authorized retry on an existing host.
         if let Some(mut host) = self.internal_codex.take() {
-            let result = host.ensure_project_menu();
+            let result = host.ensure_project_menu(&mut self.internal_ui);
             if result.is_ok() {
-                host.refresh_project_menu();
+                host.refresh_project_menu(&mut self.internal_ui);
             }
             if let Some(shell) = self.internal_shell.as_mut() {
-                host.sync_shell_projection(shell);
+                host.sync_shell_projection(shell, &self.internal_ui);
             }
             self.internal_codex = Some(host);
             result?;

@@ -122,6 +122,7 @@ pub enum ChatMessage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellRequest {
+    CloseProjectMenu,
     OpenProject {
         cwd: PathBuf,
         project_id: String,
@@ -398,7 +399,6 @@ pub struct ChatApplication {
     shell_host: bool,
     window_title: String,
     project_menu_mode: bool,
-    headless_project_controller: bool,
     shell_requests: Vec<ShellRequest>,
     pending_initial_resume: Option<nickel_codex::ThreadId>,
     shell_writer_thread: Option<nickel_codex::ThreadId>,
@@ -819,7 +819,6 @@ impl ChatApplication {
             shell_host: false,
             window_title: "Nickel".into(),
             project_menu_mode: false,
-            headless_project_controller: false,
             shell_requests: Vec::new(),
             pending_initial_resume: None,
             shell_writer_thread: None,
@@ -883,17 +882,6 @@ impl ChatApplication {
         self.state.generation = self.state.generation.saturating_add(1);
         self.controller =
             ChatController::spawn_project_menu(self.mode.clone(), self.state.generation);
-        self
-    }
-
-    /// Keep project discovery and backend state without building the retired
-    /// Rust project-menu tree. The shell publishes this state to its JSX plugin.
-    pub fn as_headless_project_controller(mut self) -> Self {
-        assert!(
-            self.project_menu_mode,
-            "headless controller needs project-menu mode"
-        );
-        self.headless_project_controller = true;
         self
     }
 
@@ -2394,6 +2382,10 @@ impl Application for ChatApplication {
                 true
             }
             Shortcut::Newline => false,
+            Shortcut::Escape if self.project_menu_mode => {
+                self.shell_requests.push(ShellRequest::CloseProjectMenu);
+                true
+            }
             Shortcut::Escape if self.host_editor.is_some() => {
                 self.update(ChatMessage::ManageRemoteHosts);
                 true
@@ -2445,9 +2437,7 @@ impl Application for ChatApplication {
                     BackendMode::Remote { host } => Some(std::path::Path::new(&host.default_cwd)),
                 }
             });
-        let view = if self.headless_project_controller {
-            AnyView::new(Container::new().width(1.0).height(1.0))
-        } else if self.project_menu_mode {
+        let view = if self.project_menu_mode {
             AnyView::new(project_menu_view(
                 &self.state,
                 self.settings_error.as_deref(),

@@ -58,8 +58,7 @@ mod windows_shell_diagnostics;
 mod windows_virtual_workspaces;
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{
-    ChatApplication, ConnectionStatus, ProjectMenuProjection, ProjectMenuRevision, ShellRequest,
-    shell_application_with_backend,
+    ChatApplication, ConnectionStatus, ShellRequest, shell_application_with_backend,
 };
 use nickel_core::optional_features::{
     CodexAvailabilityProjection, CodexSource, FeatureEffectiveState, FeatureHealth,
@@ -437,6 +436,7 @@ struct CodexSurfaces {
     source: CodexSource,
     project_menu_cwd: std::path::PathBuf,
     project_menu_host: Option<EmbeddedUiSurface<ChatApplication>>,
+    project_menu_surface: Option<SurfaceId>,
     chats: Vec<CodexChatSurface>,
     writer_leases: WriterLeases,
     installation: FeatureInstallation,
@@ -789,6 +789,7 @@ impl CodexSurfaces {
             source: settings.codex_source.clone(),
             project_menu_cwd: std::env::current_dir().map_err(|error| error.to_string())?,
             project_menu_host: None,
+            project_menu_surface: None,
             chats: Vec::new(),
             writer_leases: WriterLeases::default(),
             // UI-host construction and a previous successful connection are not
@@ -812,10 +813,14 @@ impl CodexSurfaces {
             None,
             None,
             self.backend_choice(),
-        )?
-        .as_headless_project_controller();
+        )?;
         application.set_theme(self.theme);
-        self.project_menu_host = Some(EmbeddedUiSurface::new(application, 1, 1, Instant::now()));
+        self.project_menu_host = Some(EmbeddedUiSurface::new(
+            application,
+            360,
+            420,
+            Instant::now(),
+        ));
         Ok(())
     }
 
@@ -907,9 +912,9 @@ impl CodexSurfaces {
         if !self.enabled {
             return Ok(());
         }
-        if let Some(chat) = self.chats.iter().find(|chat| chat.id == surface) {
+        if let Some(host) = self.host_mut(surface) {
             shell
-                .present(surface, chat.host.commands())
+                .present(surface, host.commands())
                 .map_err(|detail| HostFailure {
                     surface: format!("{surface:?}"),
                     stage: HostFailureStage::Presenter,
@@ -921,6 +926,9 @@ impl CodexSurfaces {
     }
 
     fn host_mut(&mut self, surface: SurfaceId) -> Option<&mut EmbeddedUiSurface<ChatApplication>> {
+        if self.project_menu_surface == Some(surface) {
+            return self.project_menu_host.as_mut();
+        }
         self.chats
             .iter_mut()
             .find(|chat| chat.id == surface)
@@ -1016,7 +1024,7 @@ impl CodexSurfaces {
                         }
                     }
                     ShellRequest::ResumeSucceeded(_) => {}
-                    ShellRequest::OpenProject { .. } => {}
+                    ShellRequest::OpenProject { .. } | ShellRequest::CloseProjectMenu => {}
                 }
             }
         }
@@ -1084,36 +1092,6 @@ impl CodexSurfaces {
         result
     }
 
-    fn refresh_project_menu(&mut self) -> bool {
-        let Some(host) = self.project_menu_host.as_mut() else {
-            return false;
-        };
-        host.application_mut()
-            .update(nickel_codex_ui::ChatMessage::Refresh);
-        true
-    }
-
-    fn open_project_by_token(
-        &mut self,
-        shell: &mut WinitShell,
-        token: &str,
-        revision: ProjectMenuRevision,
-    ) -> Result<(), String> {
-        let state = &self
-            .project_menu_host
-            .as_mut()
-            .ok_or_else(|| "Codex project data is still loading".to_owned())?
-            .application_mut()
-            .state;
-        let projection = ProjectMenuProjection::from_state(state);
-        let project_id = projection
-            .resolve_open(state, revision, token)
-            .ok_or_else(|| "Codex project menu request is stale".to_owned())?
-            .id
-            .clone();
-        self.open_project_by_id(shell, &project_id)
-    }
-
     fn open_project_by_id(
         &mut self,
         shell: &mut WinitShell,
@@ -1126,6 +1104,11 @@ impl CodexSurfaces {
                 .ok_or_else(|| "Codex project data is still loading".to_owned())?
                 .application_mut()
                 .state;
+            if state.status != nickel_codex_ui::ConnectionStatus::Ready
+                || !state.account.authenticated
+            {
+                return Err("Codex project backend is unavailable".to_owned());
+            }
             let project = state
                 .projects
                 .iter()
@@ -1266,7 +1249,7 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         })
         .collect::<Vec<_>>();
     for (id, role, taskbar, output, logical_width, logical_height) in surfaces {
-        if role == SurfaceRole::CodexChat {
+        if matches!(role, SurfaceRole::CodexChat | SurfaceRole::CodexProjectMenu) {
             continue;
         }
         if !state.native_surface_visible(
@@ -1596,21 +1579,6 @@ fn sync_panel_popover_anchor(shell: &WinitShell, state: &LiveShell) {
         );
         return;
     }
-    if role == nickel_session_protocol::ShellRole::ProjectMenu
-        && state.native_surface_visible(
-            SurfaceRole::Panel,
-            Some(&plugin_panel::codex_projects_surface_key()),
-        )
-    {
-        let _ = state.dispatch_session_command(
-            "place-anchored-codex-plugin-popover",
-            platform::ShellCommand::ShowAnchoredPluginSurface {
-                key: plugin_panel::codex_projects_surface_key(),
-                anchor,
-            },
-        );
-        return;
-    }
     let _ = state.dispatch_session_command(
         "place-anchored-shell-popover",
         platform::ShellCommand::ShowAnchoredShellRole { role, anchor },
@@ -1668,6 +1636,7 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
         SurfaceRole::ControlCenter,
         SurfaceRole::WindowPreview,
         SurfaceRole::Screenshot,
+        SurfaceRole::CodexProjectMenu,
     ] {
         #[cfg(target_os = "linux")]
         if role == SurfaceRole::Launcher {
@@ -1688,19 +1657,13 @@ fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
     ) {
         shell.raise_plugin_surface(&state.active_shell_surface_key("quick-settings"));
     }
-    #[cfg(target_os = "windows")]
-    if state.native_surface_visible(
-        SurfaceRole::Panel,
-        Some(&plugin_panel::codex_projects_surface_key()),
-    ) {
-        shell.raise_plugin_surface(&plugin_panel::codex_projects_surface_key());
-    }
 }
 
 fn handle_codex_event(
     codex: &mut CodexSurfaces,
     shell: &mut WinitShell,
     event: &ShellEvent,
+    state: &mut LiveShell,
 ) -> Result<bool, String> {
     let surface = match event {
         ShellEvent::Input { surface, .. }
@@ -1713,18 +1676,34 @@ fn handle_codex_event(
         | ShellEvent::CloseRequested(surface) => *surface,
         _ => return Ok(false),
     };
-    if !shell
-        .surface(surface)
-        .is_some_and(|entry| entry.role() == SurfaceRole::CodexChat)
-    {
+    if !shell.surface(surface).is_some_and(|entry| {
+        matches!(
+            entry.role(),
+            SurfaceRole::CodexChat | SurfaceRole::CodexProjectMenu
+        )
+    }) {
         return Ok(false);
+    }
+    let menu = shell
+        .surface(surface)
+        .is_some_and(|entry| entry.role() == SurfaceRole::CodexProjectMenu);
+    if menu {
+        if !codex.enabled || codex.project_menu_host.is_none() {
+            return Ok(true);
+        }
+        codex.project_menu_surface = Some(surface);
     }
     if matches!(event, ShellEvent::FocusChanged { focused: false, .. }) {
         shell.stop_text_input(surface);
     }
     if matches!(event, ShellEvent::CloseRequested(_)) {
         shell.stop_text_input(surface);
-        codex.remove(shell, surface);
+        if menu {
+            state.hide_overlay(SurfaceRole::CodexProjectMenu);
+            sync_visibility(shell, state);
+        } else {
+            codex.remove(shell, surface);
+        }
         return Ok(true);
     }
     if matches!(event, ShellEvent::Hidden(_)) {
@@ -1819,6 +1798,28 @@ fn handle_codex_event(
         codex
             .present(shell, surface)
             .map_err(|error| format!("{error:?}"))?;
+    }
+    if menu {
+        let requests = codex
+            .project_menu_host
+            .as_mut()
+            .map(|host| host.application_mut().take_shell_requests())
+            .unwrap_or_default();
+        for request in requests {
+            if matches!(request, ShellRequest::CloseProjectMenu) {
+                state.hide_overlay(SurfaceRole::CodexProjectMenu);
+                sync_visibility(shell, state);
+            }
+            if let ShellRequest::OpenProject { project_id, .. } = request {
+                match codex.open_project_by_id(shell, &project_id) {
+                    Ok(()) => {
+                        state.hide_overlay(SurfaceRole::CodexProjectMenu);
+                        sync_visibility(shell, state);
+                    }
+                    Err(error) => tracing::warn!(%error,"native project selection rejected"),
+                }
+            }
+        }
     }
     codex.resume_requests(shell);
     Ok(true)
@@ -2257,7 +2258,10 @@ fn handle_controller_action(
         }
         return Ok(());
     }
-    if role == SurfaceRole::CodexChat {
+    if matches!(role, SurfaceRole::CodexChat | SurfaceRole::CodexProjectMenu) {
+        if role == SurfaceRole::CodexProjectMenu {
+            codex.project_menu_surface = Some(surface);
+        }
         let transition = codex
             .host_mut(surface)
             .map(|host| step_embedded_codex_controller(host, action))
@@ -2700,6 +2704,16 @@ pub fn run() -> Result<(), String> {
         }
         let (project_menu_changed, mut due_codex_redraw) = codex.poll_due(Instant::now());
         due_codex_redraw.extend(approval_redraw);
+        if project_menu_changed && state.surface_visible(SurfaceRole::CodexProjectMenu) {
+            if let Some(id) = shell
+                .surfaces()
+                .find(|surface| surface.role() == SurfaceRole::CodexProjectMenu)
+                .map(|surface| surface.id())
+            {
+                codex.project_menu_surface = Some(id);
+                due_codex_redraw.push(id);
+            }
+        }
         state.sync_codex_approval_notifications(codex.approval_notifications());
         project_menu_changed_since_refresh |= project_menu_changed;
         for surface in due_codex_redraw {
@@ -2765,7 +2779,7 @@ pub fn run() -> Result<(), String> {
             continue;
         }
         if let Some(ref event) = event
-            && handle_codex_event(&mut codex, &mut shell, event)?
+            && handle_codex_event(&mut codex, &mut shell, event, &mut state)?
         {
             continue;
         }
@@ -3112,14 +3126,20 @@ pub fn run() -> Result<(), String> {
             codex.open_project_by_id(&mut shell, &project_id)?;
             sync_visibility(&mut shell, &mut state);
         }
-        for request in state.take_codex_menu_requests() {
-            match request {
-                live_shell::CodexMenuRequest::Refresh => {
-                    codex.refresh_project_menu();
+        if state.surface_visible(SurfaceRole::CodexProjectMenu) {
+            let requests = codex
+                .project_menu_host
+                .as_mut()
+                .map(|host| host.application_mut().take_shell_requests())
+                .unwrap_or_default();
+            for request in requests {
+                if matches!(request, ShellRequest::CloseProjectMenu) {
+                    state.hide_overlay(SurfaceRole::CodexProjectMenu);
+                    sync_visibility(&mut shell, &mut state);
                 }
-                live_shell::CodexMenuRequest::Open { token, revision } => {
-                    if let Err(error) = codex.open_project_by_token(&mut shell, &token, revision) {
-                        tracing::warn!(%error, "Codex menu plugin open request rejected");
+                if let ShellRequest::OpenProject { project_id, .. } = request {
+                    if let Err(error) = codex.open_project_by_id(&mut shell, &project_id) {
+                        tracing::warn!(%error,"native project selection rejected");
                     } else {
                         state.hide_overlay(SurfaceRole::CodexProjectMenu);
                         sync_visibility(&mut shell, &mut state);
@@ -3187,8 +3207,7 @@ pub fn run() -> Result<(), String> {
                     snapshot.account.authenticated,
                     (!snapshot.provenance.is_empty()).then(|| snapshot.provenance.clone()),
                 ));
-                let menu_changed =
-                    state.apply_codex_menu_projection(&ProjectMenuProjection::from_state(snapshot));
+                let menu_changed = project_menu_changed;
                 let projects = match snapshot.status {
                     ConnectionStatus::Loading => DashboardSection::Loading,
                     ConnectionStatus::Ready if !snapshot.account.authenticated => {
@@ -3676,22 +3695,21 @@ mod tests {
     }
 
     #[test]
-    fn codex_discovery_host_runs_without_a_native_menu_viewport() {
-        let backend = ReplayBackend::from_json(r#"{"name":"headless-menu","events":[]}"#)
+    fn codex_native_project_switcher_has_editable_query_and_discovery_deadline() {
+        let backend = ReplayBackend::from_json(r#"{"name":"native-project-menu","events":[]}"#)
             .expect("static replay is valid");
         let application = ChatApplication::new(BackendMode::Replay {
             backend,
             cwd: "/projects/nickel".into(),
         })
-        .as_shell_project_menu()
-        .as_headless_project_controller();
-        let mut controller = EmbeddedUiSurface::new(application, 1, 1, Instant::now());
+        .as_shell_project_menu();
+        let mut controller = EmbeddedUiSurface::new(application, 360, 420, Instant::now());
         assert!(
             controller
                 .host
                 .accessibility_nodes()
                 .iter()
-                .all(|node| { node.semantic_role != Some(SemanticRole::TextField) })
+                .any(|node| { node.semantic_role == Some(SemanticRole::TextField) })
         );
         let due = controller.deadline().expect("discovery poll is scheduled");
         assert!(controller.poll_due(due).is_some());

@@ -1,7 +1,6 @@
 mod attachments;
 mod controller;
 mod model;
-mod project_menu_service;
 mod projection_memory;
 mod view;
 
@@ -13,7 +12,6 @@ pub use controller::{
     BackendMode, ChatController, ControllerCommand, ControllerEvent, create_managed_workspace,
 };
 pub use model::{ChatItem, ChatItemKind, ChatState, ConnectionStatus, PendingInteraction};
-pub use project_menu_service::{ProjectMenuEntry, ProjectMenuProjection, ProjectMenuRevision};
 pub use view::{
     ChatApplication, ChatMessage, CodexApprovalChoice, CodexApprovalNotification, ShellRequest,
 };

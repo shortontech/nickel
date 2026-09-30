@@ -11,12 +11,9 @@ use std::{
 };
 
 use nickel_codex::{BackendChoice, ThreadId};
-use nickel_codex_ui::{
-    ChatApplication, ProjectMenuProjection, ProjectMenuRevision, ShellRequest,
-    shell_application_with_backend,
-};
+use nickel_codex_ui::{ChatApplication, ShellRequest, shell_application_with_backend};
 use nickel_core::optional_features::{CodexSource, OptionalFeatureSettings};
-use nickel_ui::{Application, HostBatch, HostEvent, InternalSurfaceId, UiHost};
+use nickel_ui::{Application, HostBatch, HostEvent, InternalSurfaceId};
 
 use crate::session::{InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime};
 
@@ -50,12 +47,18 @@ struct ChatSurface {
     pending_thread: Option<ThreadId>,
 }
 
+#[derive(Debug)]
+pub enum NativeProjectMenuAction {
+    Closed,
+    Opened(InternalSurfaceId),
+}
+
 /// Owns the identities and domain leases for compositor-hosted Codex UI.
 pub struct InternalCodexHost {
     settings: OptionalFeatureSettings,
     theme: nickel_ui::SemanticTheme,
     cwd: PathBuf,
-    project_controller: Option<UiHost<ChatApplication>>,
+    project_controller: Option<InternalSurfaceId>,
     chats: Vec<ChatSurface>,
     writer_leases: HashSet<ThreadId>,
 }
@@ -76,23 +79,29 @@ impl InternalCodexHost {
         }
     }
 
-    pub fn refresh_project_menu(&mut self) -> bool {
-        let Some(host) = self.project_controller.as_mut() else {
+    pub fn refresh_project_menu(&mut self, runtime: &mut InternalUiRuntime) -> bool {
+        let Some(id) = self.project_controller else {
             return false;
         };
-        host.application_mut()
-            .update(nickel_codex_ui::ChatMessage::Refresh);
-        host.step(HostBatch {
-            application_changed: true,
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
+        let Some(app) = runtime.application_mut::<ChatApplication>(id) else {
+            return false;
+        };
+        app.update(nickel_codex_ui::ChatMessage::Refresh);
+        runtime.step(
+            id,
+            HostBatch {
+                application_changed: true,
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            },
+        );
         true
     }
 
     pub fn sync_shell_projection(
         &self,
         shell: &mut crate::internal_shell::InternalShellCoordinator,
+        runtime: &InternalUiRuntime,
     ) -> bool {
         use crate::launcher::{
             DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects,
@@ -103,7 +112,8 @@ impl InternalCodexHost {
         let Some(snapshot) = self
             .project_controller
             .as_ref()
-            .map(|host| &host.application().state)
+            .and_then(|id| runtime.application::<ChatApplication>(*id))
+            .map(|app| &app.state)
         else {
             return false;
         };
@@ -117,8 +127,7 @@ impl InternalCodexHost {
             snapshot.account.authenticated,
             diagnostic.clone(),
         ));
-        let menu_changed =
-            shell.apply_codex_menu_projection(&ProjectMenuProjection::from_state(snapshot));
+
         let projects = match snapshot.status {
             ConnectionStatus::Loading => DashboardSection::Loading,
             ConnectionStatus::Ready if !snapshot.account.authenticated => {
@@ -165,11 +174,13 @@ impl InternalCodexHost {
             ),
         };
         let projects_changed = shell.set_dashboard_projects(projects);
-        availability_changed || projects_changed || menu_changed
+        availability_changed || projects_changed
     }
 
     pub fn surface_ids(&self) -> impl Iterator<Item = InternalSurfaceId> + '_ {
-        self.chats.iter().map(|chat| chat.id)
+        self.project_controller
+            .into_iter()
+            .chain(self.chats.iter().map(|chat| chat.id))
     }
 
     pub(crate) fn approval_notifications(
@@ -214,14 +225,8 @@ impl InternalCodexHost {
     }
 
     pub fn next_deadline(&self, runtime: &InternalUiRuntime) -> Option<Instant> {
-        self.project_controller
-            .as_ref()
-            .and_then(UiHost::next_deadline)
-            .into_iter()
-            .chain(
-                self.surface_ids()
-                    .filter_map(|id| runtime.surface_deadline(id)),
-            )
+        self.surface_ids()
+            .filter_map(|id| runtime.surface_deadline(id))
             .min()
     }
 
@@ -234,15 +239,6 @@ impl InternalCodexHost {
             return Vec::new();
         }
         self.theme = theme;
-        if let Some(controller) = self.project_controller.as_mut()
-            && controller.application_mut().set_theme(theme)
-        {
-            controller.step(HostBatch {
-                application_changed: true,
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-        }
         let ids = self.surface_ids().collect::<Vec<_>>();
         let mut changed = Vec::new();
         for id in ids {
@@ -264,7 +260,7 @@ impl InternalCodexHost {
         changed
     }
 
-    pub fn ensure_project_menu(&mut self) -> Result<(), String> {
+    pub fn ensure_project_menu(&mut self, runtime: &mut InternalUiRuntime) -> Result<(), String> {
         if self.project_controller.is_some() {
             return Ok(());
         }
@@ -274,11 +270,71 @@ impl InternalCodexHost {
             None,
             None,
             self.backend_choice(),
-        )?
-        .as_headless_project_controller();
+        )?;
         application.set_theme(self.theme);
-        self.project_controller = Some(UiHost::new_at(application, 1, 1, Instant::now()));
+        let id = runtime.insert(
+            application,
+            internal_placement(
+                CodexSurfacePlacement::default(),
+                (360, 420),
+                InternalSurfaceRole::Overlay,
+            ),
+            1.0,
+        );
+        runtime.set_visible(id, false);
+        self.project_controller = Some(id);
         Ok(())
+    }
+
+    pub fn sync_project_menu(
+        &mut self,
+        runtime: &mut InternalUiRuntime,
+        visible: bool,
+        placement: CodexSurfacePlacement,
+    ) -> bool {
+        let Some(id) = self.project_controller else {
+            return false;
+        };
+        let was_visible = runtime.is_visible(id);
+        let size = placement.chat_size.map_or((360, 420), |(width, height)| {
+            (360.min(width), 420.min(height))
+        });
+        let moved = runtime.relocate(
+            id,
+            internal_placement(placement, size, InternalSurfaceRole::Overlay),
+        );
+        let changed = runtime.set_visible(id, visible);
+        if visible && !was_visible {
+            runtime.focus_surface(id);
+        }
+        changed || moved
+    }
+
+    pub fn service_project_menu_requests(
+        &mut self,
+        runtime: &mut InternalUiRuntime,
+        placement: CodexSurfacePlacement,
+    ) -> Result<Option<NativeProjectMenuAction>, String> {
+        let Some(id) = self.project_controller else {
+            return Ok(None);
+        };
+        let requests = runtime
+            .application_mut::<ChatApplication>(id)
+            .ok_or("project context retired")?
+            .take_shell_requests();
+        for request in requests {
+            if matches!(request, ShellRequest::CloseProjectMenu) {
+                runtime.set_visible(id, false);
+                return Ok(Some(NativeProjectMenuAction::Closed));
+            }
+            if let ShellRequest::OpenProject { project_id, .. } = request {
+                // Re-resolve the owning backend model; JSX/native input cannot supply paths.
+                let surface = self.open_project_by_id(runtime, placement, &project_id)?;
+                runtime.set_visible(id, false);
+                return Ok(Some(NativeProjectMenuAction::Opened(surface)));
+            }
+        }
+        Ok(None)
     }
 
     pub fn open_project(
@@ -335,28 +391,6 @@ impl InternalCodexHost {
         result
     }
 
-    pub fn open_project_by_token(
-        &mut self,
-        runtime: &mut InternalUiRuntime,
-        placement: CodexSurfacePlacement,
-        token: &str,
-        revision: ProjectMenuRevision,
-    ) -> Result<InternalSurfaceId, String> {
-        let state = &self
-            .project_controller
-            .as_ref()
-            .ok_or_else(|| "Codex project data is still loading".to_owned())?
-            .application()
-            .state;
-        let projection = ProjectMenuProjection::from_state(state);
-        let project_id = projection
-            .resolve_open(state, revision, token)
-            .ok_or_else(|| "Codex project menu request is stale".to_owned())?
-            .id
-            .clone();
-        self.open_project_by_id(runtime, placement, &project_id)
-    }
-
     /// Resolve a launcher project identity through the already-owned project
     /// menu model and open its most recently used thread directly.
     pub fn open_project_by_id(
@@ -366,12 +400,18 @@ impl InternalCodexHost {
         project_id: &str,
     ) -> Result<InternalSurfaceId, String> {
         let (project, initial_thread) = {
-            let state = &self
+            let id = self
                 .project_controller
-                .as_ref()
-                .ok_or_else(|| "Codex project data is still loading".to_owned())?
-                .application()
+                .ok_or("Codex project data is still loading")?;
+            let state = &runtime
+                .application::<ChatApplication>(id)
+                .ok_or("Codex project context retired")?
                 .state;
+            if state.status != nickel_codex_ui::ConnectionStatus::Ready
+                || !state.account.authenticated
+            {
+                return Err("Codex project backend is unavailable".to_owned());
+            }
             let project = state
                 .projects
                 .iter()
@@ -426,17 +466,6 @@ impl InternalCodexHost {
         runtime: &mut InternalUiRuntime,
         now: Instant,
     ) -> Vec<InternalSurfaceId> {
-        if let Some(controller) = self.project_controller.as_mut()
-            && controller
-                .next_deadline()
-                .is_some_and(|deadline| deadline <= now)
-        {
-            controller.step(HostBatch {
-                now: Some(now),
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-        }
         let ids = self.surface_ids().collect::<Vec<_>>();
         ids.into_iter()
             .filter(|id| runtime.poll_surface(*id, now))
@@ -521,7 +550,7 @@ impl InternalCodexHost {
                             changed = true;
                         }
                     }
-                    ShellRequest::OpenProject { .. } => {}
+                    ShellRequest::OpenProject { .. } | ShellRequest::CloseProjectMenu => {}
                 }
             }
         }
@@ -555,7 +584,7 @@ impl InternalCodexHost {
 
     #[allow(dead_code)]
     fn owns(&self, id: InternalSurfaceId) -> bool {
-        self.chats.iter().any(|chat| chat.id == id)
+        self.project_controller == Some(id) || self.chats.iter().any(|chat| chat.id == id)
     }
 
     fn backend_choice(&self) -> Option<BackendChoice> {
@@ -643,34 +672,45 @@ mod tests {
     }
 
     #[test]
-    fn discovery_controller_does_not_create_or_focus_an_internal_surface() {
+    fn native_project_switcher_keeps_one_controller_and_only_focuses_when_shown() {
         let mut runtime = InternalUiRuntime::default();
         let application = runtime.insert(TestApp, placement(InternalSurfaceRole::Application), 1.0);
         runtime.focus_surface(application);
         let mut host = host();
         let controller = ChatApplication::new(nickel_codex_ui::BackendMode::Replay {
             backend: nickel_codex::ReplayBackend::from_json(
-                r#"{"name":"headless-projects","projects":[],"events":[]}"#,
+                r#"{"name":"native-projects","projects":[],"events":[]}"#,
             )
             .unwrap(),
             cwd: PathBuf::from("/tmp"),
         })
-        .as_shell_project_menu()
-        .as_headless_project_controller();
-        host.project_controller = Some(UiHost::new(controller, 1, 1));
-        assert_eq!(host.surface_ids().count(), 0);
-        assert_eq!(runtime.len(), 1);
+        .as_shell_project_menu();
+        let menu = runtime.insert(controller, placement(InternalSurfaceRole::Overlay), 1.0);
+        runtime.set_visible(menu, false);
+        host.project_controller = Some(menu);
+        assert_eq!(host.surface_ids().count(), 1);
+        assert_eq!(runtime.len(), 2);
         assert_eq!(runtime.focused(), Some(application));
-        assert!(host.refresh_project_menu());
+        assert!(host.refresh_project_menu(&mut runtime));
         assert_eq!(runtime.focused(), Some(application));
+        host.sync_project_menu(&mut runtime, true, CodexSurfacePlacement::default());
+        assert_eq!(runtime.focused(), Some(menu));
+        assert!(
+            runtime
+                .semantic_nodes(menu)
+                .iter()
+                .any(|node| node.role == Some(nickel_ui::SemanticRole::TextField))
+        );
+        host.sync_project_menu(&mut runtime, false, CodexSurfacePlacement::default());
+        assert!(!runtime.is_visible(menu));
     }
 
     #[test]
-    fn stale_plugin_project_token_never_opens_an_internal_chat() {
+    fn native_project_selection_revalidates_backend_identity_before_opening_a_chat() {
         let mut runtime = InternalUiRuntime::default();
         let mut application = ChatApplication::new(nickel_codex_ui::BackendMode::Replay {
             backend: nickel_codex::ReplayBackend::from_json(
-                r#"{"name":"stale-project-token","projects":[],"events":[]}"#,
+                r#"{"name":"native-project-selection","projects":[],"events":[]}"#,
             )
             .unwrap(),
             cwd: PathBuf::from("/tmp"),
@@ -683,25 +723,52 @@ mod tests {
             roots: vec![PathBuf::from("/tmp/example")],
         }];
         let mut host = host();
-        host.project_controller = Some(UiHost::new(
-            application
-                .as_shell_project_menu()
-                .as_headless_project_controller(),
-            1,
-            1,
+        host.project_controller = Some(runtime.insert(
+            application.as_shell_project_menu(),
+            placement(InternalSurfaceRole::Overlay),
+            1.0,
         ));
-        let revision = ProjectMenuRevision {
-            connection: 999,
-            projects: 999,
+        let menu = host.project_controller.unwrap();
+        runtime.step(
+            menu,
+            HostBatch {
+                application_changed: true,
+                ..Default::default()
+            },
+        );
+        let button = runtime
+            .semantic_nodes(menu)
+            .into_iter()
+            .find(|node| {
+                node.name.as_deref() == Some("Example")
+                    && node.role == Some(nickel_ui::SemanticRole::Button)
+            })
+            .expect("native project button");
+        let point = nickel_ui::Point {
+            x: button.bounds.origin.x + button.bounds.size.width / 2.0,
+            y: button.bounds.origin.y + button.bounds.size.height / 2.0,
         };
+        runtime.step(
+            menu,
+            HostBatch {
+                events: vec![
+                    HostEvent::Ui(nickel_ui::UiEvent::PointerPressed(point)),
+                    HostEvent::Ui(nickel_ui::UiEvent::PointerReleased(point)),
+                ],
+                ..Default::default()
+            },
+        );
+        // A backend refresh retires this identity before the native service consumes it.
+        runtime
+            .application_mut::<ChatApplication>(menu)
+            .unwrap()
+            .state
+            .projects
+            .clear();
         assert!(
-            host.open_project_by_token(
-                &mut runtime,
-                CodexSurfacePlacement::default(),
-                "0",
-                revision,
-            )
-            .is_err()
+            host.service_project_menu_requests(&mut runtime, CodexSurfacePlacement::default())
+                .unwrap_err()
+                .contains("unavailable")
         );
         assert_eq!(host.active_chat_count(), 0);
     }
