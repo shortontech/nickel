@@ -1988,25 +1988,6 @@ impl PluginPanelApplication {
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("preview-action") =>
-                        {
-                            match preview_request(&effect) {
-                                Ok((action, capability))
-                                    if effect_manifest.capabilities.contains(&capability) =>
-                                {
-                                    approved.push(PluginEffect::Preview(action));
-                                }
-                                Ok(_) => {
-                                    self.last_error = Some("preview action is not granted".into());
-                                    return;
-                                }
-                                Err(error) => {
-                                    self.last_error = Some(error);
-                                    return;
-                                }
-                            }
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("keyboard.toggle")
                             && effect_manifest
                                 .capabilities
