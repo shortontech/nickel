@@ -8,19 +8,19 @@ function App() {
                 <Text>This is a separate plugin dialog.</Text>
                 <Button id="open-settings" onClick={() => nickel.request({type: "show-settings"})}>Open Settings</Button>
                 <Button id="dismiss-dialog" onClick={() => nickel.request({
-                    type: "hide-plugin-surface",
-                    surfaceId: "confirm",
+                    type: "surface.hide",
+                    id: "confirm",
                 })}>Dismiss</Button>
             </Column>
             : <Column>
                 <Text>The dialog starts closed.</Text>
                 <Button id="open-dialog" onClick={() => nickel.request({
-                    type: "show-plugin-surface",
-                    surfaceId: "confirm",
+                    type: "surface.show",
+                    id: "confirm",
                 })}>Open dialog</Button>
                 <Button id="close-home" onClick={() => nickel.request({
-                    type: "hide-plugin-surface",
-                    surfaceId: "home",
+                    type: "surface.hide",
+                    id: "home",
                 })}>Close home</Button>
             </Column>}
     </Window>;

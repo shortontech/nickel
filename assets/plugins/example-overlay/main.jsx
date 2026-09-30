@@ -8,15 +8,15 @@ function App() {
             ? <Column>
                 <Text>This overlay is a separate surface.</Text>
                 <Button id="hide-overlay" onClick={() => nickel.request({
-                    type: "hide-plugin-surface",
-                    surfaceId: "notice",
+                    type: "surface.hide",
+                    id: "notice",
                 })}>Close overlay</Button>
             </Column>
             : <Column>
                 <Text>The overlay starts closed.</Text>
                 <Button id="show-overlay" onClick={() => nickel.request({
-                    type: "show-plugin-surface",
-                    surfaceId: "notice",
+                    type: "surface.show",
+                    id: "notice",
                 })}>Show overlay</Button>
             </Column>}
     </Window>;

@@ -1945,10 +1945,15 @@ impl nickel_ui::Application for PluginPanelApplication {
                             }
                             approved.push(PluginEffect::ShowSettings(screen.map(str::to_owned)));
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("show-plugin-surface") =>
+                        _ if matches!(
+                            effect.get("type").and_then(Value::as_str),
+                            Some("show-plugin-surface" | "surface.show")
+                        ) =>
                         {
-                            let Some(surface_id) = effect.get("surfaceId").and_then(Value::as_str)
+                            let Some(surface_id) = effect
+                                .get("surfaceId")
+                                .or_else(|| effect.get("id"))
+                                .and_then(Value::as_str)
                             else {
                                 self.last_error = Some("plugin surface ID is invalid".into());
                                 return;
@@ -1972,10 +1977,15 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 surface_id: surface_id.to_owned(),
                             });
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("hide-plugin-surface") =>
+                        _ if matches!(
+                            effect.get("type").and_then(Value::as_str),
+                            Some("hide-plugin-surface" | "surface.hide")
+                        ) =>
                         {
-                            let Some(surface_id) = effect.get("surfaceId").and_then(Value::as_str)
+                            let Some(surface_id) = effect
+                                .get("surfaceId")
+                                .or_else(|| effect.get("id"))
+                                .and_then(Value::as_str)
                             else {
                                 self.last_error = Some("plugin surface ID is invalid".into());
                                 return;
@@ -2002,7 +2012,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("surface.setPlacement") =>
                         {
-                            let Some(surface_id) = effect.get("surfaceId").and_then(Value::as_str)
+                            let Some(surface_id) = effect
+                                .get("surfaceId")
+                                .or_else(|| effect.get("id"))
+                                .and_then(Value::as_str)
                             else {
                                 self.last_error = Some("plugin surface ID is invalid".into());
                                 return;
@@ -2128,12 +2141,19 @@ impl nickel_ui::Application for PluginPanelApplication {
                         {
                             approved.push(PluginEffect::ShowControlCenter);
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("window-action") =>
+                        _ if matches!(
+                            effect.get("type").and_then(Value::as_str),
+                            Some("window-action" | "windows.focus" | "windows.close")
+                        ) =>
                         {
-                            let action = effect.get("action").and_then(Value::as_str);
+                            let action = match effect.get("type").and_then(Value::as_str) {
+                                Some("windows.focus") => Some("activate"),
+                                Some("windows.close") => Some("close"),
+                                _ => effect.get("action").and_then(Value::as_str),
+                            };
                             let window = effect
                                 .get("window")
+                                .or_else(|| effect.get("id"))
                                 .and_then(Value::as_str)
                                 .and_then(|value| value.parse::<u64>().ok())
                                 .filter(|id| *id != 0)
@@ -5002,7 +5022,7 @@ mod tests {
             ("main", "top-right", 8193, None),
         ] {
             let source = format!(
-                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'move',onClick:()=>nickel.request({{type:'surface.setPlacement',surfaceId:'{surface_id}',anchor:'{anchor}',offsetX:{offset_x},offsetY:24}})}}, 'Move')); }}"
+                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'move',onClick:()=>nickel.request({{type:'surface.setPlacement',id:'{surface_id}',anchor:'{anchor}',offsetX:{offset_x},offsetY:24}})}}, 'Move')); }}"
             );
             let mut app =
                 PluginPanelApplication::new_with_manifest(&source, &manifest, None).unwrap();
@@ -5141,8 +5161,13 @@ mod tests {
                 PluginEffect::CloseWindow(crate::model::WindowId(71)),
             ),
         ] {
+            let request = if action == "activate" {
+                "windows.focus"
+            } else {
+                "windows.close"
+            };
             let source = format!(
-                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'action',onClick:()=>nickel.request({{type:'window-action',action:'{action}',window:'71'}})}}, 'Act')); }}"
+                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'action',onClick:()=>nickel.request({{type:'{request}',id:'71'}})}}, 'Act')); }}"
             );
             manifest.capabilities.clear();
             let mut denied =

@@ -5,13 +5,13 @@ function App() {
         ? h(Column, null,
             h(Text, null, "This overlay is a separate surface."),
             h(Button, { id: "hide-overlay", onClick: () => nickel.request({
-                    type: "hide-plugin-surface",
-                    surfaceId: "notice",
+                    type: "surface.hide",
+                    id: "notice",
                 }) }, "Close overlay"))
         : h(Column, null,
             h(Text, null, "The overlay starts closed."),
             h(Button, { id: "show-overlay", onClick: () => nickel.request({
-                    type: "show-plugin-surface",
-                    surfaceId: "notice",
+                    type: "surface.show",
+                    id: "notice",
                 }) }, "Show overlay")));
 }
