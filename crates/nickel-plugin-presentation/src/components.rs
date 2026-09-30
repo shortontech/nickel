@@ -3430,7 +3430,7 @@ impl PanelNode {
     }
 }
 
-fn parse_panel_for_manifest(
+pub fn parse_panel_for_manifest(
     value: &Value,
     manifest: &PluginManifest,
     expected_surface_id: Option<&str>,

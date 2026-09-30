@@ -20,6 +20,7 @@ pub struct JsxModuleGraph {
     scripts: BTreeMap<String, String>,
     stylesheets: BTreeMap<String, String>,
     public_exports: BTreeMap<String, (String, String)>,
+    component_bridge: bool,
 }
 
 impl JsxModuleGraph {
@@ -54,9 +55,17 @@ impl JsxModuleGraph {
             scripts,
             stylesheets,
             public_exports: BTreeMap::new(),
+            component_bridge: false,
         };
         graph.validate_reachable()?;
         Ok(graph)
+    }
+
+    /// Public component lookups become declarative host mount requests. The
+    /// host resolves the contract outside JavaScript and invokes its owner.
+    pub(crate) fn with_component_bridge(mut self) -> Self {
+        self.component_bridge = true;
+        self
     }
 
     /// Connect public contracts to actual module exports, including modules not
@@ -135,13 +144,37 @@ impl JsxModuleGraph {
                const module = {exports: {}}; __nickelModuleCache.set(id, module);\n\
                factory(module, module.exports, __nickelRequireModule); return module.exports;\n}\n",
         );
+        if self.component_bridge {
+            output.push_str(r#"
+const __nickelCompositionClient = Object.freeze({...nickel, get data() { return nickel.data; }, component(contract) {
+    if (typeof contract !== 'string') throw TypeError('invalid component contract');
+    return function HostComponent(props) {
+        function check(value) {
+            if (typeof value === 'function' || typeof value === 'symbol')
+                throw TypeError('cross-package executable props require opaque callback transport');
+            if (value && typeof value === 'object') {
+                if (value.kind && Object.keys(value).some(key => key === 'action' || key.endsWith('Action')))
+                    throw TypeError('cross-package rendered children require owned callback transport');
+                for (const item of Object.values(value)) check(item);
+            }
+        }
+        check(props);
+        return {kind:'__packageComponent', contract, props};
+    };
+}});
+"#);
+        }
         for path in order {
             let source = &self.scripts[&path];
             let transformed = transform_module(&path, source)?;
             output.push_str(&format!(
                 "__nickelDefineModule({}, function(module, exports, require) {{\n{}\n}});\n",
                 js_string(&path),
-                transformed
+                if self.component_bridge {
+                    format!("const nickel = __nickelCompositionClient;\n{transformed}")
+                } else {
+                    transformed
+                }
             ));
         }
         for (contract, (path, name)) in &self.public_exports {

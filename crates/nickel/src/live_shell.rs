@@ -5254,6 +5254,37 @@ impl LiveShell {
                         })
                     {
                         descriptor.load().and_then(|package| {
+                            if package.manifest.composition.as_ref().is_some_and(|composition| composition.extends.is_some()) {
+                                let mut catalog = std::collections::BTreeMap::from([(id.to_owned(), package.clone())]);
+                                let mut next = package.manifest.composition.as_ref().and_then(|composition| composition.extends.clone());
+                                while let Some(base) = next {
+                                    if catalog.contains_key(&base) { return Err("shell inheritance cycle".into()); }
+                                    if catalog.len() >= nickel_core::package_composition::MAX_COMPOSITION_DEPTH { return Err("shell inheritance exceeds package limit".into()); }
+                                    let entry = self.plugin_registry.get(&base).ok_or("shell base package is not installed")?;
+                                    if !entry.desired_enabled { return Err(format!("shell base package {base:?} is disabled")); }
+                                    let dependency = self.external_plugin_packages.get(&base).ok_or("shell base package is not an installed Twinkle package")?.load()?;
+                                    next = dependency.manifest.composition.as_ref().and_then(|composition| composition.extends.clone());
+                                    catalog.insert(base, dependency);
+                                }
+                                let mut shared = None;
+                                let mut applications = Vec::new();
+                                for surface in surfaces.iter().filter(|surface| !matches!(surface.kind,
+                                    nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)) {
+                                    let mut snapshots = std::collections::BTreeMap::new();
+                                    for dependency in catalog.values() {
+                                        let composition = dependency.manifest.composition.as_ref().ok_or("shell dependency lacks composition")?;
+                                        let identity = nickel_core::package_composition::PackageIdentity { id: composition.id.clone(), version: composition.version.parse().map_err(|_| "invalid shell dependency version")? };
+                                        let values = self.plugin_settings.get(&dependency.manifest.id).cloned().unwrap_or_else(|| dependency.manifest.settings.iter().map(|setting| (setting.id.clone(), setting.kind.default_value())).collect());
+                                        let data = crate::plugin_panel::PluginPanelApplication::package_surface_data(dependency, &values, surface);
+                                        snapshots.insert(identity, serde_json::from_str(&data).map_err(|error| error.to_string())?);
+                                    }
+                                    let application = crate::plugin_panel::PluginPanelApplication::from_composed_surface(&catalog, id, &snapshots, surface, shared.clone())?;
+                                    shared = application.shared_composition_runtime();
+                                    let resolved = application.resolved_surface(surface)?;
+                                    applications.push((application, resolved));
+                                }
+                                return Ok(applications);
+                            }
                             crate::plugin_panel::PluginPanelApplication::validate_package(
                                 &package,
                             )?;
@@ -5324,6 +5355,12 @@ impl LiveShell {
                 .map_err(|error| format!("could not save plugin activation: {error}"))?;
         }
         self.plugin_registry.set_enabled(id, enabled)?;
+        if !enabled {
+            for (_, host) in self.plugin_surface_hosts.values_mut() {
+                host.application_mut().retire_composition_owner(id);
+            }
+        }
+
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
         if id == crate::settings_plugin_report::ID {

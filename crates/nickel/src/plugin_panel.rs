@@ -7,15 +7,28 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use nickel_core::package_composition::PackageIdentity;
 use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
+use nickel_plugin_presentation::components::parse_panel_for_manifest;
 use nickel_plugin_presentation::components::{PanelNode, render_panel, render_panel_validated};
 pub use nickel_plugin_presentation::components::{
     PluginActionContribution, PluginImages, PluginMessage, PluginSectionContribution,
     PluginWidgetContribution,
 };
+use nickel_plugin_runtime::composition_runtime::{
+    ComponentEventHandle, ComponentMount, ShellCompositionRuntime,
+};
 use nickel_plugin_runtime::{JsxModuleGraph, JsxRuntime, ModuleSource};
+
+struct CompositionPanelState {
+    host: std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
+    mount: ComponentMount,
+    events: std::collections::BTreeMap<u64, ComponentEventHandle>,
+    manifests: std::collections::BTreeMap<PackageIdentity, PluginManifest>,
+    snapshots: std::collections::BTreeMap<PackageIdentity, Value>,
+}
 use nickel_ui::{
     AnyView, Column, DragPhase, FrameOverlay, OverlayAnchor, OverlayId, OverlayMenu, OverlayStyle,
     Row, Shortcut, Size, Spacer, TransientSurface, UiId, ViewContext,
@@ -360,6 +373,7 @@ pub struct PluginPanelApplication {
     dispatch_removed_focus: bool,
     images: PluginImages,
     stylesheet: StyleSheet,
+    composition: Option<CompositionPanelState>,
 }
 
 pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, String> {
@@ -1371,7 +1385,7 @@ impl PluginPanelApplication {
         Self::from_package_surface_with_runtime(package, settings, surface, images, None)
     }
 
-    fn package_surface_data(
+    pub(crate) fn package_surface_data(
         package: &PluginPackage,
         settings: &std::collections::BTreeMap<String, serde_json::Value>,
         surface: &PluginSurface,
@@ -1410,6 +1424,9 @@ impl PluginPanelApplication {
     }
 
     pub(crate) fn retire_surface(&self) -> Result<(), String> {
+        if let Some(state) = &self.composition {
+            return state.host.borrow_mut().unmount(&state.mount);
+        }
         self.runtime
             .borrow_mut()
             .drop_surface(&self.runtime_surface_id)
@@ -1441,6 +1458,113 @@ impl PluginPanelApplication {
         application.resolved_surface(surface)?;
         application.sync_images(images);
         Ok(application)
+    }
+
+    /// One native surface adapter over the shared package-lifecycle composition
+    /// host. Public child components run in their own package contexts.
+    pub(crate) fn from_composed_surface(
+        catalog: &std::collections::BTreeMap<String, PluginPackage>,
+        active: &str,
+        snapshots: &std::collections::BTreeMap<PackageIdentity, Value>,
+        surface: &PluginSurface,
+        shared: Option<std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>>,
+    ) -> Result<Self, String> {
+        let host = match shared {
+            Some(host) => host,
+            None => std::rc::Rc::new(std::cell::RefCell::new(ShellCompositionRuntime::new(
+                catalog, active, snapshots,
+            )?)),
+        };
+        let manifest = catalog
+            .get(active)
+            .ok_or("active shell package is missing")?
+            .manifest
+            .clone();
+        let (runtime, mount, stylesheet, manifests) = {
+            let mut host_ref = host.borrow_mut();
+            for (owner, data) in snapshots {
+                host_ref.update_snapshot(owner, data)?;
+            }
+            let reference = host_ref
+                .component("shell")
+                .ok_or("composed shell has no public shell export")?;
+            let owner = host_ref.resolution().active.clone();
+            let runtime = host_ref.shared_owner_runtime(&owner)?;
+            let manifests = host_ref
+                .resolution()
+                .inheritance_chain
+                .iter()
+                .map(|identity| (identity.clone(), catalog[&identity.id].manifest.clone()))
+                .collect();
+            let css = host_ref
+                .resolution()
+                .inheritance_chain
+                .iter()
+                .map(|identity| {
+                    let package = &catalog[&identity.id];
+                    let imports = package_module_graph(package)?
+                        .map(|graph| graph.stylesheet())
+                        .transpose()?
+                        .unwrap_or_default();
+                    Ok::<_, String>(format!("{}\n{}", package.stylesheet, imports))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            let stylesheet = StyleSheet::compile(&css)?;
+            let mount = host_ref.mount(&reference)?;
+            (runtime, mount, stylesheet, manifests)
+        };
+        let rendered =
+            host.borrow_mut()
+                .render_expanded(&mount, &serde_json::json!({}), |value| {
+                    let node = parse_panel_for_manifest(value, &manifest, Some(&surface.id))?;
+                    node.requested_surface(surface, &stylesheet)?;
+                    Ok(())
+                })?;
+        let node = parse_panel_for_manifest(&rendered.node, &manifest, Some(&surface.id))?;
+        Ok(Self {
+            runtime,
+            node,
+            effects: Vec::new(),
+            pending_transient: None,
+            last_error: None,
+            runtime_failure: None,
+            manifest,
+            expected_surface_id: Some(surface.id.clone()),
+            runtime_surface_id: surface.id.clone(),
+            projection_data: None,
+            overlay_open: false,
+            dispatch_removed_focus: false,
+            images: PluginImages::new(),
+            stylesheet,
+            composition: Some(CompositionPanelState {
+                host,
+                mount,
+                events: rendered.events,
+                manifests,
+                snapshots: snapshots.clone(),
+            }),
+        })
+    }
+
+    pub(crate) fn retire_composition_owner(&mut self, id: &str) {
+        if let Some(state) = &self.composition {
+            let owners = state
+                .manifests
+                .keys()
+                .filter(|owner| owner.id == id)
+                .cloned()
+                .collect::<Vec<_>>();
+            for owner in owners {
+                state.host.borrow_mut().retire(&owner);
+            }
+        }
+    }
+
+    pub(crate) fn shared_composition_runtime(
+        &self,
+    ) -> Option<std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>> {
+        self.composition.as_ref().map(|state| state.host.clone())
     }
 
     pub fn validate_package(package: &PluginPackage) -> Result<(), String> {
@@ -1687,6 +1811,28 @@ impl PluginPanelApplication {
         if !force && self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
+        if let Some(state) = &mut self.composition {
+            let data: Value =
+                serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+            let mut host = state.host.borrow_mut();
+            let owner = host.resolution().active.clone();
+            state.snapshots.insert(owner.clone(), data.clone());
+            for (owner, data) in &state.snapshots {
+                host.update_snapshot(owner, data)?;
+            }
+            let rendered = host.render_expanded(&state.mount, &serde_json::json!({}), |value| {
+                parse_panel_for_manifest(value, &self.manifest, self.expected_surface_id.as_deref())
+                    .map(|_| ())
+            })?;
+            self.node = parse_panel_for_manifest(
+                &rendered.node,
+                &self.manifest,
+                self.expected_surface_id.as_deref(),
+            )?;
+            state.events = rendered.events;
+            self.projection_data = Some(serialized);
+            return Ok(true);
+        }
         let previous_data = self
             .projection_data
             .as_deref()
@@ -1809,6 +1955,7 @@ impl PluginPanelApplication {
             dispatch_removed_focus: false,
             images: PluginImages::new(),
             stylesheet: StyleSheet::default(),
+            composition: None,
         })
     }
 
@@ -2078,44 +2225,118 @@ impl nickel_ui::Application for PluginPanelApplication {
         if events.is_empty() {
             return;
         }
-        let expression = if self.dispatch_removed_focus {
-            format!("__nickelDispatchRemovedFocus({})", events[0][0])
-        } else {
-            format!(
-                "__nickelDispatchBatch({})",
-                serde_json::Value::Array(events)
-            )
-        };
         let mut validation_rejected = false;
-        let (rendered, effects) = {
-            let mut runtime = self.runtime.borrow_mut();
-            if let Err(error) = runtime.select_surface(&self.runtime_surface_id) {
-                self.runtime_failure = Some(error.clone());
-                self.last_error = Some(error);
-                return;
+        let (rendered, effects) = if let Some(state) = &mut self.composition {
+            let result = (|| {
+                if events.len() != 1 {
+                    return Err(
+                        "composed surface event batches require owner-safe batch dispatch"
+                            .to_owned(),
+                    );
+                }
+                let event = &events[0];
+                let handle = state
+                    .events
+                    .get(&event[0].as_u64().ok_or("invalid host action")?)
+                    .ok_or("stale host action")?
+                    .clone();
+                let mut host = state.host.borrow_mut();
+                for (owner, data) in &state.snapshots {
+                    host.update_snapshot(owner, data)?;
+                }
+                let rendered = host.dispatch_expanded(
+                    &state.mount,
+                    &handle,
+                    event.get(1).unwrap_or(&Value::Null),
+                    |value| {
+                        let node = parse_panel_for_manifest(
+                            value,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                        )?;
+                        if let Some(id) = &self.expected_surface_id {
+                            let surface = self
+                                .manifest
+                                .surfaces
+                                .iter()
+                                .find(|surface| &surface.id == id)
+                                .ok_or("composed surface grant is missing")?;
+                            node.requested_surface(surface, &self.stylesheet)?;
+                        }
+                        Ok(())
+                    },
+                )?;
+                let node = parse_panel_for_manifest(
+                    &rendered.node,
+                    &self.manifest,
+                    self.expected_surface_id.as_deref(),
+                )?;
+                state.events = rendered.events;
+                let effects = host
+                    .take_effects()
+                    .into_iter()
+                    .map(|effect| {
+                        host.validate_effect(&effect)?;
+                        let manifest = state
+                            .manifests
+                            .get(effect.owner())
+                            .ok_or("effect owner is not installed")?
+                            .clone();
+                        Ok((manifest, effect.value().clone()))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok((node, effects))
+            })();
+            match result {
+                Ok((node, effects)) => (Ok(node), Ok(effects)),
+                Err(error) => (Err(error), Ok(Vec::new())),
             }
-            let rendered = render_panel_validated(
-                &mut runtime,
-                &self.manifest,
-                self.expected_surface_id.as_deref(),
-                &expression,
-                &self.stylesheet,
-                &mut validation_rejected,
-            );
-            let effects = runtime.take_effects();
-            (rendered, effects)
+        } else {
+            let expression = if self.dispatch_removed_focus {
+                format!("__nickelDispatchRemovedFocus({})", events[0][0])
+            } else {
+                format!(
+                    "__nickelDispatchBatch({})",
+                    serde_json::Value::Array(events)
+                )
+            };
+            {
+                let mut runtime = self.runtime.borrow_mut();
+                if let Err(error) = runtime.select_surface(&self.runtime_surface_id) {
+                    self.runtime_failure = Some(error.clone());
+                    self.last_error = Some(error);
+                    return;
+                }
+                let rendered = render_panel_validated(
+                    &mut runtime,
+                    &self.manifest,
+                    self.expected_surface_id.as_deref(),
+                    &expression,
+                    &self.stylesheet,
+                    &mut validation_rejected,
+                );
+                let effects = runtime.take_effects();
+                (
+                    rendered,
+                    effects.map(|effects| {
+                        effects
+                            .into_iter()
+                            .map(|effect| (self.manifest.clone(), effect))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+            }
         };
         (|| match (rendered, effects) {
             (Ok(node), Ok(effects)) => {
                 let mut approved = Vec::new();
                 let mut requested_dialog = None;
-                for effect in effects {
+                for (effect_manifest, effect) in effects {
                     match effect.as_str() {
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("applications.movePin") =>
                         {
-                            if !self
-                                .manifest
+                            if !effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsPin)
                             {
@@ -2147,8 +2368,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("settings.invoke") =>
                         {
-                            if !self
-                                .manifest
+                            if !effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::SettingsWrite)
                             {
@@ -2179,7 +2399,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             };
                             approved.push(PluginEffect::InvokeRegisteredSetting {
-                                caller: self.manifest.id.clone(),
+                                caller: effect_manifest.id.clone(),
                                 provider: provider.into(),
                                 id: id.into(),
                                 value: value.clone(),
@@ -2188,8 +2408,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("displays.setLayout") =>
                         {
-                            if !self
-                                .manifest
+                            if !effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::DisplayControl)
                             {
@@ -2241,7 +2460,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::SetDisplayLayout {
-                                plugin_id: self.manifest.id.clone(),
+                                plugin_id: effect_manifest.id.clone(),
                                 layout,
                                 revision: revision.into(),
                             });
@@ -2249,8 +2468,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("displays.confirm") =>
                         {
-                            if !self
-                                .manifest
+                            if !effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::DisplayControl)
                             {
@@ -2258,14 +2476,13 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::ConfirmDisplayLayout {
-                                plugin_id: self.manifest.id.clone(),
+                                plugin_id: effect_manifest.id.clone(),
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("displays.revert") =>
                         {
-                            if !self
-                                .manifest
+                            if !effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::DisplayControl)
                             {
@@ -2273,12 +2490,11 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::RevertDisplayLayout {
-                                plugin_id: self.manifest.id.clone(),
+                                plugin_id: effect_manifest.id.clone(),
                             });
                         }
                         Some("show-launcher")
-                            if self
-                                .manifest
+                            if effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
@@ -2286,8 +2502,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("dismiss-launcher")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
@@ -2295,8 +2510,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("show-settings")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::SettingsShow) =>
                         {
@@ -2337,7 +2551,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 self.last_error = Some("plugin surface ID is invalid".into());
                                 return;
                             };
-                            if !self.manifest.surfaces.iter().any(|surface| {
+                            if !effect_manifest.surfaces.iter().any(|surface| {
                                 surface.id == surface_id
                                     && matches!(
                                         surface.kind,
@@ -2352,7 +2566,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::ShowPluginSurface {
-                                plugin_id: self.manifest.id.clone(),
+                                plugin_id: effect_manifest.id.clone(),
                                 surface_id: surface_id.to_owned(),
                             });
                         }
@@ -2369,7 +2583,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 self.last_error = Some("plugin surface ID is invalid".into());
                                 return;
                             };
-                            if !self.manifest.surfaces.iter().any(|surface| {
+                            if !effect_manifest.surfaces.iter().any(|surface| {
                                 surface.id == surface_id
                                     && matches!(
                                         surface.kind,
@@ -2384,7 +2598,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::HidePluginSurface {
-                                plugin_id: self.manifest.id.clone(),
+                                plugin_id: effect_manifest.id.clone(),
                                 surface_id: surface_id.to_owned(),
                             });
                         }
@@ -2399,7 +2613,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 self.last_error = Some("plugin surface ID is invalid".into());
                                 return;
                             };
-                            if !self.manifest.surfaces.iter().any(|surface| {
+                            if !effect_manifest.surfaces.iter().any(|surface| {
                                 surface.id == surface_id
                                     && !surface.passive
                                     && matches!(
@@ -2414,7 +2628,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::FocusPluginSurface {
-                                plugin_id: self.manifest.id.clone(),
+                                plugin_id: effect_manifest.id.clone(),
                                 surface_id: surface_id.to_owned(),
                             });
                         }
@@ -2429,7 +2643,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 self.last_error = Some("plugin surface ID is invalid".into());
                                 return;
                             };
-                            if !self.manifest.surfaces.iter().any(|surface| {
+                            if !effect_manifest.surfaces.iter().any(|surface| {
                                 surface.id == surface_id
                                     && surface.kind
                                         == nickel_core::plugins::PluginSurfaceKind::Window
@@ -2460,7 +2674,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::SetPluginSurfacePlacement {
-                                plugin_id: self.manifest.id.clone(),
+                                plugin_id: effect_manifest.id.clone(),
                                 surface_id: surface_id.to_owned(),
                                 anchor,
                                 offset_x: offset_x as i32,
@@ -2469,8 +2683,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("set-plugin-setting")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::SettingsWrite) =>
                         {
@@ -2482,8 +2695,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 self.last_error = Some("plugin setting value is missing".into());
                                 return;
                             };
-                            if !self
-                                .manifest
+                            if !effect_manifest
                                 .settings
                                 .iter()
                                 .any(|setting| setting.id == key && setting.kind.accepts(value))
@@ -2492,14 +2704,13 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::SetPluginSetting {
-                                plugin_id: self.manifest.id.clone(),
+                                plugin_id: effect_manifest.id.clone(),
                                 key: key.to_owned(),
                                 value: value.clone(),
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str) == Some("run-submit")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::RunCommand) =>
                         {
@@ -2516,8 +2727,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::RunSubmit(command.to_owned()));
                         }
                         _ if effect.get("type").and_then(Value::as_str) == Some("run-dismiss")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::RunCommand) =>
                         {
@@ -2525,8 +2735,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("toggle-launcher")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::LauncherShow) =>
                         {
@@ -2534,8 +2743,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("toggle-control-center")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ControlCenterShow) =>
                         {
@@ -2543,8 +2751,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("show-control-center")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ControlCenterShow) =>
                         {
@@ -2569,16 +2776,14 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .map(crate::model::WindowId);
                             let requested = match (action, window) {
                                 (Some("activate"), Some(window))
-                                    if self
-                                        .manifest
+                                    if effect_manifest
                                         .capabilities
                                         .contains(&PluginCapability::WindowsFocus) =>
                                 {
                                     Some(PluginEffect::ActivateWindow(window))
                                 }
                                 (Some("close"), Some(window))
-                                    if self
-                                        .manifest
+                                    if effect_manifest
                                         .capabilities
                                         .contains(&PluginCapability::WindowsContext) =>
                                 {
@@ -2594,8 +2799,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("toggle-on-screen-keyboard")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::OnScreenKeyboardShow) =>
                         {
@@ -2603,8 +2807,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("toggle-projects-menu")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ProjectsMenuShow) =>
                         {
@@ -2612,12 +2815,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-activate-item")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::WindowsFocus)
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsLaunch) =>
                         {
@@ -2644,8 +2845,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-context-item")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::WindowsContext) =>
                         {
@@ -2674,8 +2874,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-move-pin")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsPin) =>
                         {
@@ -2717,8 +2916,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             .is_some_and(|kind| {
                                 matches!(kind, "taskbar-activate-tray" | "tray.activate")
                             })
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::TrayActivate) =>
                         {
@@ -2738,8 +2936,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             .is_some_and(|kind| {
                                 matches!(kind, "taskbar-context-tray" | "tray.contextMenu")
                             })
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::TrayContext) =>
                         {
@@ -2755,8 +2952,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-menu-close-all")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::WindowsContext) =>
                         {
@@ -2764,8 +2960,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-window-menu-action")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::WindowsContext) =>
                         {
@@ -2798,7 +2993,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             let id = effect.get("id").and_then(Value::as_str);
                             let item = effect.get("item").and_then(Value::as_str);
                             let valid = slot_id.is_some_and(|value| {
-                                self.manifest.provides_slots.iter().any(|slot| {
+                                effect_manifest.provides_slots.iter().any(|slot| {
                                     slot.id == value
                                         && slot.contract
                                             == nickel_core::plugins::PluginSlotContract::Action
@@ -2843,7 +3038,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::InvokePluginSlotAction {
-                                target_plugin: self.manifest.id.clone(),
+                                target_plugin: effect_manifest.id.clone(),
                                 slot_id: slot_id.unwrap().to_owned(),
                                 plugin_id: plugin_id.unwrap().to_owned(),
                                 id: id.unwrap().to_owned(),
@@ -2855,7 +3050,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         {
                             match preview_request(&effect) {
                                 Ok((action, capability))
-                                    if self.manifest.capabilities.contains(&capability) =>
+                                    if effect_manifest.capabilities.contains(&capability) =>
                                 {
                                     approved.push(PluginEffect::Preview(action));
                                 }
@@ -2876,7 +3071,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             let plugin_id = effect.get("pluginId").and_then(Value::as_str);
                             let id = effect.get("id").and_then(Value::as_str);
                             if !slot_id.is_some_and(|value| {
-                                self.manifest.provides_slots.iter().any(|slot| {
+                                effect_manifest.provides_slots.iter().any(|slot| {
                                     slot.id == value
                                         && slot.contract
                                             == nickel_core::plugins::PluginSlotContract::Section
@@ -2906,7 +3101,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             }
                             approved.push(PluginEffect::InvokePluginSlotSection {
-                                target_plugin: self.manifest.id.clone(),
+                                target_plugin: effect_manifest.id.clone(),
                                 slot_id: slot_id.unwrap().to_owned(),
                                 plugin_id: plugin_id.unwrap().to_owned(),
                                 id: id.unwrap().to_owned(),
@@ -2955,11 +3150,11 @@ impl nickel_ui::Application for PluginPanelApplication {
                             .is_some_and(|operation| operation.starts_with("associations.")) =>
                         {
                             let request = crate::associations_capabilities::AssociationsEffect::parse(&effect).and_then(|request| {
-                                if !self.manifest.capabilities.contains(&request.capability()) {
+                                if !effect_manifest.capabilities.contains(&request.capability()) {
                                     return Err("associations control is not granted".into());
                                 }
                                 if matches!(request, crate::associations_capabilities::AssociationsEffect::SetDefault { .. }) {
-                                    if !self.manifest.capabilities.contains(&PluginCapability::AssociationsRead) {
+                                    if !effect_manifest.capabilities.contains(&PluginCapability::AssociationsRead) {
                                         return Err("associations read is not granted".into());
                                     }
                                     let data: Value = self.projection_data.as_deref().and_then(|data| serde_json::from_str(data).ok()).ok_or("association snapshot is unavailable")?;
@@ -2969,7 +3164,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::Associations {
-                                    plugin_id: self.manifest.id.clone(),
+                                    plugin_id: effect_manifest.id.clone(),
                                     effect,
                                 }),
                                 Err(error) => {
@@ -2988,12 +3183,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                             let request =
                                 crate::appearance_capabilities::AppearanceEffect::parse(&effect)
                                     .and_then(|request| {
-                                        if !self
-                                            .manifest
+                                        if !effect_manifest
                                             .capabilities
                                             .contains(&request.capability())
-                                            || !self
-                                                .manifest
+                                            || !effect_manifest
                                                 .capabilities
                                                 .contains(&request.read_capability())
                                         {
@@ -3012,7 +3205,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                     });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::Appearance {
-                                    plugin_id: self.manifest.id.clone(),
+                                    plugin_id: effect_manifest.id.clone(),
                                     effect,
                                 }),
                                 Err(error) => {
@@ -3033,7 +3226,8 @@ impl nickel_ui::Application for PluginPanelApplication {
                                     &effect,
                                 )
                                 .and_then(|request| {
-                                    if !self.manifest.capabilities.contains(&request.capability()) {
+                                    if !effect_manifest.capabilities.contains(&request.capability())
+                                    {
                                         return Err("connectivity control is not granted".into());
                                     }
                                     let data: Value = self
@@ -3046,7 +3240,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::Connectivity {
-                                    plugin_id: self.manifest.id.clone(),
+                                    plugin_id: effect_manifest.id.clone(),
                                     effect,
                                 }),
                                 Err(error) => {
@@ -3060,7 +3254,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         {
                             match control_request(&effect) {
                                 Ok((action, capability))
-                                    if self.manifest.capabilities.contains(&capability) =>
+                                    if effect_manifest.capabilities.contains(&capability) =>
                                 {
                                     approved.push(PluginEffect::Control(action));
                                 }
@@ -3076,9 +3270,8 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("codex-project-refresh")
-                            && self.manifest.id == codex_projects_manifest().id
-                            && self
-                                .manifest
+                            && effect_manifest.id == codex_projects_manifest().id
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ProjectsRead) =>
                         {
@@ -3086,15 +3279,14 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("codex-project-close")
-                            && self.manifest.id == codex_projects_manifest().id =>
+                            && effect_manifest.id == codex_projects_manifest().id =>
                         {
                             approved.push(PluginEffect::CodexProjectClose);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("codex-project-open")
-                            && self.manifest.id == codex_projects_manifest().id
-                            && self
-                                .manifest
+                            && effect_manifest.id == codex_projects_manifest().id
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ProjectsOpen) =>
                         {
@@ -3136,8 +3328,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 revision: revision.unwrap(),
                             });
                         }
-                        _ if self
-                            .manifest
+                        _ if effect_manifest
                             .capabilities
                             .contains(&PluginCapability::OnScreenKeyboardInput)
                             && matches!(
@@ -3270,8 +3461,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-set-query")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsRead) =>
                         {
@@ -3288,8 +3478,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-set-page")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsRead) =>
                         {
@@ -3317,8 +3506,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-activate-result")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsLaunch) =>
                         {
@@ -3341,8 +3529,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("applications.launch")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsLaunch) =>
                         {
@@ -3358,8 +3545,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-set-view")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsRead) =>
                         {
@@ -3376,8 +3562,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("applications.togglePin")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsPin) =>
                         {
@@ -3393,8 +3578,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("applications-retry-pin-save")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ApplicationsPin) =>
                         {
@@ -3402,8 +3586,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-open-project")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ProjectsOpen) =>
                         {
@@ -3419,8 +3602,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-see-all-projects")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::ProjectsRead) =>
                         {
@@ -3428,8 +3610,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("launcher-request-logout")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::SessionLogoutRequest) =>
                         {
@@ -3437,8 +3618,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("notification-invoke")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::NotificationsAct) =>
                         {
@@ -3466,8 +3646,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("notification-dismiss")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::NotificationsAct) =>
                         {
@@ -3484,8 +3663,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("notification-close-history")
-                            && self
-                                .manifest
+                            && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::NotificationsAct) =>
                         {
@@ -3510,6 +3688,18 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = Some(error);
             }
         })();
+        if let Some(state) = &self.composition {
+            if self.last_error.is_some() {
+                // Mixed-context renders cannot use the single-context rollback
+                // path. Retire participants before any denied effect can execute.
+                let owners = state.manifests.keys().cloned().collect::<Vec<_>>();
+                for owner in owners {
+                    state.host.borrow_mut().retire(&owner);
+                }
+                self.runtime_failure = self.last_error.clone();
+            }
+            return;
+        }
         if let Err(error) = self
             .runtime
             .borrow_mut()
@@ -3694,6 +3884,78 @@ mod tests {
             .publish_settings(&mut registry, &package.manifest.id)
             .unwrap();
         assert_eq!(registry.settings_pages_snapshot().pages, pages.pages);
+    }
+
+    #[test]
+    fn composed_shell_replacement_uses_production_parser_and_owner_effect_validation() {
+        fn package(
+            id: &str,
+            source: &str,
+            base: Option<&str>,
+            grants: Vec<PluginCapability>,
+        ) -> PluginPackage {
+            let mut manifest = super::manifest().clone();
+            manifest.id = id.into();
+            manifest.capabilities = grants;
+            let composition = serde_json::from_value(serde_json::json!({
+                "api_version": 1, "id": id, "version":"0.1.0",
+                "exports": if base.is_none() { serde_json::json!({"shell":"./main.js#Shell", "shell.taskbar":"./main.js#Taskbar"}) } else { serde_json::json!({}) },
+                "extends": base,
+                "requires": base.map(|base| serde_json::json!({base:"^0.1"})).unwrap_or_else(|| serde_json::json!({})),
+                "replaces": if base.is_some() { serde_json::json!({"shell.taskbar":"./main.js#Taskbar"}) } else { serde_json::json!({}) }
+            })).unwrap();
+            manifest.composition = Some(composition);
+            PluginPackage {
+                manifest,
+                source: source.into(),
+                stylesheet: String::new(),
+                modules: Vec::new(),
+                images: std::collections::BTreeMap::new(),
+            }
+        }
+        for granted in [true, false] {
+            let base = package(
+                "base-shell",
+                "globalThis.origin = 'base';\nexport function Shell() { return h(Window, {id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'}, h(nickel.component('shell.taskbar'), null)); }\nexport function Taskbar() { return h(Button, {id:'base',onClick:()=>nickel.request('show-launcher')}, origin); }\nexport default Shell;",
+                None,
+                vec![PluginCapability::LauncherShow],
+            );
+            let child = package(
+                "derived-shell",
+                "globalThis.origin = 'derived';\nexport function Taskbar() { const [count,setCount] = useState(0); return h(Button, {id:'replacement',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count); }\nexport default Taskbar;",
+                Some("base-shell"),
+                if granted {
+                    vec![PluginCapability::LauncherShow]
+                } else {
+                    Vec::new()
+                },
+            );
+            let surface = child.manifest.surfaces[0].clone();
+            let catalog = std::collections::BTreeMap::from([
+                ("base-shell".into(), base),
+                ("derived-shell".into(), child),
+            ]);
+            let mut application = PluginPanelApplication::from_composed_surface(
+                &catalog,
+                "derived-shell",
+                &std::collections::BTreeMap::new(),
+                &surface,
+                None,
+            )
+            .unwrap();
+            assert!(application.button_message("base").is_none());
+            let event = application.button_message("replacement").unwrap();
+            application.update(event);
+            if granted {
+                assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
+                assert!(application.last_error().is_none());
+            } else {
+                assert!(application.take_effects().is_empty());
+                assert!(application.last_error().is_some());
+                // The base grant does not authorize a replacement's callback.
+                assert!(application.take_runtime_failure().is_some());
+            }
+        }
     }
 
     #[test]

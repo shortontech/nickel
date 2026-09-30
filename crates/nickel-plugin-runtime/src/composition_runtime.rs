@@ -74,8 +74,14 @@ pub struct RenderedComponent {
     pub events: BTreeMap<u64, ComponentEventHandle>,
 }
 
+struct ExpansionState {
+    root: u64,
+    events: BTreeMap<u64, ComponentEventHandle>,
+    visited: std::collections::BTreeSet<String>,
+}
+
 struct PackageRuntime {
-    runtime: JsxRuntime,
+    runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
     data: Value,
     exports: BTreeMap<String, String>,
 }
@@ -95,6 +101,7 @@ pub struct ShellCompositionRuntime {
     mounts: BTreeMap<u64, MountState>,
     next_mount: u64,
     effects: Vec<OwnedComponentEffect>,
+    nested_mounts: BTreeMap<(u64, String), ComponentMount>,
 }
 
 impl ShellCompositionRuntime {
@@ -128,6 +135,7 @@ impl ShellCompositionRuntime {
             mounts: BTreeMap::new(),
             next_mount: 0,
             effects: Vec::new(),
+            nested_mounts: BTreeMap::new(),
         };
         let mut source_bytes = 0usize;
         for owner in host.resolution.inheritance_chain.clone() {
@@ -185,7 +193,8 @@ impl ShellCompositionRuntime {
                         source: &package.source,
                     })),
             )?
-            .with_public_exports(&exports)?;
+            .with_public_exports(&exports)?
+            .with_component_bridge();
             let data = snapshots
                 .get(&owner)
                 .cloned()
@@ -194,7 +203,10 @@ impl ShellCompositionRuntime {
             if !data.is_object() {
                 return Err("package snapshot must be an object".into());
             }
-            let runtime = JsxRuntime::new_modules(&graph, Some(&data.to_string()))?;
+            let runtime = std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new_modules(
+                &graph,
+                Some(&data.to_string()),
+            )?));
             host.packages.insert(
                 owner.clone(),
                 PackageRuntime {
@@ -206,6 +218,20 @@ impl ShellCompositionRuntime {
             host.drain_effects(&owner)?;
         }
         Ok(host)
+    }
+
+    /// Trusted native adapters may share the owner context without creating a
+    /// second package lifecycle. Guest code never receives this Rust reference.
+    pub fn shared_owner_runtime(
+        &self,
+        owner: &PackageIdentity,
+    ) -> Result<std::rc::Rc<std::cell::RefCell<JsxRuntime>>, String> {
+        Ok(self
+            .packages
+            .get(owner)
+            .ok_or("retired package owner")?
+            .runtime
+            .clone())
     }
 
     pub fn resolution(&self) -> &ResolvedShellPackage {
@@ -257,8 +283,8 @@ impl ShellCompositionRuntime {
                 .ok_or("component implementation is not published by its owner")?,
         )
         .unwrap();
-        package.runtime.register_surface_entry(&surface(id), &format!(
-            "function App() {{ return h(nickel.component({implementation}), nickel.data.__componentProps); }}"))?;
+        package.runtime.borrow_mut().register_surface_entry(&surface(id), &format!(
+            "function App() {{ const {{children, ...props}} = nickel.data.__componentProps; return h(nickel.component({implementation}), props, ...(children ?? [])); }}"))?;
         self.mounts.insert(
             id,
             MountState {
@@ -335,6 +361,155 @@ impl ShellCompositionRuntime {
         self.render_mount(handle.mount, Some((handle.action, value)), validate)
     }
 
+    /// Expand public component mount requests through their owning contexts.
+    /// Data props cross as bounded snapshots; executable props are rejected
+    /// explicitly until an opaque callback prop transport is available.
+    pub fn render_expanded(
+        &mut self,
+        mount: &ComponentMount,
+        props: &Value,
+        validate: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<RenderedComponent, String> {
+        let result = self
+            .render(mount, props)
+            .and_then(|rendered| self.expand_rendered(mount.id, rendered, validate));
+        if result.is_err() {
+            // Each context has committed its local render by this point. Until
+            // multi-context rollback exists, retire the transaction participants
+            // so failed expansion cannot retain executable callbacks/effects.
+            let owners = self.packages.keys().cloned().collect::<Vec<_>>();
+            for owner in owners {
+                self.retire(&owner);
+            }
+        }
+        result
+    }
+
+    pub fn dispatch_expanded(
+        &mut self,
+        root: &ComponentMount,
+        handle: &ComponentEventHandle,
+        value: &Value,
+        validate: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<RenderedComponent, String> {
+        self.validate_mount(root)?;
+        self.dispatch(handle, value)?;
+        let props = self.mounts[&root.id].props.clone();
+        self.render_expanded(root, &props, validate)
+    }
+
+    fn expand_rendered(
+        &mut self,
+        root: u64,
+        rendered: RenderedComponent,
+        validate: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<RenderedComponent, String> {
+        let mut expansion = ExpansionState {
+            root,
+            events: BTreeMap::new(),
+            visited: std::collections::BTreeSet::new(),
+        };
+        let node = self.expand_node("root", rendered.node, &rendered.events, &mut expansion, 0)?;
+        bounded_json(&node)?;
+        validate(&node)?;
+        let removed = self
+            .nested_mounts
+            .keys()
+            .filter(|(owner, path)| *owner == root && !expansion.visited.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in removed {
+            let mount = self.nested_mounts.remove(&key).unwrap();
+            self.unmount(&mount)?;
+        }
+        Ok(RenderedComponent {
+            node,
+            events: expansion.events,
+        })
+    }
+
+    fn expand_node(
+        &mut self,
+        path: &str,
+        mut node: Value,
+        source_events: &BTreeMap<u64, ComponentEventHandle>,
+        expansion: &mut ExpansionState,
+        depth: usize,
+    ) -> Result<Value, String> {
+        if depth > 64 || expansion.events.len() > MAX_NODES {
+            return Err("composition expansion exceeds limits".into());
+        }
+        if node.get("kind").and_then(Value::as_str) == Some("__packageComponent") {
+            let contract = node
+                .get("contract")
+                .and_then(Value::as_str)
+                .ok_or("missing public component contract")?;
+            let reference = self
+                .component(contract)
+                .ok_or("unknown public component contract")?;
+            let key = format!("{path}/{contract}");
+            expansion.visited.insert(key.clone());
+            let identity = (expansion.root, key.clone());
+            let mount = if let Some(mount) = self.nested_mounts.get(&identity) {
+                mount.clone()
+            } else {
+                let mount = self.mount(&reference)?;
+                self.nested_mounts.insert(identity, mount.clone());
+                mount
+            };
+            let props = node.get("props").ok_or("missing public component props")?;
+            let rendered = self.render(&mount, props)?;
+            return self.expand_node(&key, rendered.node, &rendered.events, expansion, depth + 1);
+        }
+        match &mut node {
+            Value::Array(values) => {
+                for (index, value) in values.iter_mut().enumerate() {
+                    let identity = if let Some(key) = value.get("key") {
+                        format!(
+                            "@{}",
+                            key.to_string()
+                                .bytes()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        )
+                    } else {
+                        format!("#{index}")
+                    };
+                    *value = self.expand_node(
+                        &format!("{path}/{identity}"),
+                        std::mem::take(value),
+                        source_events,
+                        expansion,
+                        depth + 1,
+                    )?;
+                }
+            }
+            Value::Object(object) => {
+                for (key, value) in object {
+                    if is_action(key) && !value.is_null() {
+                        let handle = source_events
+                            .get(&value.as_u64().ok_or("invalid host event token")?)
+                            .ok_or("unknown host event token")?
+                            .clone();
+                        let token = expansion.events.len() as u64;
+                        expansion.events.insert(token, handle);
+                        *value = Value::from(token);
+                    } else {
+                        *value = self.expand_node(
+                            &format!("{path}/{key}"),
+                            std::mem::take(value),
+                            source_events,
+                            expansion,
+                            depth + 1,
+                        )?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(node)
+    }
+
     pub fn update_snapshot(&mut self, owner: &PackageIdentity, data: &Value) -> Result<(), String> {
         bounded_json(data)?;
         if !data.is_object() {
@@ -358,11 +533,22 @@ impl ShellCompositionRuntime {
 
     pub fn unmount(&mut self, mount: &ComponentMount) -> Result<(), String> {
         self.validate_mount(mount)?;
+        let children = self
+            .nested_mounts
+            .keys()
+            .filter(|(root, _)| *root == mount.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in children {
+            let child = self.nested_mounts.remove(&key).unwrap();
+            self.unmount(&child)?;
+        }
         let state = self.mounts.remove(&mount.id).unwrap();
         self.packages
             .get_mut(&state.reference.owner)
             .unwrap()
             .runtime
+            .borrow_mut()
             .drop_surface(&surface(mount.id))
     }
 
@@ -372,6 +558,8 @@ impl ShellCompositionRuntime {
         self.mounts
             .retain(|_, mount| &mount.reference.owner != owner);
         self.packages.remove(owner);
+        self.nested_mounts
+            .retain(|_, mount| self.mounts.contains_key(&mount.id));
         self.effects.retain(|effect| &effect.owner != owner);
     }
 
@@ -402,18 +590,19 @@ impl ShellCompositionRuntime {
             .packages
             .get_mut(&owner)
             .ok_or("retired component owner")?;
-        package.runtime.select_surface(&surface(id))?;
+        let mut runtime = package.runtime.borrow_mut();
+        runtime.select_surface(&surface(id))?;
         let mut data = package.data.clone();
         let object = data
             .as_object_mut()
             .ok_or("package snapshot must be an object")?;
         object.insert("__componentProps".into(), state.props.clone());
-        package.runtime.set_data(&data.to_string())?;
+        runtime.set_data(&data.to_string())?;
         let expression = event.map_or_else(
             || "__nickelRender()".into(),
             |(action, value)| format!("__nickelDispatch({action},{value})"),
         );
-        let result = package.runtime.render(&expression, |value| {
+        let result = runtime.render(&expression, |value| {
             bounded_json(value)?;
             let mut node = value.clone();
             let mut events = BTreeMap::new();
@@ -430,9 +619,10 @@ impl ShellCompositionRuntime {
             Ok(RenderedComponent { node, events })
         });
         if event.is_some() {
-            package.runtime.finish_event(result.is_ok())?;
+            runtime.finish_event(result.is_ok())?;
         }
         let rendered = result?;
+        drop(runtime);
         self.mounts.get_mut(&id).unwrap().generation = generation;
         if let Err(error) = self.drain_effects(&owner) {
             self.retire(&owner);
@@ -447,6 +637,7 @@ impl ShellCompositionRuntime {
             .get_mut(owner)
             .unwrap()
             .runtime
+            .borrow_mut()
             .take_effects()?;
         if self.effects.len() + effects.len() > MAX_EFFECTS {
             return Err("too many composition effects".into());
@@ -479,6 +670,23 @@ impl ShellCompositionRuntime {
     }
 }
 
+fn is_action(key: &str) -> bool {
+    matches!(
+        key,
+        "action"
+            | "contextAction"
+            | "dragAction"
+            | "dropAction"
+            | "focusAction"
+            | "blurAction"
+            | "selectAction"
+            | "moveAction"
+            | "fileAction"
+            | "closeAction"
+            | "escapeAction"
+            | "submitAction"
+    )
+}
 fn surface(id: u64) -> String {
     format!("composition-{id}")
 }
@@ -509,22 +717,7 @@ fn rewrite_events(
         }
         Value::Object(object) => {
             for (key, value) in object {
-                if matches!(
-                    key.as_str(),
-                    "action"
-                        | "contextAction"
-                        | "dragAction"
-                        | "dropAction"
-                        | "focusAction"
-                        | "blurAction"
-                        | "selectAction"
-                        | "moveAction"
-                        | "fileAction"
-                        | "closeAction"
-                        | "escapeAction"
-                        | "submitAction"
-                ) && !value.is_null()
-                {
+                if is_action(key) && !value.is_null() {
                     let action = value
                         .as_u64()
                         .filter(|action| *action < MAX_NODES as u64)
@@ -620,6 +813,80 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn expanded_public_lookup_renders_replacement_and_routes_its_callback() {
+        let mut base = package(
+            "base",
+            "globalThis.secret = 'base';\nexport function Shell() { return h(Column, null, h(nickel.component('shell.taskbar'), {label:'custom'})); }\nexport function Taskbar() { return h(Text,null,'base'); }\nexport function QuickSettings() { return h(Text,null,'base'); }\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "globalThis.secret = 'child';\nexport function Taskbar(props) { const [count,setCount]=useState(0); return h(Button,{onClick:()=>{setCount(count+1);nickel.windows.activate('owned');}}, secret + props.label + count); }\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let reference = host.component("shell").unwrap();
+        let mount = host.mount(&reference).unwrap();
+        let tree = host
+            .render_expanded(&mount, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("childcustom0"));
+        assert_eq!(tree.events[&0].owner().id, "child");
+        let tree = host
+            .dispatch_expanded(&mount, &tree.events[&0], &Value::Null, |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("childcustom1"));
+        assert_eq!(host.take_effects()[0].owner().id, "child");
+        host.unmount(&mount).unwrap();
+        assert!(host.dispatch(&tree.events[&0], &Value::Null).is_err());
+    }
+
+    #[test]
+    fn executable_props_are_rejected_without_lossy_serialization() {
+        let mut base = package(
+            "base",
+            "export function Shell() { return h(nickel.component('shell.taskbar'), {onChange:()=>nickel.windows.activate('base')}); }\nexport function Taskbar() {}\nexport function QuickSettings() {}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "export function Taskbar() { return h(Text,null,'child'); }\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let reference = host.component("shell").unwrap();
+        let mount = host.mount(&reference).unwrap();
+        let error = host
+            .render_expanded(&mount, &serde_json::json!({}), |_| Ok(()))
+            .err()
+            .unwrap();
+        assert!(error.contains("opaque callback transport"));
+        assert!(host.take_effects().is_empty());
     }
 
     #[test]
