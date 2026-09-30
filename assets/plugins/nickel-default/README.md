@@ -59,7 +59,7 @@ pieces are implemented.
 The draft presents switches, sliders, select options, actions, and editable
 text/number values and grouped controls. Color settings use the replaceable
 `ColorPicker` with preset swatches, hue, saturation, brightness, optional alpha,
-and CSS color text entry. Repeated values use editable keyed rows with bounded add/remove actions. Shortcuts still fall back to text.
+and CSS color text entry. Repeated values use editable keyed rows with bounded add/remove actions. Shortcuts use an editable chord with bounded keys and an explicit Apply action. Text and number controls retain local drafts and validate before applying.
 This generic picker does not complete Spec 0263's appearance migration:
 interface hue, intensity, modes, transparency, and remaining appearance controls must move
 from the existing page to public capabilities before activation. Unresolved
