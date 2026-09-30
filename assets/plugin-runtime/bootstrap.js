@@ -327,6 +327,21 @@ const nickel = Object.freeze({
             __effects.push({type:'preferences.set',transaction:{revision:snapshot.revision,prior:snapshot.configured,requested,changedFields:Object.keys(patch)}});
         }
     }),
+    plugins: Object.freeze({
+        get() { return __nickelResource('plugins', {available:false,writable:false,reason:'Plugin read capability is unavailable',plugins:[],lastResult:null}); },
+        list() { return this.get().plugins; },
+        enable(id, revision) { this.setEnabled(id, true, revision); },
+        disable(id, revision) { this.setEnabled(id, false, revision); },
+        setEnabled(id, enabled, revision) {
+            id = __nickelIdentity(id);
+            const snapshot = this.get();
+            const plugin = snapshot.plugins.find(plugin => plugin.id === id);
+            if (!snapshot.available || !snapshot.writable || !plugin) throw Error('plugin management is unavailable');
+            if (typeof revision !== 'string' || revision !== snapshot.revision) throw Error('plugin inventory is stale');
+            if (typeof enabled !== 'boolean') throw TypeError('invalid plugin state');
+            __effects.push({type:enabled ? 'plugins.enable' : 'plugins.disable',id,revision,priorEnabled:plugin.enabled});
+        }
+    }),
     associations: Object.freeze({
         get() { return __nickelResource('associations', {available:false,reason:'Associations read capability is unavailable',targets:[],operations:{},lastResult:null}); },
         list() { return this.get().targets; },

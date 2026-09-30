@@ -420,6 +420,10 @@ pub enum PluginEffect {
         plugin_id: String,
         effect: crate::preferences_capabilities::PreferencesEffect,
     },
+    Plugins {
+        plugin_id: String,
+        effect: crate::plugins_capabilities::PluginsEffect,
+    },
     Associations {
         plugin_id: String,
         effect: crate::associations_capabilities::AssociationsEffect,
@@ -2053,6 +2057,7 @@ impl PluginPanelApplication {
                     | "wifi"
                     | "bluetooth"
                     | "associations"
+                    | "plugins"
                     | "preferences"
                     | "appearance"
                     | "wallpaper"
@@ -2127,6 +2132,7 @@ impl PluginPanelApplication {
             ("wifi", PluginCapability::NetworkRead),
             ("bluetooth", PluginCapability::BluetoothRead),
             ("associations", PluginCapability::AssociationsRead),
+            ("plugins", PluginCapability::PluginsRead),
             ("preferences", PluginCapability::PreferencesRead),
         ] {
             if fields.iter().any(|(name, _)| *name == field)
@@ -3295,6 +3301,46 @@ impl nickel_ui::Application for PluginPanelApplication {
                         _ if effect
                             .get("type")
                             .and_then(Value::as_str)
+                            .is_some_and(|operation| operation.starts_with("plugins.")) =>
+                        {
+                            let request =
+                                crate::plugins_capabilities::PluginsEffect::parse(&effect)
+                                    .and_then(|request| {
+                                        if !self
+                                            .manifest
+                                            .capabilities
+                                            .contains(&PluginCapability::PluginsRead)
+                                            || !self
+                                                .manifest
+                                                .capabilities
+                                                .contains(&PluginCapability::PluginsControl)
+                                        {
+                                            return Err(
+                                                "plugin management grants are unavailable".into()
+                                            );
+                                        }
+                                        let data: Value = self
+                                            .projection_data
+                                            .as_deref()
+                                            .and_then(|data| serde_json::from_str(data).ok())
+                                            .ok_or("plugin inventory is unavailable")?;
+                                        request.validate(&data["plugins"])?;
+                                        Ok(request)
+                                    });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::Plugins {
+                                    plugin_id: self.manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
+                        }
+                        _ if effect
+                            .get("type")
+                            .and_then(Value::as_str)
                             .is_some_and(|operation| operation.starts_with("associations.")) =>
                         {
                             let request = crate::associations_capabilities::AssociationsEffect::parse(&effect).and_then(|request| {
@@ -4059,6 +4105,22 @@ mod tests {
         assert_eq!(package.manifest.entry, "src/Shell.js");
         assert!(
             package
+                .manifest
+                .capabilities
+                .contains(&PluginCapability::PluginsRead)
+        );
+        assert!(
+            package
+                .manifest
+                .capabilities
+                .contains(&PluginCapability::PluginsControl)
+        );
+        assert_eq!(
+            package.manifest.composition.as_ref().unwrap().exports["shell.settings.plugins"],
+            "./src/Plugins.js#Plugins"
+        );
+        assert!(
+            package
                 .modules
                 .iter()
                 .any(|module| module.path == "src/Shell.jsx")
@@ -4075,6 +4137,12 @@ mod tests {
             .publish_settings(&mut registry, &package.manifest.id)
             .unwrap();
         let pages = registry.settings_pages_snapshot();
+        assert!(
+            pages
+                .pages
+                .iter()
+                .any(|page| page.registration.id == "plugins")
+        );
         assert!(
             pages
                 .pages
@@ -6625,6 +6693,54 @@ mod tests {
             PluginPanelApplication::new_with_manifest(&invalid, &manifest, Some(data)).unwrap();
         invalid.update(invalid.button_message("change").unwrap());
         assert!(invalid.take_effects().is_empty());
+    }
+
+    #[test]
+    fn plugins_clients_require_both_grants_and_current_inventory() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities.clear();
+        let snapshot = serde_json::json!({"available":true,"writable":true,"revision":"7","plugins":[{"id":"example","enabled":true}]});
+        let source = "function App() { return h(Window,{id:'main',width:520,height:340},h(Button,{id:'change',onClick:()=>nickel.plugins.disable('example','7')},'Disable')); }";
+        let data = serde_json::json!({"plugins":snapshot}).to_string();
+        for capabilities in [
+            vec![],
+            vec![PluginCapability::PluginsRead],
+            vec![PluginCapability::PluginsControl],
+        ] {
+            manifest.capabilities = capabilities;
+            let mut denied =
+                PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                    .unwrap();
+            denied.update(denied.button_message("change").unwrap());
+            assert!(denied.take_effects().is_empty());
+            assert_eq!(
+                denied.sync_host_data_field("plugins", &snapshot).is_ok(),
+                manifest
+                    .capabilities
+                    .contains(&PluginCapability::PluginsRead)
+            );
+        }
+        manifest.capabilities = vec![
+            PluginCapability::PluginsRead,
+            PluginCapability::PluginsControl,
+        ];
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data)).unwrap();
+        granted.update(granted.button_message("change").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::Plugins { .. }]
+        ));
+        let mut stale = snapshot;
+        stale["revision"] = "8".into();
+        granted.sync_host_data_field("plugins", &stale).unwrap();
+        granted.update(granted.button_message("change").unwrap());
+        assert!(granted.take_effects().is_empty());
     }
 
     #[test]

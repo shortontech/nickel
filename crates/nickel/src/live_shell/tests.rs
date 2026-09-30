@@ -3887,3 +3887,85 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
         [FileWindowRequest::OpenOrFocus(FileLaunch::Browse(path))]
     );
 }
+
+#[test]
+fn plugin_management_rechecks_grants_and_retires_disabled_package_resources() {
+    with_package_runtime_stack(|| {
+        use nickel_core::plugins::{PluginCapability, PluginPackage, PluginPackageSource};
+        let package = PluginPackage::from_embedded(&[
+            ("plugin.json", br#"{"api_version":1,"id":"org.example.management","name":"Management","entry":"main.js","capabilities":["plugins-read","plugins-control"],"surfaces":[{"id":"main","kind":"window","width":400,"height":240}]}"#),
+            ("main.js", b"export default function App() {return h(Window,{id:'main',width:400,height:240},h(Text,{},'Management'));}"),
+        ]).unwrap();
+        let id = package.manifest.id.clone();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(id.clone(), PluginPackageSource::embedded(package));
+        shell.set_plugin_enabled(&id, true).unwrap();
+        assert!(shell.package_runtimes.contains_key(&id));
+        let request = crate::plugins_capabilities::PluginsEffect {
+            id: id.clone(),
+            enabled: false,
+            revision: shell.plugin_activation_generation,
+            prior_enabled: true,
+        };
+        shell.locked = true;
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::Plugins {
+            plugin_id: id.clone(),
+            effect: request.clone(),
+        }]);
+        assert!(shell.plugin_registry.get(&id).unwrap().desired_enabled);
+        shell.locked = false;
+        let mut readonly = shell.plugin_registry.get(&id).unwrap().manifest.clone();
+        readonly.id = "org.example.readonly-management".into();
+        readonly
+            .capabilities
+            .retain(|capability| *capability != PluginCapability::PluginsControl);
+        shell.plugin_registry.register(readonly.clone()).unwrap();
+        shell
+            .plugin_registry
+            .set_enabled(&readonly.id, true)
+            .unwrap();
+        shell.plugin_registry.mark_running(&readonly.id).unwrap();
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::Plugins {
+            plugin_id: readonly.id.clone(),
+            effect: request.clone(),
+        }]);
+        assert!(shell.plugin_registry.get(&id).unwrap().desired_enabled);
+        let mut stale = request.clone();
+        stale.revision = stale.revision.wrapping_sub(1);
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::Plugins {
+            plugin_id: id.clone(),
+            effect: stale,
+        }]);
+        assert!(shell.plugin_registry.get(&id).unwrap().desired_enabled);
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::Plugins {
+            plugin_id: id.clone(),
+            effect: request,
+        }]);
+        assert!(!shell.plugin_registry.get(&id).unwrap().desired_enabled);
+        assert!(!shell.package_runtimes.contains_key(&id));
+        assert!(
+            !shell
+                .plugin_surface_hosts
+                .keys()
+                .any(|key| key.plugin_id == id)
+        );
+        assert_eq!(shell.plugins_results[&id]["status"], "applied");
+        let restore = crate::plugins_capabilities::PluginsEffect {
+            id: id.clone(),
+            enabled: true,
+            revision: shell.plugin_activation_generation,
+            prior_enabled: false,
+        };
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::Plugins {
+            plugin_id: id.clone(),
+            effect: restore,
+        }]);
+        assert!(!shell.plugin_registry.get(&id).unwrap().desired_enabled);
+    });
+}

@@ -150,6 +150,7 @@ mod places;
 #[allow(dead_code, unused_imports)]
 mod platform;
 pub mod plugin_panel;
+pub mod plugins_capabilities;
 pub mod preferences_capabilities;
 mod screenshot;
 mod session_host;

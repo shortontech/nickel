@@ -27,7 +27,8 @@
       "shell.settings.preferences": "./src/Preferences.js#Preferences",
       "shell.settings.idle": "./src/Preferences.js#IdlePreferences",
       "shell.settings.preferredApplications": "./src/Preferences.js#PreferredApplications",
-      "shell.settings.fileArtwork": "./src/Preferences.js#FileArtwork"
+      "shell.settings.fileArtwork": "./src/Preferences.js#FileArtwork",
+      "shell.settings.plugins": "./src/Plugins.js#Plugins"
     }
   },
   "capabilities": [
@@ -53,6 +54,8 @@
     "on-screen-keyboard-show",
     "preferences-control",
     "preferences-read",
+    "plugins-control",
+    "plugins-read",
     "projects-menu-show",
     "projects-open",
     "projects-read",

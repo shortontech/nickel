@@ -172,3 +172,17 @@ surfaces continue to require explicit show requests. Showing or closing windows
 uses the same paths as an installed package. A package keeps its shared runtime
 and Settings registrations when all windows close; explicit disable or a runtime
 failure retires it. The stock shell remains selected until the host cutover.
+
+The public `shell.settings.plugins` export registers an ordinary `Plugins` Settings
+page when imported from the shell module graph. Import `./Plugins.js` alongside
+other Settings modules. It reads `nickel.plugins.get()` / `list()` with
+`plugins-read`, and requests `enable(id, revision)` / `disable(id, revision)` with
+both `plugins-read` and `plugins-control`. Revisions are strings; requests are
+checked against the current registry, prior enabled state, caller grants and
+lock state before using the existing package activation/retirement lifecycle.
+
+The inventory reports native runtime health, approved capabilities, declared
+surfaces/composition and existing package memory counters. Missing counters are
+`null`, not zero. Tracked peaks are estimates of tracked resources; per component
+and total process memory are unavailable. Enabling an installed package remains
+subject to its existing package validation and approval requirements.

@@ -276,6 +276,72 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_plugins_page_registers_from_emitted_module_and_renders_inventory() {
+        use super::{JsxModuleGraph, JsxRuntime, ModuleSource};
+        let graph = JsxModuleGraph::new("entry.js", [
+            ModuleSource {path:"entry.js",source:"import { Plugins } from './Plugins.js';\nexport default function App() { return h(Window,{id:'main',width:800,height:600},h(Plugins,{})); }"},
+            ModuleSource {path:"Plugins.js",source:include_str!("../../../assets/plugins/nickel-default/src/Plugins.js")},
+            ModuleSource {path:"styles/plugins.css",source:include_str!("../../../assets/plugins/nickel-default/src/styles/plugins.css")},
+        ]).unwrap();
+        let mut runtime = JsxRuntime::new_modules(&graph, Some(r#"{"plugins":{"available":true,"writable":true,"revision":"7","plugins":[{"id":"example","name":"Example","enabled":true,"health":{"state":"running"},"grants":["windows-read"],"surfaces":[],"composition":[],"memory":{"jsHeapBytes":null,"nativeUiBytes":null,"textureBytes":null,"trackedPeakBytes":null,"timers":0,"subscriptions":0}}]}}"#)).unwrap();
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        runtime
+            .publish_settings(&mut registry, "nickel-default")
+            .unwrap();
+        assert_eq!(
+            registry.settings_pages_snapshot().pages[0].registration.id,
+            "plugins"
+        );
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let rendered = tree.to_string();
+        assert!(rendered.contains("Example"));
+        assert!(rendered.contains("Unavailable"));
+        assert!(rendered.contains("Authorized capabilities"));
+    }
+
+    #[test]
+    fn plugins_clients_copy_inventory_and_emit_guarded_lifecycle_requests() {
+        let mut runtime = super::JsxRuntime::new("", Some(r#"{"plugins":{"available":true,"writable":true,"revision":"9007199254740993","plugins":[{"id":"example","enabled":true,"memory":{"jsHeapBytes":null}}]}}"#)).unwrap();
+        runtime.eval("nickel.plugins.list()[0].enabled=false; nickel.plugins.disable('example','9007199254740993');").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<bool>("JSON.stringify(nickel.plugins.list()[0].enabled)")
+                .unwrap(),
+            true
+        );
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(
+            effects[0],
+            serde_json::json!({"type":"plugins.disable","id":"example","revision":"9007199254740993","priorEnabled":true})
+        );
+        assert!(
+            runtime
+                .eval("nickel.plugins.enable('unknown','9007199254740993')")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("nickel.plugins.enable('example','1')")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("nickel.plugins.enable('example',9007199254740993)")
+                .is_err()
+        );
+        let mut denied = super::JsxRuntime::new("", None).unwrap();
+        assert!(denied.eval("nickel.plugins.enable('example','1')").is_err());
+        assert_eq!(
+            denied
+                .eval_json::<bool>("JSON.stringify(nickel.plugins.get().available)")
+                .unwrap(),
+            false
+        );
+    }
+
+    #[test]
     fn associations_clients_copy_snapshots_and_emit_expected_revision_and_handler() {
         let mut runtime = super::JsxRuntime::new("", Some(r#"{"associations":{"available":true,"revision":"9007199254740993","targets":[{"id":"mime:text/plain","capability":"nativeConsent","canSetDefault":true,"protected":false,"effectiveHandlerId":"old.desktop","handlers":[{"id":"new.desktop","name":"New","protected":false},{"id":"protected.desktop","protected":true}]}]}}"#)).unwrap();
         runtime.eval("nickel.associations.getHandlers('mime:text/plain').handlers[0].name = 'mutated'; nickel.associations.setDefault('mime:text/plain','new.desktop','9007199254740993'); nickel.associations.openSystemSettings();").unwrap();

@@ -298,6 +298,19 @@ interface NickelDisplaySnapshot {
     }>>;
 }
 
+interface NickelPluginStatus {
+    readonly id:string;
+    readonly name:string;
+    readonly author:string | null;
+    readonly version:string | null;
+    readonly enabled:boolean;
+    readonly health:Readonly<{state:"disabled" | "idle" | "starting" | "running" | "failed";reason?:string}>;
+    readonly grants:ReadonlyArray<string>;
+    readonly surfaces:ReadonlyArray<string>;
+    readonly composition:ReadonlyArray<string>;
+    readonly memory:Readonly<{jsHeapBytes:number | null;nativeUiBytes:number | null;textureBytes:number | null;trackedPeakBytes:number | null;timers:number;subscriptions:number;componentBreakdownAvailable:false}>;
+}
+
 declare const nickel: Readonly<{
     readonly data: Readonly<Record<string, unknown> & {
         displays?: NickelDisplaySnapshot;
@@ -313,6 +326,15 @@ declare const nickel: Readonly<{
     request(effect: string | Readonly<{ type: string; [key: string]: unknown }>): void;
     openDialog(id: string): void;
     openMenu(id: string): void;
+    plugins: Readonly<{
+        /** Requires plugins-read; unavailable memory counters are null. */
+        get(): Readonly<{available:boolean; writable:boolean; revision?:string; plugins:ReadonlyArray<NickelPluginStatus>; lastResult?:Readonly<{status:string;detail?:string}> | null}>;
+        list(): ReadonlyArray<NickelPluginStatus>;
+        /** Requires plugins-read and plugins-control and a current inventory revision. */
+        enable(id:string, revision:string):void;
+        disable(id:string, revision:string):void;
+        setEnabled(id:string, enabled:boolean, revision:string):void;
+    }>;
     displays: Readonly<{
         /** Read a copy of the current host supplied display snapshot. */
         get(): NickelDisplaySnapshot | undefined;

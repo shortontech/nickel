@@ -675,6 +675,7 @@ pub struct LiveShell {
     audio: AudioStatus,
     audio_status_observed: bool,
     associations_results: HashMap<String, serde_json::Value>,
+    plugins_results: HashMap<String, serde_json::Value>,
     volume_osd_until: Option<Instant>,
     launcher_visible: bool,
     run_visible: bool,
@@ -1780,6 +1781,7 @@ impl LiveShell {
             volume_osd_until: None,
             audio_status_observed: false,
             associations_results: HashMap::new(),
+            plugins_results: HashMap::new(),
             launcher_visible: false,
             run_visible: false,
             locked: false,
@@ -3798,6 +3800,24 @@ impl LiveShell {
         })
     }
 
+    fn plugin_management(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        use nickel_core::plugins::PluginCapability;
+        let manifest = &self.plugin_registry.get(plugin_id)?.manifest;
+        manifest
+            .capabilities
+            .contains(&PluginCapability::PluginsRead)
+            .then(|| {
+                crate::plugins_capabilities::snapshot(
+                    &self.plugin_status_snapshot(),
+                    manifest
+                        .capabilities
+                        .contains(&PluginCapability::PluginsControl)
+                        && !self.locked,
+                    self.plugins_results.get(plugin_id),
+                )
+            })
+    }
+
     fn plugin_associations(&self, plugin_id: &str) -> Option<serde_json::Value> {
         let manifest = self
             .external_plugin_packages
@@ -4140,6 +4160,7 @@ impl LiveShell {
             .map(|_| serde_json::Value::Array(self.tray.iter().take(128).map(|item| serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect()));
         let audio = self.plugin_audio(&key.plugin_id);
         let associations = self.plugin_associations(&key.plugin_id);
+        let plugins = self.plugin_management(&key.plugin_id);
         let preferences = self.plugin_preferences(&key.plugin_id);
         let appearance = self.plugin_appearance(&key.plugin_id, false);
         let wallpaper = self.plugin_appearance(&key.plugin_id, true);
@@ -4183,6 +4204,7 @@ impl LiveShell {
                     ("audio", audio.as_ref()),
                     ("tray", tray.as_ref()),
                     ("associations", associations.as_ref()),
+                    ("plugins", plugins.as_ref()),
                     ("preferences", preferences.as_ref()),
                     ("appearance", appearance.as_ref()),
                     ("wallpaper", wallpaper.as_ref()),
@@ -4799,6 +4821,7 @@ impl LiveShell {
             self.package_settings_values.remove(&id);
             self.package_settings_value_revisions.remove(&id);
             self.associations_results.remove(&id);
+            self.plugins_results.remove(&id);
         }
         let mut changed_runtime = false;
         for (id, runtime) in &runtimes {
@@ -4810,6 +4833,7 @@ impl LiveShell {
                 continue;
             }
             self.associations_results.remove(id);
+            self.plugins_results.remove(id);
             match runtime
                 .borrow_mut()
                 .publish_settings(&mut self.package_settings_registry, id)
@@ -7476,6 +7500,29 @@ impl LiveShell {
                             .request_effect(NotificationEffect::CloseHistory);
                         changed |= self.apply_notification_effects();
                     }
+                }
+                crate::plugin_panel::PluginEffect::Plugins { plugin_id, effect } => {
+                    let result = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| {
+                            entry.desired_enabled
+                                && entry.health == nickel_core::plugins::PluginHealth::Running
+                        })
+                        .and_then(|_| self.plugin_management(&plugin_id))
+                        .ok_or_else(|| "plugin management read grant is unavailable".to_owned())
+                        .and_then(|snapshot| effect.validate(&snapshot))
+                        .and_then(|()| self.set_plugin_enabled(&effect.id, effect.enabled));
+                    let value = match result {
+                        Ok(_changed_state) => {
+                            serde_json::json!({"status":"applied","id":effect.id,"enabled":effect.enabled})
+                        }
+                        Err(error) => {
+                            serde_json::json!({"status":"rejected","detail":error.chars().take(512).collect::<String>()})
+                        }
+                    };
+                    self.plugins_results.insert(plugin_id, value);
+                    changed = true;
                 }
                 crate::plugin_panel::PluginEffect::Associations { plugin_id, effect } => {
                     let granted = self.external_plugin_packages.get(&plugin_id).map(|package| &package.manifest)
