@@ -34,7 +34,7 @@ pub struct TaskbarPluginAction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ControlPluginSection {
+pub struct PluginSectionContribution {
     pub id: String,
     pub label: String,
     pub value: String,
@@ -2837,9 +2837,9 @@ impl PanelNode {
         }
     }
 
-    pub fn collect_control_sections(
+    pub fn collect_sections(
         &self,
-        sections: &mut Vec<ControlPluginSection>,
+        sections: &mut Vec<PluginSectionContribution>,
     ) -> Result<(), String> {
         match self {
             Self::Section {
@@ -2851,7 +2851,7 @@ impl PanelNode {
                 if sections.iter().any(|section| section.id == *id) {
                     return Err("extension section IDs must be unique".into());
                 }
-                sections.push(ControlPluginSection {
+                sections.push(PluginSectionContribution {
                     id: id.clone(),
                     label: label.clone(),
                     value: value.clone(),
@@ -2861,12 +2861,11 @@ impl PanelNode {
             _ => {
                 let Some(children) = self.container_children() else {
                     return Err(
-                        "control section extension must return sections in a supported container"
-                            .into(),
+                        "section extension must return sections in a supported container".into(),
                     );
                 };
                 for child in children {
-                    child.collect_control_sections(sections)?;
+                    child.collect_sections(sections)?;
                 }
                 Ok(())
             }

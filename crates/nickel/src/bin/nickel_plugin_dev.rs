@@ -203,7 +203,7 @@ mod platform {
         let extension = package.manifest.surfaces.is_empty()
             && matches!(package.manifest.contributes.as_slice(), [contribution]
                 if matches!((contribution.target_plugin.as_str(), contribution.target_slot.as_str(), contribution.contract),
-                    ("org.nickel.control-center", "control-section", PluginSlotContract::Section)
+                    (_, _, PluginSlotContract::Section)
                     | (_, _, PluginSlotContract::Badge)
                     | (_, _, PluginSlotContract::Widget)
                     | (_, _, PluginSlotContract::Action))

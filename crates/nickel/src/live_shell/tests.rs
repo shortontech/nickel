@@ -406,6 +406,76 @@ fn badge_slot_can_target_an_installed_window_plugin() {
 }
 
 #[test]
+fn section_slot_can_target_an_installed_window_plugin() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = root.path().join("org.example.section-host");
+    std::fs::create_dir(&provider).unwrap();
+    std::fs::write(
+        provider.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.section-host","name":"Section host",
+            "entry":"main.js","surfaces":[{"id":"main","kind":"window","width":320,"height":180}],
+            "provides_slots":[{"id":"status","contract":"section","replaceable":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        provider.join("main.js"),
+        "function App() { return h(Window, {width: 320, height: 180}, h(Text, {}, 'Host')); }",
+    )
+    .unwrap();
+    let contributor = root.path().join("org.example.status-section");
+    std::fs::create_dir(&contributor).unwrap();
+    std::fs::write(
+        contributor.join("plugin.json"),
+        r#"{"api_version":1,"id":"org.example.status-section","name":"Status section",
+            "entry":"main.js","capabilities":["launcher-show"],
+            "contributes":[{"target_plugin":"org.example.section-host",
+            "target_slot":"status","contract":"section","mode":"add"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        contributor.join("main.js"),
+        "function App() { return h(Section, {id: 'open', label: 'Apps', value: 'Ready', onClick: () => nickel.request('show-launcher')}); }",
+    )
+    .unwrap();
+
+    let mut shell = LiveShell::new().unwrap();
+    let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+    assert!(catalog.failures.is_empty());
+    for (_, descriptor) in std::mem::take(&mut catalog.packages) {
+        shell
+            .plugin_registry
+            .register(descriptor.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(descriptor.manifest.id.clone(), descriptor);
+    }
+    shell
+        .set_plugin_enabled("org.example.section-host", true)
+        .unwrap();
+    shell
+        .set_plugin_enabled("org.example.status-section", true)
+        .unwrap();
+    let slots = shell
+        .plugin_slot_projection("org.example.section-host")
+        .unwrap();
+    assert_eq!(slots["status"][0]["label"], "Apps");
+    assert_eq!(slots["status"][0]["value"], "Ready");
+    let invoke = || crate::plugin_panel::PluginEffect::InvokePluginSlotSection {
+        target_plugin: "org.example.section-host".into(),
+        slot_id: "status".into(),
+        plugin_id: "org.example.status-section".into(),
+        id: "open".into(),
+    };
+    assert!(shell.apply_plugin_effects(vec![invoke()]));
+    assert!(shell.launcher_visible);
+    shell
+        .set_plugin_enabled("org.example.status-section", false)
+        .unwrap();
+    assert!(!shell.apply_plugin_effects(vec![invoke()]));
+}
+
+#[test]
 fn installed_panel_can_be_enabled_measured_and_disabled() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("org.example.panel");

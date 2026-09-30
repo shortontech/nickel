@@ -2,6 +2,7 @@
 // Nickel owns status snapshots and validates every requested system action.
 function App() {
     const data = nickel.data;
+    const sections = (data.slots && data.slots["control-section"]) || [];
     const [wifiOpen, setWifiOpen] = useState(false);
     const [bluetoothOpen, setBluetoothOpen] = useState(false);
     const [audioOpen, setAudioOpen] = useState(false);
@@ -46,11 +47,12 @@ function App() {
                     h(Row, null,
                         h(Button, { id: "show-desktop", onClick: () => request("show-desktop") }, "Show desktop"),
                         h(Button, { id: "show-notifications", onClick: () => request("show-notifications") }, "Notifications")),
-                    data.sections.length ? h(Text, { className: "control-section-title" }, "Extensions") : null,
-                    data.sections.map((section, index) => h(Row, { key: `${section.plugin}:${section.id}` },
+                    sections.length ? h(Text, { className: "control-section-title" }, "Extensions") : null,
+                    sections.map((section, index) => h(Row, { key: `${section.pluginId}:${section.id}` },
                         h(Text, null, section.label + ": " + section.value),
                         h(Button, { id: `control-extension-${index}`, onClick: () => nickel.request({
-                                type: "control-extension-section", plugin: section.plugin, id: section.id
+                                type: "invoke-plugin-slot-section", slot: "control-section",
+                                pluginId: section.pluginId, id: section.id
                             }) }, "Open"))),
                     h(Text, { className: "control-section-title" }, "Displays"),
                     data.pendingProjection ? h(Row, null,

@@ -419,12 +419,15 @@ then additive priority and plugin ID. The callback runs in the contributing
 plugin's own JS host; its requested effects still require that plugin's
 declared capabilities and current host validation. The
 [example task action](../assets/plugins/example-task-action/) demonstrates this.
-Control Center provides a `control-section` slot with the `section` contract.
-An extension can return
+Any provider can declare a `section` slot and read bounded
+`{pluginId, id, label, value}` entries from `nickel.data.slots[slotId]`.
+Control Center provides the `control-section` slot. An extension can return
 `h(Section, { id: "find-apps", label: "Applications", value: "Search the catalog", onClick: () => nickel.request("show-launcher") })`.
-Up to four sections appear in its scrollable JSX view. Replacement selection
-and additive ordering match the taskbar slots. The callback executes in the
-contributor's JS host under its own grants. The
+On click, a provider requests `{type: "invoke-plugin-slot-section", slot,
+pluginId, id}`. Nickel checks the current projection and executes the callback
+in the contributor's JS host under its own grants. Up to four sections appear
+in Control Center's scrollable JSX view. Replacement selection and additive
+ordering match the other slots. The
 [example control section](../assets/plugins/example-control-section/) is a
 working package.
 For a quick edit loop, run

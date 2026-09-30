@@ -13,7 +13,7 @@
       "network": {"available": false, "enabled": false, "networks": []},
       "bluetooth": {"available": false, "powered": false, "discovering": false, "devices": []},
       "audio": {"muted": false, "percent": 50, "devices": []},
-      "workspaces": [], "activeWorkspace": 0, "sections": [],
+      "workspaces": [], "activeWorkspace": 0,
       "pendingProjection": false, "projectionModes": []
     }
   },

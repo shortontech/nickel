@@ -11,7 +11,8 @@ use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
 pub use nickel_plugin_presentation::components::{
-    ControlPluginSection, DesktopPluginWidget, PluginImages, PluginMessage, TaskbarPluginAction,
+    DesktopPluginWidget, PluginImages, PluginMessage, PluginSectionContribution,
+    TaskbarPluginAction,
 };
 use nickel_plugin_presentation::components::{PanelNode, render_panel};
 use nickel_plugin_runtime::JsxRuntime;
@@ -475,7 +476,9 @@ pub enum PluginEffect {
         id: String,
         item: Option<String>,
     },
-    InvokeControlExtensionSection {
+    InvokePluginSlotSection {
+        target_plugin: String,
+        slot_id: String,
         plugin_id: String,
         id: String,
     },
@@ -1270,16 +1273,16 @@ impl PluginPanelApplication {
         self.node.contribution_bytes() + self.stylesheet.estimated_retained_bytes()
     }
 
-    pub fn control_sections(&self) -> Result<Vec<ControlPluginSection>, String> {
+    pub fn section_contributions(&self) -> Result<Vec<PluginSectionContribution>, String> {
         let mut sections = Vec::new();
-        self.node.collect_control_sections(&mut sections)?;
+        self.node.collect_sections(&mut sections)?;
         if sections.is_empty() {
-            return Err("control section extension did not return a section".into());
+            return Err("section extension did not return a section".into());
         }
         Ok(sections)
     }
 
-    pub fn activate_control_section(&mut self, id: &str) -> bool {
+    pub fn activate_section(&mut self, id: &str) -> bool {
         fn find(node: &PanelNode, id: &str) -> Option<usize> {
             match node {
                 PanelNode::Section {
@@ -1342,7 +1345,7 @@ impl PluginPanelApplication {
             PluginSlotContract::Badge => self.badge_contributions().map(|_| ()),
             PluginSlotContract::Widget => self.desktop_widgets().map(|_| ()),
             PluginSlotContract::Action => self.taskbar_actions().map(|_| ()),
-            PluginSlotContract::Section => self.control_sections().map(|_| ()),
+            PluginSlotContract::Section => self.section_contributions().map(|_| ()),
         }
     }
 
@@ -2192,17 +2195,22 @@ impl nickel_ui::Application for PluginPanelApplication {
                             }
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("control-extension-section")
-                            && self.manifest.id == control_center_manifest().id =>
+                            == Some("invoke-plugin-slot-section") =>
                         {
-                            let plugin_id = effect.get("plugin").and_then(Value::as_str);
+                            let slot_id = effect.get("slot").and_then(Value::as_str);
+                            let plugin_id = effect.get("pluginId").and_then(Value::as_str);
                             let id = effect.get("id").and_then(Value::as_str);
-                            if !plugin_id
+                            if !slot_id.is_some_and(|value| {
+                                self.manifest.provides_slots.iter().any(|slot| {
+                                    slot.id == value
+                                        && slot.contract
+                                            == nickel_core::plugins::PluginSlotContract::Section
+                                })
+                            }) || !plugin_id
                                 .is_some_and(|value| !value.is_empty() && value.len() <= 128)
                                 || !id.is_some_and(|value| !value.is_empty() && value.len() <= 64)
                             {
-                                self.last_error =
-                                    Some("control extension section is invalid".into());
+                                self.last_error = Some("plugin slot section is invalid".into());
                                 return;
                             }
                             let projected = self
@@ -2210,19 +2218,21 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .as_deref()
                                 .and_then(|data| serde_json::from_str::<Value>(data).ok())
                                 .and_then(|data| {
-                                    data.get("sections").and_then(Value::as_array).cloned()
+                                    data.get("slots")?.get(slot_id?)?.as_array().cloned()
                                 })
                                 .is_some_and(|sections| {
                                     sections.iter().any(|section| {
-                                        section.get("plugin").and_then(Value::as_str) == plugin_id
+                                        section.get("pluginId").and_then(Value::as_str) == plugin_id
                                             && section.get("id").and_then(Value::as_str) == id
                                     })
                                 });
                             if !projected {
-                                self.last_error = Some("control extension section is stale".into());
+                                self.last_error = Some("plugin slot section is stale".into());
                                 return;
                             }
-                            approved.push(PluginEffect::InvokeControlExtensionSection {
+                            approved.push(PluginEffect::InvokePluginSlotSection {
+                                target_plugin: self.manifest.id.clone(),
+                                slot_id: slot_id.unwrap().to_owned(),
                                 plugin_id: plugin_id.unwrap().to_owned(),
                                 id: id.unwrap().to_owned(),
                             });
@@ -3304,10 +3314,13 @@ mod tests {
         .unwrap();
         PluginPanelApplication::validate_package(&package).unwrap();
         let mut application = PluginPanelApplication::from_package(&package).unwrap();
-        assert_eq!(application.control_sections().unwrap()[0].id, "find-apps");
-        assert!(application.activate_control_section("find-apps"));
+        assert_eq!(
+            application.section_contributions().unwrap()[0].id,
+            "find-apps"
+        );
+        assert!(application.activate_section("find-apps"));
         assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
-        assert!(!application.activate_control_section("missing"));
+        assert!(!application.activate_section("missing"));
         assert!(application.take_effects().is_empty());
     }
 
@@ -3343,8 +3356,11 @@ mod tests {
         "#
         .into();
         let mut application = PluginPanelApplication::from_package(&section).unwrap();
-        assert_eq!(application.control_sections().unwrap()[0].id, "find-apps");
-        assert!(application.activate_control_section("find-apps"));
+        assert_eq!(
+            application.section_contributions().unwrap()[0].id,
+            "find-apps"
+        );
+        assert!(application.activate_section("find-apps"));
         assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
 
         let mut badge = PluginPackage::load(format!("{root}/example-task-badge")).unwrap();

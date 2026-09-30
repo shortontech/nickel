@@ -715,7 +715,9 @@
         assert!(shell.launcher_visible);
         shell.set_plugin_enabled(&package.manifest.id, false).unwrap();
         assert!(!shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::InvokeControlExtensionSection {
+            crate::plugin_panel::PluginEffect::InvokePluginSlotSection {
+                target_plugin: crate::plugin_panel::control_center_manifest().id.clone(),
+                slot_id: "control-section".into(),
                 plugin_id: package.manifest.id,
                 id: "find-apps".into(),
             },

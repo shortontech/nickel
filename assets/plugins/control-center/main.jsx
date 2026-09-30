@@ -2,6 +2,7 @@
 // Nickel owns status snapshots and validates every requested system action.
 function App() {
     const data = nickel.data;
+    const sections = (data.slots && data.slots["control-section"]) || [];
     const [wifiOpen, setWifiOpen] = useState(false);
     const [bluetoothOpen, setBluetoothOpen] = useState(false);
     const [audioOpen, setAudioOpen] = useState(false);
@@ -64,11 +65,12 @@ function App() {
                         <Button id="show-desktop" onClick={() => request("show-desktop")}>Show desktop</Button>
                         <Button id="show-notifications" onClick={() => request("show-notifications")}>Notifications</Button>
                     </Row>
-                    {data.sections.length ? <Text className="control-section-title">Extensions</Text> : null}
-                    {data.sections.map((section, index) => <Row key={`${section.plugin}:${section.id}`}>
+                    {sections.length ? <Text className="control-section-title">Extensions</Text> : null}
+                    {sections.map((section, index) => <Row key={`${section.pluginId}:${section.id}`}>
                         <Text>{section.label + ": " + section.value}</Text>
                         <Button id={`control-extension-${index}`} onClick={() => nickel.request({
-                            type: "control-extension-section", plugin: section.plugin, id: section.id
+                            type: "invoke-plugin-slot-section", slot: "control-section",
+                            pluginId: section.pluginId, id: section.id
                         })}>Open</Button>
                     </Row>)}
                     <Text className="control-section-title">Displays</Text>
