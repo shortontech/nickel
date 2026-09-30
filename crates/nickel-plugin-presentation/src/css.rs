@@ -1502,8 +1502,8 @@ mod tests {
     }
 
     #[test]
-    fn bundled_taskbar_stylesheet_compiles() {
-        let source = include_str!("../../../assets/plugins/taskbar/ui.css");
+    fn stock_shell_taskbar_stylesheet_compiles() {
+        let source = include_str!("../../../assets/plugins/nickel-default/src/styles/taskbar.css");
         StyleSheet::compile(source).unwrap();
     }
 
