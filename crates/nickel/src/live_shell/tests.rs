@@ -537,7 +537,7 @@ use nickel_ui_testkit::{Scenario, Selector};
 
 use super::{
     HostRuntimeSamples, LiveShell, desktop_label_foreground, initial_wallpaper,
-    panel_status_layout, panel_tray_icons,
+    panel_tray_icons,
     platform::{
         AudioStatus, BluetoothStatus, GlobalShortcut, NetworkStatus, SecureStorageState,
         SystemStatusUpdate,

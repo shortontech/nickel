@@ -366,7 +366,7 @@
         assert!(shell.shell_panel_surfaces().iter().any(|(surface, _)| surface == &key));
         assert!(shell.plugin_panels().iter().all(|(surface, _)| surface != &key));
         assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
-        shell.apply_panel_action(super::TaskbarAction::Codex);
+        assert!(shell.show_projects_menu(true));
         assert!(shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
         assert!(!shell.native_surface_visible(SurfaceRole::CodexProjectMenu, None));
         let mut state = nickel_codex_ui::ChatState::default();
