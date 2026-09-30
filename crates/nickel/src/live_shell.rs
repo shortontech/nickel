@@ -712,6 +712,8 @@ pub struct LiveShell {
     external_plugin_packages:
         std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageSource>,
     application_search: crate::application_capabilities::ApplicationSearch,
+    feature_client: crate::feature_capabilities::FeatureClient,
+    shortcut_capability_observed: bool,
     primary_panel_key: nickel_core::plugins::PluginSurfaceKey,
     plugin_activation_generation: u64,
     #[cfg(target_os = "linux")]
@@ -1716,6 +1718,8 @@ impl LiveShell {
             plugin_settings,
             external_plugin_packages,
             application_search: Default::default(),
+            feature_client: Default::default(),
+            shortcut_capability_observed: false,
             primary_panel_key: crate::plugin_panel::surface_key(),
             plugin_activation_generation: 1,
             #[cfg(target_os = "linux")]
@@ -3756,6 +3760,68 @@ impl LiveShell {
         true
     }
 
+    fn feature_snapshot(&self) -> serde_json::Value {
+        let keyboard = self.session_host.keyboard_snapshot().ok();
+        let override_active = self.keyboard_override
+            != nickel_core::on_screen_keyboard::KeyboardOverride::None
+            || keyboard
+                .as_ref()
+                .is_some_and(|keyboard| keyboard.environment_override);
+        let runtime = self.launcher.codex_projection().map(|projection| {
+            nickel_core::optional_features::OptionalFeatureRuntime {
+                codex_generation: projection.generation,
+                codex_support: projection.support,
+                codex_installation: projection.installation,
+                codex_health: projection.health,
+                diagnostic: projection.reason.clone(),
+                ..Default::default()
+            }
+        });
+        self.feature_client.read(
+            keyboard.as_ref(),
+            override_active,
+            cfg!(any(target_os = "linux", target_os = "windows")),
+            if cfg!(target_os = "linux") {
+                runtime.as_ref()
+            } else {
+                None
+            },
+        )
+    }
+    fn plugin_features(&self, id: &str, shortcuts: bool) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(id)
+            .map(|package| &package.manifest)
+            .or_else(|| self.plugin_registry.get(id).map(|entry| &entry.manifest))?;
+        let capability = if shortcuts {
+            nickel_core::plugins::PluginCapability::ShortcutsRead
+        } else {
+            nickel_core::plugins::PluginCapability::FeaturesRead
+        };
+        manifest.capabilities.contains(&capability).then(|| {
+            if shortcuts {
+                crate::shortcut_capabilities::snapshot(
+                    self.shortcut_capability_observed
+                        && self.shortcut_capability_status.is_none()
+                        && !self.locked,
+                    self.shortcut_capability_status.as_deref(),
+                )
+            } else {
+                let mut snapshot = self.feature_snapshot();
+                if self.locked
+                    || !self.session_host.feature_preference_writes_allowed()
+                    || !manifest
+                        .capabilities
+                        .contains(&nickel_core::plugins::PluginCapability::FeaturesControl)
+                {
+                    snapshot["operations"] = serde_json::json!({});
+                }
+                snapshot
+            }
+        })
+    }
+
     fn plugin_appearance(&mut self, plugin_id: &str, wallpaper: bool) -> Option<serde_json::Value> {
         use nickel_core::plugins::PluginCapability;
         let manifest = self
@@ -4207,6 +4273,8 @@ impl LiveShell {
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
         let application_search = self.plugin_application_search(&key.plugin_id);
+        let features = self.plugin_features(&key.plugin_id, false);
+        let shortcuts = self.plugin_features(&key.plugin_id, true);
         let mut application_images =
             self.plugin_application_images(applications.as_ref(), application_search.as_ref());
         let notifications = self.external_plugin_notifications(&key.plugin_id);
@@ -4253,6 +4321,8 @@ impl LiveShell {
                     ("windows", windows.as_ref()),
                     ("applications", applications.as_ref()),
                     ("applicationSearch", application_search.as_ref()),
+                    ("features", features.as_ref()),
+                    ("shortcuts", shortcuts.as_ref()),
                     ("notifications", notifications.as_ref()),
                     ("audio", audio.as_ref()),
                     ("tray", tray.as_ref()),
@@ -7205,7 +7275,42 @@ impl LiveShell {
                         changed = true;
                     }
                 }
-
+                crate::plugin_panel::PluginEffect::Feature { plugin_id, effect } => {
+                    let check = || -> Result<(), String> {
+                        if self.locked
+                            || !self.session_host.feature_preference_writes_allowed()
+                            || !self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
+                                entry.desired_enabled
+                                    && entry.health == nickel_core::plugins::PluginHealth::Running
+                                    && entry.manifest.capabilities.contains(
+                                        &nickel_core::plugins::PluginCapability::FeaturesControl,
+                                    )
+                            })
+                        {
+                            return Err("feature authority is unavailable".into());
+                        }
+                        effect.validate(&self.feature_snapshot())
+                    };
+                    let result = nickel_core::optional_features::settings_path()
+                        .map_err(|error| error.to_string())
+                        .and_then(|path| {
+                            crate::feature_capabilities::FeatureClient::apply(
+                                &effect,
+                                path,
+                                &self.feature_snapshot(),
+                                check,
+                            )
+                        })
+                        .and_then(|settings| {
+                            self.session_host.optional_features_committed(
+                                settings.codex_generation,
+                                settings.on_screen_keyboard_generation,
+                            ).map_err(|error|if effect.commits_preference(){format!("Saved; native runtime has not applied the preference: {error}")}else{error})
+                        });
+                    self.feature_client.record(result);
+                    self.refresh_keyboard();
+                    changed = true;
+                }
                 crate::plugin_panel::PluginEffect::SearchApplications { plugin_id, query } => {
                     let granted = self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
                         entry.desired_enabled
@@ -11272,6 +11377,7 @@ impl LiveShell {
         &mut self,
         capability: &nickel_input::global::ShortcutCapability,
     ) {
+        self.shortcut_capability_observed = true;
         self.shortcut_capability_status = shortcut_capability_status(capability);
     }
 

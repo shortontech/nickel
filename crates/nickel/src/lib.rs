@@ -135,6 +135,7 @@ mod application_capabilities;
 pub mod associations_capabilities;
 pub mod connectivity_capabilities;
 mod control_view;
+pub mod feature_capabilities;
 #[allow(dead_code)] // Wired into the Smithay runtime by the next integration slice.
 #[cfg(target_os = "linux")]
 mod internal_shell;
@@ -153,6 +154,7 @@ pub mod plugins_capabilities;
 pub mod preferences_capabilities;
 mod screenshot;
 mod session_host;
+mod shortcut_capabilities;
 mod softbuffer_presenter;
 mod wallpaper_selection;
 #[cfg(target_os = "windows")]

@@ -1239,3 +1239,14 @@ pub(crate) fn set_bluetooth_connected(id: &str, connected: bool) -> bool {
         false
     }
 }
+
+pub(crate) fn refresh_optional_features() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::refresh_optional_features().map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(())
+    }
+}

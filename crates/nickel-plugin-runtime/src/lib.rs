@@ -462,6 +462,34 @@ mod tests {
         assert!(runtime.eval("nickel.applications.search(12)").is_err());
     }
 
+    #[test]
+    fn optional_feature_clients_copy_observations_and_capture_native_revisions() {
+        let revision = "a".repeat(64);
+        let data = serde_json::json!({"features":{"available":true,"revision":revision,"operations":{"setKeyboardMode":true,"setCodexEnabled":true},"keyboard":{"mode":"automatic"}},"shortcuts":{"available":true,"editable":false,"shortcuts":[{"id":"launcher"}]}});
+        let mut runtime = super::JsxRuntime::new("", Some(&data.to_string())).unwrap();
+        runtime.eval("nickel.features.get().keyboard.mode='changed'; nickel.features.setKeyboardMode('enabled'); nickel.features.setCodexEnabled(false,true);").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>("JSON.stringify(nickel.features.get().keyboard.mode)")
+                .unwrap(),
+            "automatic"
+        );
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(effects[0]["revision"], revision);
+        assert_eq!(effects[1]["confirmed"], true);
+        assert!(
+            runtime
+                .eval("nickel.features.setKeyboardMode('other')")
+                .is_err()
+        );
+        assert!(runtime.eval("nickel.features.retryCodex()").is_err());
+        assert!(
+            !runtime
+                .eval_json::<bool>("nickel.shortcuts.get().editable")
+                .unwrap()
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -855,6 +855,44 @@ mod platform {
         }
 
         #[test]
+        fn feature_settings_confirm_destructive_preferences_and_render_public_shortcuts() {
+            std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+                use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
+                let directory = tempfile::tempdir().unwrap();
+                std::fs::create_dir(directory.path().join("styles")).unwrap();
+                std::fs::write(directory.path().join("OptionalFeatures.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/OptionalFeatures.jsx")).unwrap();
+                std::fs::write(directory.path().join("KeyboardShortcuts.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/KeyboardShortcuts.jsx")).unwrap();
+                std::fs::write(directory.path().join("styles/features.css"), include_str!("../../../../assets/plugins/nickel-default/src/styles/features.css")).unwrap();
+                std::fs::write(directory.path().join("main.jsx"), "import {OptionalFeatures} from './OptionalFeatures.js'; import {KeyboardShortcuts} from './KeyboardShortcuts.js'; export default function App() { return <Window id='main' width={520} height={340}><Column><OptionalFeatures/><KeyboardShortcuts/></Column></Window>; }").unwrap();
+                let (source, modules) = super::super::compile_jsx_modules(directory.path(), "main.js", Path::new("main.jsx")).unwrap();
+                let graph = JsxModuleGraph::new("main.js", modules.iter().map(|module|ModuleSource {path:&module.path,source:&module.source})).unwrap();
+                let revision = "a".repeat(64);
+                let data = serde_json::json!({"features":{"available":true,"revision":revision,"operations":{"setKeyboardMode":true,"setCodexEnabled":true,"retryCodex":true},"keyboard":{"mode":"automatic","runtimeAvailable":true},"codex":{"requestedEnabled":true,"disableConfirmationRequired":true,"state":"enabled","policy":"editable","runtimeCountersAvailable":false}},"shortcuts":{"available":true,"editable":false,"reason":"Shortcut remapping is unsupported","globalAvailable":false,"globalReason":"Native shortcuts unavailable","shortcuts":[{"id":"launcher","action":"Open launcher","keys":"Super","scope":"Global","available":false}]}});
+                let mut runtime = JsxRuntime::new_modules(&graph,Some(&data.to_string())).unwrap();
+                let metadata:serde_json::Value = runtime.eval_json("__nickelSettingsMetadata()").unwrap();
+                for id in ["optional-features","keyboard-shortcuts"] { assert!(metadata["pages"].as_array().unwrap().iter().any(|page|page["id"]==id)); }
+                fn action(node:&serde_json::Value,id:&str)->Option<u64> { if node["id"].as_str()==Some(id) {return node["action"].as_u64();} node["children"].as_array()?.iter().find_map(|child|action(child,id)) }
+                let tree = runtime.render("__nickelRender()",|node|Ok(node.clone())).unwrap();
+                let switch = action(&tree,"feature-codex-enabled").unwrap();
+                let confirm = runtime.render(&format!("__nickelDispatch({switch})"),|node|Ok(node.clone())).unwrap();
+                runtime.finish_event(true).unwrap();
+                assert!(runtime.take_effects().unwrap().is_empty());
+                let disable = action(&confirm,"feature-codex-confirm").unwrap();
+                runtime.render(&format!("__nickelDispatch({disable})"),|node|Ok(node.clone())).unwrap();
+                runtime.finish_event(true).unwrap();
+                assert_eq!(runtime.take_effects().unwrap(),vec![serde_json::json!({"type":"features.setCodexEnabled","revision":revision,"enabled":false,"confirmed":true})]);
+                let mut manifest = PluginManifest::from_json(include_str!("../../../../assets/plugins/example-window/plugin.json")).unwrap();
+                manifest.capabilities.extend([nickel_core::plugins::PluginCapability::FeaturesRead,nickel_core::plugins::PluginCapability::FeaturesControl,nickel_core::plugins::PluginCapability::ShortcutsRead]);
+                let package = PluginPackage {manifest,source,modules,stylesheet:String::new(),images:Default::default()};
+                let mut app = PluginPanelApplication::from_package(&package).unwrap();
+                app.sync_data(&data).unwrap();
+                let host = nickel_ui::UiHost::new(app,520,340);
+                assert!(host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Switch,name:"Enable Codex integration".into()}).is_ok());
+                nickel_plugin_presentation::css::StyleSheet::compile(include_str!("../../../../assets/plugins/nickel-default/src/styles/features.css")).unwrap();
+            }).unwrap().join().unwrap();
+        }
+
+        #[test]
         fn default_launcher_owns_paging_query_and_launches_stable_search_identities() {
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
                 use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};

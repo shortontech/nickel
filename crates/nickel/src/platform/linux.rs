@@ -3102,3 +3102,9 @@ mod tests {
 pub(super) fn set_bluetooth_connected(id: &str, connected: bool) -> bool {
     linux_control::set_bluetooth_connected(id, connected)
 }
+
+pub(super) fn refresh_optional_features() -> Result<(), SessionRequestError> {
+    command_response(one_shot_session_request(SessionRequest::Command(
+        SessionCommand::ReloadShellSettings,
+    ))?)
+}

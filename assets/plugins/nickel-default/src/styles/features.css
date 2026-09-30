@@ -1,0 +1,10 @@
+column.features-page { width: 100%; gap: 16px; }
+column.feature-card, column.feature-confirmation {
+    width: 100%; gap: 12px; padding: 16px;
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: var(--nickel-radius-control);
+}
+row.feature-options { gap: 12px; align-items: center; }
+.feature-title { font-size: 18px; line-height: 26px; color: var(--nickel-text); }
+button.feature-option.selected { border-color: var(--nickel-accent); }

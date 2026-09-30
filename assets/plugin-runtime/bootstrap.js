@@ -239,7 +239,27 @@ function __nickelSessionAction(action) {
     __effects.push({type:'session.perform',revision:snapshot.revision,action});
 }
 
+function __nickelFeatureEffect(operation, values = {}) {
+    const snapshot = __nickelData.features;
+    if (!snapshot?.available || !snapshot.operations?.[operation]) throw Error('feature operation is unavailable');
+    __effects.push({type:'features.' + operation, revision:snapshot.revision, ...values});
+}
 const nickel = Object.freeze({
+    shortcuts: Object.freeze({
+        get() { return __nickelResource('shortcuts', {available:false,editable:false,shortcuts:[],reason:'Shortcut read capability is unavailable'}); }
+    }),
+    features: Object.freeze({
+        get() { return __nickelResource('features', {available:false,operations:{},keyboard:{},codex:{},reason:'Feature read capability is unavailable'}); },
+        setKeyboardMode(mode) {
+            if (!['automatic','enabled','disabled'].includes(mode)) throw TypeError('invalid keyboard mode');
+            __nickelFeatureEffect('setKeyboardMode', {mode});
+        },
+        setCodexEnabled(enabled, confirmed = false) {
+            if (typeof enabled !== 'boolean' || typeof confirmed !== 'boolean') throw TypeError('invalid feature enablement');
+            __nickelFeatureEffect('setCodexEnabled', {enabled,confirmed});
+        },
+        retryCodex() { __nickelFeatureEffect('retryCodex'); }
+    }),
     appearance: Object.freeze({
         get() { return __nickelResource('appearance', {available:false,reason:'Appearance read capability is unavailable'}); },
         set(preferences) { __nickelAppearanceEffect('appearance', preferences); }

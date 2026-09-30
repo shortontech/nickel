@@ -335,6 +335,17 @@ declare const nickel: Readonly<{
         disable(id:string, revision:string):void;
         setEnabled(id:string, enabled:boolean, revision:string):void;
     }>;
+    /** Read-only reference: native shortcut remapping is currently unsupported. Requires shortcuts-read. */
+    shortcuts: Readonly<{
+        get(): Readonly<{available: boolean; editable: false; reason?: string; globalAvailable?: boolean; globalReason?: string | null; shortcuts: ReadonlyArray<Readonly<{id: string; action: string; keys: string; scope: string; available: boolean}>>}>;
+    }>;
+    /** Copied native feature snapshot; controls require features-control and capture its current revision. */
+    features: Readonly<{
+        get(): Readonly<{available: boolean; revision?: string; reason?: string; operations: Readonly<{setKeyboardMode?: boolean; setCodexEnabled?: boolean; retryCodex?: boolean}>; keyboard: Readonly<{mode?: "automatic" | "enabled" | "disabled"; generation?: number; environmentOverride?: boolean; runtimeAvailable?: boolean; enabled?: boolean | null; touchscreenPresent?: boolean | null}>; codex: Readonly<{configuredEnabled?: boolean; requestedEnabled?: boolean; generation?: number; acknowledgedGeneration?: number; state?: string; policy?: string; support?: string; installation?: string; health?: string; source?: string; diagnostic?: string | null; disableConfirmationRequired?: boolean; runtimeCountersAvailable?: boolean; activeWindows?: number | null; backgroundWorkers?: number | null; subscriptions?: number | null; warmSurfaces?: number | null; cacheEntries?: number | null}>; lastResult?: Readonly<{status: string; detail: string}> | null}>;
+        setKeyboardMode(mode: "automatic" | "enabled" | "disabled"): void;
+        setCodexEnabled(enabled: boolean, confirmed?: boolean): void;
+        retryCodex(): void;
+    }>;
     displays: Readonly<{
         /** Read a copy of the current host supplied display snapshot. */
         get(): NickelDisplaySnapshot | undefined;

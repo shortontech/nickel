@@ -380,6 +380,10 @@ pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, St
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
+    Feature {
+        plugin_id: String,
+        effect: crate::feature_capabilities::FeatureEffect,
+    },
     SearchApplications {
         plugin_id: String,
         query: String,
@@ -1803,6 +1807,8 @@ impl PluginPanelApplication {
                     | "windows"
                     | "applications"
                     | "applicationSearch"
+                    | "features"
+                    | "shortcuts"
                     | "notifications"
                     | "audio"
                     | "displays"
@@ -1872,6 +1878,8 @@ impl PluginPanelApplication {
         for (field, capability) in [
             ("appearance", PluginCapability::AppearanceRead),
             ("wallpaper", PluginCapability::WallpaperRead),
+            ("features", PluginCapability::FeaturesRead),
+            ("shortcuts", PluginCapability::ShortcutsRead),
             ("wifi", PluginCapability::NetworkRead),
             ("bluetooth", PluginCapability::BluetoothRead),
             ("associations", PluginCapability::AssociationsRead),
@@ -3425,6 +3433,40 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 _ => {
                                     self.last_error =
                                         Some(format!("menu {id:?} is not declared and open"));
+                                    return;
+                                }
+                            }
+                        }
+                        _ if effect
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|operation| operation.starts_with("features.")) =>
+                        {
+                            let request =
+                                crate::feature_capabilities::FeatureEffect::parse(&effect)
+                                    .and_then(|request| {
+                                        if !self
+                                            .manifest
+                                            .capabilities
+                                            .contains(&PluginCapability::FeaturesControl)
+                                        {
+                                            return Err("feature control is not granted".into());
+                                        }
+                                        let data: Value = self
+                                            .projection_data
+                                            .as_deref()
+                                            .and_then(|data| serde_json::from_str(data).ok())
+                                            .ok_or("feature snapshot is unavailable")?;
+                                        request.validate(&data["features"])?;
+                                        Ok(request)
+                                    });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::Feature {
+                                    plugin_id: self.manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
                                     return;
                                 }
                             }
@@ -6456,6 +6498,39 @@ mod tests {
         granted.update(granted.button_message("connect").unwrap());
         assert!(granted.take_effects().is_empty());
         assert!(granted.last_error().is_some());
+    }
+
+    #[test]
+    fn optional_feature_effects_require_grants_and_the_current_native_snapshot() {
+        let mut manifest = manifest().clone();
+        manifest.capabilities.clear();
+        let features = crate::feature_capabilities::snapshot(
+            &nickel_core::optional_features::OptionalFeatureSettings::default(),
+            &nickel_core::optional_features::OptionalFeatureRuntime::default(),
+            None,
+            false,
+            nickel_core::optional_features::FeaturePolicy::Editable,
+            true,
+        );
+        let data = serde_json::json!({"features":features}).to_string();
+        let source = "function App(){return h(Panel,{},h(Button,{id:'set',onClick:()=>nickel.features.setKeyboardMode('disabled')},'Set'));}";
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        assert!(denied.sync_host_data_field("features", &features).is_err());
+        denied.update(denied.button_message("set").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest.capabilities.extend([
+            PluginCapability::FeaturesRead,
+            PluginCapability::FeaturesControl,
+        ]);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data)).unwrap();
+        granted.update(granted.button_message("set").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::Feature { .. }]
+        ));
     }
 
     #[test]

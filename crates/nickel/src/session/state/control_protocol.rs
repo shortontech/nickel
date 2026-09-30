@@ -982,6 +982,32 @@ impl NickelSession {
                     Err(error) => protocol_error(ErrorCode::InvalidRequest, error),
                 }
             }
+            SessionAuthorityRequest::OptionalFeaturesCommitted {
+                codex_generation,
+                keyboard_generation,
+            } => {
+                let settings = match nickel_core::optional_features::settings_path()
+                    .map_err(|error| error.to_string())
+                    .and_then(|path| crate::feature_capabilities::read_settings(&path))
+                {
+                    Ok(settings) => settings,
+                    Err(error) => return protocol_error(ErrorCode::InvalidRequest, error),
+                };
+                if self.locked
+                    || settings.codex_generation != codex_generation
+                    || settings.on_screen_keyboard_generation != keyboard_generation
+                {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "feature preference changed or session is locked",
+                    );
+                }
+                self.notify_shell_settings_changed();
+                match self.apply_remote_codex_preference(&settings) {
+                    Ok(()) => ServerMessage::Ack,
+                    Err(error) => protocol_error(ErrorCode::InvalidRequest, error),
+                }
+            }
             SessionAuthorityRequest::Query(query) => self.handle_protocol_query(query),
             SessionAuthorityRequest::Command(command) => {
                 self.handle_protocol_command(command, None, 0)
@@ -1381,6 +1407,18 @@ impl NickelSession {
                 }
             }
             SessionCommand::ReloadShellSettings => {
+                let settings = match nickel_core::optional_features::settings_path()
+                    .map_err(|error| error.to_string())
+                    .and_then(|path| crate::feature_capabilities::read_settings(&path))
+                {
+                    Ok(settings) => settings,
+                    Err(error) => return protocol_error(ErrorCode::InvalidRequest, error),
+                };
+                if !self.locked {
+                    if let Err(error) = self.apply_remote_codex_preference(&settings) {
+                        return protocol_error(ErrorCode::InvalidRequest, error);
+                    }
+                }
                 self.apply_configured_workspace_count();
                 self.notify_shell_settings_changed();
             }

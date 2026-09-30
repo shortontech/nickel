@@ -491,3 +491,26 @@ or a declared image,
 entry path, version, capabilities, surfaces, or extension declarations, automatic startup stops and
 Settings shows that a fresh review is required. Re-enabling records the new
 declarations.
+
+### Optional features and shortcut reference
+
+`nickel.features.get()` requires `features-read` and returns a copied native
+snapshot with an opaque revision, operation availability, keyboard preference,
+Codex policy, configured and acknowledged generations, installation and health.
+`features-control` permits `setKeyboardMode("automatic" | "enabled" | "disabled")`,
+`setCodexEnabled(enabled, confirmed = false)`, and `retryCodex()`. Each request
+captures the current revision. The host rechecks grants, session authority,
+policy, environment overrides and the persisted preference before committing.
+The native service reconciles the saved preference; an unavailable runtime is
+reported separately from successful persistence. If `disableConfirmationRequired`
+is true, JSX must confirm before calling `setCodexEnabled(false, true)`.
+Linux resource counters currently report unavailable, so disabling always asks
+for confirmation there. `retryCodex()` refreshes the existing native controller
+on Linux. Windows reports this operation unavailable; its native subscription
+still reconciles committed keyboard and Codex preferences.
+
+`nickel.shortcuts.get()` requires `shortcuts-read` and returns stable shortcut
+reference IDs, keys, scopes and actual global registration availability. Its
+`editable` value is false: Nickel currently has no native shortcut remapping
+service. Ordinary Settings pages register with `registerSettingsPage`; these
+clients do not expose page indexes or native page views.
