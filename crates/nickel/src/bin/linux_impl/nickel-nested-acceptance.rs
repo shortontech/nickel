@@ -1384,15 +1384,15 @@ fn click_plugin_control(
         .find(|line| line.ends_with(plugin_surface))
         .and_then(|line| line.split('\t').next())
         .ok_or_else(|| format!("{plugin_surface} is absent from layout inventory: {layouts}"))?;
-    let layout = checked(test_input, environment, &["layout", surface])?;
-    let node = layout
-        .lines()
+    let nodes = layout_nodes(test_input, environment, surface)?;
+    let node = nodes
+        .iter()
         .find(|line| {
             line.split_whitespace().nth(1).is_some_and(|id| {
                 id == control_id || id.strip_suffix(control_id).is_some_and(|prefix| prefix.ends_with('/'))
             })
         })
-        .ok_or_else(|| format!("{control_id} is absent from {plugin_surface} layout: {layout}"))?;
+        .ok_or_else(|| format!("{control_id} is absent from {plugin_surface} layout: {nodes:?}"))?;
     let allocated = node
         .split(" allocated=")
         .nth(1)
@@ -2229,12 +2229,12 @@ fn verify_layout_snapshot(
         .find(|line| line.ends_with(plugin_surface))
         .and_then(|line| line.split('\t').next())
         .ok_or_else(|| format!("{plugin_surface} is absent from layout inventory: {layouts}"))?;
-    let layout = checked(test_input, environment, &["layout", surface])?;
-    if !layout.lines().any(|line| {
+    let nodes = layout_nodes(test_input, environment, surface)?;
+    if !nodes.iter().any(|line| {
         line.contains(" source=") && line.contains(" allocated=") && line.contains(" children=")
     }) {
         return Err(format!(
-            "{plugin_surface} has no computed component layout: {layout}"
+            "{plugin_surface} has no computed component layout: {nodes:?}"
         ));
     }
     Ok(())
@@ -2251,14 +2251,33 @@ fn verify_native_layout_snapshot(
         .find(|line| line.split('\t').nth(1) == Some(role) && line.split('\t').count() == 5)
         .and_then(|line| line.split('\t').next())
         .ok_or_else(|| format!("native {role} is absent from layout inventory: {layouts}"))?;
+    let nodes = layout_nodes(test_input, environment, surface)?;
+    if nodes.is_empty()
+        || nodes.iter().any(|line| {
+            !line.contains(" source=")
+                || !line.contains(" allocated=")
+                || !line.contains(" children=")
+        })
+    {
+        return Err(format!("native {role} has no computed component layout: {nodes:?}"));
+    }
+    Ok(())
+}
+
+fn layout_nodes(
+    test_input: &Path,
+    environment: &[(String, String)],
+    surface: &str,
+) -> Result<Vec<String>, String> {
     let mut offset = 0;
     let mut total = None;
+    let mut all_nodes = Vec::new();
     loop {
         let layout = checked(test_input, environment, &["layout", surface, &offset.to_string()])?;
         let header = layout.lines().next().ok_or("layout page has no header")?;
         let fields = header.split_whitespace().collect::<Vec<_>>();
         if fields.len() != 5 || fields[0] != "#" || fields[1] != "layout" {
-            return Err(format!("native {role} layout page has an invalid header: {header}"));
+            return Err(format!("{surface} layout page has an invalid header: {header}"));
         }
         let page_offset = fields[2]
             .strip_prefix("offset=")
@@ -2269,33 +2288,28 @@ fn verify_native_layout_snapshot(
             .and_then(|value| value.parse::<usize>().ok())
             .ok_or("layout page has no valid node count")?;
         if page_offset != offset || total.is_some_and(|total| total != page_total) {
-            return Err(format!("native {role} layout pages changed during inspection"));
+            return Err(format!("{surface} layout pages changed during inspection"));
         }
         total = Some(page_total);
         let nodes = layout.lines().skip(1).collect::<Vec<_>>();
-        if nodes.is_empty()
-            || nodes.iter().any(|line| {
-                !line.contains(" source=")
-                    || !line.contains(" allocated=")
-                    || !line.contains(" children=")
-            })
-        {
-            return Err(format!("native {role} has no computed component layout: {layout}"));
+        if nodes.is_empty() {
+            return Err(format!("{surface} has an empty layout page: {layout}"));
         }
         let next = fields[4].strip_prefix("next=").ok_or("layout page has no next offset")?;
+        all_nodes.extend(nodes.iter().map(|line| (*line).to_owned()));
         if next == "end" {
-            if offset + nodes.len() != page_total {
-                return Err(format!("native {role} layout ends before all nodes were returned"));
+            if all_nodes.len() != page_total {
+                return Err(format!("{surface} layout ends before all nodes were returned"));
             }
             break;
         }
         let next = next.parse::<usize>().map_err(|_| "invalid next layout offset")?;
         if next != offset + nodes.len() || next > page_total {
-            return Err(format!("native {role} layout page skipped nodes"));
+            return Err(format!("{surface} layout page skipped nodes"));
         }
         offset = next;
     }
-    Ok(())
+    Ok(all_nodes)
 }
 
 fn checked(
