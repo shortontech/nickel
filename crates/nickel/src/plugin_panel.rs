@@ -2094,7 +2094,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::RunSubmit(command.to_owned()));
                         }
                         _ if effect.get("type").and_then(Value::as_str) == Some("run-dismiss")
-                            && self.manifest.id == run_manifest().id =>
+                            && self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::RunCommand) =>
                         {
                             approved.push(PluginEffect::RunDismiss);
                         }
@@ -2553,11 +2556,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 revision: revision.unwrap(),
                             });
                         }
-                        _ if self.manifest.id == on_screen_keyboard_manifest().id
-                            && self
-                                .manifest
-                                .capabilities
-                                .contains(&PluginCapability::OnScreenKeyboardInput)
+                        _ if self
+                            .manifest
+                            .capabilities
+                            .contains(&PluginCapability::OnScreenKeyboardInput)
                             && matches!(
                                 effect.get("type").and_then(Value::as_str),
                                 Some(
@@ -5138,6 +5140,54 @@ mod tests {
             granted.take_effects(),
             vec![PluginEffect::RunSubmit("nickel-test".into())]
         );
+
+        let dismiss_source = "function App() { return h(Window, {width: 320, height: 180, onEscape: () => nickel.request({type: 'run-dismiss'})}); }";
+        manifest.capabilities.clear();
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(dismiss_source, &manifest, None).unwrap();
+        denied.shortcut_outcome(Shortcut::Escape);
+        assert!(denied.take_effects().is_empty());
+        assert!(denied.last_error().is_some());
+        manifest.capabilities.push(PluginCapability::RunCommand);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(dismiss_source, &manifest, None).unwrap();
+        granted.shortcut_outcome(Shortcut::Escape);
+        assert_eq!(granted.take_effects(), vec![PluginEffect::RunDismiss]);
+    }
+
+    #[test]
+    fn external_keyboard_action_uses_capability_and_current_projection() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities.clear();
+        let source = "function App() { return h(Window, {width: 320, height: 180, onEscape: () => nickel.request({type: 'keyboard-hide', generation: 7})}); }";
+        let data = Some(r#"{"generation":7,"rows":[]}"#.to_owned());
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, data.clone()).unwrap();
+        denied.shortcut_outcome(Shortcut::Escape);
+        assert!(denied.take_effects().is_empty());
+        assert!(denied.last_error().is_some());
+
+        manifest
+            .capabilities
+            .push(PluginCapability::OnScreenKeyboardInput);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, data).unwrap();
+        granted.shortcut_outcome(Shortcut::Escape);
+        assert_eq!(
+            granted.take_effects(),
+            vec![PluginEffect::KeyboardHide { generation: 7 }]
+        );
+        granted
+            .sync_data(&serde_json::json!({"generation": 8, "rows": []}))
+            .unwrap();
+        granted.shortcut_outcome(Shortcut::Escape);
+        assert!(granted.take_effects().is_empty());
+        assert_eq!(granted.last_error(), Some("keyboard request is stale"));
     }
 
     #[test]
