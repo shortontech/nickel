@@ -54,6 +54,13 @@ pub fn surface() -> &'static PluginSurface {
     surface
 }
 
+pub fn surface_key() -> nickel_core::plugins::PluginSurfaceKey {
+    nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: manifest().id.clone(),
+        surface_id: surface().id.clone(),
+    }
+}
+
 pub fn launcher_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {

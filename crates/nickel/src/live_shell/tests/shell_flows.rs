@@ -20,7 +20,7 @@
         let id = &crate::plugin_panel::manifest().id;
         shell.set_plugin_enabled(id, false).unwrap();
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_panel_host.is_some());
+        assert!(shell.primary_panel_host_ref().is_some());
         let surface = crate::plugin_panel::surface();
         let key = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: id.clone(),
@@ -29,7 +29,7 @@
         shell.plugin_panel_scene(&key, surface.width, surface.height);
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.plugin_panel_host.is_none());
+        assert!(shell.primary_panel_host_ref().is_none());
         let entry = shell.plugin_registry().get(id).unwrap();
         assert_eq!(entry.health, nickel_core::plugins::PluginHealth::Disabled);
         assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
@@ -69,15 +69,17 @@
             surface,
         )
         .unwrap();
-        shell.plugin_panel_host = Some(nickel_ui::UiHost::new(
-            application,
-            surface.width,
-            surface.height,
-        ));
         let key = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: shell.plugin_panel_owner.clone(),
             surface_id: surface.id.clone(),
         };
+        shell.plugin_surface_hosts.insert(
+            key.clone(),
+            (
+                surface.clone(),
+                nickel_ui::UiHost::new(application, surface.width, surface.height),
+            ),
+        );
         assert!(shell
             .plugin_panel_scene(&key, surface.width, surface.height)
             .is_none());
@@ -85,7 +87,7 @@
         assert!(entry.desired_enabled);
         assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("provider projection exploded")));
         assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
-        assert!(shell.plugin_panel_host.is_none());
+        assert!(shell.primary_panel_host_ref().is_none());
     }
 
     #[test]
@@ -113,7 +115,7 @@
         )
         .unwrap();
         let mut shell = LiveShell::new().unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             key.clone(),
             (
                 surface.clone(),
@@ -121,7 +123,7 @@
             ),
         );
         assert_eq!(shell.plugin_panel_title(&key), Some("Home"));
-        shell.plugin_panel_extra_hosts.remove(&key);
+        shell.plugin_surface_hosts.remove(&key);
         assert_eq!(shell.plugin_panel_title(&key), None);
     }
 
@@ -165,7 +167,7 @@
             surface,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             key.clone(),
             (
                 surface.clone(),
@@ -177,7 +179,7 @@
             .is_some());
         let expected = format!("Volume {}", shell.audio.volume_percent.min(100));
         assert!(shell
-            .plugin_panel_extra_hosts
+            .plugin_surface_hosts
             .get(&key)
             .unwrap()
             .1
@@ -258,7 +260,7 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::notification_surface_key(),
             (
                 crate::plugin_panel::notification_surface().clone(),
@@ -299,7 +301,7 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::notification_surface_key(),
             (
                 crate::plugin_panel::notification_surface().clone(),
@@ -414,7 +416,7 @@
     fn notification_plugin_secure_field_protects_its_surface() {
         let mut shell = LiveShell::new().unwrap();
         let source = "function App() { return h(Panel, {}, h(TextField, {id: 'private', value: 'secret', secure: true, onChange: value => {}})); }";
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::notification_surface_key(),
             (
                 crate::plugin_panel::notification_surface().clone(),
@@ -508,7 +510,7 @@
             &serde_json::json!({"windows": []}),
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::window_preview_surface_key(),
             (
                 crate::plugin_panel::window_preview_surface().clone(),
@@ -549,7 +551,7 @@
             &data,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::window_preview_surface_key(),
             (
                 crate::plugin_panel::window_preview_surface().clone(),
@@ -712,7 +714,7 @@
             &data,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::volume_osd_surface_key(),
             (
                 crate::plugin_panel::volume_osd_surface().clone(),
@@ -884,7 +886,7 @@
             &data,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::control_center_surface_key(),
             (
                 crate::plugin_panel::control_center_surface().clone(),
@@ -928,7 +930,7 @@
             &data,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::control_center_surface_key(),
             (
                 crate::plugin_panel::control_center_surface().clone(),
@@ -1013,7 +1015,7 @@
         )
         .unwrap();
         let surface = crate::plugin_panel::codex_projects_manifest().surfaces[0].clone();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             key.clone(),
             (surface.clone(), nickel_ui::UiHost::new(application, surface.width, surface.height)),
         );
@@ -1025,7 +1027,7 @@
         assert!(entry.desired_enabled);
         assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("Codex projection exploded")));
         assert!(!shell.plugin_surface_matches(&key));
-        assert!(!shell.plugin_panel_extra_hosts.contains_key(&key));
+        assert!(!shell.plugin_surface_hosts.contains_key(&key));
     }
 
     #[test]
@@ -1048,7 +1050,7 @@
                 name: "Open project".into(),
             })
             .unwrap();
-        shell.plugin_panel_extra_hosts.insert(key.clone(), (surface.clone(), host));
+        shell.plugin_surface_hosts.insert(key.clone(), (surface.clone(), host));
         assert!(shell.plugin_panel_host_ui_for(
             &key,
             UiEvent::AccessibilityActivate(target.id),
@@ -1058,7 +1060,7 @@
         let entry = shell.plugin_registry().get(&key.plugin_id).unwrap();
         assert!(entry.desired_enabled);
         assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("Codex callback exploded")));
-        assert!(!shell.plugin_panel_extra_hosts.contains_key(&key));
+        assert!(!shell.plugin_surface_hosts.contains_key(&key));
         assert!(!shell.plugin_surface_matches(&key));
     }
 
@@ -1073,7 +1075,7 @@
         )
         .unwrap();
         let surface = crate::plugin_panel::on_screen_keyboard_manifest().surfaces[0].clone();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             key.clone(),
             (surface.clone(), nickel_ui::UiHost::new(application, surface.width, surface.height)),
         );
@@ -1083,7 +1085,7 @@
         assert!(entry.desired_enabled);
         assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("keyboard projection exploded")));
         assert!(!shell.plugin_surface_matches(&key));
-        assert!(!shell.plugin_panel_extra_hosts.contains_key(&key));
+        assert!(!shell.plugin_surface_hosts.contains_key(&key));
     }
 
     #[test]
@@ -1322,7 +1324,7 @@
             "function App() { return h(Panel, {}, h(Button, {id: 'run-fail', onClick: () => { throw Error('Run callback exploded'); }}, 'Break Run')); }",
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::run_surface_key(),
             (
                 crate::plugin_panel::run_surface().clone(),
@@ -1474,7 +1476,7 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::launcher_surface_key(),
             (
                 crate::plugin_panel::launcher_surface().clone(),
@@ -1517,7 +1519,7 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::launcher_surface_key(),
             (
                 crate::plugin_panel::launcher_surface().clone(),
@@ -1543,7 +1545,7 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_panel_extra_hosts.insert(
+        shell.plugin_surface_hosts.insert(
             crate::plugin_panel::launcher_surface_key(),
             (
                 crate::plugin_panel::launcher_surface().clone(),

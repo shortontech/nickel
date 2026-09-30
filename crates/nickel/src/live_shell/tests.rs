@@ -824,7 +824,13 @@ fn keyed_panel_controller_opens_a_component_dialog() {
     let mut shell = LiveShell::new().unwrap();
     let source = include_str!("../../../../assets/plugins/hello-panel/main.js");
     let app = crate::plugin_panel::PluginPanelApplication::new(source).unwrap();
-    shell.plugin_panel_host = Some(UiHost::new(app, 360, 96));
+    shell.plugin_surface_hosts.insert(
+        shell.primary_panel_key(),
+        (
+            crate::plugin_panel::surface().clone(),
+            UiHost::new(app, 360, 96),
+        ),
+    );
     let (key, surface) = shell.plugin_panels().into_iter().next().unwrap();
     shell
         .plugin_panel_scene(&key, surface.width, surface.height)
@@ -1099,23 +1105,18 @@ fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
     assert_eq!((surfaces[0].1.width, surfaces[0].1.height), (360, 220));
     assert_eq!((surfaces[1].1.width, surfaces[1].1.height), (420, 240));
     let first = shell
-        .plugin_panel_host
-        .as_ref()
+        .plugin_panel_host_ref(&surfaces[0].0)
         .unwrap()
         .application()
         .shared_runtime();
     let second = shell
-        .plugin_panel_extra_hosts
-        .values()
-        .next()
+        .plugin_panel_host_ref(&surfaces[1].0)
         .unwrap()
-        .1
         .application()
         .shared_runtime();
     assert!(std::rc::Rc::ptr_eq(&first, &second));
     let button = shell
-        .plugin_panel_host
-        .as_ref()
+        .plugin_panel_host_ref(&surfaces[0].0)
         .unwrap()
         .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
             role: nickel_ui::SemanticRole::Button,
@@ -1129,21 +1130,16 @@ fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
         220,
     ));
     assert_eq!(shell.plugin_panel_surface.width, 300);
+    assert_eq!(shell.plugin_surface_hosts[&surfaces[0].0].0.width, 300);
     shell
-        .plugin_panel_host
-        .as_ref()
+        .plugin_panel_host_ref(&surfaces[0].0)
         .unwrap()
         .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
             role: nickel_ui::SemanticRole::Button,
             name: "first:1".into(),
         })
         .unwrap();
-    let second_host = &mut shell
-        .plugin_panel_extra_hosts
-        .values_mut()
-        .next()
-        .unwrap()
-        .1;
+    let second_host = shell.plugin_panel_host_for(&surfaces[1].0).unwrap();
     second_host
         .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
             role: nickel_ui::SemanticRole::Button,
@@ -1189,9 +1185,14 @@ fn installed_plugin_can_reposition_only_its_open_window() {
     let surface = &shell.plugin_panels()[0].1;
     assert_eq!(surface.anchor, PluginSurfaceAnchor::TopRight);
     assert_eq!((surface.offset_x, surface.offset_y), (-24, 24));
+    assert_eq!(
+        shell.plugin_surface_hosts[&shell.primary_panel_key()]
+            .0
+            .anchor,
+        PluginSurfaceAnchor::TopRight
+    );
     let button = shell
-        .plugin_panel_host
-        .as_ref()
+        .primary_panel_host_ref()
         .unwrap()
         .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
             role: nickel_ui::SemanticRole::Button,

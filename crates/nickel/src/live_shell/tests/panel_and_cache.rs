@@ -187,11 +187,13 @@
         .replace("bottomOffset: 24", "bottomOffset: 12");
         let application = crate::plugin_panel::PluginPanelApplication::new(&source).unwrap();
         let grant = crate::plugin_panel::surface();
-        shell.plugin_panel_host = Some(nickel_ui::UiHost::new(
-            application,
-            grant.width,
-            grant.height,
-        ));
+        shell.plugin_surface_hosts.insert(
+            shell.primary_panel_key(),
+            (
+                grant.clone(),
+                nickel_ui::UiHost::new(application, grant.width, grant.height),
+            ),
+        );
         assert_eq!(shell.plugin_panel_surface.bottom_offset, 24);
         let key = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: shell.plugin_panel_owner.clone(),
@@ -209,11 +211,17 @@
             plugin_id: shell.plugin_panel_owner.clone(),
             surface_id: grant.id.clone(),
         };
-        shell.plugin_panel_host = Some(nickel_ui::UiHost::new(
-            crate::plugin_panel::PluginPanelApplication::bundled().unwrap(),
-            grant.width,
-            grant.height,
-        ));
+        shell.plugin_surface_hosts.insert(
+            key.clone(),
+            (
+                grant.clone(),
+                nickel_ui::UiHost::new(
+                    crate::plugin_panel::PluginPanelApplication::bundled().unwrap(),
+                    grant.width,
+                    grant.height,
+                ),
+            ),
+        );
         let target = shell
             .plugin_panel_host_ref(&key)
             .unwrap()
