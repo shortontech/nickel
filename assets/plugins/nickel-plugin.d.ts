@@ -262,9 +262,35 @@ interface NickelDisplayLayout {
     }>>;
 }
 
+interface NickelDisplayMode {
+    width: number;
+    height: number;
+    refresh_millihz: number;
+}
+
+interface NickelDisplaySnapshot {
+    available: boolean;
+    reason?: string;
+    outputs: ReadonlyArray<Readonly<{
+        name: string;
+        model: string;
+        geometry: Readonly<{ x: number; y: number; width: number; height: number }>;
+        work_area: Readonly<{ x: number; y: number; width: number; height: number }>;
+        scale_120: number;
+        transform: "normal" | "rotate90" | "rotate180" | "rotate270"
+            | "flipped" | "flipped90" | "flipped180" | "flipped270";
+        physical_width_mm: number;
+        physical_height_mm: number;
+        primary: boolean;
+        enabled: boolean;
+        modes: ReadonlyArray<Readonly<NickelDisplayMode>>;
+        current_mode: Readonly<NickelDisplayMode> | null;
+    }>>;
+}
+
 declare const nickel: Readonly<{
     readonly data: Readonly<Record<string, unknown> & {
-        displays?: unknown;
+        displays?: NickelDisplaySnapshot;
         settings?: Readonly<Record<string, boolean | number | string>>;
         surface?: Readonly<{
             id: string;
@@ -279,7 +305,7 @@ declare const nickel: Readonly<{
     openMenu(id: string): void;
     displays: Readonly<{
         /** Read a copy of the current host supplied display snapshot. */
-        get(): unknown;
+        get(): NickelDisplaySnapshot | undefined;
         /** Preview a complete display layout; it automatically reverts after 15 seconds unless confirmed. */
         setLayout(layout: Readonly<NickelDisplayLayout>): void;
         /** Keep the previewed layout. */
