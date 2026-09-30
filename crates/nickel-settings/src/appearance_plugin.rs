@@ -10,7 +10,6 @@ use nickel_core::{
 };
 use nickel_plugin_presentation::{
     components::PluginImages,
-    css::StyleSheet,
     page::{JsxPage, STALE_DATA},
 };
 use nickel_ui::{
@@ -20,30 +19,27 @@ use nickel_ui::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::settings_plugin::StyledSettingsPage;
 use crate::{SettingsApp, SettingsMessage, SettingsPage};
 
 const STALE_STATUS: &str = STALE_DATA;
 const APPEARANCE_SCOPE: &str = "appearance";
 
 pub(super) struct AppearancePage {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
     images: PluginImages,
 }
 
 impl AppearancePage {
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
             images: PluginImages::new(),
         })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes()
     }
 
     pub(super) fn render(
@@ -52,35 +48,33 @@ impl AppearancePage {
         theme: SemanticTheme,
         wallpaper_preview: Option<&Arc<image::RgbaImage>>,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-appearance.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
+        let (node, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-appearance.css"),
+        )?;
         self.images.clear();
         if let Some(preview) = wallpaper_preview {
             self.images
                 .insert("wallpaper-preview".into(), (1, Arc::clone(preview)));
         }
-        let node = self.page.node().ok_or("Appearance page is unavailable")?;
         if node.dialog("appearance-custom-hue-dialog").is_none() {
             return Err("Appearance custom hue dialog is unavailable".into());
         }
-        Ok(node.view_as_scoped::<SettingsMessage>(
-            &self.images,
-            &self.stylesheet,
-            Some(APPEARANCE_SCOPE),
-        ))
+        Ok(
+            node.view_as_scoped::<SettingsMessage>(
+                &self.images,
+                stylesheet,
+                Some(APPEARANCE_SCOPE),
+            ),
+        )
     }
 
     pub(super) fn dialog_view(&self, _theme: SemanticTheme) -> Option<AnyView<SettingsMessage>> {
         self.page.node()?.dialog_content_view(
             "appearance-custom-hue-dialog",
             &self.images,
-            &self.stylesheet,
+            self.page.stylesheet(),
             Some(APPEARANCE_SCOPE),
         )
     }

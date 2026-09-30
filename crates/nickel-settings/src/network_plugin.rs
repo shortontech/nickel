@@ -2,26 +2,24 @@
 
 use nickel_plugin_presentation::{
     components::PluginImages,
-    css::StyleSheet,
     page::{JsxPage, STALE_DATA},
 };
 use nickel_ui::{AnyView, Column, SemanticTheme, VerticalScroll};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::settings_plugin::StyledSettingsPage;
 use crate::{SettingsApp, SettingsMessage, SettingsPage};
 
 const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct NetworkPage {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
 }
 
 impl NetworkPage {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes()
     }
 
     #[cfg(test)]
@@ -35,9 +33,7 @@ impl NetworkPage {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
         })
     }
 
@@ -46,21 +42,17 @@ impl NetworkPage {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-network.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
-        let node = self.page.node().ok_or("Network page is unavailable")?;
+        let (node, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-network.css"),
+        )?;
         Ok(AnyView::new(
             Column::new().grow(1.0).child(
                 VerticalScroll::new(SettingsMessage::NetworkScroll, 0.0)
                     .grow(1.0)
                     .theme(theme)
-                    .child(node.view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet)),
+                    .child(node.view_as::<SettingsMessage>(&PluginImages::new(), stylesheet)),
             ),
         ))
     }

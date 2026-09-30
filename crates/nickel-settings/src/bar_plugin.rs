@@ -7,14 +7,13 @@ use nickel_core::{
 use nickel_i18n::Localizer;
 use nickel_plugin_presentation::{
     components::PluginImages,
-    css::StyleSheet,
     page::{JsxPage, STALE_DATA},
 };
 use nickel_ui::{AnyView, SemanticTheme};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{SettingsApp, SettingsMessage};
+use crate::{SettingsApp, SettingsMessage, settings_plugin::StyledSettingsPage};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
@@ -46,14 +45,12 @@ fn validate_request(request: &BarRequest) -> Result<SettingsMessage, String> {
 }
 
 pub(super) struct BarPage {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
 }
 
 impl BarPage {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes()
     }
 
     #[cfg(test)]
@@ -67,9 +64,7 @@ impl BarPage {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
         })
     }
 
@@ -79,16 +74,12 @@ impl BarPage {
         theme: SemanticTheme,
         _palette: ThemePalette,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-bar.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
-        let node = self.page.node().ok_or("Bar page is unavailable")?;
-        Ok(node.view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet))
+        let (node, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-bar.css"),
+        )?;
+        Ok(node.view_as::<SettingsMessage>(&PluginImages::new(), stylesheet))
     }
 
     #[cfg(test)]

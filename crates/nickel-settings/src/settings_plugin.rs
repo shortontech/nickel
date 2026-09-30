@@ -2,7 +2,7 @@
 
 use nickel_i18n::Localizer;
 use nickel_plugin_presentation::{
-    components::{PluginImages, PluginMessage, PluginUiMessage},
+    components::{PanelNode, PluginImages, PluginMessage, PluginUiMessage},
     css::StyleSheet,
     page::JsxPage,
 };
@@ -111,6 +111,60 @@ pub(super) fn stylesheet_template(
         source = source.replace(token, &value);
     }
     StyleSheet::compile(&source)
+}
+
+/// Shared render and theme lifecycle for Settings pages backed by JSX.
+pub(super) struct StyledSettingsPage {
+    page: JsxPage,
+    stylesheet: StyleSheet,
+    last_theme: Option<SemanticTheme>,
+}
+
+impl StyledSettingsPage {
+    pub(super) fn new(page: JsxPage) -> Self {
+        Self {
+            page,
+            stylesheet: StyleSheet::default(),
+            last_theme: None,
+        }
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+    }
+
+    pub(super) fn render(
+        &mut self,
+        data: &Value,
+        theme: SemanticTheme,
+        css: &str,
+    ) -> Result<(&PanelNode, &StyleSheet), String> {
+        self.page.render(data)?;
+        if self.last_theme != Some(theme) {
+            self.stylesheet = stylesheet_template(css, theme)?;
+            self.last_theme = Some(theme);
+        }
+        let node = self.page.node().ok_or("Settings JSX page is unavailable")?;
+        Ok((node, &self.stylesheet))
+    }
+
+    pub(super) fn node(&self) -> Option<&PanelNode> {
+        self.page.node()
+    }
+
+    pub(super) fn stylesheet(&self) -> &StyleSheet {
+        &self.stylesheet
+    }
+
+    pub(super) fn dispatch(
+        &mut self,
+        index: usize,
+        value: &Value,
+        data: &Value,
+        validate: impl FnOnce(Value) -> Result<SettingsMessage, String>,
+    ) -> Result<SettingsMessage, String> {
+        self.page.dispatch(index, value, data, validate)
+    }
 }
 
 pub(super) struct OrdinaryPages {

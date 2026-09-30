@@ -5,26 +5,26 @@ use nickel_core::{
 };
 use nickel_plugin_presentation::{
     components::PluginImages,
-    css::StyleSheet,
     page::{JsxPage, STALE_DATA},
 };
 use nickel_ui::{AnyView, Column, Insets, SemanticTheme, VerticalScroll};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{SettingsApp, SettingsMessage, SettingsPage, view::codex_switch_state};
+use crate::{
+    SettingsApp, SettingsMessage, SettingsPage, settings_plugin::StyledSettingsPage,
+    view::codex_switch_state,
+};
 
 const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct OptionalFeaturesPage {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
 }
 
 impl OptionalFeaturesPage {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes()
     }
 
     #[cfg(test)]
@@ -38,9 +38,7 @@ impl OptionalFeaturesPage {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
         })
     }
 
@@ -49,18 +47,11 @@ impl OptionalFeaturesPage {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-optional-features.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
-        let node = self
-            .page
-            .node()
-            .ok_or("Optional Features page is unavailable")?;
+        let (node, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-optional-features.css"),
+        )?;
         Ok(AnyView::new(
             VerticalScroll::new(SettingsMessage::OptionalFeaturesScroll, 0.0)
                 .grow(1.0)
@@ -74,9 +65,7 @@ impl OptionalFeaturesPage {
                             bottom: 24.0,
                             left: 0.0,
                         })
-                        .child(
-                            node.view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet),
-                        ),
+                        .child(node.view_as::<SettingsMessage>(&PluginImages::new(), stylesheet)),
                 ),
         ))
     }

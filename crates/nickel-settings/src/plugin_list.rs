@@ -1,7 +1,7 @@
 //! JSX-owned ordinary plugin list. Permission approval remains a native overlay.
 
 use nickel_i18n::Localizer;
-use nickel_plugin_presentation::{components::PluginImages, css::StyleSheet, page::JsxPage};
+use nickel_plugin_presentation::{components::PluginImages, page::JsxPage};
 use nickel_session_protocol::{
     PluginMemorySnapshot, PluginRuntimeHealth, PluginSettingKind, PluginStatusSnapshot,
 };
@@ -9,7 +9,7 @@ use nickel_ui::{AnyView, SemanticTheme};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{SettingsApp, SettingsMessage};
+use crate::{SettingsApp, SettingsMessage, settings_plugin::StyledSettingsPage};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
@@ -43,14 +43,12 @@ pub(super) enum PluginRequest {
 }
 
 pub(super) struct PluginList {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
 }
 
 impl PluginList {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes()
     }
 
     #[cfg(test)]
@@ -64,9 +62,7 @@ impl PluginList {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
         })
     }
 
@@ -75,19 +71,12 @@ impl PluginList {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-plugins.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
-        Ok(self
-            .page
-            .node()
-            .ok_or("Plugin list is unavailable")?
-            .view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet))
+        let (node, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-plugins.css"),
+        )?;
+        Ok(node.view_as::<SettingsMessage>(&PluginImages::new(), stylesheet))
     }
 
     pub(super) fn dispatch(
