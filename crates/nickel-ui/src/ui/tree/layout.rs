@@ -714,13 +714,39 @@ pub(super) fn apply_transient_state<Message>(
     id: &UiId,
     state: &mut UiStateStore,
 ) {
+    apply_transient_state_with_parent(element, id, state, None);
+}
+
+fn apply_transient_state_with_parent<Message>(
+    element: &mut Element<Message>,
+    id: &UiId,
+    state: &mut UiStateStore,
+    parent_interaction: Option<usize>,
+) {
+    let direct_interaction = if state.pressed() == Some(id) {
+        Some(1)
+    } else if state.window_focused()
+        && (state.focused() == Some(id) || state.navigation().controller_selected() == Some(id))
+    {
+        Some(2)
+    } else if state.hovered() == Some(id) {
+        Some(0)
+    } else {
+        None
+    };
+    let interaction_index = if element.style.parent_interaction {
+        parent_interaction.or(direct_interaction)
+    } else {
+        direct_interaction
+    };
     let focus_foreground = element.style.foreground.or_else(|| {
         element
             .children
             .iter()
             .find_map(|child| focus_participating_foreground(child))
     });
-    let owns_state = element.message.is_some()
+    let owns_state = element.style.parent_interaction
+        || element.message.is_some()
         || element.navigation_scope.is_some()
         || element.text_mapper.is_some()
         || matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
@@ -777,17 +803,6 @@ pub(super) fn apply_transient_state<Message>(
         if let Some(background) = exact_focus_background {
             element.style.background = Some(background);
         }
-        let interaction_index = if state.pressed() == Some(id) {
-            Some(1)
-        } else if state.window_focused()
-            && (state.focused() == Some(id) || state.navigation().controller_selected() == Some(id))
-        {
-            Some(2)
-        } else if state.hovered() == Some(id) {
-            Some(0)
-        } else {
-            None
-        };
         if let Some(index) = interaction_index {
             let paint = element
                 .style
@@ -806,26 +821,36 @@ pub(super) fn apply_transient_state<Message>(
             if let Some(radius) = paint.radius {
                 element.style.corner_radius = radius;
             }
-            fn text_paint<Message>(element: &mut Element<Message>, paint: InteractionPaint) {
-                if let Some(color) = paint.foreground {
+            fn text_paint<Message>(
+                element: &mut Element<Message>,
+                paint: InteractionPaint,
+                owner: bool,
+            ) {
+                if let Some(color) = paint.foreground
+                    && (owner || element.style.inherited_state_text[0])
+                {
                     element.style.foreground = Some(color);
                 }
                 if let Kind::Text {
                     scale, line_height, ..
                 } = &mut element.kind
                 {
-                    if let Some(size) = paint.font_size {
+                    if let Some(size) = paint.font_size
+                        && (owner || element.style.inherited_state_text[1])
+                    {
                         *scale = -size;
                     }
-                    if let Some(height) = paint.line_height {
+                    if let Some(height) = paint.line_height
+                        && (owner || element.style.inherited_state_text[2])
+                    {
                         *line_height = Some(height);
                     }
                 }
                 for child in &mut element.children {
-                    text_paint(child, paint);
+                    text_paint(child, paint, false);
                 }
             }
-            text_paint(element, paint);
+            text_paint(element, paint, true);
         }
         // A transparent editor already exposes keyboard focus through its caret.
         // Filling its entire text node with the generic fallback tint makes a
@@ -915,6 +940,28 @@ pub(super) fn apply_transient_state<Message>(
                 controlled: false,
                 ..
             } => *offset = scroll_offset.max(0.0),
+            Kind::Slider {
+                presentation: Some(parts),
+                ..
+            } => {
+                let index = if state.pressed() == Some(id) {
+                    Some(1)
+                } else if state.window_focused()
+                    && (state.focused() == Some(id)
+                        || state.navigation().controller_selected() == Some(id))
+                {
+                    Some(2)
+                } else if state.hovered() == Some(id) {
+                    Some(0)
+                } else {
+                    None
+                };
+                if let Some(index) = index {
+                    for part in parts.iter_mut() {
+                        *part = part.with_interaction(index);
+                    }
+                }
+            }
             Kind::Dropdown {
                 expanded,
                 options,
@@ -925,7 +972,19 @@ pub(super) fn apply_transient_state<Message>(
                 ..
             } => {
                 *expanded = dropdown_open;
+                let owner_paint = interaction_index
+                    .map(|index| {
+                        element
+                            .style
+                            .interaction_paints
+                            .as_ref()
+                            .map_or(InteractionPaint::default(), |paints| paints[index])
+                    })
+                    .unwrap_or_default();
                 if let Some(parts) = presentation.as_mut() {
+                    for part in parts.iter_mut() {
+                        *part = part.inherited_paint(owner_paint);
+                    }
                     let resolved = |mut part: DropdownPartStyle, part_id: &UiId| {
                         let index = if state.pressed() == Some(part_id) {
                             Some(1)
@@ -945,10 +1004,15 @@ pub(super) fn apply_transient_state<Message>(
                         part
                     };
                     parts[0] = resolved(parts[0], id);
+                    parts[2] = resolved(parts[2], id);
                     *resolved_options = (0..options.len())
                         .map(|index| {
                             resolved(
-                                option_presentations.get(index).copied().unwrap_or(parts[1]),
+                                option_presentations
+                                    .get(index)
+                                    .copied()
+                                    .unwrap_or(parts[1])
+                                    .inherited_paint(owner_paint),
                                 &id.scoped(format!("option-{index}")),
                             )
                         })
@@ -966,15 +1030,17 @@ pub(super) fn apply_transient_state<Message>(
                             0.0
                         }
                 });
-                element.style.height = Length::Px(height.unwrap_or_else(|| {
-                    if *overlay {
-                        30.0
-                    } else if *expanded {
-                        42.0 + options.len() as f32 * 36.0
-                    } else {
-                        42.0
-                    }
-                }));
+                if !element.style.css_paint {
+                    element.style.height = Length::Px(height.unwrap_or_else(|| {
+                        if *overlay {
+                            30.0
+                        } else if *expanded {
+                            42.0 + options.len() as f32 * 36.0
+                        } else {
+                            42.0
+                        }
+                    }));
+                }
             }
             _ => {}
         }
@@ -1063,7 +1129,12 @@ pub(super) fn apply_transient_state<Message>(
             || id.scoped(format!("#{index}")),
             |child_id| id.scoped(child_id.as_str()),
         );
-        apply_transient_state(child, &child_id, state);
+        apply_transient_state_with_parent(
+            child,
+            &child_id,
+            state,
+            direct_interaction.or(parent_interaction),
+        );
     }
 }
 
@@ -1333,7 +1404,9 @@ fn flex_bounds<Message>(
             Axis::Horizontal => {
                 rect.origin.x += main_offset;
                 let cross = measured.height.min(content.size.height);
-                if alignment != Align::Stretch {
+                if alignment != Align::Stretch
+                    || (child.style.css_paint && child.style.height != Length::Auto)
+                {
                     rect.size.height = cross;
                     rect.origin.y += match alignment {
                         Align::Center => (content.size.height - cross) / 2.0,
@@ -1346,7 +1419,9 @@ fn flex_bounds<Message>(
             Axis::Vertical => {
                 rect.origin.y += main_offset;
                 let cross = measured.width.min(content.size.width);
-                if alignment != Align::Stretch {
+                if alignment != Align::Stretch
+                    || (child.style.css_paint && child.style.width != Length::Auto)
+                {
                     rect.size.width = cross;
                     rect.origin.x += match alignment {
                         Align::Center => (content.size.width - cross) / 2.0,

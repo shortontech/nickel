@@ -52,6 +52,7 @@ pub struct ControlStyle {
     pub gap: Option<f32>,
     pub bottom: Option<f32>,
     pub top: Option<f32>,
+    pub(crate) inherited_text: [bool; 3],
     pub(crate) custom_properties: HashMap<String, String>,
     pub(crate) ancestors: Vec<(String, Option<String>, Option<String>)>,
 }
@@ -603,13 +604,29 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                     Some(
                         "button"
                             | "text-field"
+                            | "select"
                             | "select-header"
                             | "option"
                             | "menu-item"
+                            | "menu-shortcut"
+                            | "menu-indicator"
+                            | "text-field-menu-shortcut"
+                            | "text-field-menu-indicator"
+                            | "select-indicator"
                             | "switch"
                             | "checkbox"
                             | "text-field-menu-item"
                             | "color-swatch"
+                            | "color-swatch-fill"
+                            | "color-swatch-label"
+                            | "switch-track"
+                            | "switch-thumb"
+                            | "checkbox-box"
+                            | "checkbox-mark"
+                            | "slider"
+                            | "slider-track"
+                            | "slider-fill"
+                            | "slider-thumb"
                     )
                 )
             }) {

@@ -973,6 +973,22 @@ impl<Message> Component<Message> for StyledText<Message> {
 pub struct Text<Message = String>(Element<Message>);
 
 impl<Message> Text<Message> {
+    pub fn part_interaction_text(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.parent_interaction = true;
+        self.0.style.interaction_paints = Some(Box::new(paints.map(|paint| InteractionPaint {
+            foreground: paint.foreground,
+            font_size: paint.font_size,
+            line_height: paint.line_height,
+            ..InteractionPaint::default()
+        })));
+        self
+    }
+
+    pub fn inherited_state_text(mut self, inherited: [bool; 3]) -> Self {
+        self.0.style.inherited_state_text = inherited;
+        self
+    }
+
     pub fn css_paint(mut self, enabled: bool) -> Self {
         self.0.style.css_paint = enabled;
         self
@@ -1828,6 +1844,12 @@ impl<Message> Component<Message> for Header<Message> {
 pub struct Container<Message = String>(Element<Message>);
 
 impl<Message> Container<Message> {
+    pub fn part_interaction_paints(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.parent_interaction = true;
+        self.0.style.interaction_paints = Some(Box::new(paints));
+        self
+    }
+
     pub fn css_paint(mut self, enabled: bool) -> Self {
         self.0.style.css_paint = enabled;
         self
@@ -3289,7 +3311,7 @@ impl<Message> Component<Message> for Slider<Message> {
     }
 }
 
-/// Typed presentation for one native select part. Geometry is shared by paint,
+/// Typed presentation for a native compound-control part. Geometry is shared by paint,
 /// hit testing and accessibility; a CSS compiler can leave every paint absent.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DropdownPartStyle {
@@ -3301,6 +3323,8 @@ pub struct DropdownPartStyle {
     /// Hover, pressed and focused backgrounds supplied by CSS.
     pub interaction_backgrounds: [Option<Color>; 3],
     pub interaction_paints: [InteractionPaint; 3],
+    /// Foreground, font size and line height inheritance from the owning control.
+    pub inherited_text: [bool; 3],
     pub foreground: Option<Color>,
     pub border_color: Option<Color>,
     pub border_width: f32,
@@ -3310,6 +3334,19 @@ pub struct DropdownPartStyle {
 }
 
 impl DropdownPartStyle {
+    pub(crate) fn inherited_paint(mut self, paint: InteractionPaint) -> Self {
+        if self.inherited_text[0] {
+            self.foreground = paint.foreground.or(self.foreground);
+        }
+        if self.inherited_text[1] {
+            self.font_size = paint.font_size.unwrap_or(self.font_size);
+        }
+        if self.inherited_text[2] {
+            self.line_height = paint.line_height.unwrap_or(self.line_height);
+        }
+        self
+    }
+
     pub(crate) fn with_interaction(mut self, index: usize) -> Self {
         let paint = self.interaction_paints[index];
         self.background = paint
@@ -3325,7 +3362,7 @@ impl DropdownPartStyle {
         self
     }
 
-    fn bounded(mut self) -> Self {
+    pub(crate) fn bounded(mut self) -> Self {
         let bound = |value: f32| {
             if value.is_finite() {
                 value.clamp(0.0, 4096.0)

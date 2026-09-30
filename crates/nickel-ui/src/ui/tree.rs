@@ -24,6 +24,7 @@ struct HitRegion<Message> {
     id: UiId,
     rect: Rect,
     target_bounds: Rect,
+    value_bounds: Option<Rect>,
     message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
     seeded_value_mapper: Option<fn(Message, f32) -> Message>,
@@ -843,6 +844,7 @@ impl<Message: Clone> UiFrame<Message> {
             let mut text_bounds =
                 item_rect.inset(part.map_or(menu.item_padding, |part| part.padding));
             if let Some(parts) = &item.presentation {
+                let mut parts = **parts;
                 let mut style = parts[0];
                 let index = if interaction.pressed {
                     Some(1)
@@ -855,6 +857,11 @@ impl<Message: Clone> UiFrame<Message> {
                 };
                 if let Some(index) = index {
                     style = style.with_interaction(index);
+                    for part in &mut parts[1..] {
+                        *part = part
+                            .inherited_paint(style.interaction_paints[index])
+                            .with_interaction(index);
+                    }
                 }
                 emission::paint_dropdown_part(
                     &mut self.commands,
@@ -1029,6 +1036,7 @@ impl<Message: Clone> UiFrame<Message> {
                 id: id.clone(),
                 rect: item_rect,
                 target_bounds: item_rect,
+                value_bounds: None,
                 message: item.action.clone(),
                 message_mapper: None,
                 seeded_value_mapper: None,
@@ -2610,8 +2618,9 @@ impl<Message: Clone> UiFrame<Message> {
             .rev()
             .find(|hit| contains(hit.rect, point))
             .and_then(|hit| {
-                let fraction =
-                    ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0);
+                let fraction = ((point.x - hit.value_bounds.unwrap_or(hit.rect).origin.x)
+                    / hit.value_bounds.unwrap_or(hit.rect).size.width.max(1.0))
+                .clamp(0.0, 1.0);
                 Some((hit.message.as_ref()?, fraction))
             })
     }
@@ -2622,8 +2631,9 @@ impl<Message: Clone> UiFrame<Message> {
             .rev()
             .find(|hit| contains(hit.rect, point))
             .and_then(|hit| {
-                let fraction =
-                    ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0);
+                let fraction = ((point.x - hit.value_bounds.unwrap_or(hit.rect).origin.x)
+                    / hit.value_bounds.unwrap_or(hit.rect).size.width.max(1.0))
+                .clamp(0.0, 1.0);
                 hit.message.as_ref().and_then(|message| {
                     map_value(
                         message,
@@ -2644,15 +2654,19 @@ impl<Message: Clone> UiFrame<Message> {
             .iter()
             .rev()
             .find(|hit| hit.message.as_ref() == Some(message))
-            .map(|hit| ((x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0))
+            .map(|hit| {
+                ((x - hit.value_bounds.unwrap_or(hit.rect).origin.x)
+                    / hit.value_bounds.unwrap_or(hit.rect).size.width.max(1.0))
+                .clamp(0.0, 1.0)
+            })
     }
 
     pub fn horizontal_fraction_for_id(&self, id: &UiId, x: f32) -> Option<f32> {
-        self.hits
-            .iter()
-            .rev()
-            .find(|hit| &hit.id == id)
-            .map(|hit| ((x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0))
+        self.hits.iter().rev().find(|hit| &hit.id == id).map(|hit| {
+            ((x - hit.value_bounds.unwrap_or(hit.rect).origin.x)
+                / hit.value_bounds.unwrap_or(hit.rect).size.width.max(1.0))
+            .clamp(0.0, 1.0)
+        })
     }
 
     pub fn horizontal_fraction_for_matching(
@@ -2664,7 +2678,11 @@ impl<Message: Clone> UiFrame<Message> {
             .iter()
             .rev()
             .find(|hit| hit.message.as_ref().is_some_and(&predicate))
-            .map(|hit| ((x - hit.rect.origin.x) / hit.rect.size.width.max(1.0)).clamp(0.0, 1.0))
+            .map(|hit| {
+                ((x - hit.value_bounds.unwrap_or(hit.rect).origin.x)
+                    / hit.value_bounds.unwrap_or(hit.rect).size.width.max(1.0))
+                .clamp(0.0, 1.0)
+            })
     }
 
     pub fn messages_intersecting(&self, rect: Rect) -> Vec<&Message> {
@@ -2972,8 +2990,9 @@ impl<Message: Clone> UiFrame<Message> {
                     && let Some(hit) = self.hits.iter().rev().find(|hit| &hit.id == captured)
                     && let Some(seed) = hit.message.as_ref()
                 {
-                    let fraction = ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0))
-                        .clamp(0.0, 1.0);
+                    let fraction = ((point.x - hit.value_bounds.unwrap_or(hit.rect).origin.x)
+                        / hit.value_bounds.unwrap_or(hit.rect).size.width.max(1.0))
+                    .clamp(0.0, 1.0);
                     if let Some(message) =
                         map_value(seed, hit.message_mapper, hit.seeded_value_mapper, fraction)
                     {
@@ -5615,33 +5634,89 @@ pub(super) fn measure_element<Message>(
                 _ => intrinsic,
             }
         }
+        Kind::Slider {
+            presentation: Some(parts),
+            ..
+        } if element.style.css_paint => Size::new(
+            parts
+                .iter()
+                .map(|part| part.width + part.margin.width())
+                .fold(0.0, f32::max),
+            parts
+                .iter()
+                .map(|part| part.height + part.margin.height())
+                .fold(0.0, f32::max),
+        ),
         Kind::Slider { .. } => Size::new(120.0, 24.0),
         Kind::Dropdown {
             selected,
             options,
             expanded,
             overlay,
+            presentation,
+            option_presentations,
+            resolved_options,
             ..
         } => {
-            let width = std::iter::once(selected)
-                .chain(options)
-                .map(|label| {
-                    measure_text(label, 2.0, false, false, None, Some(1), f32::INFINITY).width
-                })
-                .fold(0.0_f32, f32::max)
-                + 48.0;
-            Size::new(
-                width,
-                if *overlay {
-                    30.0
+            if let Some(parts) = presentation {
+                let header = &parts[0];
+                let text_width = if header.font_size > 0.0 {
+                    measure_text(
+                        selected,
+                        -header.font_size,
+                        false,
+                        false,
+                        None,
+                        Some(1),
+                        f32::INFINITY,
+                    )
+                    .width
                 } else {
-                    42.0 + if *expanded {
-                        options.len() as f32 * 36.0
+                    0.0
+                };
+                let width = if header.width > 0.0 {
+                    header.width
+                } else {
+                    text_width + header.padding.width() + parts[2].width + parts[2].margin.width()
+                };
+                let options_height = if *expanded && !*overlay {
+                    (0..options.len())
+                        .map(|index| {
+                            resolved_options
+                                .get(index)
+                                .or_else(|| option_presentations.get(index))
+                                .unwrap_or(&parts[1])
+                        })
+                        .map(|part| part.height + part.margin.height())
+                        .sum()
+                } else {
+                    0.0
+                };
+                Size::new(
+                    width + header.margin.width(),
+                    header.height + header.margin.height() + options_height,
+                )
+            } else {
+                let width = std::iter::once(selected)
+                    .chain(options)
+                    .map(|label| {
+                        measure_text(label, 2.0, false, false, None, Some(1), f32::INFINITY).width
+                    })
+                    .fold(0.0_f32, f32::max)
+                    + 48.0;
+                Size::new(
+                    width,
+                    if *overlay {
+                        30.0
                     } else {
-                        0.0
-                    }
-                },
-            )
+                        42.0 + if *expanded {
+                            options.len() as f32 * 36.0
+                        } else {
+                            0.0
+                        }
+                    },
+                )
+            }
         }
         Kind::Layer => element
             .children

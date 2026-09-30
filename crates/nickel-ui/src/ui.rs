@@ -971,6 +971,10 @@ pub struct Style {
     /// Presentation compilers may supply complete focus cues explicitly.
     pub automatic_focus_tint: bool,
     pub css_paint: bool,
+    /// Whether foreground, font size and line height inherit owner state paint.
+    pub inherited_state_text: [bool; 3],
+    /// Decorative compound parts follow owner state without becoming input targets.
+    pub parent_interaction: bool,
     pub auto_focus: bool,
     pub editing_parts: Option<Box<[DropdownPartStyle; 2]>>,
     pub editing_menu: Option<Box<crate::OverlayMenuPresentation>>,
@@ -1045,6 +1049,8 @@ impl Default for Style {
             focus_background_tint: None,
             automatic_focus_tint: true,
             css_paint: false,
+            inherited_state_text: [false; 3],
+            parent_interaction: false,
             auto_focus: false,
             editing_parts: None,
             editing_menu: None,
@@ -2013,6 +2019,25 @@ impl<Message> Component<Message> for AnyView<Message> {
 /// extension methods fill in the same typed style and identity surface for
 /// components that do not need a specialized return type.
 pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
+    /// Apply a compiler-owned frame without changing the native component behavior.
+    fn css_frame(self, frame: DropdownPartStyle) -> Element<Message> {
+        let frame = frame.bounded();
+        let mut element = self.into_element();
+        element.style.css_paint = true;
+        element.style.automatic_focus_tint = false;
+        element.style.background = frame
+            .background
+            .filter(|color| *color != 0)
+            .map(Background::Solid);
+        element.style.foreground = Some(frame.foreground.unwrap_or(0));
+        element.style.border = frame.border_color.filter(|color| *color != 0);
+        element.style.border_width = frame.border_width;
+        element.style.corner_radius = frame.radius;
+        element.style.padding = frame.padding;
+        element.style.interaction_paints = Some(Box::new(frame.interaction_paints));
+        element
+    }
+
     fn id(self, id: impl Into<UiId>) -> Element<Message> {
         self.into_element().id(id)
     }

@@ -120,6 +120,20 @@ fn translate_custom_command(mut command: PaintCommand, origin: Point) -> PaintCo
     command
 }
 
+fn slider_track_rect(content: Rect, style: &DropdownPartStyle) -> Rect {
+    let available = content.inset(style.margin);
+    Rect::new(
+        available.origin.x,
+        available.origin.y + (available.size.height - style.height) / 2.0,
+        if style.width > 0.0 {
+            style.width.min(available.size.width)
+        } else {
+            available.size.width
+        },
+        style.height,
+    )
+}
+
 pub(super) fn emit_element<Message: Clone>(
     element: &Element<Message>,
     node_index: usize,
@@ -128,6 +142,21 @@ pub(super) fn emit_element<Message: Clone>(
 ) {
     let node = tree.resolved.nodes[node_index].clone();
     let rect = node.allocated;
+    let value_bounds = match &element.kind {
+        Kind::Slider {
+            presentation: Some(parts),
+            ..
+        } if element.style.css_paint => {
+            let track = slider_track_rect(node.content, &parts[0]).inset(parts[0].padding);
+            Rect::new(
+                track.origin.x,
+                node.content.origin.y,
+                track.size.width,
+                node.content.size.height,
+            )
+        }
+        _ => rect,
+    };
     if element.focus_message.is_some() || element.blur_message.is_some() {
         tree.focus_messages.push((
             node.id.clone(),
@@ -145,7 +174,7 @@ pub(super) fn emit_element<Message: Clone>(
             tree.messages.push(MessageRegion {
                 id: node.id.clone(),
                 navigation_owner: None,
-                rect,
+                rect: value_bounds,
                 message: message.clone(),
                 message_mapper: element.message_mapper,
                 seeded_value_mapper: element.seeded_value_mapper,
@@ -155,7 +184,7 @@ pub(super) fn emit_element<Message: Clone>(
             tree.context_messages.push(MessageRegion {
                 id: node.id.clone(),
                 navigation_owner: None,
-                rect,
+                rect: value_bounds,
                 message: message.clone(),
                 message_mapper: None,
                 seeded_value_mapper: None,
@@ -238,7 +267,7 @@ pub(super) fn emit_element<Message: Clone>(
         tree.messages.push(MessageRegion {
             id: node.id.clone(),
             navigation_owner: None,
-            rect,
+            rect: value_bounds,
             message: message.clone(),
             message_mapper: element.message_mapper,
             seeded_value_mapper: element.seeded_value_mapper,
@@ -254,6 +283,7 @@ pub(super) fn emit_element<Message: Clone>(
                 id: node.id.clone(),
                 rect: hit_rect,
                 target_bounds: rect,
+                value_bounds: (value_bounds != rect).then_some(value_bounds),
                 message: Some(message.clone()),
                 message_mapper: element.message_mapper,
                 seeded_value_mapper: element.seeded_value_mapper,
@@ -277,6 +307,7 @@ pub(super) fn emit_element<Message: Clone>(
             id: node.id.clone(),
             rect: hit_rect,
             target_bounds: rect,
+            value_bounds: None,
             message: None,
             message_mapper: None,
             seeded_value_mapper: None,
@@ -289,7 +320,7 @@ pub(super) fn emit_element<Message: Clone>(
         tree.context_messages.push(MessageRegion {
             id: node.id.clone(),
             navigation_owner: None,
-            rect,
+            rect: value_bounds,
             message: message.clone(),
             message_mapper: None,
             seeded_value_mapper: None,
@@ -306,6 +337,7 @@ pub(super) fn emit_element<Message: Clone>(
                 id: node.id.clone(),
                 rect: hit_rect,
                 target_bounds: rect,
+                value_bounds: (value_bounds != rect).then_some(value_bounds),
                 message: None,
                 message_mapper: None,
                 seeded_value_mapper: None,
@@ -374,6 +406,7 @@ pub(super) fn emit_element<Message: Clone>(
                 id: node.id.clone(),
                 rect: hit_rect,
                 target_bounds: rect,
+                value_bounds: (value_bounds != rect).then_some(value_bounds),
                 message: None,
                 message_mapper: None,
                 seeded_value_mapper: None,
@@ -594,6 +627,7 @@ pub(super) fn emit_element<Message: Clone>(
                             id: link_id.clone(),
                             rect: glyph.rect,
                             target_bounds: glyph.rect,
+                            value_bounds: None,
                             message: Some(message.clone()),
                             message_mapper: None,
                             seeded_value_mapper: None,
@@ -662,17 +696,7 @@ pub(super) fn emit_element<Message: Clone>(
         } => {
             if let Some(parts) = presentation {
                 let track_style = &parts[0];
-                let available = rect.inset(track_style.margin);
-                let track_rect = Rect::new(
-                    available.origin.x,
-                    available.origin.y + (available.size.height - track_style.height) / 2.0,
-                    if track_style.width > 0.0 {
-                        track_style.width.min(available.size.width)
-                    } else {
-                        available.size.width
-                    },
-                    track_style.height,
-                );
+                let track_rect = slider_track_rect(node.content, track_style);
                 paint_dropdown_part(
                     &mut tree.commands,
                     track_rect,
@@ -701,7 +725,7 @@ pub(super) fn emit_element<Message: Clone>(
                     TextAlign::Start,
                 );
                 let thumb_style = &parts[2];
-                let thumb_available = rect.inset(thumb_style.margin);
+                let thumb_available = node.content.inset(thumb_style.margin);
                 let width = thumb_style.width.min(thumb_available.size.width);
                 let height = thumb_style.height.min(thumb_available.size.height);
                 let x = (content.origin.x + content.size.width * value.clamp(0.0, 1.0)
@@ -802,6 +826,7 @@ pub(super) fn emit_element<Message: Clone>(
             resolved_options,
             ..
         } => {
+            let rect = node.content;
             let header_height = presentation
                 .as_ref()
                 .map_or(if *overlay { 30.0 } else { 42.0 }, |parts| {
@@ -844,9 +869,13 @@ pub(super) fn emit_element<Message: Clone>(
                 }
             };
             let header = Rect::new(rect.origin.x, rect.origin.y, rect.size.width, header_height);
-            let header = presentation
-                .as_ref()
-                .map_or(header, |parts| header.inset(parts[0].margin));
+            let header = presentation.as_ref().map_or(header, |parts| {
+                let mut header = header.inset(parts[0].margin);
+                if parts[0].width > 0.0 {
+                    header.size.width = header.size.width.min(parts[0].width);
+                }
+                header
+            });
             if let Some(parts) = presentation {
                 paint_dropdown_part(
                     &mut tree.commands,
@@ -1032,6 +1061,7 @@ pub(super) fn emit_element<Message: Clone>(
                             id: option_id,
                             rect: hit_rect,
                             target_bounds: option_rect,
+                            value_bounds: None,
                             message,
                             message_mapper: None,
                             seeded_value_mapper: None,

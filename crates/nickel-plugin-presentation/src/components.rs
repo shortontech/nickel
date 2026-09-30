@@ -406,6 +406,7 @@ fn dropdown_part(style: &ControlStyle) -> DropdownPartStyle {
         background: style.background.filter(|color| *color != 0),
         interaction_backgrounds: [None; 3],
         interaction_paints: [nickel_ui::InteractionPaint::default(); 3],
+        inherited_text: style.inherited_text,
         foreground: style.color.filter(|color| *color != 0),
         border_color: style.border_color.filter(|color| *color != 0),
         border_width: style.border_width.unwrap_or(0.0),
@@ -413,6 +414,30 @@ fn dropdown_part(style: &ControlStyle) -> DropdownPartStyle {
         font_size: style.font_size.unwrap_or(0.0),
         line_height: style.line_height.unwrap_or(0.0),
     }
+}
+
+fn interaction_paints(
+    stylesheet: &StyleSheet,
+    kind: &str,
+    id: &str,
+    class_name: Option<&str>,
+    style: &ControlStyle,
+) -> [nickel_ui::InteractionPaint; 3] {
+    [
+        InteractionState::Hover,
+        InteractionState::Active,
+        InteractionState::Focus,
+    ]
+    .map(|state| {
+        stylesheet.resolve_interaction_paint(
+            kind,
+            Some(id),
+            class_name,
+            state,
+            &style.custom_properties,
+            &style.ancestors[..style.ancestors.len().saturating_sub(1)],
+        )
+    })
 }
 
 fn apply_control_interactions<Message>(
@@ -521,7 +546,19 @@ fn with_margin<Message: Clone>(view: AnyView<Message>, style: &ControlStyle) -> 
 }
 
 fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<Message> {
-    text = text.css_paint(true).color(style.color.unwrap_or(0));
+    let inherits = if style
+        .ancestors
+        .last()
+        .is_some_and(|ancestor| ancestor.0 == "button")
+    {
+        [true; 3]
+    } else {
+        style.inherited_text
+    };
+    text = text
+        .css_paint(true)
+        .inherited_state_text(inherits)
+        .color(style.color.unwrap_or(0));
     if let Some(font_size) = style.font_size {
         text = text.font_size(font_size);
     }
@@ -552,6 +589,11 @@ impl InheritedTextStyle {
     }
 
     fn apply(&self, mut style: ControlStyle) -> ControlStyle {
+        style.inherited_text = [
+            style.color.is_none(),
+            style.font_size.is_none(),
+            style.line_height.is_none(),
+        ];
         style.color = style.color.or(self.color);
         style.font_size = style.font_size.or(self.font_size);
         style.line_height = style.line_height.or(self.line_height);
@@ -2072,11 +2114,13 @@ impl PanelNode {
                 &inherited.ancestors,
             )
         });
-        item.presentation = Some(Box::new([
-            frame,
-            dropdown_part(&shortcut),
-            dropdown_part(&indicator),
-        ]));
+        let mut shortcut_part = dropdown_part(&shortcut);
+        shortcut_part.interaction_paints =
+            interaction_paints(stylesheet, "menu-shortcut", id, Some(&classes), &shortcut);
+        let mut indicator_part = dropdown_part(&indicator);
+        indicator_part.interaction_paints =
+            interaction_paints(stylesheet, "menu-indicator", id, Some(&classes), &indicator);
+        item.presentation = Some(Box::new([frame, shortcut_part, indicator_part]));
         for (source, target) in children.iter().zip(&mut item.children) {
             source.style_menu_item(target, stylesheet, &nested, Some(&classes));
         }
@@ -2152,6 +2196,312 @@ impl PanelNode {
             InheritedTextStyle::default(),
             slots,
         )
+    }
+
+    // Keep compound builders outside the recursive renderer to bound its stack frame.
+    fn view_slider<Message: PluginUiMessage>(
+        &self,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+    ) -> AnyView<Message> {
+        let Self::Slider {
+            id,
+            class_name,
+            value,
+            label,
+            action,
+        } = self
+        else {
+            unreachable!()
+        };
+        let style = inherited.resolve(stylesheet, "slider", Some(id), class_name.as_deref());
+        let parts = inherited.extend(&style);
+        let track_style =
+            parts.resolve(stylesheet, "slider-track", Some(id), class_name.as_deref());
+        let fill_style = parts.resolve(stylesheet, "slider-fill", Some(id), class_name.as_deref());
+        let thumb_style =
+            parts.resolve(stylesheet, "slider-thumb", Some(id), class_name.as_deref());
+        let mut frame = dropdown_part(&style);
+        frame.interaction_paints =
+            interaction_paints(stylesheet, "slider", id, class_name.as_deref(), &style);
+        let part = |kind: &str, style: &ControlStyle| {
+            let mut part = dropdown_part(style);
+            part.interaction_paints =
+                interaction_paints(stylesheet, kind, id, class_name.as_deref(), style);
+            part
+        };
+        let slider = Slider::on_change_with(
+            Message::from_plugin_scoped(PluginMessage::Value(*action, *value), scope),
+            Message::value,
+            *value,
+        )
+        .id(id.clone())
+        .automatic_focus_tint(false)
+        .parts(
+            part("slider-track", &track_style),
+            part("slider-fill", &fill_style),
+            part("slider-thumb", &thumb_style),
+        );
+        let mut slider = slider
+            .accessibility_label(label.clone())
+            .css_frame(frame)
+            .width_length(style.width.unwrap_or(Length::Auto))
+            .height_length(style.height.unwrap_or(Length::Auto))
+            .grow(style.grow.unwrap_or(0.0));
+        if let Some(value) = style.min_width {
+            slider = slider.min_width(value);
+        }
+        if let Some(value) = style.max_width {
+            slider = slider.max_width(value);
+        }
+        if let Some(value) = style.min_height {
+            slider = slider.min_height(value);
+        }
+        if let Some(value) = style.max_height {
+            slider = slider.max_height(value);
+        }
+        if let Some(value) = style.shrink {
+            slider = slider.shrink(value);
+        }
+        if let Some(value) = style.basis {
+            slider = slider.basis(value);
+        }
+        with_margin(AnyView::new(slider), &style)
+    }
+
+    fn view_select<Message: PluginUiMessage>(
+        &self,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+    ) -> AnyView<Message> {
+        let Self::Select {
+            id,
+            class_name,
+            label,
+            value,
+            open,
+            action,
+            options,
+        } = self
+        else {
+            unreachable!()
+        };
+        let style = inherited.resolve(stylesheet, "select", Some(id), class_name.as_deref());
+        let parts = inherited.extend(&style);
+        let header_style = parts.apply(parts.resolve(
+            stylesheet,
+            "select-header",
+            Some(id),
+            class_name.as_deref(),
+        ));
+        let option_style =
+            parts.apply(parts.resolve(stylesheet, "option", Some(id), class_name.as_deref()));
+        let indicator_style = parts.apply(parts.resolve(
+            stylesheet,
+            "select-indicator",
+            Some(id),
+            class_name.as_deref(),
+        ));
+        let with_interactions = |kind: &str, control: &ControlStyle, target_id: &str| {
+            let mut part = dropdown_part(control);
+            part.interaction_backgrounds = [
+                crate::css::InteractionState::Hover,
+                crate::css::InteractionState::Active,
+                crate::css::InteractionState::Focus,
+            ]
+            .map(|state| {
+                stylesheet.resolve_interaction_background_with_properties(
+                    kind,
+                    Some(target_id),
+                    control
+                        .ancestors
+                        .last()
+                        .and_then(|ancestor| ancestor.2.as_deref()),
+                    state,
+                    &control.custom_properties,
+                    &control.ancestors[..control.ancestors.len().saturating_sub(1)],
+                )
+            });
+            part.interaction_paints = [
+                crate::css::InteractionState::Hover,
+                crate::css::InteractionState::Active,
+                crate::css::InteractionState::Focus,
+            ]
+            .map(|state| {
+                stylesheet.resolve_interaction_paint(
+                    kind,
+                    Some(target_id),
+                    control
+                        .ancestors
+                        .last()
+                        .and_then(|ancestor| ancestor.2.as_deref()),
+                    state,
+                    &control.custom_properties,
+                    &control.ancestors[..control.ancestors.len().saturating_sub(1)],
+                )
+            });
+            part
+        };
+        let select = Dropdown::new(
+            Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
+            value,
+            options.iter().map(|(_, label, action, _)| {
+                (
+                    label.as_str(),
+                    Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
+                )
+            }),
+        )
+        .id(id.clone())
+        .accessibility_label(label)
+        .overlay(true)
+        .expanded(*open)
+        .parts(
+            with_interactions("select-header", &header_style, id),
+            with_interactions("option", &option_style, id),
+            with_interactions("select-indicator", &indicator_style, id),
+        )
+        .option_parts(options.iter().map(|(option_id, _, _, option_class)| {
+            let classes = format!(
+                "{} {}",
+                class_name.as_deref().unwrap_or(""),
+                option_class.as_deref().unwrap_or("")
+            );
+            let option =
+                parts.apply(parts.resolve(stylesheet, "option", Some(option_id), Some(&classes)));
+            with_interactions("option", &option, option_id)
+        }));
+        let mut frame = dropdown_part(&style);
+        frame.interaction_paints =
+            interaction_paints(stylesheet, "select", id, class_name.as_deref(), &style);
+        let mut select = select
+            .css_frame(frame)
+            .width_length(style.width.unwrap_or(Length::Auto))
+            .height_length(style.height.unwrap_or(Length::Auto))
+            .grow(style.grow.unwrap_or(0.0));
+        if let Some(value) = style.min_width {
+            select = select.min_width(value);
+        }
+        if let Some(value) = style.max_width {
+            select = select.max_width(value);
+        }
+        if let Some(value) = style.min_height {
+            select = select.min_height(value);
+        }
+        if let Some(value) = style.max_height {
+            select = select.max_height(value);
+        }
+        if let Some(value) = style.shrink {
+            select = select.shrink(value);
+        }
+        if let Some(value) = style.basis {
+            select = select.basis(value);
+        }
+        with_margin(AnyView::new(select), &style)
+    }
+
+    fn view_colorswatch<Message: PluginUiMessage>(
+        &self,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+    ) -> AnyView<Message> {
+        let Self::ColorSwatch {
+            id,
+            class_name,
+            color,
+            selected,
+            label,
+            action,
+        } = self
+        else {
+            unreachable!()
+        };
+        let state_classes = format!(
+            "{} {}",
+            class_name.as_deref().unwrap_or(""),
+            if *selected { "selected" } else { "unselected" }
+        );
+        let class_name = Some(state_classes);
+        let style = inherited.resolve(stylesheet, "color-swatch", Some(id), class_name.as_deref());
+        let parts = inherited.extend(&style);
+        let inner = if let Some(color) = color {
+            let fill_style = parts.resolve(
+                stylesheet,
+                "color-swatch-fill",
+                Some(id),
+                class_name.as_deref(),
+            );
+            let fill = apply_container_style(Container::new(), &fill_style)
+                .part_interaction_paints(interaction_paints(
+                    stylesheet,
+                    "color-swatch-fill",
+                    id,
+                    class_name.as_deref(),
+                    &fill_style,
+                ));
+            // The swatch color is semantic data, like an image source.
+            AnyView::new(if *color == 0 {
+                fill.clear_background()
+            } else {
+                fill.background(*color)
+            })
+        } else {
+            let label_style = parts.apply(parts.resolve(
+                stylesheet,
+                "color-swatch-label",
+                Some(id),
+                class_name.as_deref(),
+            ));
+            let text = styled_text(Text::new("+"), &label_style).part_interaction_text(
+                interaction_paints(
+                    stylesheet,
+                    "color-swatch-label",
+                    id,
+                    class_name.as_deref(),
+                    &label_style,
+                ),
+            );
+            with_margin(
+                AnyView::new(
+                    apply_container_style(Container::new(), &label_style)
+                        .part_interaction_paints(interaction_paints(
+                            stylesheet,
+                            "color-swatch-label",
+                            id,
+                            class_name.as_deref(),
+                            &label_style,
+                        ))
+                        .child(text),
+                ),
+                &label_style,
+            )
+        };
+        let control = Container::new()
+            .id(id.clone())
+            .semantic_role(if color.is_some() {
+                SemanticRole::Radio
+            } else {
+                SemanticRole::Button
+            })
+            .accessibility_label(label)
+            .accessibility_state(if *selected { "selected" } else { "unselected" })
+            .message(Message::from_plugin_scoped(
+                PluginMessage::Click(*action),
+                scope,
+            ))
+            .child(inner);
+        let control = apply_control_interactions(
+            control,
+            &style,
+            stylesheet,
+            "color-swatch",
+            id,
+            class_name.as_deref(),
+        );
+        with_margin(AnyView::new(apply_container_style(control, &style)), &style)
     }
 
     fn view_as_scoped_with_slots<Message: PluginUiMessage>(
@@ -2724,45 +3074,7 @@ impl PanelNode {
                     &style,
                 )
             }
-            Self::Slider {
-                id,
-                class_name,
-                value,
-                label,
-                action,
-            } => {
-                let style =
-                    inherited.resolve(stylesheet, "slider", Some(id), class_name.as_deref());
-                let parts = inherited.extend(&style);
-                let track_style =
-                    parts.resolve(stylesheet, "slider-track", Some(id), class_name.as_deref());
-                let fill_style =
-                    parts.resolve(stylesheet, "slider-fill", Some(id), class_name.as_deref());
-                let thumb_style =
-                    parts.resolve(stylesheet, "slider-thumb", Some(id), class_name.as_deref());
-                let slider = Slider::on_change_with(
-                    Message::from_plugin_scoped(PluginMessage::Value(*action, *value), scope),
-                    Message::value,
-                    *value,
-                )
-                .id(id.clone())
-                .height_length(Length::Percent(1.0))
-                .width_length(Length::Percent(1.0))
-                .automatic_focus_tint(false)
-                .parts(
-                    dropdown_part(&track_style),
-                    dropdown_part(&fill_style),
-                    dropdown_part(&thumb_style),
-                );
-                let slider = slider.accessibility_label(label.clone());
-                with_margin(
-                    AnyView::new(apply_container_style(
-                        Container::new().child(slider),
-                        &style,
-                    )),
-                    &style,
-                )
-            }
+            Self::Slider { .. } => self.view_slider(stylesheet, scope, inherited),
             Self::Switch {
                 id,
                 class_name,
@@ -2789,6 +3101,11 @@ impl PanelNode {
                     parts.resolve(stylesheet, "switch-track", Some(id), class_name.as_deref());
                 let thumb_style =
                     parts.resolve(stylesheet, "switch-thumb", Some(id), class_name.as_deref());
+                let part = |kind: &str, style: &ControlStyle| {
+                    apply_container_style(Container::new(), style).part_interaction_paints(
+                        interaction_paints(stylesheet, kind, id, class_name.as_deref(), style),
+                    )
+                };
                 let track = if checkbox {
                     let box_style =
                         parts.resolve(stylesheet, "checkbox-box", Some(id), class_name.as_deref());
@@ -2800,9 +3117,9 @@ impl PanelNode {
                     ));
                     with_margin(
                         AnyView::new(
-                            apply_container_style(Container::new(), &box_style).child(with_margin(
+                            part("checkbox-box", &box_style).child(with_margin(
                                 AnyView::new(
-                                    apply_container_style(Container::new(), &mark_style).child(
+                                    part("checkbox-mark", &mark_style).child(
                                         styled_text(
                                             Text::new(if mixed {
                                                 "−"
@@ -2813,7 +3130,14 @@ impl PanelNode {
                                             })
                                             .color(0),
                                             &mark_style,
-                                        ),
+                                        )
+                                        .part_interaction_text(interaction_paints(
+                                            stylesheet,
+                                            "checkbox-mark",
+                                            id,
+                                            class_name.as_deref(),
+                                            &mark_style,
+                                        )),
                                     ),
                                 ),
                                 &mark_style,
@@ -2824,7 +3148,7 @@ impl PanelNode {
                 } else {
                     with_margin(
                         AnyView::new(
-                            apply_container_style(Container::new(), &track_style).child(
+                            part("switch-track", &track_style).child(
                                 Row::new()
                                     .fill_width()
                                     .justify_content(if mixed {
@@ -2835,10 +3159,7 @@ impl PanelNode {
                                         nickel_ui::Justify::Start
                                     })
                                     .child(with_margin(
-                                        AnyView::new(apply_container_style(
-                                            Container::new(),
-                                            &thumb_style,
-                                        )),
+                                        AnyView::new(part("switch-thumb", &thumb_style)),
                                         &thumb_style,
                                     )),
                             ),
@@ -2878,181 +3199,8 @@ impl PanelNode {
                 }
                 with_margin(AnyView::new(control), &style)
             }
-            Self::Select {
-                id,
-                class_name,
-                label,
-                value,
-                open,
-                action,
-                options,
-            } => {
-                let style =
-                    inherited.resolve(stylesheet, "select", Some(id), class_name.as_deref());
-                let parts = inherited.extend(&style);
-                let header_style = parts.apply(parts.resolve(
-                    stylesheet,
-                    "select-header",
-                    Some(id),
-                    class_name.as_deref(),
-                ));
-                let option_style = parts.apply(parts.resolve(
-                    stylesheet,
-                    "option",
-                    Some(id),
-                    class_name.as_deref(),
-                ));
-                let indicator_style = parts.apply(parts.resolve(
-                    stylesheet,
-                    "select-indicator",
-                    Some(id),
-                    class_name.as_deref(),
-                ));
-                let with_interactions = |kind: &str, control: &ControlStyle, target_id: &str| {
-                    let mut part = dropdown_part(control);
-                    part.interaction_backgrounds = [
-                        crate::css::InteractionState::Hover,
-                        crate::css::InteractionState::Active,
-                        crate::css::InteractionState::Focus,
-                    ]
-                    .map(|state| {
-                        stylesheet.resolve_interaction_background_with_properties(
-                            kind,
-                            Some(target_id),
-                            control
-                                .ancestors
-                                .last()
-                                .and_then(|ancestor| ancestor.2.as_deref()),
-                            state,
-                            &control.custom_properties,
-                            &control.ancestors[..control.ancestors.len().saturating_sub(1)],
-                        )
-                    });
-                    part.interaction_paints = [
-                        crate::css::InteractionState::Hover,
-                        crate::css::InteractionState::Active,
-                        crate::css::InteractionState::Focus,
-                    ]
-                    .map(|state| {
-                        stylesheet.resolve_interaction_paint(
-                            kind,
-                            Some(target_id),
-                            control
-                                .ancestors
-                                .last()
-                                .and_then(|ancestor| ancestor.2.as_deref()),
-                            state,
-                            &control.custom_properties,
-                            &control.ancestors[..control.ancestors.len().saturating_sub(1)],
-                        )
-                    });
-                    part
-                };
-                let select = Dropdown::new(
-                    Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
-                    value,
-                    options.iter().map(|(_, label, action, _)| {
-                        (
-                            label.as_str(),
-                            Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
-                        )
-                    }),
-                )
-                .id(id.clone())
-                .accessibility_label(label)
-                .overlay(true)
-                .expanded(*open)
-                .parts(
-                    with_interactions("select-header", &header_style, id),
-                    with_interactions("option", &option_style, id),
-                    dropdown_part(&indicator_style),
-                )
-                .option_parts(options.iter().map(
-                    |(option_id, _, _, option_class)| {
-                        let classes = format!(
-                            "{} {}",
-                            class_name.as_deref().unwrap_or(""),
-                            option_class.as_deref().unwrap_or("")
-                        );
-                        let option = parts.apply(parts.resolve(
-                            stylesheet,
-                            "option",
-                            Some(option_id),
-                            Some(&classes),
-                        ));
-                        with_interactions("option", &option, option_id)
-                    },
-                ));
-                let container = Container::new().child(select);
-                with_margin(
-                    AnyView::new(apply_container_style(container, &style)),
-                    &style,
-                )
-            }
-            Self::ColorSwatch {
-                id,
-                class_name,
-                color,
-                selected,
-                label,
-                action,
-            } => {
-                let state_classes = format!(
-                    "{} {}",
-                    class_name.as_deref().unwrap_or(""),
-                    if *selected { "selected" } else { "unselected" }
-                );
-                let class_name = Some(state_classes);
-                let style =
-                    inherited.resolve(stylesheet, "color-swatch", Some(id), class_name.as_deref());
-                let parts = inherited.extend(&style);
-                let inner = if let Some(color) = color {
-                    let fill_style = parts.resolve(
-                        stylesheet,
-                        "color-swatch-fill",
-                        Some(id),
-                        class_name.as_deref(),
-                    );
-                    let fill = apply_container_style(Container::new(), &fill_style);
-                    // The swatch color is semantic data, like an image source.
-                    AnyView::new(if *color == 0 {
-                        fill.clear_background()
-                    } else {
-                        fill.background(*color)
-                    })
-                } else {
-                    let label_style = parts.apply(parts.resolve(
-                        stylesheet,
-                        "color-swatch-label",
-                        Some(id),
-                        class_name.as_deref(),
-                    ));
-                    AnyView::new(styled_text(Text::new("+"), &label_style))
-                };
-                let control = Container::new()
-                    .id(id.clone())
-                    .semantic_role(if color.is_some() {
-                        SemanticRole::Radio
-                    } else {
-                        SemanticRole::Button
-                    })
-                    .accessibility_label(label)
-                    .accessibility_state(if *selected { "selected" } else { "unselected" })
-                    .message(Message::from_plugin_scoped(
-                        PluginMessage::Click(*action),
-                        scope,
-                    ))
-                    .child(inner);
-                let control = apply_control_interactions(
-                    control,
-                    &style,
-                    stylesheet,
-                    "color-swatch",
-                    id,
-                    class_name.as_deref(),
-                );
-                with_margin(AnyView::new(apply_container_style(control, &style)), &style)
-            }
+            Self::Select { .. } => self.view_select(stylesheet, scope, inherited),
+            Self::ColorSwatch { .. } => self.view_colorswatch(stylesheet, scope, inherited),
             Self::TextField {
                 id,
                 class_name,
@@ -3226,7 +3374,23 @@ impl PanelNode {
                             &menu_inherited.ancestors,
                         )
                     });
-                    [frame, dropdown_part(&shortcut), dropdown_part(&indicator)]
+                    let mut shortcut_part = dropdown_part(&shortcut);
+                    shortcut_part.interaction_paints = interaction_paints(
+                        stylesheet,
+                        "text-field-menu-shortcut",
+                        id,
+                        Some(&classes),
+                        &shortcut,
+                    );
+                    let mut indicator_part = dropdown_part(&indicator);
+                    indicator_part.interaction_paints = interaction_paints(
+                        stylesheet,
+                        "text-field-menu-indicator",
+                        id,
+                        Some(&classes),
+                        &indicator,
+                    );
+                    [frame, shortcut_part, indicator_part]
                 };
                 let menu = nickel_ui::OverlayMenuPresentation {
                     frame: dropdown_part(&menu_style),
@@ -3842,6 +4006,125 @@ mod compound_css_tests {
     use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
 
     #[test]
+    fn slider_frame_and_parts_use_css_states_and_padded_value_geometry() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"slider","id":"volume","value":0.5,"action":4,"accessibilityLabel":"Volume","children":[]})).unwrap();
+        let sheet = StyleSheet::compile("slider { width: 200px; height: 50px; padding: 10px; margin: 3px; background: #123456; } slider:hover { background: #334455; border: 2px solid #abcdef; border-radius: 8px; } slider:focus { background: transparent; border: 3px solid #fedcba; border-radius: 7px; } slider:active { background: #556677; } slider-track { width: 150px; margin: 0px 5px; padding: 0px 10px; height: 4px; background: #778899; } slider-fill { background: #aabbcc; } slider-thumb { width: 16px; height: 16px; background: #abcdef; } slider-thumb:hover { background: transparent; border: 2px solid #112233; border-radius: 6px; }").unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let build = |state: &mut nickel_ui::UiStateStore| {
+            UiFrame::layout_with_state(
+                node.view(&PluginImages::new(), &sheet),
+                Rect::new(0.0, 0.0, 300.0, 200.0),
+                state,
+            )
+        };
+        let first = build(&mut state);
+        let slider = first
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::Slider))
+            .unwrap();
+        assert_eq!(slider.allocated.size, nickel_ui::Size::new(200.0, 50.0));
+        assert_eq!(slider.content.size, nickel_ui::Size::new(180.0, 30.0));
+        let at = Point {
+            x: slider.content.origin.x + 5.0 + 10.0 + 130.0 * 0.25,
+            y: slider.content.origin.y + 15.0,
+        };
+        assert_eq!(
+            first.message_at_owned(at),
+            Some(PluginMessage::Value(4, 0.25))
+        );
+        first.handle_event(&mut state, nickel_ui::UiEvent::PointerMoved(at));
+        let hover = build(&mut state);
+        assert!(hover.commands().iter().any(|command| matches!(command, PaintCommand::RoundedStroke { color, width, radius, .. } if *color == 0xff112233 && *width == 2.0 && *radius == 6.0)));
+        hover.handle_event(&mut state, nickel_ui::UiEvent::FocusNext);
+        let focus = build(&mut state);
+        assert!(focus.commands().iter().any(|command| matches!(command, PaintCommand::RoundedStroke { rect, color, width, radius } if rect.size.width == 200.0 && *color == 0xfffedcba && *width == 3.0 && *radius == 7.0)));
+        assert!(!focus.commands().iter().any(|command| matches!(command, PaintCommand::Fill { rect, .. } | PaintCommand::RoundedFill { rect, .. } if rect.size.width == 200.0)));
+        focus.handle_event(&mut state, nickel_ui::UiEvent::PointerPressed(at));
+        let dragged = focus.handle_event(&mut state, nickel_ui::UiEvent::PointerMoved(at));
+        assert_eq!(dragged.messages, vec![PluginMessage::Value(4, 0.25)]);
+        let active = build(&mut state);
+        assert!(active.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == 0xff556677)
+        ));
+    }
+
+    #[test]
+    fn decorative_compound_parts_follow_the_native_owner_focus() {
+        let sheet = StyleSheet::compile("checkbox, switch, color-swatch { width: 60px; height: 40px; } checkbox-box { width: 30px; height: 30px; } checkbox-box:focus { background: transparent; border: 2px solid #abcdef; border-radius: 5px; } checkbox-mark { font-size: 14px; line-height: 20px; } checkbox-mark:focus { color: #fedcba; font-size: 22px; line-height: 26px; } switch-track { width: 50px; height: 24px; } switch-track:focus { background: #223344; } switch-thumb { width: 20px; height: 20px; } switch-thumb:focus { background: transparent; border: 3px solid #445566; border-radius: 7px; } color-swatch-label { font-size: 14px; line-height: 20px; } color-swatch-label:focus { color: #aabbcc; font-size: 23px; line-height: 27px; background: #334455; }").unwrap();
+        for (kind, role) in [
+            ("checkbox", SemanticRole::Checkbox),
+            ("switch", SemanticRole::Switch),
+            ("color-swatch", SemanticRole::Button),
+        ] {
+            let node = PanelNode::parse(&serde_json::json!({"kind":kind,"id":"control","state":"on","action":1,"accessibilityLabel":"Control","children":[]})).unwrap();
+            let mut state = nickel_ui::UiStateStore::default();
+            let build = |state: &mut nickel_ui::UiStateStore| {
+                UiFrame::layout_with_state(
+                    Column::new().child(node.view(&PluginImages::new(), &sheet)),
+                    Rect::new(0.0, 0.0, 200.0, 100.0),
+                    state,
+                )
+            };
+            let first = build(&mut state);
+            assert_eq!(
+                first
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.semantic_role == Some(role))
+                    .count(),
+                1
+            );
+            first.handle_event(&mut state, nickel_ui::UiEvent::FocusNext);
+            let focused = build(&mut state);
+            match kind {
+                "checkbox" => {
+                    assert!(focused.commands().iter().any(|command|matches!(command,PaintCommand::RoundedStroke{color,width,radius,..} if *color==0xffabcdef && *width==2.0 && *radius==5.0)));
+                    assert!(focused.commands().iter().any(|command|matches!(command,PaintCommand::Text{text,color,scale,..} if text=="✓" && *color==0xfffedcba && *scale == -22.0)));
+                }
+                "switch" => {
+                    assert!(focused.commands().iter().any(|command|matches!(command,PaintCommand::Fill{color,..} if *color==0xff223344)));
+                    assert!(focused.commands().iter().any(|command|matches!(command,PaintCommand::RoundedStroke{color,width,radius,..} if *color==0xff445566 && *width==3.0 && *radius==7.0)));
+                }
+                _ => {
+                    assert!(focused.commands().iter().any(|command|matches!(command,PaintCommand::Fill{color,..} if *color==0xff334455)));
+                    assert!(focused.commands().iter().any(|command|matches!(command,PaintCommand::Text{text,color,scale,..} if text=="+" && *color==0xffaabbcc && *scale == -23.0)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn select_root_frame_focus_and_padding_reach_native_parts() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"select","id":"choice","value":"One","action":1,"accessibilityLabel":"Choice","children":[{"kind":"option","id":"one","action":2,"children":["One"]}]})).unwrap();
+        let sheet = StyleSheet::compile("select { width: 180px; padding: 5px; background: #123456; } select:focus { background: transparent; color: #fedcba; font-size: 19px; line-height: 24px; border: 2px solid #abcdef; border-radius: 6px; } select-header { height: 30px; width: 140px; } select-indicator { width: 20px; height: 20px; font-size: 10px; } select-indicator:focus { color: #112233; font-size: 17px; line-height: 23px; border: 1px solid #445566; border-radius: 4px; } option { height: 20px; }").unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let build = |state: &mut nickel_ui::UiStateStore| {
+            UiFrame::layout_with_state(
+                Column::new().child(node.view(&PluginImages::new(), &sheet)),
+                Rect::new(0.0, 0.0, 300.0, 200.0),
+                state,
+            )
+        };
+        let first = build(&mut state);
+        let select = first
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.accessibility_label.as_deref() == Some("Choice"))
+            .unwrap();
+        assert_eq!(select.allocated.size, nickel_ui::Size::new(180.0, 40.0));
+        first.handle_event(&mut state, nickel_ui::UiEvent::FocusNext);
+        let focus = build(&mut state);
+        assert!(focus.commands().iter().any(|command| matches!(command, PaintCommand::RoundedStroke { rect, color, radius, .. } if rect.size == nickel_ui::Size::new(180.0,40.0) && *color == 0xffabcdef && *radius == 6.0)));
+        assert!(focus.commands().iter().any(|command| matches!(command, PaintCommand::Text { bounds, scale, text, .. } if text == "One" && bounds.origin.x == 5.0 && bounds.origin.y == 5.0 && bounds.size.width == 140.0 && *scale == -19.0)));
+        assert!(focus.commands().iter().any(|command| matches!(command, PaintCommand::Text { color,scale,text,.. } if text != "One" && *color == 0xff112233 && *scale == -17.0)));
+        assert!(focus.commands().iter().any(|command| matches!(command, PaintCommand::RoundedStroke { color,radius,.. } if *color == 0xff445566 && *radius == 4.0)));
+    }
+
+    #[test]
     fn option_classes_drive_independent_native_geometry_paint_and_hits() {
         let node = PanelNode::parse(&serde_json::json!({"kind":"select","id":"choice","accessibilityLabel":"Choice","value":"Small","action":1,"open":true,"children":[
             {"kind":"option","id":"small","className":"compact","action":2,"children":["Small"]},
@@ -4112,7 +4395,7 @@ mod compound_css_tests {
             "menu { width: 220px; padding: 2px; }
             menu-item { height: 24px; padding: 4px; color: #abcdef; font-size: 14px; }
             menu-item.large { height: 40px; margin: 3px; background: #123456; }
-            menu-shortcut.small { width: 80px; padding: 1px; color: #fedcba; font-size: 7px; }",
+            menu-shortcut.small { width: 80px; padding: 1px; color: #fedcba; font-size: 7px; } menu-shortcut.small:focus { color: #112233; font-size: 19px; line-height: 23px; border: 2px solid #aabbcc; border-radius: 5px; }",
         )
         .unwrap();
         let mut state = nickel_ui::UiStateStore::default();
@@ -4153,7 +4436,8 @@ mod compound_css_tests {
             }),
             Some(&PluginMessage::Click(3))
         );
-        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { text,color,scale,bounds,.. } if text == "Ctrl+S" && *color == 0xfffedcba && *scale == -7.0 && bounds.size.width == 78.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { text,color,scale,bounds,.. } if text == "Ctrl+S" && *color == 0xff112233 && *scale == -19.0 && bounds.size.width == 78.0)));
+        assert!(frame.commands().iter().any(|command|matches!(command,PaintCommand::RoundedStroke{color,width,radius,..} if *color==0xffaabbcc && *width==2.0 && *radius==5.0)));
     }
 
     #[test]
