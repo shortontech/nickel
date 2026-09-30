@@ -194,13 +194,13 @@
                 nickel_ui::UiHost::new(application, grant.width, grant.height),
             ),
         );
-        assert_eq!(shell.plugin_panel_surface.bottom_offset, 24);
+        assert_eq!(shell.plugin_panel_surface().bottom_offset, 24);
         let key = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: shell.plugin_panel_owner.clone(),
+            plugin_id: shell.primary_panel_key.plugin_id.clone(),
             surface_id: grant.id.clone(),
         };
         shell.plugin_panel_scene(&key, grant.width, grant.height);
-        assert_eq!(shell.plugin_panel_surface.bottom_offset, 12);
+        assert_eq!(shell.plugin_panel_surface().bottom_offset, 12);
     }
 
     #[test]
@@ -208,7 +208,7 @@
         let mut shell = LiveShell::new().unwrap();
         let grant = crate::plugin_panel::surface();
         let key = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: shell.plugin_panel_owner.clone(),
+            plugin_id: shell.primary_panel_key.plugin_id.clone(),
             surface_id: grant.id.clone(),
         };
         shell.plugin_surface_hosts.insert(

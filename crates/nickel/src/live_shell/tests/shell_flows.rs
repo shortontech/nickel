@@ -58,7 +58,7 @@
             },
         );
         shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
-        assert_eq!(shell.plugin_panel_owner, package.manifest.id);
+        assert_eq!(shell.primary_panel_key.plugin_id, package.manifest.id);
 
         let mut failing = package.clone();
         failing.source = "function App() { if (nickel.data.slots.metrics) throw Error('provider projection exploded'); return h(Panel, {}, h(Text, {}, 'Ready')); }".into();
@@ -70,7 +70,7 @@
         )
         .unwrap();
         let key = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: shell.plugin_panel_owner.clone(),
+            plugin_id: shell.primary_panel_key.plugin_id.clone(),
             surface_id: surface.id.clone(),
         };
         shell.plugin_surface_hosts.insert(

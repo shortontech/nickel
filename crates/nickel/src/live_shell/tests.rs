@@ -1129,7 +1129,7 @@ fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
         360,
         220,
     ));
-    assert_eq!(shell.plugin_panel_surface.width, 300);
+    assert_eq!(shell.plugin_panel_surface().width, 300);
     assert_eq!(shell.plugin_surface_hosts[&surfaces[0].0].0.width, 300);
     shell
         .plugin_panel_host_ref(&surfaces[0].0)
@@ -1208,15 +1208,15 @@ fn installed_plugin_can_reposition_only_its_open_window() {
         400,
         240,
     ));
-    assert_eq!(shell.plugin_panel_surface.width, 300);
+    assert_eq!(shell.plugin_panel_surface().width, 300);
     assert_eq!(
-        shell.plugin_panel_surface.anchor,
+        shell.plugin_panel_surface().anchor,
         PluginSurfaceAnchor::TopRight
     );
     assert_eq!(
         (
-            shell.plugin_panel_surface.offset_x,
-            shell.plugin_panel_surface.offset_y
+            shell.plugin_panel_surface().offset_x,
+            shell.plugin_panel_surface().offset_y
         ),
         (-24, 24)
     );

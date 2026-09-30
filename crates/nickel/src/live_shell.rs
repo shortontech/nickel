@@ -503,8 +503,7 @@ pub struct LiveShell {
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
     external_plugin_packages:
         std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageDescriptor>,
-    plugin_panel_owner: String,
-    plugin_panel_surface: nickel_core::plugins::PluginSurface,
+    primary_panel_key: nickel_core::plugins::PluginSurfaceKey,
     plugin_activation_generation: u64,
     #[cfg(target_os = "linux")]
     last_published_plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
@@ -1587,8 +1586,7 @@ impl LiveShell {
             plugin_registry,
             plugin_settings,
             external_plugin_packages,
-            plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
-            plugin_panel_surface: crate::plugin_panel::surface().clone(),
+            primary_panel_key: crate::plugin_panel::surface_key(),
             plugin_activation_generation: 1,
             #[cfg(target_os = "linux")]
             last_published_plugin_status: None,
@@ -3074,11 +3072,7 @@ impl LiveShell {
             SurfaceRole::Desktop => true,
             SurfaceRole::Taskbar => self.plugin_taskbar_host.is_some(),
             SurfaceRole::Panel => {
-                self.plugin_taskbar_host.is_some()
-                    || self.primary_panel_host_ref().is_some()
-                    || !self.plugin_surface_hosts.is_empty()
-                    || self.notification_plugin_host_ref().is_some()
-                    || self.control_plugin_host_ref().is_some()
+                self.plugin_taskbar_host.is_some() || !self.plugin_surface_hosts.is_empty()
             }
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible && self.control_surface_available(),
@@ -3198,7 +3192,10 @@ impl LiveShell {
     }
 
     pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
-        &self.plugin_panel_surface
+        self.plugin_surface_hosts
+            .get(&self.primary_panel_key)
+            .map(|(surface, _)| surface)
+            .unwrap_or_else(|| crate::plugin_panel::surface())
     }
 
     pub(crate) fn plugin_surface_matches(
@@ -3219,14 +3216,8 @@ impl LiveShell {
         nickel_core::plugins::PluginSurface,
     )> {
         let mut panels = Vec::new();
-        if self.primary_panel_host_ref().is_some() {
-            panels.push((
-                nickel_core::plugins::PluginSurfaceKey {
-                    plugin_id: self.plugin_panel_owner.clone(),
-                    surface_id: self.plugin_panel_surface.id.clone(),
-                },
-                self.plugin_panel_surface.clone(),
-            ));
+        if let Some((surface, _)) = self.plugin_surface_hosts.get(&self.primary_panel_key) {
+            panels.push((self.primary_panel_key.clone(), surface.clone()));
         }
         panels.extend(
             self.plugin_surface_hosts
@@ -3944,12 +3935,9 @@ impl LiveShell {
         if let Some(host) = self.plugin_panel_host_for(key) {
             host.application().retire_surface(&key.surface_id)?;
         }
-        if self.plugin_panel_owner == key.plugin_id
-            && self.plugin_panel_surface.id == key.surface_id
-        {
+        if self.primary_panel_key == *key {
             self.plugin_surface_hosts.remove(key);
-            self.plugin_panel_owner = crate::plugin_panel::manifest().id.clone();
-            self.plugin_panel_surface = crate::plugin_panel::surface().clone();
+            self.primary_panel_key = crate::plugin_panel::surface_key();
         } else {
             self.plugin_surface_hosts.remove(key);
         }
@@ -4005,7 +3993,6 @@ impl LiveShell {
             plugin_id: id.to_owned(),
             surface_id: surface_id.to_owned(),
         };
-        let primary = self.primary_panel_key() == key;
         let surface = &mut self
             .plugin_surface_hosts
             .get_mut(&key)
@@ -4020,9 +4007,6 @@ impl LiveShell {
         surface.anchor = anchor;
         surface.offset_x = offset_x;
         surface.offset_y = offset_y;
-        if primary {
-            self.plugin_panel_surface = surface.clone();
-        }
         self.plugin_window_placement_overrides
             .insert(key, (anchor, offset_x, offset_y));
         Ok(true)
@@ -4101,8 +4085,7 @@ impl LiveShell {
         let surface = application.resolved_surface(&surface)?;
         let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
         if self.primary_panel_host_ref().is_none() {
-            self.plugin_panel_owner = id.to_owned();
-            self.plugin_panel_surface = surface.clone();
+            self.primary_panel_key = key.clone();
         }
         self.plugin_surface_hosts.insert(key, (surface, host));
         self.plugin_activation_generation =
@@ -4407,31 +4390,10 @@ impl LiveShell {
                         resolved.offset_x = offset_x;
                         resolved.offset_y = offset_y;
                     }
-                    if self.plugin_panel_owner == id
-                        && self.plugin_panel_surface.id == surface_id
-                        && self.primary_panel_host_ref().is_some()
-                    {
-                        self.plugin_panel_surface = resolved.clone();
-                        self.plugin_surface_hosts.insert(
-                            key,
-                            (
-                                resolved.clone(),
-                                nickel_ui::UiHost::new(
-                                    application,
-                                    resolved.width,
-                                    resolved.height,
-                                ),
-                            ),
-                        );
-                    } else {
-                        if let Some((surface, host)) = self.plugin_surface_hosts.get_mut(&key) {
-                            *surface = resolved.clone();
-                            *host = nickel_ui::UiHost::new(
-                                application,
-                                resolved.width,
-                                resolved.height,
-                            );
-                        }
+                    if let Some((surface, host)) = self.plugin_surface_hosts.get_mut(&key) {
+                        *surface = resolved.clone();
+                        *host =
+                            nickel_ui::UiHost::new(application, resolved.width, resolved.height);
                     }
                 } else if let Some(host) = self.plugin_slot_hosts.get_mut(id) {
                     extension_bytes = Some(application.retained_contribution_bytes());
@@ -4511,10 +4473,9 @@ impl LiveShell {
             .retain(|key, _| key.plugin_id != id);
         self.plugin_window_placement_overrides
             .retain(|key, _| key.plugin_id != id);
-        if self.plugin_panel_owner == id {
+        if self.primary_panel_key.plugin_id == id {
             self.plugin_surface_hosts.remove(&self.primary_panel_key());
-            self.plugin_panel_owner = crate::plugin_panel::manifest().id.clone();
-            self.plugin_panel_surface = crate::plugin_panel::surface().clone();
+            self.primary_panel_key = crate::plugin_panel::surface_key();
         }
         if let Some(target) = extension_target {
             self.refresh_plugin_slot_hosts(&target);
@@ -4865,9 +4826,8 @@ impl LiveShell {
                 .retain(|key, _| key.plugin_id != id);
             self.plugin_window_placement_overrides
                 .retain(|key, _| key.plugin_id != id);
-            if id == self.plugin_panel_owner {
-                self.plugin_panel_owner = crate::plugin_panel::manifest().id.clone();
-                self.plugin_panel_surface = crate::plugin_panel::surface().clone();
+            if id == self.primary_panel_key.plugin_id {
+                self.primary_panel_key = crate::plugin_panel::surface_key();
             } else if id == crate::plugin_panel::launcher_manifest().id {
                 self.retire_launcher_plugin_state();
             } else if id == crate::plugin_panel::run_manifest().id {
@@ -4924,8 +4884,7 @@ impl LiveShell {
                         surface_id: surface.id.clone(),
                     };
                     if self.primary_panel_host_ref().is_none() {
-                        self.plugin_panel_owner = id.to_owned();
-                        self.plugin_panel_surface = surface.clone();
+                        self.primary_panel_key = key.clone();
                     }
                     self.plugin_surface_hosts.insert(key, (surface, host));
                 }
@@ -4935,8 +4894,7 @@ impl LiveShell {
                 let surface = crate::plugin_panel::surface().clone();
                 let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
                 if self.primary_panel_host_ref().is_none() {
-                    self.plugin_panel_owner = id.to_owned();
-                    self.plugin_panel_surface = surface.clone();
+                    self.primary_panel_key = crate::plugin_panel::surface_key();
                 }
                 self.plugin_surface_hosts.insert(
                     nickel_core::plugins::PluginSurfaceKey {
@@ -5783,10 +5741,7 @@ impl LiveShell {
     }
 
     fn primary_panel_key(&self) -> nickel_core::plugins::PluginSurfaceKey {
-        nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: self.plugin_panel_owner.clone(),
-            surface_id: self.plugin_panel_surface.id.clone(),
-        }
+        self.primary_panel_key.clone()
     }
 
     fn primary_panel_host_ref(
@@ -5904,7 +5859,6 @@ impl LiveShell {
             resolved.offset_x = offset_x;
             resolved.offset_y = offset_y;
         }
-        let primary = self.primary_panel_key() == *key;
         let current = &mut self
             .plugin_surface_hosts
             .get_mut(key)
@@ -5914,9 +5868,6 @@ impl LiveShell {
             return Ok(false);
         }
         *current = resolved;
-        if primary {
-            self.plugin_panel_surface = current.clone();
-        }
         Ok(true)
     }
 
