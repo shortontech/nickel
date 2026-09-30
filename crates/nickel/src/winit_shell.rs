@@ -1246,14 +1246,7 @@ impl WinitShell {
                     return None;
                 }
                 let key = dialog.plugin.as_ref()?;
-                let declaration = if self.plugin_panel_enabled
-                    && key.plugin_id == self.plugin_panel_owner
-                    && key.surface_id == self.plugin_panel_surface.id
-                {
-                    Some(&self.plugin_panel_surface)
-                } else {
-                    self.extra_plugin_panels.get(key)
-                }?;
+                let declaration = dialog.plugin_surface.as_ref()?;
                 if declaration.kind != nickel_core::plugins::PluginSurfaceKind::Dialog {
                     return None;
                 }
@@ -2789,24 +2782,19 @@ impl WinitShell {
                     application_id: application_id.clone(),
                     role: session_role,
                     output,
-                    plugin_surface: matches!(
-                        role,
-                        SurfaceRole::Desktop
-                            | SurfaceRole::Panel
-                            | SurfaceRole::VolumeOsd
-                            | SurfaceRole::WindowPreview
-                    )
-                    .then(|| nickel_session_protocol::PluginSurfacePlacement {
-                        plugin_id: plugin_key.as_ref().unwrap().plugin_id.clone(),
-                        surface_id: panel.id.clone(),
-                        kind: protocol_plugin_surface_kind(panel.kind),
-                        width: panel.width,
-                        height: panel.height,
-                        bottom_offset: panel.bottom_offset,
-                        anchor: protocol_plugin_surface_anchor(panel.anchor),
-                        offset_x: panel.offset_x,
-                        offset_y: panel.offset_y,
-                        passive: panel.passive,
+                    plugin_surface: plugin_key.as_ref().map(|key| {
+                        nickel_session_protocol::PluginSurfacePlacement {
+                            plugin_id: key.plugin_id.clone(),
+                            surface_id: panel.id.clone(),
+                            kind: protocol_plugin_surface_kind(panel.kind),
+                            width: panel.width,
+                            height: panel.height,
+                            bottom_offset: panel.bottom_offset,
+                            anchor: protocol_plugin_surface_anchor(panel.anchor),
+                            offset_x: panel.offset_x,
+                            offset_y: panel.offset_y,
+                            passive: panel.passive,
+                        }
                     }),
                 },
             )
