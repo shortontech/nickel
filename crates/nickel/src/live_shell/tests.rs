@@ -3315,7 +3315,7 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
         .expect("task switcher preview token");
     assert!(shell.global_shortcut(crate::platform::GlobalShortcut::SwitchNext));
     assert!(
-        shell.plugin_preview_host.is_some(),
+        shell.preview_plugin_host_ref().is_some(),
         "consecutive switch steps must retain the JSX preview host so its presentation token advances"
     );
     let _ = shell.scene(preview_role, 640, 240);

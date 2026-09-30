@@ -218,7 +218,7 @@ impl LiveShell {
             SurfaceRole::WindowPreview => {
                 if self.preview_plugin_active() {
                     Ok(observe_only(plugin_projection(
-                        self.plugin_preview_host.as_ref().unwrap(),
+                        self.preview_plugin_host_ref().unwrap(),
                         |_, _| false,
                     )?))
                 } else {

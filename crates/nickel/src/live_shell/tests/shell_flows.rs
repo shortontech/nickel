@@ -453,7 +453,7 @@
             .is_some());
         assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(shell.preview_plugin_active());
-        let preview_host = shell.plugin_preview_host.as_mut().unwrap();
+        let preview_host = shell.preview_plugin_host_mut().unwrap();
         let image_bytes = preview_host.application().retained_image_bytes();
         assert!(image_bytes > 0);
         let frame_bytes = preview_host
@@ -508,7 +508,13 @@
             &serde_json::json!({"windows": []}),
         )
         .unwrap();
-        shell.plugin_preview_host = Some(nickel_ui::UiHost::new(application, 300, 214));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::window_preview_surface_key(),
+            (
+                crate::plugin_panel::window_preview_surface().clone(),
+                nickel_ui::UiHost::new(application, 300, 214),
+            ),
+        );
         shell.open_window_preview(0);
         assert!(shell.window_preview_scene().is_empty());
         let id = &crate::plugin_panel::window_preview_manifest().id;
@@ -521,7 +527,7 @@
         assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_preview_host.is_some());
+        assert!(shell.preview_plugin_host_ref().is_some());
     }
 
     #[test]
@@ -543,10 +549,14 @@
             &data,
         )
         .unwrap();
-        shell.plugin_preview_host = Some(nickel_ui::UiHost::new(application, 300, 214));
-        let target = shell
-            .plugin_preview_host
-            .as_ref()
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::window_preview_surface_key(),
+            (
+                crate::plugin_panel::window_preview_surface().clone(),
+                nickel_ui::UiHost::new(application, 300, 214),
+            ),
+        );
+        let target = shell.preview_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,

@@ -545,7 +545,6 @@ pub struct LiveShell {
     preview_hovered: Option<crate::model::WindowId>,
     preview_images: HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
     preview_refresh_deadline: Option<Instant>,
-    plugin_preview_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     window_menu: Option<crate::model::WindowId>,
     window_menu_snapshot: Option<OpenWindow>,
     window_menu_generation: u64,
@@ -1625,7 +1624,6 @@ impl LiveShell {
             preview_hovered: None,
             preview_images: HashMap::new(),
             preview_refresh_deadline: None,
-            plugin_preview_host: None,
             window_menu: None,
             window_menu_snapshot: None,
             window_menu_generation: 0,
@@ -1813,11 +1811,13 @@ impl LiveShell {
             ) {
                 Ok(application) => {
                     let surface = crate::plugin_panel::window_preview_surface();
-                    shell.plugin_preview_host = Some(nickel_ui::UiHost::new(
-                        application,
-                        surface.width,
-                        surface.height,
-                    ));
+                    shell.plugin_panel_extra_hosts.insert(
+                        crate::plugin_panel::window_preview_surface_key(),
+                        (
+                            surface.clone(),
+                            nickel_ui::UiHost::new(application, surface.width, surface.height),
+                        ),
+                    );
                     shell.plugin_registry.mark_running(id)?;
                 }
                 Err(error) => {
@@ -2473,8 +2473,7 @@ impl LiveShell {
             SurfaceRole::WindowPreview => {
                 self.preview_plugin_active()
                     || self
-                        .plugin_preview_host
-                        .as_ref()
+                        .preview_plugin_host_ref()
                         .is_none_or(|host| host.remote_access_protected())
             }
             SurfaceRole::WindowContextMenu => {
@@ -2535,8 +2534,7 @@ impl LiveShell {
                 .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
                 .map(|host| host.layout_snapshot()),
             SurfaceRole::WindowPreview => self
-                .plugin_preview_host
-                .as_ref()
+                .preview_plugin_host_ref()
                 .map(|host| host.layout_snapshot()),
             SurfaceRole::WindowContextMenu => self
                 .window_menu_plugin_host
@@ -3089,7 +3087,7 @@ impl LiveShell {
                         .is_some()
             }
             SurfaceRole::WindowPreview => {
-                self.plugin_preview_host.is_some()
+                self.preview_plugin_host_ref().is_some()
                     && (self.preview_group.is_some() || self.task_switcher_group.is_some())
             }
             SurfaceRole::WindowContextMenu => {
@@ -3201,8 +3199,6 @@ impl LiveShell {
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> bool {
         self.plugin_panel_extra_hosts.contains_key(key)
-            || (self.plugin_preview_host.is_some()
-                && crate::plugin_panel::window_preview_surface_key() == *key)
             || self
                 .shell_panel_surfaces()
                 .iter()
@@ -3236,6 +3232,7 @@ impl LiveShell {
                         && **key != crate::plugin_panel::launcher_surface_key()
                         && **key != crate::plugin_panel::control_center_surface_key()
                         && **key != crate::plugin_panel::notification_surface_key()
+                        && **key != crate::plugin_panel::window_preview_surface_key()
                 })
                 .map(|(key, (surface, _))| (key.clone(), surface.clone())),
         );
@@ -3429,7 +3426,7 @@ impl LiveShell {
             if !self.preview_plugin_active() {
                 return None;
             }
-            (self.plugin_preview_host.as_ref()?.inspect(), 0)
+            (self.preview_plugin_host_ref()?.inspect(), 0)
         } else {
             return self.plugin_panel_change_token(key);
         };
@@ -3764,6 +3761,12 @@ impl LiveShell {
             .then(|| self.control_plugin_data(height));
         let notification_data = (*key == crate::plugin_panel::notification_surface_key())
             .then(|| self.notification_plugin_projection().to_json());
+        let preview_projection = if *key == crate::plugin_panel::window_preview_surface_key() {
+            let group = self.preview_plugin_group()?;
+            Some(self.preview_plugin_projection(&group))
+        } else {
+            None
+        };
         let slots = self.plugin_slot_projection(&key.plugin_id);
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
@@ -3774,6 +3777,13 @@ impl LiveShell {
         let result = (|| {
             let host = self.plugin_panel_host_for(key)?;
             let projected = (|| -> Result<bool, String> {
+                let preview_changed = if let Some((data, images)) = preview_projection {
+                    let data_changed = host.application_mut().sync_data(&data)?;
+                    let images_changed = host.application_mut().sync_images(images);
+                    data_changed || images_changed
+                } else {
+                    false
+                };
                 let control_changed = control_data
                     .as_ref()
                     .map(|data| host.application_mut().sync_data(data))
@@ -3800,7 +3810,11 @@ impl LiveShell {
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
                 .collect::<Vec<_>>();
                 let resource_changed = host.application_mut().sync_host_data_fields(&fields)?;
-                Ok(control_changed || notification_changed || keyboard_changed || resource_changed)
+                Ok(preview_changed
+                    || control_changed
+                    || notification_changed
+                    || keyboard_changed
+                    || resource_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
@@ -3867,12 +3881,6 @@ impl LiveShell {
                 return None;
             }
             return Some(self.scene(SurfaceRole::Notification, width, height));
-        }
-        if *key == crate::plugin_panel::window_preview_surface_key() {
-            if !self.preview_plugin_active() {
-                return None;
-            }
-            return Some(self.window_preview_scene());
         }
         self.plugin_panel_scene_for_output(key, output, width, height)
     }
@@ -4625,6 +4633,8 @@ impl LiveShell {
             Self::retire_control_plugin_state
         } else if id == crate::plugin_panel::notification_manifest().id {
             Self::retire_notification_plugin_state
+        } else if id == crate::plugin_panel::window_preview_manifest().id {
+            Self::retire_preview_plugin_state
         } else {
             return self.fail_installed_plugin_runtime(id, error);
         };
@@ -4704,7 +4714,7 @@ impl LiveShell {
     }
 
     fn retire_preview_plugin_state(&mut self) {
-        self.plugin_preview_host = None;
+        self.retire_extra_panel_plugin_state(&crate::plugin_panel::window_preview_manifest().id);
         let preview_was_open = self.preview_group.is_some() || self.task_switcher_group.is_some();
         if self.task_switcher_group.is_some() {
             self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
@@ -5113,12 +5123,14 @@ impl LiveShell {
                 data.to_string(),
             )
             .map(|application| {
-                let surface = crate::plugin_panel::window_preview_surface();
-                self.plugin_preview_host = Some(nickel_ui::UiHost::new(
-                    application,
-                    surface.width,
-                    surface.height,
-                ));
+                let surface = crate::plugin_panel::window_preview_surface().clone();
+                self.plugin_panel_extra_hosts.insert(
+                    crate::plugin_panel::window_preview_surface_key(),
+                    (
+                        surface.clone(),
+                        nickel_ui::UiHost::new(application, surface.width, surface.height),
+                    ),
+                );
             })
         } else {
             Err(format!("plugin {id:?} has no runtime host"))
@@ -5215,8 +5227,7 @@ impl LiveShell {
         push("screenshot", self.screenshot.next_deadline());
         push(
             "window-preview-host",
-            self.plugin_preview_host
-                .as_ref()
+            self.preview_plugin_host_ref()
                 .filter(|_| self.preview_plugin_active())
                 .and_then(|host| host.next_deadline()),
         );
@@ -5273,7 +5284,7 @@ impl LiveShell {
                 .map(|host| host_token(host.inspect())),
             SurfaceRole::WindowPreview => self
                 .preview_plugin_active()
-                .then(|| host_token(self.plugin_preview_host.as_ref().unwrap().inspect())),
+                .then(|| host_token(self.preview_plugin_host_ref().unwrap().inspect())),
             SurfaceRole::WindowContextMenu => self
                 .window_menu_plugin_host
                 .as_ref()
@@ -5866,6 +5877,18 @@ impl LiveShell {
         &mut self,
     ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_panel_host_for(&crate::plugin_panel::notification_surface_key())
+    }
+
+    fn preview_plugin_host_ref(
+        &self,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_panel_host_ref(&crate::plugin_panel::window_preview_surface_key())
+    }
+
+    fn preview_plugin_host_mut(
+        &mut self,
+    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_panel_host_for(&crate::plugin_panel::window_preview_surface_key())
     }
 
     fn reconcile_plugin_surface_root(
@@ -7599,8 +7622,7 @@ impl LiveShell {
                 return false;
             };
             if self
-                .plugin_preview_host
-                .as_ref()
+                .preview_plugin_host_ref()
                 .is_some_and(|host| host.inspect().controller_target.is_none())
             {
                 self.preview_plugin_event(
@@ -7708,7 +7730,7 @@ impl LiveShell {
         input: nickel_input::InputEvent,
     ) -> nickel_ui::HostEventOutcome {
         if self.preview_plugin_active() {
-            let Some(host) = self.plugin_preview_host.as_ref() else {
+            let Some(host) = self.preview_plugin_host_ref() else {
                 return Default::default();
             };
             let (ingress, authority) =
@@ -8279,7 +8301,7 @@ impl LiveShell {
     }
 
     fn open_window_preview(&mut self, index: usize) {
-        if self.plugin_preview_host.is_none() {
+        if self.preview_plugin_host_ref().is_none() {
             return;
         }
         if self.preview_group == Some(index) {
@@ -8389,7 +8411,7 @@ impl LiveShell {
     }
 
     fn clear_preview_plugin_payload(&mut self) {
-        if let Some(host) = self.plugin_preview_host.as_mut() {
+        if let Some(host) = self.preview_plugin_host_mut() {
             let data_changed = match host
                 .application_mut()
                 .sync_data(&serde_json::json!({"windows": []}))
@@ -10339,64 +10361,27 @@ impl LiveShell {
     }
 
     fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
-        if self.plugin_preview_host.is_none() {
+        if !self.preview_plugin_active() {
             return Vec::new();
         }
-        let group = self.task_switcher_group.clone().or_else(|| {
-            self.preview_group.and_then(|index| {
-                self.panel_groups()
-                    .get(index)
-                    .map(|task| task.window_group())
-            })
-        });
-        let Some(group) = group else {
+        let Some(group) = self.preview_plugin_group() else {
             return Vec::new();
         };
-        if self.preview_plugin_active() {
-            let (data, images) = self.preview_plugin_projection(&group);
-            let host = self.plugin_preview_host.as_mut().unwrap();
-            let data_changed = match host.application_mut().sync_data(&data) {
-                Ok(changed) => changed,
-                Err(error) => {
-                    self.fail_preview_plugin_runtime(error);
-                    return Vec::new();
-                }
-            };
-            let images_changed = host.application_mut().sync_images(images);
-            let (width, height) = if self.task_switcher_group.is_some() {
-                task_switcher_dimensions(group.windows.len().min(5))
-            } else {
-                preview_dimensions(group.windows.len().min(12))
-            };
-            let outcome = host.step(HostBatch {
-                application_changed: data_changed || images_changed,
-                surface_size: Some((width, height)),
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                self.fail_preview_plugin_runtime(error);
-                return Vec::new();
-            }
-            let commands = host.commands().to_vec();
-            let image_bytes = host.application().retained_image_bytes();
-            let _ = self.plugin_registry.record_memory(
-                &crate::plugin_panel::window_preview_manifest().id,
-                nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(
-                        (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
-                    ),
-                    ..Default::default()
-                },
-            );
-            self.maybe_publish_plugin_status();
-            return commands;
-        }
-        Vec::new()
+        let (width, height) = if self.task_switcher_group.is_some() {
+            task_switcher_dimensions(group.windows.len().min(5))
+        } else {
+            preview_dimensions(group.windows.len().min(12))
+        };
+        self.plugin_panel_scene(
+            &crate::plugin_panel::window_preview_surface_key(),
+            width,
+            height,
+        )
+        .unwrap_or_default()
     }
 
     fn preview_plugin_active(&self) -> bool {
-        self.plugin_preview_host.is_some()
+        self.preview_plugin_host_ref().is_some()
             && (self.preview_group.is_some() || self.task_switcher_group.is_some())
     }
 
@@ -10457,7 +10442,7 @@ impl LiveShell {
             PreviewAction::Close(window) => format!("preview-close-{}", window.0),
             PreviewAction::Dismiss => return None,
         };
-        let host = self.plugin_preview_host.as_ref()?;
+        let host = self.preview_plugin_host_ref()?;
         let message = host.application().button_message(&id)?;
         host.semantic_targets_for_message(&message)
             .into_iter()
@@ -10510,8 +10495,7 @@ impl LiveShell {
 
     fn preview_plugin_selected_window(&mut self) -> Option<crate::model::WindowId> {
         let selected = self
-            .plugin_preview_host
-            .as_ref()?
+            .preview_plugin_host_ref()?
             .inspect()
             .controller_target?;
         let group = self.preview_plugin_group()?;
@@ -10522,12 +10506,10 @@ impl LiveShell {
         };
         group.windows.iter().take(limit).find_map(|window| {
             let message = self
-                .plugin_preview_host
-                .as_ref()?
+                .preview_plugin_host_ref()?
                 .application()
                 .button_message(&format!("preview-window-{}", window.id.0))?;
-            self.plugin_preview_host
-                .as_ref()?
+            self.preview_plugin_host_ref()?
                 .semantic_targets_for_message(&message)
                 .iter()
                 .any(|target| target.id == selected)
@@ -10615,7 +10597,7 @@ impl LiveShell {
             return Default::default();
         };
         let (data, images) = self.preview_plugin_projection(&group);
-        let Some(host) = self.plugin_preview_host.as_mut() else {
+        let Some(host) = self.preview_plugin_host_mut() else {
             return Default::default();
         };
         let data_changed = match host.application_mut().sync_data(&data) {
