@@ -9078,6 +9078,25 @@ impl NickelSession {
         self.set_launcher_visible_from(!visible, source);
     }
 
+    fn requested_output_transform(
+        placement: &nickel_session_protocol::OutputPlacement,
+        current: smithay::utils::Transform,
+    ) -> smithay::utils::Transform {
+        use nickel_session_protocol::OutputTransform as T;
+        use smithay::utils::Transform;
+        match placement.transform {
+            None => current,
+            Some(T::Normal) => Transform::Normal,
+            Some(T::Rotate90) => Transform::_90,
+            Some(T::Rotate180) => Transform::_180,
+            Some(T::Rotate270) => Transform::_270,
+            Some(T::Flipped) => Transform::Flipped,
+            Some(T::Flipped90) => Transform::Flipped90,
+            Some(T::Flipped180) => Transform::Flipped180,
+            Some(T::Flipped270) => Transform::Flipped270,
+        }
+    }
+
     fn apply_output_layout(
         &mut self,
         layout: nickel_session_protocol::OutputLayout,
@@ -9186,8 +9205,7 @@ impl NickelSession {
                 placement.mode.map_or_else(
                     || {
                         output.current_mode().map_or(*fallback, |mode| {
-                            output
-                                .current_transform()
+                            Self::requested_output_transform(placement, output.current_transform())
                                 .transform_size(mode.size)
                                 .to_f64()
                                 .to_logical(f64::from(placement.scale_120) / 120.0)
@@ -9195,7 +9213,11 @@ impl NickelSession {
                         })
                     },
                     |mode| {
-                        Size::<i32, smithay::utils::Physical>::from((mode.width, mode.height))
+                        Self::requested_output_transform(placement, output.current_transform())
+                            .transform_size(Size::<i32, smithay::utils::Physical>::from((
+                                mode.width,
+                                mode.height,
+                            )))
                             .to_f64()
                             .to_logical(f64::from(placement.scale_120) / 120.0)
                             .to_i32_round()
@@ -9259,7 +9281,10 @@ impl NickelSession {
             let location = (placement.x, placement.y).into();
             output.change_current_state(
                 None,
-                None,
+                Some(Self::requested_output_transform(
+                    placement,
+                    output.current_transform(),
+                )),
                 Some(OutputScale::Fractional(
                     f64::from(placement.scale_120) / 120.0,
                 )),

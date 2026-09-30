@@ -435,27 +435,30 @@ mod tests {
             serde_json::json!({"generation": 1, "outputs": [{"name": "HDMI-A-1"}]})
         );
         runtime
-            .set_data(r#"{"displays":{"generation":2,"outputs":[]}}"#)
+            .set_data(r#"{"displays":{"generation":2,"available":true,"revision":"0123456789abcdef","outputs":[]}}"#)
             .unwrap();
         assert_eq!(
             runtime
                 .eval_json::<Value>("JSON.stringify(nickel.displays.get())")
                 .unwrap(),
-            serde_json::json!({"generation": 2, "outputs": []})
+            serde_json::json!({"generation": 2, "available": true, "revision": "0123456789abcdef", "outputs": []})
         );
 
-        runtime.eval("let requestedLayout = {primary: 'HDMI-A-1', placements: [{name: 'HDMI-A-1', x: 0, y: 0, enabled: true, scale_120: 120, mode: {width: 1920, height: 1080, refresh_millihz: 60000}}]}; nickel.displays.setLayout(requestedLayout); requestedLayout.placements[0].x = 100; nickel.displays.confirm(); nickel.displays.revert()")
+        assert!(runtime.eval("nickel.displays.setLayout({primary:'HDMI-A-1',placements:[{name:'HDMI-A-1',x:0,y:0,enabled:true}]}, 'fedcba9876543210')").is_err());
+        runtime.eval("let requestedLayout = {primary: 'HDMI-A-1', placements: [{name: 'HDMI-A-1', x: 0, y: 0, enabled: true, scale_120: 120, transform:'rotate90', mode: {width: 1920, height: 1080, refresh_millihz: 60000}}]}; nickel.displays.setLayout(requestedLayout); requestedLayout.placements[0].x = 100; nickel.displays.confirm(); nickel.displays.revert()")
             .unwrap();
         assert_eq!(
             runtime.take_effects().unwrap(),
             vec![
                 serde_json::json!({
                     "type": "displays.setLayout",
+                    "revision": "0123456789abcdef",
                     "layout": {
                         "primary": "HDMI-A-1",
                         "placements": [{
                             "name": "HDMI-A-1", "x": 0, "y": 0, "enabled": true,
                             "scale_120": 120,
+                            "transform": "rotate90",
                             "mode": {"width": 1920, "height": 1080, "refresh_millihz": 60000}
                         }]
                     }

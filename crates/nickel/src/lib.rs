@@ -1,5 +1,6 @@
 pub mod appearance_capabilities;
 pub mod appearance_service;
+mod display_capabilities;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod remote_default_associations;
 mod remote_indicator;

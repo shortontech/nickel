@@ -423,6 +423,7 @@ pub enum PluginEffect {
     SetDisplayLayout {
         plugin_id: String,
         layout: nickel_session_protocol::OutputLayout,
+        revision: String,
     },
     ConfirmDisplayLayout {
         plugin_id: String,
@@ -2220,9 +2221,29 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 self.last_error = Some("display layout is invalid".into());
                                 return;
                             }
+                            let Some(revision) = effect
+                                .get("revision")
+                                .and_then(Value::as_str)
+                                .filter(|revision| revision.len() == 16)
+                            else {
+                                self.last_error = Some("display observation is unavailable".into());
+                                return;
+                            };
+                            let data: Value = self
+                                .projection_data
+                                .as_deref()
+                                .and_then(|data| serde_json::from_str(data).ok())
+                                .unwrap_or(Value::Null);
+                            if data["displays"]["available"] != true
+                                || data["displays"]["revision"].as_str() != Some(revision)
+                            {
+                                self.last_error = Some("display observation is stale".into());
+                                return;
+                            }
                             approved.push(PluginEffect::SetDisplayLayout {
                                 plugin_id: self.manifest.id.clone(),
                                 layout,
+                                revision: revision.into(),
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
@@ -3758,7 +3779,7 @@ mod tests {
         ))
         .unwrap()
         .manifest;
-        let source = r#"function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'apply',onClick:()=>nickel.request({type:'displays.setLayout',layout:{primary:'DP-1',placements:[{name:'DP-1',x:0,y:0,enabled:true,scale_120:120}]}})}, 'Apply')); }"#;
+        let source = r#"function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'apply',onClick:()=>nickel.request({type:'displays.setLayout',revision:'0123456789abcdef',layout:{primary:'DP-1',placements:[{name:'DP-1',x:0,y:0,enabled:true,scale_120:120}]}})}, 'Apply')); }"#;
         manifest.capabilities.clear();
         let mut denied =
             PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
@@ -3766,7 +3787,7 @@ mod tests {
         assert_eq!(
             denied.sync_host_data_field(
                 "displays",
-                &serde_json::json!({"available":true,"outputs":[]})
+                &serde_json::json!({"available":true,"revision":"0123456789abcdef","outputs":[]})
             ),
             Err("display data requires display-control".into())
         );
@@ -3782,16 +3803,26 @@ mod tests {
             granted
                 .sync_host_data_field(
                     "displays",
-                    &serde_json::json!({"available":true,"outputs":[]})
+                    &serde_json::json!({"available":true,"revision":"0123456789abcdef","outputs":[]})
                 )
                 .unwrap()
         );
         granted.update(granted.button_message("apply").unwrap());
         assert!(
-            matches!(granted.take_effects().as_slice(), [PluginEffect::SetDisplayLayout { plugin_id, layout }] if plugin_id == &manifest.id && layout.placements.len() == 1)
+            matches!(granted.take_effects().as_slice(), [PluginEffect::SetDisplayLayout { plugin_id, layout, .. }] if plugin_id == &manifest.id && layout.placements.len() == 1)
         );
 
-        let malformed = r#"function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'apply',onClick:()=>nickel.request({type:'displays.setLayout',layout:{primary:'DP-1',placements:'bad'}})}, 'Apply')); }"#;
+        granted
+            .sync_host_data_field(
+                "displays",
+                &serde_json::json!({"available":true,"revision":"fedcba9876543210","outputs":[]}),
+            )
+            .unwrap();
+        granted.update(granted.button_message("apply").unwrap());
+        assert!(granted.take_effects().is_empty());
+        assert_eq!(granted.last_error(), Some("display observation is stale"));
+
+        let malformed = r#"function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'apply',onClick:()=>nickel.request({type:'displays.setLayout',revision:'0123456789abcdef',layout:{primary:'DP-1',placements:'bad'}})}, 'Apply')); }"#;
         let mut rejected =
             PluginPanelApplication::new_with_manifest(malformed, &manifest, Some("{}".into()))
                 .unwrap();

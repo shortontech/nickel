@@ -22,6 +22,7 @@ const MAX_NATIVE_PATHS: usize = 4096;
 const MAX_NATIVE_MODES: usize = 8192;
 type TargetKey = (i32, u32, u32);
 type SourceGeometry = (i32, i32, u32, u32);
+type ConfigurationGeometry = (i32, i32, u32, u32, u32);
 
 pub(crate) struct Observation {
     pub layout: Layout,
@@ -196,6 +197,27 @@ pub(crate) fn apply_position_change(
     requested_topology_generation: u64,
     check_commit: impl Fn() -> Result<(), String>,
 ) -> Result<RecoveryPlan, ApplyFailure> {
+    apply_position_and_rotation_change(
+        observation,
+        prior,
+        requested,
+        requested_topology_generation,
+        &BTreeMap::new(),
+        check_commit,
+    )
+}
+
+/// Reuse the captured DisplayConfig preview/recovery transaction for orientation.
+/// Values are prior/requested DEVMODE counterclockwise quarter turns, keyed by
+/// the same stable native target identity as the validated layout.
+pub(crate) fn apply_position_and_rotation_change(
+    observation: &Observation,
+    prior: &Layout,
+    requested: &Layout,
+    requested_topology_generation: u64,
+    rotations: &BTreeMap<String, (u32, u32)>,
+    check_commit: impl Fn() -> Result<(), String>,
+) -> Result<RecoveryPlan, ApplyFailure> {
     use windows::{
         Win32::Devices::Display::{
             QDC_VIRTUAL_MODE_AWARE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
@@ -264,6 +286,20 @@ pub(crate) fn apply_position_change(
         let mut requested_mode = original;
         requested_mode.Anonymous1.Anonymous2.dmPosition.x = placement.x;
         requested_mode.Anonymous1.Anonymous2.dmPosition.y = placement.y;
+        if let Some(&(prior_rotation, requested_rotation)) = rotations.get(&placement.output.id) {
+            // SAFETY: original came from EnumDisplaySettingsW and contains the display union.
+            let actual_rotation = unsafe { original.Anonymous1.Anonymous2.dmDisplayOrientation.0 };
+            if actual_rotation != prior_rotation || requested_rotation > 3 {
+                return Err("Windows display orientation changed before staging".into());
+            }
+            requested_mode.Anonymous1.Anonymous2.dmDisplayOrientation.0 = requested_rotation;
+            if prior_rotation % 2 != requested_rotation % 2 {
+                std::mem::swap(
+                    &mut requested_mode.dmPelsWidth,
+                    &mut requested_mode.dmPelsHeight,
+                );
+            }
+        }
         modes.push((
             wide,
             original,
@@ -279,7 +315,8 @@ pub(crate) fn apply_position_change(
     configuration_positions(&saved_configuration.0, &saved_configuration.1)?;
     let requested_modes = requested_source_modes(observation, requested, &paths, &original_modes)?;
     let original_configuration = (paths.clone(), original_modes);
-    let requested_configuration = (paths, requested_modes);
+    let requested_configuration =
+        requested_rotation_configuration(paths, requested_modes, rotations)?;
     check_commit()?;
     let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE;
     // SAFETY: The captured paths and modes remain valid for this synchronous
@@ -464,8 +501,10 @@ impl RecoveryPlan {
                 EnumDisplaySettingsW(PCWSTR(wide.as_ptr()), ENUM_CURRENT_SETTINGS, &raw mut mode)
             }
             .as_bool()
-                || mode.dmPelsWidth != requested.dmPelsWidth
-                || mode.dmPelsHeight != requested.dmPelsHeight
+                || !((mode.dmPelsWidth == requested.dmPelsWidth
+                    && mode.dmPelsHeight == requested.dmPelsHeight)
+                    || (mode.dmPelsWidth == original.dmPelsWidth
+                        && mode.dmPelsHeight == original.dmPelsHeight))
                 || mode.dmDisplayFrequency != requested.dmDisplayFrequency
                 || mode.dmBitsPerPel != requested.dmBitsPerPel
                 || (mode.dmFields & windows::Win32::Graphics::Gdi::DM_POSITION).0 == 0
@@ -474,8 +513,10 @@ impl RecoveryPlan {
             }
             // SAFETY: EnumDisplaySettingsW initialized the display union and
             // both captured modes came from the same initialized native mode.
-            if unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation }
+            if (unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation }
                 != unsafe { requested.Anonymous1.Anonymous2.dmDisplayOrientation }
+                && unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation }
+                    != unsafe { original.Anonymous1.Anonymous2.dmDisplayOrientation })
                 || unsafe { mode.Anonymous1.Anonymous2.dmDisplayFixedOutput }
                     != unsafe { requested.Anonymous1.Anonymous2.dmDisplayFixedOutput }
             {
@@ -631,7 +672,7 @@ fn active_source_modes(
 fn configuration_positions(
     paths: &[DISPLAYCONFIG_PATH_INFO],
     modes: &[DISPLAYCONFIG_MODE_INFO],
-) -> Result<BTreeMap<TargetKey, SourceGeometry>, String> {
+) -> Result<BTreeMap<TargetKey, ConfigurationGeometry>, String> {
     let indices = active_source_modes(paths, modes)?;
     Ok(indices
         .into_iter()
@@ -645,6 +686,13 @@ fn configuration_positions(
                     source.position.y,
                     source.width,
                     source.height,
+                    paths
+                        .iter()
+                        .find(|path| target_key(path) == target)
+                        .expect("validated active target")
+                        .targetInfo
+                        .rotation
+                        .0 as u32,
                 ),
             )
         })
@@ -694,6 +742,45 @@ fn requested_source_modes(
         prepared[index].Anonymous.sourceMode = source;
     }
     Ok(prepared)
+}
+
+// DEVMODE quarter turns are counterclockwise; DisplayConfig turns clockwise.
+// https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-devmodew
+// https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ne-wingdi-displayconfig_rotation
+fn display_config_rotation(devmode_rotation: u32) -> Result<u32, String> {
+    match devmode_rotation {
+        0 => Ok(1),
+        1 => Ok(4),
+        2 => Ok(3),
+        3 => Ok(2),
+        _ => Err("unsupported Windows display orientation".into()),
+    }
+}
+
+fn requested_rotation_configuration(
+    mut paths: Vec<DISPLAYCONFIG_PATH_INFO>,
+    mut modes: Vec<DISPLAYCONFIG_MODE_INFO>,
+    rotations: &BTreeMap<String, (u32, u32)>,
+) -> Result<NativeConfiguration, String> {
+    let indices = active_source_modes(&paths, &modes)?;
+    for (id, &(prior, requested)) in rotations {
+        let path = paths
+            .iter_mut()
+            .find(|path| target_identity(target_key(path)) == *id)
+            .ok_or("Windows rotation target retired")?;
+        if path.targetInfo.rotation.0 as u32 != display_config_rotation(prior)? {
+            return Err("Windows native rotation changed before staging".into());
+        }
+        let index = indices[&target_key(path)];
+        // SAFETY: active_source_modes validated this source-mode union member.
+        let mut source = unsafe { modes[index].Anonymous.sourceMode };
+        if prior % 2 != requested % 2 {
+            std::mem::swap(&mut source.width, &mut source.height);
+        }
+        modes[index].Anonymous.sourceMode = source;
+        path.targetInfo.rotation.0 = display_config_rotation(requested)? as i32;
+    }
+    Ok((paths, modes))
 }
 
 fn native_configuration(
@@ -778,7 +865,10 @@ fn native_transaction_prerequisites(inventory: &OutputInventory) -> Result<(), S
         let geometry = *active_positions
             .get(&target_key(path))
             .ok_or("Windows active display source geometry is unavailable")?;
-        if named_positions.insert(source, geometry).is_some() {
+        if named_positions
+            .insert(source, (geometry.0, geometry.1, geometry.2, geometry.3))
+            .is_some()
+        {
             return Err("Windows DisplayConfig source identity is ambiguous".into());
         }
     }
@@ -1199,6 +1289,48 @@ mod tests {
         assert!(active_source_modes(&[path], &[]).is_err());
         mode.id += 1;
         assert!(active_source_modes(&[path], &[mode]).is_err());
+    }
+
+    #[test]
+    fn supplied_rotation_swaps_source_dimensions_and_guards_prior_orientation() {
+        let mut path = DISPLAYCONFIG_PATH_INFO::default();
+        path.sourceInfo.id = 5;
+        path.targetInfo.id = 6;
+        path.sourceInfo.Anonymous.modeInfoIdx = 0;
+        path.targetInfo.rotation.0 = 1;
+        let mut mode = DISPLAYCONFIG_MODE_INFO {
+            infoType: DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
+            id: 5,
+            ..Default::default()
+        };
+        mode.Anonymous.sourceMode.width = 1920;
+        mode.Anonymous.sourceMode.height = 1080;
+        let id = target_identity(target_key(&path));
+        let rotations = BTreeMap::from([(id.clone(), (0, 1))]);
+        let (paths, modes) =
+            requested_rotation_configuration(vec![path], vec![mode], &rotations).unwrap();
+        assert_eq!(paths[0].targetInfo.rotation.0, 4);
+        // SAFETY: The helper validated that index zero contains a source mode.
+        assert_eq!(
+            unsafe {
+                (
+                    modes[0].Anonymous.sourceMode.width,
+                    modes[0].Anonymous.sourceMode.height,
+                )
+            },
+            (1080, 1920)
+        );
+        assert_eq!(path.targetInfo.rotation.0, 1);
+        assert_eq!(display_config_rotation(3).unwrap(), 2);
+        assert!(requested_rotation_configuration(paths, modes, &rotations).is_err());
+        assert!(
+            requested_rotation_configuration(
+                vec![path],
+                vec![mode],
+                &BTreeMap::from([(id, (0, 4))])
+            )
+            .is_err()
+        );
     }
 
     #[test]

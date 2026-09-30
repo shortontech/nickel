@@ -456,6 +456,7 @@ fn output_layout_from_snapshot(
                 enabled: output.enabled,
                 scale_120: output.scale_120,
                 mode: output.current_mode,
+                transform: Some(output.transform),
             })
             .collect(),
     };
@@ -484,6 +485,12 @@ fn normalized_output_layout_with_modes(
     for placement in &mut layout.placements {
         placement.x -= minimum_x;
         placement.y -= minimum_y;
+        if placement.transform.is_none() {
+            placement.transform = outputs
+                .iter()
+                .find(|output| output.name == placement.name)
+                .map(|output| output.transform);
+        }
         if placement.mode.is_none() {
             placement.mode = outputs
                 .iter()
@@ -3743,7 +3750,13 @@ impl LiveShell {
         #[cfg(target_os = "linux")]
         {
             return Some(match self.session_host.projection_outputs() {
-                Ok(outputs) => serde_json::json!({"available": true, "outputs": outputs}),
+                Ok(outputs) => serde_json::json!({"available": true, "outputs": outputs,
+                    "revision": crate::display_capabilities::revision(&outputs),
+                    "operations": {"setOrientation": true},
+                    "pending_confirmation": self.display_preview.is_some(),
+                    "can_confirm": self.display_preview.as_ref().is_some_and(|preview| preview.owner == plugin_id && Instant::now() < preview.deadline && output_layout_from_snapshot(&outputs) == preview.applied),
+                    "can_revert": self.display_preview.as_ref().is_some_and(|preview| preview.owner == plugin_id && (output_layout_from_snapshot(&outputs) == preview.applied || output_layout_from_snapshot(&outputs) == preview.previous)),
+                    "transforms": ["normal","rotate90","rotate180","rotate270","flipped","flipped90","flipped180","flipped270"]}),
                 Err(error) => {
                     serde_json::json!({"available": false, "reason": error, "outputs": []})
                 }
@@ -3751,12 +3764,17 @@ impl LiveShell {
         }
         #[cfg(target_os = "windows")]
         {
-            let read = crate::windows_plugin_display::read();
+            let read = crate::windows_plugin_display::read(plugin_id);
             return Some(serde_json::json!({
                 "available": read.available,
                 "reason": read.reason,
                 "outputs": read.outputs,
+                "revision": read.revision,
                 "pending_confirmation": read.pending_confirmation,
+                "can_confirm": read.can_confirm,
+                "can_revert": read.can_revert,
+                "operations": {"setOrientation": read.available},
+                "transforms": ["normal","rotate90","rotate180","rotate270"],
             }));
         }
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -6465,14 +6483,24 @@ impl LiveShell {
         let mut changed = false;
         for effect in effects {
             match effect {
-                crate::plugin_panel::PluginEffect::SetDisplayLayout { plugin_id, layout } => {
-                    changed |= self.preview_plugin_display_layout(plugin_id, layout);
+                crate::plugin_panel::PluginEffect::SetDisplayLayout {
+                    plugin_id,
+                    layout,
+                    revision,
+                } => {
+                    if self.plugin_display_control_granted(&plugin_id) && !self.locked {
+                        changed |= self.preview_plugin_display_layout(plugin_id, layout, &revision);
+                    }
                 }
                 crate::plugin_panel::PluginEffect::ConfirmDisplayLayout { plugin_id } => {
-                    changed |= self.confirm_plugin_display_layout(&plugin_id);
+                    if self.plugin_display_control_granted(&plugin_id) && !self.locked {
+                        changed |= self.confirm_plugin_display_layout(&plugin_id);
+                    }
                 }
                 crate::plugin_panel::PluginEffect::RevertDisplayLayout { plugin_id } => {
-                    changed |= self.revert_plugin_display_layout(Some(&plugin_id));
+                    if self.plugin_display_control_granted(&plugin_id) && !self.locked {
+                        changed |= self.revert_plugin_display_layout(Some(&plugin_id));
+                    }
                 }
                 effect @ (crate::plugin_panel::PluginEffect::KeyboardKey { .. }
                 | crate::plugin_panel::PluginEffect::KeyboardHide { .. }
@@ -12214,6 +12242,7 @@ impl LiveShell {
                         enabled: entry.enabled,
                         scale_120: entry.scale.units(),
                         mode: None,
+                        transform: None,
                     })
                     .collect(),
             };
@@ -12262,6 +12291,7 @@ impl LiveShell {
                         enabled: entry.enabled,
                         scale_120: entry.scale.units(),
                         mode: None,
+                        transform: None,
                     })
                     .collect(),
             };
@@ -12270,10 +12300,27 @@ impl LiveShell {
         }
     }
 
+    fn plugin_display_control_granted(&self, plugin_id: &str) -> bool {
+        self.external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })
+            .is_some_and(|manifest| {
+                manifest
+                    .capabilities
+                    .contains(&nickel_core::plugins::PluginCapability::DisplayControl)
+            })
+    }
+
     fn preview_plugin_display_layout(
         &mut self,
         plugin_id: String,
         layout: nickel_session_protocol::OutputLayout,
+        expected_revision: &str,
     ) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -12283,6 +12330,9 @@ impl LiveShell {
             let Ok(outputs) = self.session_host.projection_outputs() else {
                 return false;
             };
+            if crate::display_capabilities::revision(&outputs) != expected_revision {
+                return false;
+            }
             if validate_plugin_display_layout(&outputs, &layout).is_err() {
                 return false;
             }
@@ -12306,7 +12356,8 @@ impl LiveShell {
         }
         #[cfg(target_os = "windows")]
         {
-            match crate::windows_plugin_display::set_layout(&plugin_id, &layout) {
+            match crate::windows_plugin_display::set_layout(&plugin_id, &layout, expected_revision)
+            {
                 Ok(()) => true,
                 Err(error) => {
                     tracing::warn!(%error, "plugin display layout preview failed");
@@ -12316,7 +12367,7 @@ impl LiveShell {
         }
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
-            let _ = (plugin_id, layout);
+            let _ = (plugin_id, layout, expected_revision);
             false
         }
     }
@@ -12337,6 +12388,19 @@ impl LiveShell {
             .as_ref()
             .is_some_and(|preview| preview.owner == plugin_id && Instant::now() < preview.deadline)
         {
+            #[cfg(target_os = "linux")]
+            {
+                let Ok(outputs) = self.session_host.projection_outputs() else {
+                    return false;
+                };
+                if self
+                    .display_preview
+                    .as_ref()
+                    .is_none_or(|preview| output_layout_from_snapshot(&outputs) != preview.applied)
+                {
+                    return false;
+                }
+            }
             self.display_preview = None;
             return true;
         }

@@ -20,7 +20,10 @@ pub(crate) struct DisplayRead {
     pub available: bool,
     pub reason: Option<String>,
     pub outputs: Vec<OutputSnapshot>,
+    pub revision: Option<String>,
     pub pending_confirmation: bool,
+    pub can_confirm: bool,
+    pub can_revert: bool,
 }
 
 struct Pending {
@@ -180,36 +183,71 @@ fn inventory() -> Result<(OutputInventory, Vec<OutputSnapshot>), String> {
     ))
 }
 
-pub(crate) fn read() -> DisplayRead {
-    let (pending_confirmation, recovery_error) = state()
+pub(crate) fn read(owner: &str) -> DisplayRead {
+    let (pending_confirmation, recovery_error, can_confirm, can_revert) = state()
         .lock()
-        .map(|state| (state.pending.is_some(), state.recovery_error.clone()))
+        .map(|state| {
+            (
+                state.pending.is_some(),
+                state.recovery_error.clone(),
+                state.pending.as_ref().is_some_and(|pending| {
+                    pending.owner == owner
+                        && pending.confirmable
+                        && Instant::now() < pending.deadline
+                }),
+                state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.owner == owner),
+            )
+        })
         .unwrap_or((
             true,
             Some("Windows display recovery owner is unavailable".into()),
+            false,
+            false,
         ));
     match inventory() {
         Ok((inventory, outputs)) => match topology::observe(&inventory) {
             Ok(observed) => DisplayRead {
                 available: observed.transaction_supported && recovery_error.is_none(),
+                revision: Some(display_revision(&outputs, &observed)),
                 reason: recovery_error.or(observed.transaction_unavailable_reason),
                 outputs,
                 pending_confirmation,
+                can_confirm,
+                can_revert,
             },
             Err(reason) => DisplayRead {
                 available: false,
                 reason: Some(reason),
                 outputs,
+                revision: None,
                 pending_confirmation,
+                can_confirm,
+                can_revert,
             },
         },
         Err(reason) => DisplayRead {
             available: false,
             reason: Some(reason),
             outputs: Vec::new(),
+            revision: None,
             pending_confirmation,
+            can_confirm,
+            can_revert,
         },
     }
+}
+
+fn display_revision(outputs: &[OutputSnapshot], observation: &Observation) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    crate::display_capabilities::revision(outputs).hash(&mut hash);
+    // The opaque observation also retires when the native adapter/target mapping
+    // changes, even if its public connector geometry happens to stay identical.
+    observation.native_names.hash(&mut hash);
+    format!("{:016x}", hash.finish())
 }
 
 fn requested_layout(
@@ -280,7 +318,21 @@ fn requested_layout(
     Ok(layout)
 }
 
-pub(crate) fn set_layout(owner: &str, requested: &OutputLayout) -> Result<(), String> {
+fn rotation(transform: OutputTransform) -> Result<u32, String> {
+    match transform {
+        OutputTransform::Normal => Ok(0),
+        OutputTransform::Rotate90 => Ok(1),
+        OutputTransform::Rotate180 => Ok(2),
+        OutputTransform::Rotate270 => Ok(3),
+        _ => Err("Windows mirrored display transforms are unavailable".into()),
+    }
+}
+
+pub(crate) fn set_layout(
+    owner: &str,
+    requested: &OutputLayout,
+    expected_revision: &str,
+) -> Result<(), String> {
     let mut state_guard = state()
         .lock()
         .map_err(|_| "Windows display recovery owner is unavailable")?;
@@ -292,17 +344,40 @@ pub(crate) fn set_layout(owner: &str, requested: &OutputLayout) -> Result<(), St
     }
     let (before_inventory, snapshots) = inventory()?;
     let observed = topology::observe(&before_inventory)?;
+    if display_revision(&snapshots, &observed) != expected_revision {
+        return Err("Windows display observation is stale".into());
+    }
     if !observed.transaction_supported {
         return Err(observed
             .transaction_unavailable_reason
             .unwrap_or_else(|| "Windows display topology is unavailable".into()));
     }
     let layout = requested_layout(requested, &observed, &snapshots)?;
-    let plan = match topology::apply_position_change(
+    let mut rotations = std::collections::BTreeMap::new();
+    for placement in &requested.placements {
+        if let Some(transform) = placement.transform {
+            let snapshot = snapshots
+                .iter()
+                .find(|output| output.name == placement.name)
+                .ok_or("Windows orientation target retired")?;
+            let native_id = observed
+                .native_names
+                .iter()
+                .find(|(_, name)| **name == placement.name)
+                .map(|(id, _)| id.clone())
+                .ok_or("Windows orientation target retired")?;
+            rotations.insert(
+                native_id,
+                (rotation(snapshot.transform)?, rotation(transform)?),
+            );
+        }
+    }
+    let plan = match topology::apply_position_and_rotation_change(
         &observed,
         &observed.layout,
         &layout,
         observed.topology_generation,
+        &rotations,
         || Ok(()),
     ) {
         Ok(plan) => plan,
@@ -315,9 +390,17 @@ pub(crate) fn set_layout(owner: &str, requested: &OutputLayout) -> Result<(), St
             return Err(failure.reason);
         }
     };
-    let verified = inventory()
-        .and_then(|(inventory, _)| topology::observe(&inventory))
-        .is_ok_and(|actual| topology::matches_physical_layout(&actual.layout, &layout));
+    let verified = inventory().is_ok_and(|(inventory, outputs)| {
+        topology::observe(&inventory)
+            .is_ok_and(|actual| topology::matches_physical_layout(&actual.layout, &layout))
+            && requested.placements.iter().all(|placement| {
+                placement.transform.is_none_or(|transform| {
+                    outputs.iter().any(|output| {
+                        output.name == placement.name && output.transform == transform
+                    })
+                })
+            })
+    });
     if !verified {
         if let Err(error) = plan.restore() {
             retain_failed_recovery(&mut state_guard, owner, plan, error.clone());

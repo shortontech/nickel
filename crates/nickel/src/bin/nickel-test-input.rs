@@ -1049,6 +1049,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     y: output.geometry.y,
                     scale_120: output.scale_120,
                     mode: None,
+                    transform: None,
                 })
                 .collect(),
         };

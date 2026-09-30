@@ -505,6 +505,7 @@ impl SettingsApp {
                     enabled: display.enabled,
                     scale_120: display.scale.units(),
                     mode: Some(display.mode),
+                    transform: None,
                 })
                 .collect(),
         };

@@ -351,13 +351,16 @@ const nickel = Object.freeze({
             const snapshot = __nickelData.displays;
             return snapshot === undefined ? undefined : JSON.parse(JSON.stringify(snapshot));
         },
-        setLayout(layout) {
+        setLayout(layout, expectedRevision) {
             if (layout === null || typeof layout !== 'object' || Array.isArray(layout)
                 || typeof layout.primary !== 'string'
                 || !Array.isArray(layout.placements)
                 || layout.placements.length < 1 || layout.placements.length > 32)
                 throw TypeError('invalid display layout');
-            __effects.push({type: 'displays.setLayout', layout: JSON.parse(JSON.stringify(layout))});
+            const snapshot = this.get();
+            const revision = expectedRevision === undefined ? snapshot?.revision : expectedRevision;
+            if (snapshot?.available !== true || typeof revision !== 'string' || revision.length !== 16 || revision !== snapshot.revision) throw Error('display observation is unavailable or stale');
+            __effects.push({type: 'displays.setLayout', revision, layout: JSON.parse(JSON.stringify(layout))});
         },
         confirm() { __effects.push({type: 'displays.confirm'}); },
         revert() { __effects.push({type: 'displays.revert'}); }

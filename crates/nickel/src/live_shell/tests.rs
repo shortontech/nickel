@@ -127,6 +127,9 @@ fn plugin_display_preview_rejects_stale_topology_and_rolls_back_on_deadline() {
                             if let Some(mode) = placement.mode {
                                 output.current_mode = Some(mode);
                             }
+                            if let Some(transform) = placement.transform {
+                                output.transform = transform;
+                            }
                         }
                         self.applied.lock().unwrap().push(layout);
                     }
@@ -180,12 +183,30 @@ fn plugin_display_preview_rejects_stale_topology_and_rolls_back_on_deadline() {
                 super::output_layout_from_snapshot(&host.projection_outputs().unwrap());
             requested.placements[1].x = 0;
             requested.placements[1].y = 1080;
+            requested.placements[1].transform =
+                Some(nickel_session_protocol::OutputTransform::Rotate90);
+            let revision =
+                crate::display_capabilities::revision(&host.projection_outputs().unwrap());
             let mut stale = requested.clone();
             stale.placements[1].name = "disconnected".into();
-            assert!(!shell.preview_plugin_display_layout("plugin-a".into(), stale));
+            assert!(!shell.preview_plugin_display_layout("plugin-a".into(), stale, &revision));
             assert!(host.applied.lock().unwrap().is_empty());
-            assert!(shell.preview_plugin_display_layout("plugin-a".into(), requested));
+            host.outputs.lock().unwrap()[1].transform =
+                nickel_session_protocol::OutputTransform::Rotate180;
+            assert!(!shell.preview_plugin_display_layout(
+                "plugin-a".into(),
+                requested.clone(),
+                &revision
+            ));
+            host.outputs.lock().unwrap()[1].transform =
+                nickel_session_protocol::OutputTransform::Normal;
+            assert!(shell.preview_plugin_display_layout("plugin-a".into(), requested, &revision));
             assert!(!shell.confirm_plugin_display_layout("plugin-b"));
+            host.outputs.lock().unwrap()[1].transform =
+                nickel_session_protocol::OutputTransform::Rotate270;
+            assert!(!shell.confirm_plugin_display_layout("plugin-a"));
+            host.outputs.lock().unwrap()[1].transform =
+                nickel_session_protocol::OutputTransform::Rotate90;
             assert_eq!(host.applied.lock().unwrap().len(), 1);
             shell.display_preview.as_mut().unwrap().deadline =
                 Instant::now() - Duration::from_millis(1);
@@ -193,11 +214,19 @@ fn plugin_display_preview_rejects_stale_topology_and_rolls_back_on_deadline() {
             assert!(shell.display_preview.is_none());
             assert_eq!(host.applied.lock().unwrap().len(), 2);
             assert_eq!(host.outputs.lock().unwrap()[1].geometry.x, 1920);
+            assert_eq!(
+                host.outputs.lock().unwrap()[1].transform,
+                nickel_session_protocol::OutputTransform::Normal
+            );
             let mut requested =
                 super::output_layout_from_snapshot(&host.projection_outputs().unwrap());
             requested.placements[1].x = 0;
             requested.placements[1].y = 1080;
-            assert!(shell.preview_plugin_display_layout("plugin-a".into(), requested));
+            requested.placements[1].transform =
+                Some(nickel_session_protocol::OutputTransform::Rotate90);
+            let revision =
+                crate::display_capabilities::revision(&host.projection_outputs().unwrap());
+            assert!(shell.preview_plugin_display_layout("plugin-a".into(), requested, &revision));
             assert!(shell.confirm_plugin_display_layout("plugin-a"));
             assert!(shell.display_preview.is_none());
             shell.poll_deadlines(Instant::now() + Duration::from_secs(16));

@@ -8398,6 +8398,7 @@ fn applying_multi_output_fractional_scale_updates_internal_surfaces_at_native_sc
                     enabled: true,
                     scale_120: 120,
                     mode: None,
+                    transform: None,
                 },
                 nickel_session_protocol::OutputPlacement {
                     name: "quarter".into(),
@@ -8406,6 +8407,7 @@ fn applying_multi_output_fractional_scale_updates_internal_surfaces_at_native_sc
                     enabled: true,
                     scale_120: 150,
                     mode: None,
+                    transform: None,
                 },
                 nickel_session_protocol::OutputPlacement {
                     name: "half".into(),
@@ -8414,6 +8416,7 @@ fn applying_multi_output_fractional_scale_updates_internal_surfaces_at_native_sc
                     enabled: true,
                     scale_120: 180,
                     mode: None,
+                    transform: None,
                 },
                 nickel_session_protocol::OutputPlacement {
                     name: "double".into(),
@@ -8422,6 +8425,7 @@ fn applying_multi_output_fractional_scale_updates_internal_surfaces_at_native_sc
                     enabled: true,
                     scale_120: 240,
                     mode: None,
+                    transform: None,
                 },
             ],
         })
@@ -8546,6 +8550,7 @@ fn output_scale_change_reprojects_stationary_absolute_pointer_without_new_motion
                 enabled: true,
                 scale_120: 240,
                 mode: None,
+                transform: None,
             }],
         })
         .unwrap();
@@ -8556,6 +8561,65 @@ fn output_scale_change_reprojects_stationary_absolute_pointer_without_new_motion
         session.output_name_at(location).as_deref(),
         Some("absolute")
     );
+}
+
+#[test]
+fn output_layout_rotates_geometry_preserves_unspecified_transform_and_rejects_overlap() {
+    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+    let (_event_loop, mut session) = preview_test_session();
+    for (name, transform) in [
+        ("left", OutputTransform::Normal),
+        ("right", OutputTransform::Flipped180),
+    ] {
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: name.into(),
+                logical_width: 800,
+                logical_height: 600,
+                scale_120: 120,
+                transform,
+            })
+            .unwrap();
+    }
+    let mut layout = nickel_session_protocol::OutputLayout {
+        primary: "left".into(),
+        placements: vec![
+            nickel_session_protocol::OutputPlacement {
+                name: "left".into(),
+                x: 0,
+                y: 0,
+                enabled: true,
+                scale_120: 120,
+                mode: None,
+                transform: Some(OutputTransform::Rotate90),
+            },
+            nickel_session_protocol::OutputPlacement {
+                name: "right".into(),
+                x: 600,
+                y: 0,
+                enabled: true,
+                scale_120: 120,
+                mode: None,
+                transform: None,
+            },
+        ],
+    };
+    session.apply_output_layout(layout.clone()).unwrap();
+    let outputs = session.protocol_outputs();
+    let left = outputs.iter().find(|output| output.name == "left").unwrap();
+    assert_eq!(left.transform, OutputTransform::Rotate90);
+    assert_eq!((left.geometry.width, left.geometry.height), (600, 800));
+    assert_eq!(
+        outputs
+            .iter()
+            .find(|output| output.name == "right")
+            .unwrap()
+            .transform,
+        OutputTransform::Flipped180
+    );
+    layout.placements[1].x = 599;
+    assert!(session.apply_output_layout(layout).is_err());
+    assert_eq!(session.protocol_outputs(), outputs);
 }
 
 #[test]
@@ -8584,6 +8648,7 @@ fn applying_output_layout_preserves_independent_vertical_offsets() {
                     enabled: true,
                     scale_120: 120,
                     mode: None,
+                    transform: None,
                 },
                 nickel_session_protocol::OutputPlacement {
                     name: "right".into(),
@@ -8592,6 +8657,7 @@ fn applying_output_layout_preserves_independent_vertical_offsets() {
                     enabled: true,
                     scale_120: 120,
                     mode: None,
+                    transform: None,
                 },
             ],
         })
@@ -8673,6 +8739,7 @@ fn nested_backend_rejects_a_mode_it_cannot_apply_without_mutating_output() {
                 height: 768,
                 refresh_millihz: 60_000,
             }),
+            transform: None,
         }],
     });
 

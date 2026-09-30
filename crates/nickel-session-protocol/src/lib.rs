@@ -1876,12 +1876,14 @@ pub struct ShellPopoverAnchor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputLayout {
     pub primary: String,
     pub placements: Vec<OutputPlacement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputPlacement {
     pub name: String,
     pub x: i32,
@@ -1893,6 +1895,9 @@ pub struct OutputPlacement {
     /// Requested physical scanout mode. Omitted by older clients.
     #[serde(default)]
     pub mode: Option<OutputMode>,
+    /// Requested orientation. Omission preserves the current native transform.
+    #[serde(default)]
+    pub transform: Option<OutputTransform>,
 }
 
 const fn default_output_scale_120() -> u32 {
@@ -2097,6 +2102,24 @@ impl PreviewFrame {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_placement_preserves_omitted_orientation_and_validates_transform() {
+        let value = serde_json::json!({"name":"left","x":0,"y":0,"enabled":true});
+        let placement: OutputPlacement = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(placement.transform, None);
+        let mut rotated = value.clone();
+        rotated["transform"] = serde_json::json!("rotate90");
+        assert_eq!(
+            serde_json::from_value::<OutputPlacement>(rotated)
+                .unwrap()
+                .transform,
+            Some(OutputTransform::Rotate90)
+        );
+        let mut invalid = value;
+        invalid["transform"] = serde_json::json!("arbitrary");
+        assert!(serde_json::from_value::<OutputPlacement>(invalid).is_err());
+    }
+
     #[test]
     fn plugin_status_and_activation_round_trip_over_local_protocol() {
         use super::*;
@@ -2790,6 +2813,7 @@ mod tests {
                         height: 1080,
                         refresh_millihz: 60_000,
                     }),
+                    transform: None,
                 }],
             },
         });
