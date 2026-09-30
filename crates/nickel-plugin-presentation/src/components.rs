@@ -8,9 +8,9 @@ use std::{
 use nickel_core::plugins::{PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, DragGesture, Dropdown, Grid, Image, ImageFit,
-    Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Slider, Spacer,
-    Text, TextField as UiTextField, VerticalScroll,
+    AnyView, Column, ComponentBuilderExt, Container, DragGesture, DropGesture, Dropdown, Grid,
+    Image, ImageFit, Insets, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Shortcut,
+    Slider, Spacer, Text, TextField as UiTextField, VerticalScroll,
 };
 use serde_json::Value;
 
@@ -46,6 +46,7 @@ pub enum PluginMessage {
     Button { click: usize, drag: usize },
     Context(usize),
     Drag(usize, DragGesture),
+    Drop(usize, DropGesture),
     Text(usize, String),
     Value(usize, f32),
     Scroll,
@@ -59,6 +60,7 @@ pub trait PluginUiMessage: Clone + 'static {
         Self::from_plugin(message)
     }
     fn drag(seed: Self, gesture: DragGesture) -> Self;
+    fn drop(seed: Self, gesture: DropGesture) -> Self;
     fn value(seed: Self, value: f32) -> Self;
 }
 
@@ -79,6 +81,13 @@ impl PluginUiMessage for PluginMessage {
             unreachable!("plugin slider seed retains its handler")
         };
         Self::Value(action, value)
+    }
+
+    fn drop(seed: Self, gesture: DropGesture) -> Self {
+        let Self::Click(action) = seed else {
+            unreachable!("plugin drop seed retains its handler")
+        };
+        Self::Drop(action, gesture)
     }
 }
 
@@ -265,6 +274,7 @@ pub enum PanelNode {
         class_name: Option<String>,
         children: Vec<Self>,
         action: Option<usize>,
+        drop_action: Option<usize>,
         role: Option<SemanticRole>,
         accessibility_label: Option<String>,
         accessibility_state: Option<String>,
@@ -382,6 +392,7 @@ pub enum PanelNode {
         action: usize,
         context_action: Option<usize>,
         drag_action: Option<usize>,
+        drop_action: Option<usize>,
         focus_action: Option<usize>,
         blur_action: Option<usize>,
     },
@@ -1029,6 +1040,10 @@ impl PanelNode {
                                 .ok_or("div action index is invalid")?,
                         ),
                     },
+                    drop_action: value
+                        .get("dropAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
                     role: match value.get("role") {
                         None => interactive.then_some(SemanticRole::Button),
                         Some(Value::String(role)) if role == "button" => Some(SemanticRole::Button),
@@ -1645,6 +1660,10 @@ impl PanelNode {
                         .get("dragAction")
                         .and_then(Value::as_u64)
                         .and_then(|action| usize::try_from(action).ok()),
+                    drop_action: value
+                        .get("dropAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
                     focus_action: value
                         .get("focusAction")
                         .and_then(Value::as_u64)
@@ -1938,6 +1957,7 @@ impl PanelNode {
                 class_name,
                 children,
                 action,
+                drop_action,
                 role,
                 accessibility_label,
                 accessibility_state,
@@ -2054,6 +2074,12 @@ impl PanelNode {
                     container = container.message(Message::from_plugin_scoped(
                         PluginMessage::Click(*action),
                         scope,
+                    ));
+                }
+                if let Some(action) = drop_action.filter(|_| !*disabled) {
+                    container = container.on_drop((
+                        Message::from_plugin_scoped(PluginMessage::Click(action), scope),
+                        Message::drop,
                     ));
                 }
                 with_margin(
@@ -2750,6 +2776,7 @@ impl PanelNode {
                 action,
                 context_action,
                 drag_action,
+                drop_action,
                 focus_action,
                 blur_action,
             } => {
@@ -2810,6 +2837,12 @@ impl PanelNode {
                             scope,
                         ),
                         Message::drag,
+                    ));
+                }
+                if let Some(action) = drop_action.filter(|_| !*disabled) {
+                    container = container.on_drop((
+                        Message::from_plugin_scoped(PluginMessage::Click(action), scope),
+                        Message::drop,
                     ));
                 }
                 if let Some(action) = focus_action.filter(|_| !*disabled) {

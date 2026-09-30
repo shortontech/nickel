@@ -175,8 +175,32 @@ pub(super) fn emit_element<Message: Clone>(
                 message_mapper: element.message_mapper,
                 seeded_value_mapper: element.seeded_value_mapper,
                 drag_mapper: element.drag_mapper,
+                drop_message: element.drop_message.clone(),
+                drop_mapper: element.drop_mapper,
             });
         }
+    }
+    if element.message.is_none()
+        && element.context_message.is_none()
+        && element.drop_mapper.is_some()
+        && !is_scroll_container(element)
+        && let Some(hit_rect) = node
+            .clip
+            .map(|clip| intersection(rect, clip))
+            .unwrap_or(Some(rect))
+    {
+        tree.resolved.nodes[node_index].hit_stack = Some(tree.hits.len());
+        tree.hits.push(HitRegion {
+            id: node.id.clone(),
+            rect: hit_rect,
+            target_bounds: rect,
+            message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            drag_mapper: None,
+            drop_message: element.drop_message.clone(),
+            drop_mapper: element.drop_mapper,
+        });
     }
     if let Some(message) = &element.context_message {
         tree.context_messages.push(MessageRegion {
@@ -203,6 +227,8 @@ pub(super) fn emit_element<Message: Clone>(
                 message_mapper: None,
                 seeded_value_mapper: None,
                 drag_mapper: element.drag_mapper,
+                drop_message: element.drop_message.clone(),
+                drop_mapper: element.drop_mapper,
             });
         }
     }
@@ -268,6 +294,8 @@ pub(super) fn emit_element<Message: Clone>(
                 message_mapper: None,
                 seeded_value_mapper: None,
                 drag_mapper: None,
+                drop_message: None,
+                drop_mapper: None,
             });
         }
     }
@@ -434,6 +462,8 @@ pub(super) fn emit_element<Message: Clone>(
                             message_mapper: None,
                             seeded_value_mapper: None,
                             drag_mapper: None,
+                            drop_message: None,
+                            drop_mapper: None,
                         });
                     }
                 }
@@ -714,6 +744,8 @@ pub(super) fn emit_element<Message: Clone>(
                             message_mapper: None,
                             seeded_value_mapper: None,
                             drag_mapper: None,
+                            drop_message: None,
+                            drop_mapper: None,
                         });
                     }
                 }

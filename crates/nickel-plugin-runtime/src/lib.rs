@@ -110,6 +110,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn drop_handler_receives_serializable_event_data() {
+        let source = "function App() { return h('div', {id: 'target', onDrop: event => nickel.request({type: 'dropped', ...event})}); }";
+        let mut runtime = JsxRuntime::new(source, None).unwrap();
+        let rendered = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let action = rendered["dropAction"].as_u64().unwrap();
+        let event = serde_json::json!({"x": 12, "y": 14, "sourceId": "source", "targetId": "target",
+            "sourceBounds": {"x": 0, "y": 0, "width": 20, "height": 20},
+            "targetBounds": {"x": 10, "y": 0, "width": 20, "height": 20}});
+        runtime
+            .render(&format!("__nickelDispatch({action},{event})"), |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![serde_json::json!({"type": "dropped", "x": 12,
+            "y": 14, "sourceId": "source", "targetId": "target",
+            "sourceBounds": {"x": 0, "y": 0, "width": 20, "height": 20},
+            "targetBounds": {"x": 10, "y": 0, "width": 20, "height": 20}})]
+        );
+    }
+
+    #[test]
     fn displays_facade_reads_latest_host_snapshot_and_emits_layout_effect() {
         let mut runtime = JsxRuntime::new("", None).unwrap();
         assert_eq!(

@@ -223,6 +223,8 @@ impl<Message> VerticalScroll<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -315,6 +317,8 @@ impl<Message> Grid<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -355,6 +359,8 @@ impl<Message> Grid<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -380,6 +386,8 @@ impl<Message> Grid<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -797,6 +805,11 @@ impl<Message> FilePlaneItem<Message> {
         self
     }
 
+    pub fn on_drop(mut self, event: (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.container = self.container.on_drop(event);
+        self
+    }
+
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.container = self.container.focus_background_tint(color);
         self
@@ -900,6 +913,8 @@ impl<Message> StyledText<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1165,6 +1180,8 @@ impl<Message> CustomPaint<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1189,6 +1206,8 @@ impl<Message> CustomPaint<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1220,6 +1239,11 @@ impl<Message> CustomPaint<Message> {
 
     pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
         self.0 = self.0.on_drag(seed, map);
+        self
+    }
+
+    pub fn on_drop(mut self, (seed, map): (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drop(seed, map);
         self
     }
 
@@ -1298,6 +1322,8 @@ impl<Message> Image<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1940,6 +1966,11 @@ impl<Message> Container<Message> {
 
     pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
         self.0 = self.0.on_drag(seed, map);
+        self
+    }
+
+    pub fn on_drop(mut self, (seed, map): (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drop(seed, map);
         self
     }
 
@@ -3013,6 +3044,8 @@ impl<Message> Slider<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -3134,6 +3167,8 @@ impl<Message> Dropdown<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages,
             inline_messages: Vec::new(),
@@ -3302,6 +3337,8 @@ impl<Message: Clone> Menu<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: items.into_iter().map(|item| item.message).collect(),
             inline_messages: Vec::new(),

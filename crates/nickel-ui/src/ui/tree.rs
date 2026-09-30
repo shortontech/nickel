@@ -28,6 +28,8 @@ struct HitRegion<Message> {
     message_mapper: Option<fn(f32) -> Message>,
     seeded_value_mapper: Option<fn(Message, f32) -> Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
+    drop_message: Option<Message>,
+    drop_mapper: Option<fn(Message, DropGesture) -> Message>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -499,6 +501,28 @@ impl<Message: Clone> UiFrame<Message> {
         ))
     }
 
+    fn drop_message(&self, source: &UiId, position: Point) -> Option<Message> {
+        let source_hit = self.hits.iter().rev().find(|hit| &hit.id == source)?;
+        // Only a declarative drag source can deliver a drop. An ordinary click
+        // cannot trigger a target's drop handler.
+        source_hit.drag_mapper?;
+        let target = self
+            .hits
+            .iter()
+            .rev()
+            .find(|hit| contains(hit.rect, position))?;
+        Some((target.drop_mapper?)(
+            target.drop_message.clone()?,
+            DropGesture {
+                position,
+                source_id: source.clone(),
+                source_bounds: source_hit.target_bounds,
+                target_id: target.id.clone(),
+                target_bounds: target.target_bounds,
+            },
+        ))
+    }
+
     fn cancelled_drag_message(&self, state: &UiStateStore) -> Option<Message> {
         let captured = state.captured()?;
         let bounds = self
@@ -901,6 +925,8 @@ impl<Message: Clone> UiFrame<Message> {
                 message_mapper: None,
                 seeded_value_mapper: None,
                 drag_mapper: None,
+                drop_message: None,
+                drop_mapper: None,
             });
             if let Some(message) = item.action.clone() {
                 self.messages.push(MessageRegion {
@@ -3046,6 +3072,11 @@ impl<Message: Clone> UiFrame<Message> {
                 }
                 if let Some(captured) = state.captured()
                     && let Some(message) = self.drag_message(captured, DragPhase::Ended, point)
+                {
+                    outcome.messages.push(message);
+                }
+                if let Some(captured) = state.captured()
+                    && let Some(message) = self.drop_message(captured, point)
                 {
                     outcome.messages.push(message);
                 }

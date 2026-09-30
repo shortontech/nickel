@@ -18,6 +18,14 @@ interface NickelDragGesture {
     y: number;
     bounds: { x: number; y: number; width: number; height: number };
 }
+interface NickelDropGesture {
+    x: number;
+    y: number;
+    sourceId: string;
+    sourceBounds: { x: number; y: number; width: number; height: number };
+    targetId: string;
+    targetBounds: { x: number; y: number; width: number; height: number };
+}
 
 interface NickelProps {
     key?: string | number;
@@ -28,6 +36,7 @@ interface NickelProps {
 interface NickelDivProps extends NickelProps {
     id?: string;
     onClick?: NickelClick;
+    onDrop?: (gesture: NickelDropGesture) => void;
     role?: "button" | "radio" | "radiogroup" | "option" | "group";
     "aria-label"?: string;
     "aria-checked"?: boolean;
@@ -84,6 +93,7 @@ interface NickelButtonProps extends NickelProps {
     onBlur?: NickelClick;
     onContextMenu?: NickelClick;
     onDrag?: (gesture: NickelDragGesture) => void;
+    onDrop?: (gesture: NickelDropGesture) => void;
 }
 interface NickelTextFieldProps extends NickelProps {
     id?: string;

@@ -219,6 +219,8 @@ function h(kind, props, ...children) {
         ? __handlers.push(props.onContextMenu) - 1 : null;
     const dragAction = typeof props?.onDrag === 'function'
         ? __handlers.push(props.onDrag) - 1 : null;
+    const dropAction = typeof props?.onDrop === 'function'
+        ? __handlers.push(props.onDrop) - 1 : null;
     const focusAction = typeof props?.onFocus === 'function'
         ? __handlers.push(props.onFocus) - 1 : null;
     const blurAction = typeof props?.onBlur === 'function'
@@ -253,7 +255,7 @@ function h(kind, props, ...children) {
         'aria-label': props?.['aria-label'], 'aria-checked': props?.['aria-checked'],
         'aria-selected': props?.['aria-selected'],
         state: props?.state, disabled: props?.disabled, icon: props?.icon,
-        showLabel: props?.showLabel, contextAction, dragAction, focusAction, blurAction,
+        showLabel: props?.showLabel, contextAction, dragAction, dropAction, focusAction, blurAction,
         selectAction, moveAction, fileAction, closeAction,
         escapeAction, submitAction,
         value: props?.value, placeholder: props?.placeholder, secure: props?.secure,

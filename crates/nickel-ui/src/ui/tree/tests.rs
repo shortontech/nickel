@@ -23,6 +23,7 @@ enum TestMessage {
     Volume(u8),
     Query(String),
     Drag(DragPhase, i32, i32),
+    Drop(String, String, i32, i32),
 }
 
 fn map_volume(value: f32) -> TestMessage {
@@ -39,6 +40,65 @@ fn map_drag(_seed: TestMessage, gesture: DragGesture) -> TestMessage {
         gesture.position.x.round() as i32,
         gesture.position.y.round() as i32,
     )
+}
+
+fn map_drop(_seed: TestMessage, gesture: DropGesture) -> TestMessage {
+    TestMessage::Drop(
+        gesture.source_id.as_str().to_owned(),
+        gesture.target_id.as_str().to_owned(),
+        gesture.source_bounds.size.width.round() as i32,
+        gesture.target_bounds.size.width.round() as i32,
+    )
+}
+
+#[test]
+fn captured_drag_releases_on_another_drop_target() {
+    let tree = UiFrame::layout(
+        Row::new()
+            .child(
+                Container::new()
+                    .id("source")
+                    .width(80.0)
+                    .height(40.0)
+                    .on_drag((TestMessage::Named("seed"), map_drag)),
+            )
+            .child(
+                Container::new()
+                    .id("target")
+                    .width(80.0)
+                    .height(40.0)
+                    .on_drop((TestMessage::Named("seed"), map_drop)),
+            ),
+        Rect::new(0.0, 0.0, 160.0, 40.0),
+    );
+    let mut state = UiStateStore::default();
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerPressed(Point { x: 20.0, y: 20.0 }),
+    );
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 120.0, y: 20.0 }),
+        )
+        .messages,
+        vec![
+            TestMessage::Drag(DragPhase::Ended, 120, 20),
+            TestMessage::Drop("root/source".into(), "root/target".into(), 80, 80),
+        ]
+    );
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerPressed(Point { x: 120.0, y: 20.0 }),
+    );
+    assert!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 120.0, y: 20.0 }),
+        )
+        .messages
+        .is_empty()
+    );
 }
 
 #[test]

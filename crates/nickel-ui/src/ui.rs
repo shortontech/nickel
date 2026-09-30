@@ -328,6 +328,16 @@ pub struct DragGesture {
     pub bounds: Rect,
 }
 
+/// A release over a drop target during a captured declarative drag.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropGesture {
+    pub position: Point,
+    pub source_id: UiId,
+    pub source_bounds: Rect,
+    pub target_id: UiId,
+    pub target_bounds: Rect,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PointerIcon {
     #[default]
@@ -1174,6 +1184,8 @@ pub struct Element<Message = String> {
     seeded_value_mapper: Option<fn(Message, f32) -> Message>,
     scroll_extent_mapper: Option<fn(ScrollExtent) -> Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
+    drop_message: Option<Message>,
+    drop_mapper: Option<fn(Message, DropGesture) -> Message>,
     text_mapper: Option<TextMessageMapper<Message>>,
     option_messages: Vec<Option<Message>>,
     inline_messages: Vec<(Range<usize>, Message)>,
@@ -1197,6 +1209,8 @@ impl<Message> Element<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1240,6 +1254,8 @@ impl<Message> Element<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1459,6 +1475,13 @@ impl<Message> Element<Message> {
         self
     }
 
+    /// Accepts a release from a captured drag source over this element.
+    pub fn on_drop(mut self, seed: Message, map: fn(Message, DropGesture) -> Message) -> Self {
+        self.drop_message = Some(seed);
+        self.drop_mapper = Some(map);
+        self
+    }
+
     pub fn min_width(mut self, width: f32) -> Self {
         self.style.min_width = width.max(0.0);
         self
@@ -1568,6 +1591,7 @@ impl<Message> Element<Message> {
             self.message_mapper.is_none()
                 && self.seeded_value_mapper.is_none()
                 && self.drag_mapper.is_none()
+                && self.drop_mapper.is_none()
                 && self.text_mapper.is_none(),
             "map value-producing messages at the control constructor"
         );
@@ -1584,6 +1608,8 @@ impl<Message> Element<Message> {
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: self
                 .option_messages
