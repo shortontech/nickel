@@ -24,7 +24,7 @@ export function Launcher(props) {
     return h(Window, { id: "launcher", title: "Nickel Launcher", className: "launcher-window", onEscape: escape, onSubmit: !data.dashboardVisible && data.results.length ? submit : undefined },
         h("div", { className: "launcher-content" },
             data.status ? h(Text, { className: "launcher-status" }, data.status) : null,
-            h(TextField, { id: "launcher-query", className: "launcher-search", value: data.query, placeholder: "Search applications", onChange: query => nickel.request({ type: "launcher-set-query", query }) }),
+            h(TextField, { autoFocus: true, id: "launcher-query", className: "launcher-search", value: data.query, placeholder: "Search applications", onChange: query => nickel.request({ type: "launcher-set-query", query }) }),
             data.dashboardVisible ? h(ScrollView, { id: "launcher-dashboard-scroll", className: "launcher-scroll", grow: true },
                 h(Text, { className: "launcher-section" }, "Places"),
                 data.places.map(place => h(Row, { key: place.id, className: "launcher-app-row" },

@@ -1399,7 +1399,7 @@ impl InternalShellCoordinator {
     }
 
     pub fn launcher_visible(&self) -> bool {
-        self.shell.surface_visible(SurfaceRole::Launcher)
+        self.shell.launcher_intent_visible()
     }
 
     /// Identify the concrete panel receiving an internal pointer event.
@@ -1501,7 +1501,9 @@ impl InternalShellCoordinator {
         &mut self.shell
     }
 
-    pub(crate) fn take_preferences_commit(&mut self) -> Option<nickel_core::shell_settings::ShellSettings> {
+    pub(crate) fn take_preferences_commit(
+        &mut self,
+    ) -> Option<nickel_core::shell_settings::ShellSettings> {
         self.shell.take_preferences_commit()
     }
 

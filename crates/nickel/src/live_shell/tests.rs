@@ -203,27 +203,65 @@ fn embedded_package_can_enable_with_all_windows_initially_closed() {
 }
 
 #[test]
-fn embedded_default_shell_starts_only_taskbar_and_uses_normal_surface_lifecycle() {
+fn stock_shell_package_handles_semantic_taskbar_input_and_global_surface_intents() {
     with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
-        let id = "nickel-default";
-        assert!(!shell.plugin_registry.get(id).unwrap().desired_enabled);
-        assert!(!shell.package_runtimes.contains_key(id));
-        shell.set_plugin_enabled(id, true).unwrap();
-        let runtime = ordinary_package_runtime(&shell, id);
-        let surfaces = shell
-            .plugin_surface_hosts
-            .keys()
-            .filter(|key| key.plugin_id == id)
-            .map(|key| key.surface_id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(surfaces, vec!["taskbar"]);
-        for surface in ["launcher", "settings", "quick-settings", "notifications"] {
-            assert!(shell.show_plugin_window(id, surface).unwrap());
-            let key = nickel_core::plugins::PluginSurfaceKey {
-                plugin_id: id.into(),
-                surface_id: surface.into(),
-            };
+        let taskbar = LiveShell::default_shell_surface_key("taskbar");
+        assert_eq!(
+            shell.plugin_registry.get("nickel-default").unwrap().health,
+            nickel_core::plugins::PluginHealth::Running
+        );
+        assert_eq!(shell.taskbar_reservation_height(), 56);
+        let panels = shell.shell_panel_surfaces();
+        assert_eq!(panels.iter().filter(|(key, _)| key == &taskbar).count(), 1);
+        let surface = &panels.iter().find(|(key, _)| key == &taskbar).unwrap().1;
+        assert!(surface.reserve_work_area);
+        assert_eq!(surface.output, nickel_core::plugins::PluginOutputScope::All);
+        assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Taskbar));
+        let runtime = shell
+            .plugin_panel_host_for(&taskbar)
+            .unwrap()
+            .application()
+            .shared_runtime();
+        shell.plugin_panel_scene(&taskbar, 1280, 56).unwrap();
+        let button = shell
+            .plugin_panel_host_for(&taskbar)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open Nickel Start".into(),
+            })
+            .unwrap();
+        assert!(shell.plugin_panel_host_ui_for(
+            &taskbar,
+            nickel_ui::UiEvent::AccessibilityActivate(button.id),
+            1280,
+            56
+        ));
+        assert!(shell.launcher_intent_visible());
+        assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
+        let launcher = LiveShell::default_shell_surface_key("launcher");
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            &shell
+                .plugin_panel_host_for(&launcher)
+                .unwrap()
+                .application()
+                .shared_runtime()
+        ));
+        shell.global_shortcut(crate::platform::GlobalShortcut::HideLauncher);
+        assert!(!shell.launcher_intent_visible());
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        assert!(shell.launcher_intent_visible());
+        shell.global_shortcut(crate::platform::GlobalShortcut::ToggleLauncher);
+        assert!(!shell.launcher_intent_visible());
+        shell.global_shortcut(crate::platform::GlobalShortcut::OpenSettings);
+        assert!(shell.default_shell_surface_visible("settings"));
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowControlCenter);
+        assert!(shell.default_shell_surface_visible("quick-settings"));
+        assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::ControlCenter));
+        for surface in ["settings", "quick-settings"] {
+            let key = LiveShell::default_shell_surface_key(surface);
             assert!(std::rc::Rc::ptr_eq(
                 &runtime,
                 &shell
@@ -232,16 +270,12 @@ fn embedded_default_shell_starts_only_taskbar_and_uses_normal_surface_lifecycle(
                     .application()
                     .shared_runtime()
             ));
-            assert!(shell.close_plugin_window(&key).unwrap());
         }
-        shell.set_plugin_enabled(id, false).unwrap();
-        assert!(!shell.package_runtimes.contains_key(id));
-        assert!(
-            shell
-                .plugin_surface_hosts
-                .keys()
-                .all(|key| key.plugin_id != id)
-        );
+        shell.set_plugin_enabled("nickel-default", false).unwrap();
+        assert_eq!(shell.taskbar_reservation_height(), 0);
+        assert!(!shell.can_show_launcher());
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        assert!(!shell.launcher_intent_visible());
     });
 }
 

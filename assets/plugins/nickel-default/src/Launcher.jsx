@@ -54,7 +54,7 @@ export function Launcher() {
         onSubmit={!dashboardVisible && results.length ? submit : undefined}>
       <div className="launcher-content">
         {search.status ? <Text className="launcher-status">{search.status}</Text> : null}
-        <TextField id="launcher-query" className="launcher-search" value={query} placeholder="Search applications"
+        <TextField autoFocus={true} id="launcher-query" className="launcher-search" value={query} placeholder="Search applications"
             onChange={changeQuery} />
         {dashboardVisible ? <ScrollView id="launcher-dashboard-scroll" className="launcher-scroll" grow={true}>
             <Text className="launcher-section">Places</Text>

@@ -3,8 +3,8 @@
 This directory contains the default shell module graph described by Spec 0263.
 `plugin.json` uses the current validated package schema, with composition metadata
 and bounded grants for every surface. JSX imports refer to emitted JavaScript
-paths so the developer compiler can stage the entire graph. It remains a draft:
-stock activation awaits capability snapshots and complete Settings controls.
+paths so the developer compiler can stage the entire graph. Nickel activates this
+package as its stock shell; optional windows share its runtime.
 
 The taskbar, launcher, quick settings, notification JSX, and their CSS are
 source-preserving copies of the shipped first-party plugins. The modules add CSS imports, named component exports, and unique window IDs.
@@ -86,9 +86,10 @@ and absence of old CSS template tokens. A focused native host test loads this
 package from the embedded catalog, publishes Settings pages, and creates every
 declared surface with one shared `JsxRuntime`. Additional surface construction
 does not initialize registration modules again. Live visual validation remains.
-Stock activation, native visibility updates, complete capability snapshots,
+Complete capability snapshots,
 remaining legacy request dispatch, and inherited shell composition still need
-integration before the package replaces the stock shell.
+integration. Derived shell selection and optional Settings ownership are the
+next composition integration step.
 
 ## Public component lookup
 
@@ -152,7 +153,7 @@ Cargo embeds ordinary package files verbatim into a generated catalog.
 manifest, module sources, CSS, and declared images entirely from that catalog.
 Neither building nor running Nickel invokes npm or a JSX compiler. JSX remains
 included for inspection, while the manifest entry and imports select emitted JS.
-This prepares the shared host; it does not change stock shell activation.
+The stock shell uses this ordinary package host.
 
 ## Package surface actions
 
@@ -165,13 +166,15 @@ Settings window and closes itself after invoking application launch.
 
 ## Package activation preparation
 
-The shared shell source catalog registers embedded `nickel-default` disabled.
-It can be enabled through the normal package lifecycle; activation opens only
+The shared shell source catalog registers embedded `nickel-default` and activates
+it as the stock shell through the normal package lifecycle. Activation opens only
 its taskbar. Launcher and Settings declare `initially_open: false`, and transient
 surfaces continue to require explicit show requests. Showing or closing windows
 uses the same paths as an installed package. A package keeps its shared runtime
 and Settings registrations when all windows close; explicit disable or a runtime
-failure retires it. The stock shell remains selected until the host cutover.
+failure retires it. Global launcher, Settings, and Quick Settings intents target
+these declared package surfaces. Ordinary taskbar rendering and input use the generic package
+host; native display projection recovery remains trusted infrastructure.
 
 The public `shell.settings.plugins` export registers an ordinary `Plugins` Settings
 page when imported from the shell module graph. Import `./Plugins.js` alongside
