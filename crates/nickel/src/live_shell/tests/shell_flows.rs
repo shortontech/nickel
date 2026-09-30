@@ -1253,7 +1253,7 @@
         assert!(!shell.run_visible);
         assert!(!shell.launcher_visible);
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_run_host.is_some());
+        assert!(shell.run_host_ref().is_some());
         let launcher_surface = crate::plugin_panel::launcher_surface();
         assert_eq!(
             shell.launcher_preferred_surface_size((960, 720)),
@@ -1268,7 +1268,7 @@
         );
         assert_eq!(shell.launcher_preferred_surface_size((480, 120)), (480, 120));
         assert_eq!(shell.active_launcher_surface_key(), Some(run_key.clone()));
-        assert!(shell.plugin_run_host.as_ref().unwrap().inspect().keyboard_focus.is_some());
+        assert!(shell.run_host_ref().unwrap().inspect().keyboard_focus.is_some());
         assert!(shell
             .plugin_surface_scene_for_output(&run_key, None, 620, 180)
             .is_some());
@@ -1278,11 +1278,11 @@
         );
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.plugin_run_host.is_none());
+        assert!(shell.run_host_ref().is_none());
         assert!(!shell.run_visible);
         assert_eq!(shell.active_launcher_surface_key(), Some(launcher_key));
         assert!(shell.plugin_surface_change_token(&run_key).is_none());
-        assert!(shell.run_scene(620, 180).is_empty());
+        assert!(shell.plugin_surface_scene_for_output(&run_key, None, 620, 180).is_none());
         assert_eq!(
             shell.plugin_registry().get(id).unwrap().memory,
             nickel_core::plugins::PluginMemory::default()
@@ -1296,12 +1296,17 @@
             "function App() { return h(Panel, {}, h(Button, {id: 'run-fail', onClick: () => { throw Error('Run callback exploded'); }}, 'Break Run')); }",
         )
         .unwrap();
-        shell.plugin_run_host = Some(nickel_ui::UiHost::new(application, 620, 180));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::run_surface_key(),
+            (
+                crate::plugin_panel::run_surface().clone(),
+                nickel_ui::UiHost::new(application, 620, 180),
+            ),
+        );
         shell.apply_session_launcher_visibility(true);
         assert!(shell.set_run_visible(true));
         let target = shell
-            .plugin_run_host
-            .as_ref()
+            .run_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,

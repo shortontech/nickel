@@ -166,7 +166,7 @@ impl LiveShell {
                 output,
             ),
             SurfaceRole::Launcher if self.run_visible => {
-                if let Some(host) = self.plugin_run_host.as_ref() {
+                if let Some(host) = self.run_host_ref() {
                     plugin_projection(host, |leaf, action| {
                         leaf == "run-command" && action == nickel_ui::ActionKind::SetValue
                     })
@@ -390,10 +390,7 @@ impl LiveShell {
         let mut effects = Vec::new();
         let host = match role {
             SurfaceRole::Launcher if self.run_visible => {
-                let plugin = self
-                    .plugin_run_host
-                    .as_mut()
-                    .ok_or("Run plugin is unavailable")?;
+                let plugin = self.run_host_mut().ok_or("Run plugin is unavailable")?;
                 let outcome = mutate(plugin, generation, node, action, clipboard_limit);
                 let requested = plugin.application_mut().take_effects();
                 if let Some(error) = plugin.application_mut().take_runtime_failure() {
