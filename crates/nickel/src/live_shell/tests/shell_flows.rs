@@ -1020,7 +1020,6 @@
     }
     use crate::{
         model::{ApplicationId, OpenWindow, TrayItem, WindowId},
-        window_preview::MenuAction,
         winit_shell::SurfaceRole,
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
@@ -1735,44 +1734,6 @@
             .unwrap());
     }
 
-    #[test]
-    fn plugin_taskbar_window_menu_rejects_reused_window_identity() {
-        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
-            crate::session_host::default_session_host(),
-        ));
-        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
-        let captured = OpenWindow {
-            id: WindowId(71),
-            application_id: Some(ApplicationId::new("org.nickel.original")),
-            active: true,
-            title: "Original".into(),
-            state: crate::model::WindowState::default(),
-        };
-        shell.window_menu = Some(captured.id);
-        shell.window_menu_snapshot = Some(captured.clone());
-        shell.windows = vec![OpenWindow {
-            application_id: Some(ApplicationId::new("org.nickel.replacement")),
-            ..captured
-        }];
-        let close_index = crate::window_preview::window_menu_entries(
-            shell.window_menu_snapshot.as_ref().unwrap(),
-            &shell.workspaces,
-            &shell.window_feed.outputs(),
-        )
-        .iter()
-        .position(|(_, action)| matches!(action, MenuAction::Close(_)))
-        .unwrap();
-        shell.apply_plugin_effects(vec![
-            crate::plugin_panel::PluginEffect::InvokeTaskbarWindowMenu {
-                page: "root".into(),
-                index: close_index,
-            },
-        ]);
-        assert!(!host.take_commands().iter().any(|command| matches!(
-            command,
-            crate::platform::ShellCommand::WindowAction { .. }
-        )));
-    }
 
     #[test]
     fn plugin_taskbar_window_menu_navigates_to_workspace_action() {

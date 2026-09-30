@@ -132,11 +132,10 @@ use crate::{
     session_host::{SessionHost, default_session_host},
     window_preview::{
         ApplicationMenuAction, ApplicationMenuTarget, MENU_WIDTH, MenuAction, PreviewAction,
-        TaskbarPreviewAnchor, application_menu_entries, display_menu_entries, menu_height,
-        menu_height_for_rows, preview_dimensions, semantic_theme_from_palette,
-        task_switcher_dimensions, validated_application_close_targets,
-        window_menu_action_is_current, window_menu_entries, window_menu_max_rows,
-        workspace_menu_entries,
+        TaskbarPreviewAnchor, application_menu_entries, menu_height, menu_height_for_rows,
+        preview_dimensions, semantic_theme_from_palette, task_switcher_dimensions,
+        validated_application_close_targets, window_menu_action_is_current, window_menu_entries,
+        window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
 };
@@ -7063,18 +7062,7 @@ impl LiveShell {
                         changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::ActivateTaskbarItem { index, id } => {
-                    if crate::plugin_panel::taskbar_item_matches(&self.panel_groups(), index, &id) {
-                        self.apply_panel_action(TaskbarAction::Task(index));
-                        changed = true;
-                    }
-                }
-                crate::plugin_panel::PluginEffect::ContextTaskbarItem { index, id } => {
-                    if crate::plugin_panel::taskbar_item_matches(&self.panel_groups(), index, &id) {
-                        self.apply_panel_action(TaskbarAction::TaskContext(index));
-                        changed = true;
-                    }
-                }
+
                 crate::plugin_panel::PluginEffect::MoveApplicationPin { id, direction } => {
                     if matches!(direction, -1 | 1)
                         && self.launcher.is_pinned(&id)
@@ -7084,33 +7072,7 @@ impl LiveShell {
                         changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::MoveTaskbarPin {
-                    index,
-                    id,
-                    direction,
-                } => {
-                    let groups = self.panel_groups();
-                    if matches!(direction, -1 | 1)
-                        && groups.get(index).is_some_and(|group| {
-                            group.pinned
-                                && group
-                                    .application_id
-                                    .as_ref()
-                                    .is_some_and(|application| application.as_str() == id)
-                        })
-                    {
-                        self.apply_panel_action(if direction < 0 {
-                            TaskbarAction::MoveTaskPinLeft(id)
-                        } else {
-                            TaskbarAction::MoveTaskPinRight(id)
-                        });
-                        changed = true;
-                    }
-                }
-                crate::plugin_panel::PluginEffect::CloseTaskbarMenuWindows => {
-                    self.apply_application_menu_action(ApplicationMenuAction::CloseAll);
-                    changed = true;
-                }
+
                 crate::plugin_panel::PluginEffect::InvokePluginSlotAction {
                     target_plugin,
                     slot_id,
@@ -7231,32 +7193,7 @@ impl LiveShell {
                         changed |= self.apply_plugin_effects(extension_effects);
                     }
                 }
-                crate::plugin_panel::PluginEffect::InvokeTaskbarWindowMenu { page, index } => {
-                    if self.plugin_taskbar_host.is_none() {
-                        continue;
-                    }
-                    let Some(snapshot) = self.window_menu_snapshot.as_ref() else {
-                        continue;
-                    };
-                    let outputs = self.window_feed.outputs();
-                    let entries = match page.as_str() {
-                        "root" => window_menu_entries(snapshot, &self.workspaces, &outputs),
-                        "workspaces" => workspace_menu_entries(snapshot, &self.workspaces),
-                        "displays" => display_menu_entries(snapshot, &outputs),
-                        _ => continue,
-                    };
-                    if let Some((_, action)) = entries.get(index)
-                        && !matches!(
-                            action,
-                            MenuAction::ShowWorkspaces
-                                | MenuAction::ShowDisplays
-                                | MenuAction::Back
-                        )
-                    {
-                        self.apply_window_menu_action(action.clone());
-                        changed = true;
-                    }
-                }
+
                 crate::plugin_panel::PluginEffect::ActivateTrayItem { id } => {
                     if self.tray.iter().take(128).any(|item| item.id == id) {
                         self.apply_panel_action(TaskbarAction::Tray(id));

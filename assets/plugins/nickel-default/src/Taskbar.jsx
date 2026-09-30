@@ -27,28 +27,25 @@ function Task(props) {
             pendingDrag.current = 0;
             if (move) {
                 suppressClick.current = true;
-                if (item.capabilityModel) { nickel.applications.movePin(item.id, move < 0 ? -1 : 1); return; }
-                nickel.request({type: "taskbar-move-pin", index: item.index,
-                    id: item.id, direction: move < 0 ? "left" : "right"});
+                nickel.applications.movePin(item.id, move < 0 ? -1 : 1);
             }
         }
     };
     return <div className="taskbar-item"><Button id={buttonId}
         className={item.active ? "task-button is-active" : "task-button"}
         accessibilityLabel={item.name}
-        icon={item.icon ? "task:" + item.index : null}
+        icon={item.icon || null}
         onDrag={onDrag}
         onContextMenu={() => {
-            if (item.capabilityModel) { setMenuOpen(true); nickel.openMenu(menuId); }
-            else nickel.request({type: "taskbar-context-item", index: item.index, id: item.id});
+            setMenuOpen(true);
+            nickel.openMenu(menuId);
         }}
         onClick={() => {
             if (suppressClick.current) {
                 suppressClick.current = false;
                 return;
             }
-            if (item.capabilityModel) activateTask(item, nickel);
-            else nickel.request({type: "taskbar-activate-item", index: item.index, id: item.id});
+            activateTask(item, nickel);
         }}>
         {label}
     </Button>
@@ -79,8 +76,8 @@ function TrayItem(props) {
 
 export function Taskbar(props) {
     const data = {...{items:[],tray:[],clock:'',codexAvailable:false,keyboardEnabled:false}, ...props?.data};
-    const items = props?.data?.items || taskItems(nickel.applications.list(), nickel.windows.list());
-    const tray = props?.data?.tray || nickel.tray.list();
+    const items = taskItems(nickel.applications.list(), nickel.windows.list());
+    const tray = nickel.tray.list();
     const contributions = nickel.contributions("taskbar.items");
     return <FixedWindow id="taskbar" output="all" edge="bottom"
         reserveWorkArea={true} className="taskbar">

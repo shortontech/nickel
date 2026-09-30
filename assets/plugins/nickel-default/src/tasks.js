@@ -2,19 +2,19 @@
 export function taskItems(applications, windows) {
     const groups = new Map();
     for (const application of applications.slice().sort((left,right) => (left.pinOrder ?? Number.MAX_SAFE_INTEGER) - (right.pinOrder ?? Number.MAX_SAFE_INTEGER))) {
-        if (application.pinned) groups.set(application.id, {id:application.id, name:application.name, pinned:true, windows:[], active:false});
+        if (application.pinned) groups.set(application.id, {id:application.id, name:application.name, icon:application.icon, pinned:true, windows:[], active:false});
     }
     for (const window of windows) {
         const id = window.applicationId || `window:${window.id}`;
         if (!groups.has(id)) {
             const application = applications.find(application => application.id === id);
-            groups.set(id, {id, name:application?.name || window.title || 'Window', pinned:false, windows:[], active:false});
+            groups.set(id, {id, name:application?.name || window.title || 'Window', icon:application?.icon, pinned:false, windows:[], active:false});
         }
         const group = groups.get(id);
         group.windows.push(window);
         group.active ||= window.active;
     }
-    return Array.from(groups.values(), (group, index) => ({...group, index, capabilityModel:true}));
+    return Array.from(groups.values());
 }
 export function activateTask(item, capabilities) {
     if (!item.windows.length) return capabilities.applications.launch(item.id);

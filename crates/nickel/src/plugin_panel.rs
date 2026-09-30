@@ -484,20 +484,6 @@ pub enum PluginEffect {
         plugin_id: String,
         request: crate::session_capabilities::Request,
     },
-    ActivateTaskbarItem {
-        index: usize,
-        id: String,
-    },
-    ContextTaskbarItem {
-        index: usize,
-        id: String,
-    },
-    MoveTaskbarPin {
-        index: usize,
-        id: String,
-        direction: i8,
-    },
-    CloseTaskbarMenuWindows,
     InvokePluginSlotAction {
         target_plugin: String,
         slot_id: String,
@@ -510,10 +496,6 @@ pub enum PluginEffect {
         slot_id: String,
         plugin_id: String,
         id: String,
-    },
-    InvokeTaskbarWindowMenu {
-        page: String,
-        index: usize,
     },
     ActivateTrayItem {
         id: String,
@@ -809,12 +791,6 @@ pub fn taskbar_item_id(group: &TaskbarApplication) -> String {
         },
         |id| id.as_str().to_owned(),
     )
-}
-
-pub fn taskbar_item_matches(groups: &[TaskbarApplication], index: usize, id: &str) -> bool {
-    groups
-        .get(index)
-        .is_some_and(|group| taskbar_item_id(group) == id)
 }
 
 /// A package may supply synthetic data for each surface's initial validation tree.
@@ -2671,109 +2647,11 @@ impl nickel_ui::Application for PluginPanelApplication {
                         {
                             approved.push(PluginEffect::ToggleCodexProjects);
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-activate-item")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::WindowsFocus)
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ApplicationsLaunch) =>
-                        {
-                            let Some(index) = effect
-                                .get("index")
-                                .and_then(Value::as_u64)
-                                .and_then(|index| usize::try_from(index).ok())
-                            else {
-                                self.last_error = Some("taskbar item index is invalid".into());
-                                return;
-                            };
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error = Some("taskbar item ID is missing".into());
-                                return;
-                            };
-                            if id.len() > 256 || index >= 12 {
-                                self.last_error = Some("taskbar item reference is invalid".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::ActivateTaskbarItem {
-                                index,
-                                id: id.to_owned(),
-                            });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-context-item")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::WindowsContext) =>
-                        {
-                            let Some(index) = effect
-                                .get("index")
-                                .and_then(Value::as_u64)
-                                .and_then(|index| usize::try_from(index).ok())
-                            else {
-                                self.last_error =
-                                    Some("taskbar context item index is invalid".into());
-                                return;
-                            };
-                            let Some(id) = effect.get("id").and_then(Value::as_str) else {
-                                self.last_error = Some("taskbar context item ID is missing".into());
-                                return;
-                            };
-                            if id.is_empty() || id.len() > 256 || index >= 12 {
-                                self.last_error =
-                                    Some("taskbar context item reference is invalid".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::ContextTaskbarItem {
-                                index,
-                                id: id.to_owned(),
-                            });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-move-pin")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::ApplicationsPin) =>
-                        {
-                            let Some(index) = effect
-                                .get("index")
-                                .and_then(Value::as_u64)
-                                .and_then(|index| usize::try_from(index).ok())
-                                .filter(|index| *index < 12)
-                            else {
-                                self.last_error = Some("taskbar pin index is invalid".into());
-                                return;
-                            };
-                            let Some(id) = effect
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .filter(|id| !id.is_empty() && id.len() <= 256)
-                            else {
-                                self.last_error = Some("taskbar pin ID is invalid".into());
-                                return;
-                            };
-                            let direction = match effect.get("direction").and_then(Value::as_str) {
-                                Some("left") => -1,
-                                Some("right") => 1,
-                                _ => {
-                                    self.last_error =
-                                        Some("taskbar pin direction is invalid".into());
-                                    return;
-                                }
-                            };
-                            approved.push(PluginEffect::MoveTaskbarPin {
-                                index,
-                                id: id.to_owned(),
-                                direction,
-                            });
-                        }
+
                         _ if effect
                             .get("type")
                             .and_then(Value::as_str)
-                            .is_some_and(|kind| {
-                                matches!(kind, "taskbar-activate-tray" | "tray.activate")
-                            })
+                            .is_some_and(|kind| kind == "tray.activate")
                             && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::TrayActivate) =>
@@ -2791,9 +2669,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         _ if effect
                             .get("type")
                             .and_then(Value::as_str)
-                            .is_some_and(|kind| {
-                                matches!(kind, "taskbar-context-tray" | "tray.contextMenu")
-                            })
+                            .is_some_and(|kind| kind == "tray.contextMenu")
                             && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::TrayContext) =>
@@ -2808,41 +2684,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             }
                             approved.push(PluginEffect::ContextTrayItem { id: id.to_owned() });
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-menu-close-all")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::WindowsContext) =>
-                        {
-                            approved.push(PluginEffect::CloseTaskbarMenuWindows);
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-window-menu-action")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::WindowsContext) =>
-                        {
-                            let Some(page) = effect.get("page").and_then(Value::as_str) else {
-                                self.last_error = Some("window menu page is missing".into());
-                                return;
-                            };
-                            let Some(index) = effect
-                                .get("index")
-                                .and_then(Value::as_u64)
-                                .and_then(|index| usize::try_from(index).ok())
-                            else {
-                                self.last_error = Some("window menu row is missing".into());
-                                return;
-                            };
-                            if !matches!(page, "root" | "workspaces" | "displays") || index >= 32 {
-                                self.last_error = Some("window menu target is invalid".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::InvokeTaskbarWindowMenu {
-                                page: page.to_owned(),
-                                index,
-                            });
-                        }
+
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("invoke-plugin-slot-action") =>
                         {
@@ -4289,108 +4131,6 @@ mod tests {
             Some("Clipboard is empty")
         );
         assert!(view.children[1].action.is_none());
-    }
-
-    #[test]
-    fn bundled_taskbar_drag_requests_validated_pin_move_without_click() {
-        let projection = TaskbarPluginProjection {
-            items: ["first", "second"]
-                .into_iter()
-                .enumerate()
-                .map(|(index, id)| TaskbarPluginItem {
-                    index,
-                    id: id.into(),
-                    name: id.into(),
-                    active: false,
-                    pinned: true,
-                    icon: false,
-                })
-                .collect(),
-            tray: Vec::new(),
-            clock: "12:00".into(),
-            keyboard_enabled: false,
-            codex_available: false,
-        };
-        let app = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::taskbar_manifest(),
-            "main.js",
-            projection.to_json(),
-        )
-        .unwrap();
-        assert!(matches!(
-            &app.node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        assert_eq!(
-            app.stylesheet
-                .resolve("window", Some("main"), Some("taskbar"))
-                .background,
-            Some(0xf2222730)
-        );
-        let mut host = nickel_ui::UiHost::new(app, 600, 56);
-        let bounds = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "first".into(),
-            })
-            .unwrap()
-            .bounds;
-        let inside = Point {
-            x: bounds.origin.x + bounds.size.width / 2.0,
-            y: bounds.origin.y + bounds.size.height / 2.0,
-        };
-        let outside = Point {
-            x: bounds.origin.x + bounds.size.width + 20.0,
-            y: inside.y,
-        };
-        for event in [
-            nickel_ui::UiEvent::PointerPressed(inside),
-            nickel_ui::UiEvent::PointerMoved(outside),
-            nickel_ui::UiEvent::PointerReleased(inside),
-        ] {
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(event)],
-                ..Default::default()
-            });
-        }
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::MoveTaskbarPin {
-                index: 0,
-                id: "first".into(),
-                direction: 1,
-            }]
-        );
-    }
-
-    #[test]
-    fn desktop_actions_follow_capabilities_instead_of_plugin_identity() {
-        let source = r#"function App() { return h(FixedWindow, {width: '100%', height: 56, output: 'all', edge: 'bottom', reserveWorkArea: true},
-            h(Button, {id: 'activate', onClick: () => nickel.request({type: 'taskbar-activate-item', index: 0, id: 'app.example'})}, 'Activate')) }"#;
-        let mut manifest = taskbar_manifest().clone();
-        manifest.id = "org.example.custom-bar".into();
-        let mut application =
-            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
-        application.update(application.button_message("activate").unwrap());
-        assert_eq!(
-            application.take_effects(),
-            vec![PluginEffect::ActivateTaskbarItem {
-                index: 0,
-                id: "app.example".into(),
-            }]
-        );
-
-        manifest
-            .capabilities
-            .retain(|capability| *capability != PluginCapability::WindowsFocus);
-        let mut denied =
-            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
-        denied.update(denied.button_message("activate").unwrap());
-        assert!(denied.take_effects().is_empty());
-        assert!(denied.last_error().is_some());
     }
 
     #[test]
