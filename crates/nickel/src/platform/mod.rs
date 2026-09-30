@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod native_application_windows;
 use crate::model::{TrayItem, WindowId};
 #[cfg(target_os = "windows")]
 pub(crate) use windows::WindowsShortcutDiagnosticSource;
@@ -1242,7 +1244,8 @@ pub use unsupported::{
 pub(crate) use windows::{
     expose_trusted_control_window, native_preview_diagnostics, prepare_application_discovery,
     prepare_trusted_control_window, publish_application_discovery, refresh_audio_status,
-    refresh_connectivity_status, verify_trusted_control_window,
+    refresh_connectivity_status, register_native_application_window,
+    unregister_native_application_window, verify_trusted_control_window,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

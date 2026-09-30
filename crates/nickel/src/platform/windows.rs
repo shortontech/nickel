@@ -5277,7 +5277,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
     };
     let hwnd = hwnd(window);
     // SAFETY: The handle comes from EnumWindows and is revalidated immediately before use.
-    if unsafe { !IsWindow(Some(hwnd)).as_bool() } {
+    if unsafe { !IsWindow(Some(hwnd)).as_bool() } || window_metadata(hwnd, true).is_none() {
         return false;
     }
     // SAFETY: These operations do not dereference application memory; they send standard window
@@ -5761,7 +5761,41 @@ impl WindowFeed {
 
 /// Shared read-only policy for task windows and remote observations. Enumeration
 /// callers own their separate bounds; only the bar path parks iconic windows.
+static NATIVE_APPLICATION_WINDOWS: LazyLock<
+    Mutex<super::native_application_windows::NativeApplicationWindows>,
+> = LazyLock::new(|| {
+    Mutex::new(super::native_application_windows::NativeApplicationWindows::default())
+});
+
+pub(crate) fn register_native_application_window(
+    window: &impl raw_window_handle::HasWindowHandle,
+    application_id: &str,
+) {
+    if let Some(hwnd) = window_hwnd(window) {
+        NATIVE_APPLICATION_WINDOWS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .register(hwnd.0 as usize, application_id);
+    }
+}
+
+pub(crate) fn unregister_native_application_window(
+    window: &impl raw_window_handle::HasWindowHandle,
+) {
+    if let Some(hwnd) = window_hwnd(window) {
+        NATIVE_APPLICATION_WINDOWS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .unregister(hwnd.0 as usize);
+    }
+}
+
+// Remote observations retain their stricter exclusion of all shell-process windows.
 fn ordinary_window_metadata(hwnd: HWND) -> Option<(u32, String, String)> {
+    window_metadata(hwnd, false)
+}
+
+fn window_metadata(hwnd: HWND, admit_native_application: bool) -> Option<(u32, String, String)> {
     // SAFETY: Handle queries do not send input or mutate the target window.
     if unsafe { !IsWindowVisible(hwnd).as_bool() } {
         return None;
@@ -5770,7 +5804,15 @@ fn ordinary_window_metadata(hwnd: HWND) -> Option<(u32, String, String)> {
     unsafe {
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
     }
-    if pid == 0 || pid == std::process::id() {
+    let admitted = if admit_native_application {
+        NATIVE_APPLICATION_WINDOWS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .admits(hwnd.0 as usize, pid, std::process::id())
+    } else {
+        pid != 0 && pid != std::process::id()
+    };
+    if !admitted {
         return None;
     }
     let title = window_title(hwnd)?;
@@ -5779,14 +5821,21 @@ fn ordinary_window_metadata(hwnd: HWND) -> Option<(u32, String, String)> {
 }
 
 unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
-    let Some((_process_id, title, class)) = ordinary_window_metadata(hwnd) else {
+    let Some((_process_id, title, class)) = window_metadata(hwnd, true) else {
         return BOOL(1);
     };
     // This presentation housekeeping belongs only to the existing bar feed.
     if unsafe { IsIconic(hwnd).as_bool() } {
         park_iconic_window(hwnd);
     }
-    let application_id = Some(if is_nickel_host_terminal(&title) {
+    let native_application = NATIVE_APPLICATION_WINDOWS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .application(hwnd.0 as usize)
+        .map(str::to_owned);
+    let application_id = Some(if let Some(application) = native_application {
+        ApplicationId::new(application)
+    } else if is_nickel_host_terminal(&title) {
         ApplicationId::new("org.nickel.ShellTerminal")
     } else if class.eq_ignore_ascii_case("ApplicationFrameWindow")
         && let Some(app_id) = window_application_user_model_id(hwnd)

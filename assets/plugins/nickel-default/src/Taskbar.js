@@ -46,7 +46,7 @@ function Task(props) {
         menuOpen ? h(Menu, { id: menuId, anchor: buttonId, open: true, onClose: () => setMenuOpen(false) },
             item.windows.map(window => h(MenuItem, { key: window.id, id: "activate-" + window.id, disabled: window.canActivate === false, onClick: () => { nickel.windows.activate(window.id); setMenuOpen(false); } }, window.title || item.name)),
             item.windows.filter(window => window.canClose).map(window => h(MenuItem, { key: "close-" + window.id, id: "close-" + window.id, onClick: () => { nickel.windows.close(window.id); setMenuOpen(false); } }, "Close " + (window.title || item.name))),
-            !item.id.startsWith('window:') ? h(MenuItem, { id: "toggle-pin", onClick: () => { nickel.applications.togglePin(item.id); setMenuOpen(false); } }, item.pinned ? 'Unpin' : 'Pin') : null) : null);
+            (item.pinned || item.canPin) ? h(MenuItem, { id: "toggle-pin", onClick: () => { nickel.applications.togglePin(item.id); setMenuOpen(false); } }, item.pinned ? 'Unpin' : 'Pin') : null) : null);
 }
 function TrayItem(props) {
     const item = props.item;

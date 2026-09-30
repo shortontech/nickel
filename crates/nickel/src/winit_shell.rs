@@ -544,6 +544,14 @@ impl ShellSurface {
 #[cfg(target_os = "windows")]
 impl Drop for ShellSurface {
     fn drop(&mut self) {
+        if self.role == SurfaceRole::CodexChat
+            || self
+                .plugin_surface
+                .as_ref()
+                .is_some_and(crate::platform::native_application_windows::is_application_surface)
+        {
+            crate::platform::unregister_native_application_window(&self.window);
+        }
         if matches!(self.role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
             crate::platform::release_panel_window(&self.window);
         }
@@ -1734,6 +1742,8 @@ impl WinitShell {
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
         let diagnostic_generation = self.next_surface_diagnostic_generation()?;
+        #[cfg(target_os = "windows")]
+        crate::platform::register_native_application_window(&window, application_id);
         self.surface_indices.insert(id.0, index);
         self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {
@@ -2819,6 +2829,13 @@ impl WinitShell {
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
         let diagnostic_generation = self.next_surface_diagnostic_generation()?;
+        #[cfg(target_os = "windows")]
+        if let Some(key) = plugin_key
+            .as_ref()
+            .filter(|_| crate::platform::native_application_windows::is_application_surface(&panel))
+        {
+            crate::platform::register_native_application_window(&window, &key.plugin_id);
+        }
         self.surface_indices.insert(id.0, index);
         self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {

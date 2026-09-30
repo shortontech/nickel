@@ -2808,3 +2808,112 @@ fn shipped_example_shell_composes_owned_taskbar_default_controls_and_registered_
         assert_eq!(values["show-title"], serde_json::json!(false));
     });
 }
+
+#[test]
+fn admitted_native_application_windows_reach_granted_public_resources() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let application =
+            crate::codex_project_application_id(Some("public-proof"), std::path::Path::new(""));
+        shell.windows = vec![crate::model::OpenWindow {
+            id: crate::model::WindowId(71),
+            application_id: Some(crate::model::ApplicationId::new(application.clone())),
+            active: true,
+            title: "Native project chat".into(),
+            state: crate::model::WindowState::default(),
+        }];
+        let windows = shell.external_plugin_windows("nickel-default").unwrap();
+        assert_eq!(windows[0]["id"], "71");
+        assert_eq!(windows[0]["applicationId"], application);
+        assert_eq!(windows[0]["canActivate"], true);
+        assert_eq!(windows[0]["canClose"], true);
+        let apps = shell
+            .external_plugin_applications("nickel-default")
+            .unwrap();
+        let app = apps
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == application)
+            .unwrap();
+        assert_eq!(app["name"], "Native project chat");
+        assert_eq!(app["canLaunch"], false); // running identity is not an invented launch command
+        assert_eq!(app["canPin"], false);
+        let images = shell.plugin_application_images(Some(&apps), None);
+        assert!(images.contains_key(&crate::application_capabilities::icon_asset(&application)));
+        let key = shell.active_shell_surface_key("taskbar");
+        shell.plugin_panel_scene(&key, 1280, 40).unwrap();
+        let button = shell
+            .plugin_panel_host_for(&key)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Native project chat".into(),
+            })
+            .unwrap();
+        assert!(shell.plugin_panel_host_ui_for(
+            &key,
+            nickel_ui::UiEvent::AccessibilityContextMenu(button.id),
+            1280,
+            40
+        ));
+        assert!(
+            shell
+                .plugin_panel_host_for(&key)
+                .unwrap()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::MenuItem,
+                    name: "Pin".into(),
+                })
+                .is_err()
+        );
+        assert!(
+            shell
+                .plugin_panel_host_for(&key)
+                .unwrap()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::MenuItem,
+                    name: "Close Native project chat".into(),
+                })
+                .is_ok()
+        );
+        shell
+            .external_plugin_packages
+            .get_mut("nickel-default")
+            .unwrap()
+            .manifest
+            .capabilities
+            .retain(|capability| {
+                *capability != nickel_core::plugins::PluginCapability::WindowsRead
+            });
+        assert!(shell.external_plugin_windows("nickel-default").is_none());
+        let read_only_catalog = shell
+            .external_plugin_applications("nickel-default")
+            .unwrap();
+        assert!(
+            !read_only_catalog
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == application)
+        );
+        let manifest = &mut shell
+            .external_plugin_packages
+            .get_mut("nickel-default")
+            .unwrap()
+            .manifest;
+        manifest.capabilities.retain(|capability| {
+            !matches!(
+                capability,
+                nickel_core::plugins::PluginCapability::WindowsRead
+                    | nickel_core::plugins::PluginCapability::ApplicationsRead
+            )
+        });
+        assert!(shell.external_plugin_windows("nickel-default").is_none());
+        assert!(
+            shell
+                .external_plugin_applications("nickel-default")
+                .is_none()
+        );
+    });
+}

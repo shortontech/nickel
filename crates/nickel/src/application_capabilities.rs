@@ -49,6 +49,49 @@ pub(crate) fn list(launcher: &Launcher) -> Value {
     )
 }
 
+/// Add running application identities admitted by the platform window registry.
+/// Protected shell utilities never enter that registry. These entries describe
+/// existing applications; launch remains restricted to the discovered catalog.
+pub(crate) fn include_running(launcher: &Launcher, windows: &[crate::model::OpenWindow]) -> Value {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    for window in windows {
+        let Some(id) = window.application_id.as_ref().map(|id| id.as_str()) else {
+            continue;
+        };
+        if items.len() >= APPLICATION_LIMIT {
+            break;
+        }
+        if !id.is_empty() && id.len() <= 256 && seen.insert(id.to_owned()) {
+            if let Some(application) = launcher
+                .applications()
+                .find(|application| application.id() == id)
+            {
+                items.push(item(launcher, application));
+                continue;
+            }
+            items.push(
+                json!({"id":id, "name":window.title.chars().take(120).collect::<String>(),
+                "icon":icon_asset(id), "pinned":launcher.is_pinned(id),
+                "pinOrder":launcher.preferences().favorites().iter().position(|item| item == id),
+                "recentOrder":launcher.preferences().recents().iter().position(|item| item == id),
+                "kind":"application", "launchClass":"running", "canLaunch":false, "canPin":false}),
+            );
+        }
+    }
+    for item in list(launcher).as_array().expect("application list") {
+        if items.len() >= APPLICATION_LIMIT {
+            break;
+        }
+        if let Some(id) = item["id"].as_str()
+            && seen.insert(id.to_owned())
+        {
+            items.push(item.clone());
+        }
+    }
+    Value::Array(items)
+}
+
 #[derive(Default)]
 pub(crate) struct ApplicationSearch {
     queries: BTreeMap<String, String>,
@@ -89,6 +132,41 @@ mod tests {
     use super::*;
     fn app(id: &str, name: &str) -> Application {
         Application::new(id.into(), name.into(), None, None, None)
+    }
+    #[test]
+    fn full_catalog_keeps_running_native_identity_and_prefers_discovered_metadata() {
+        let native = "io.nickel.codex.project.boundary";
+        let mut applications = (0..APPLICATION_LIMIT)
+            .map(|index| app(&format!("app-{index}"), "App"))
+            .collect::<Vec<_>>();
+        let window = crate::model::OpenWindow {
+            id: crate::model::WindowId(71),
+            application_id: Some(crate::model::ApplicationId::new(native)),
+            active: true,
+            title: "Running project".into(),
+            state: crate::model::WindowState::default(),
+        };
+        let running = include_running(
+            &Launcher::new(applications.clone()),
+            std::slice::from_ref(&window),
+        );
+        assert_eq!(running.as_array().unwrap().len(), APPLICATION_LIMIT);
+        assert_eq!(running[0]["id"], native);
+        assert_eq!(running[0]["canPin"], false);
+        applications.push(app(native, "Discovered project"));
+        let discovered = include_running(&Launcher::new(applications), &[window.clone(), window]);
+        assert_eq!(discovered.as_array().unwrap().len(), APPLICATION_LIMIT);
+        assert_eq!(discovered[0]["name"], "Discovered project");
+        assert!(discovered[0].get("canLaunch").is_none());
+        assert_eq!(
+            discovered
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["id"] == native)
+                .count(),
+            1
+        );
     }
     #[test]
     fn package_search_uses_native_ranking_without_changing_launcher_query_and_refreshes_pins() {

@@ -3146,7 +3146,21 @@ impl LiveShell {
         {
             return None;
         }
-        Some(crate::application_capabilities::list(&self.launcher))
+        // Running-only entries include window titles/identities; retain the
+        // separate WindowsRead grant rather than expanding ApplicationsRead.
+        let windows = if package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::WindowsRead)
+        {
+            self.windows.as_slice()
+        } else {
+            &[]
+        };
+        Some(crate::application_capabilities::include_running(
+            &self.launcher,
+            windows,
+        ))
     }
 
     fn plugin_application_search(&self, plugin_id: &str) -> Option<serde_json::Value> {
@@ -3185,17 +3199,30 @@ impl LiveShell {
             let Some(id) = item["id"].as_str() else {
                 continue;
             };
-            let Some(application) = self
+            let icon = if let Some(application) = self
                 .launcher
                 .applications()
                 .find(|application| application.id() == id)
-            else {
+            {
+                self.launcher_icons
+                    .resolve(application)
+                    .unwrap_or_else(launcher_placeholder_icon)
+            } else if let Some(window) = self.windows.iter().find(|window| {
+                window
+                    .application_id
+                    .as_ref()
+                    .is_some_and(|application| application.as_str() == id)
+            }) {
+                self.window_feed
+                    .icon(window.id)
+                    .map(|image| {
+                        self.launcher_icons
+                            .resolve_window_icon(window.id, Arc::new(image))
+                    })
+                    .unwrap_or_else(launcher_placeholder_icon)
+            } else {
                 continue;
             };
-            let icon = self
-                .launcher_icons
-                .resolve(application)
-                .unwrap_or_else(launcher_placeholder_icon);
             images.insert(crate::application_capabilities::icon_asset(id), icon);
         }
         images

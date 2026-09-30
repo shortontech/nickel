@@ -58,7 +58,7 @@ function Task(props) {
             onClick={() => { nickel.windows.close(window.id); setMenuOpen(false); }}>
             {"Close " + (window.title || item.name)}
         </MenuItem>)}
-        {!item.id.startsWith('window:') ? <MenuItem id="toggle-pin" onClick={() => { nickel.applications.togglePin(item.id); setMenuOpen(false); }}>
+        {(item.pinned || item.canPin) ? <MenuItem id="toggle-pin" onClick={() => { nickel.applications.togglePin(item.id); setMenuOpen(false); }}>
             {item.pinned ? 'Unpin' : 'Pin'}
         </MenuItem> : null}
     </Menu> : null}
