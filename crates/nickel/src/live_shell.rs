@@ -7945,12 +7945,22 @@ impl LiveShell {
         let Some(host) = self.application_menu_plugin_host.as_mut() else {
             return false;
         };
-        let outcome = host.step(HostBatch {
-            surface_size: Some((width, height)),
-            events: vec![event],
-            normalized_authorities: authority.into_iter().collect(),
-            ..HostBatch::default()
-        });
+        let outcome = match step_plugin_host(
+            host,
+            None,
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![event],
+                normalized_authorities: authority.into_iter().collect(),
+                ..HostBatch::default()
+            },
+        ) {
+            Ok((outcome, _)) => outcome,
+            Err(error) => {
+                self.fail_taskbar_plugin_runtime(error);
+                return true;
+            }
+        };
         let effects = host.application_mut().take_effects();
         let requested = !effects.is_empty();
         let changed = outcome.changed | self.apply_plugin_effects(effects);
@@ -7973,12 +7983,22 @@ impl LiveShell {
         let Some(host) = self.window_menu_plugin_host.as_mut() else {
             return false;
         };
-        let outcome = host.step(HostBatch {
-            surface_size: Some((width, height)),
-            events: vec![event],
-            normalized_authorities: authority.into_iter().collect(),
-            ..HostBatch::default()
-        });
+        let outcome = match step_plugin_host(
+            host,
+            None,
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![event],
+                normalized_authorities: authority.into_iter().collect(),
+                ..HostBatch::default()
+            },
+        ) {
+            Ok((outcome, _)) => outcome,
+            Err(error) => {
+                self.fail_taskbar_plugin_runtime(error);
+                return true;
+            }
+        };
         let effects = host.application_mut().take_effects();
         outcome.changed | self.apply_plugin_effects(effects)
     }
@@ -10745,21 +10765,22 @@ impl LiveShell {
                 }
             }
             if let Some(host) = self.window_menu_plugin_host.as_mut() {
-                let changed = host
-                    .application_mut()
-                    .sync_serialized_data(projection.to_json())
-                    .unwrap_or_else(|error| {
-                        tracing::warn!(%error, "taskbar JSX window menu projection failed");
-                        false
-                    });
-                let outcome = host.step(HostBatch {
-                    application_changed: changed,
-                    surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
-                    events: vec![HostEvent::Poll],
-                    ..HostBatch::default()
-                });
-                let commands = host.commands().to_vec();
-                self.plugin_taskbar_menu_memory = outcome.telemetry.retained_frame_bytes as u64;
+                let (commands, bytes) = match render_plugin_host(
+                    host,
+                    Some(projection.to_json()),
+                    HostBatch {
+                        surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
+                        events: vec![HostEvent::Poll],
+                        ..HostBatch::default()
+                    },
+                ) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        self.fail_taskbar_plugin_runtime(error);
+                        return Vec::new();
+                    }
+                };
+                self.plugin_taskbar_menu_memory = bytes;
                 self.record_taskbar_memory();
                 return commands;
             }
@@ -10817,21 +10838,22 @@ impl LiveShell {
                 }
             }
             if let Some(host) = self.application_menu_plugin_host.as_mut() {
-                let changed = match host.application_mut().sync_serialized_data(data) {
-                    Ok(changed) => changed,
+                let (commands, bytes) = match render_plugin_host(
+                    host,
+                    Some(data),
+                    HostBatch {
+                        surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
+                        events: vec![HostEvent::Poll],
+                        ..HostBatch::default()
+                    },
+                ) {
+                    Ok(frame) => frame,
                     Err(error) => {
-                        tracing::error!(%error, "taskbar JSX menu failed to refresh");
+                        self.fail_taskbar_plugin_runtime(error);
                         return Vec::new();
                     }
                 };
-                let outcome = host.step(HostBatch {
-                    surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
-                    events: vec![HostEvent::Poll],
-                    application_changed: changed,
-                    ..HostBatch::default()
-                });
-                let commands = host.commands().to_vec();
-                self.plugin_taskbar_menu_memory = outcome.telemetry.retained_frame_bytes as u64;
+                self.plugin_taskbar_menu_memory = bytes;
                 self.record_taskbar_memory();
                 return commands;
             }
