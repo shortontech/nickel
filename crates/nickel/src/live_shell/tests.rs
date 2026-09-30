@@ -2982,9 +2982,9 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
     assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
     shell.volume_osd_scene(320, 88);
     assert!(
-        shell
-            .volume_osd_projection()
-            .label
+        shell.audio_plugin_data()["label"]
+            .as_str()
+            .unwrap()
             .starts_with("Volume 31%")
     );
     assert!(
@@ -3048,9 +3048,9 @@ fn audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes
     assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
     shell.volume_osd_scene(320, 88);
     assert!(
-        shell
-            .volume_osd_projection()
-            .label
+        shell.audio_plugin_data()["label"]
+            .as_str()
+            .unwrap()
             .starts_with("Volume 36%")
     );
     let first = shell.volume_osd_until.unwrap();

@@ -930,6 +930,35 @@ fn render_plugin_host(
     Ok((host.commands().to_vec(), retained_bytes))
 }
 
+fn audio_plugin_data(audio: &AudioStatus, locked: bool) -> serde_json::Value {
+    let percent = audio.volume_percent.min(100);
+    let output = if locked {
+        Some("Audio output")
+    } else {
+        audio
+            .devices
+            .iter()
+            .find(|device| device.is_default)
+            .map(|device| device.name.as_str())
+    };
+    let mut label = if audio.muted {
+        "Muted".to_owned()
+    } else {
+        format!("Volume {percent}%")
+    };
+    if let Some(output) = output {
+        label.push_str(" · ");
+        label.extend(output.chars().take(120));
+    }
+    serde_json::json!({
+        "available": audio.available,
+        "label": label,
+        "percent": percent,
+        "muted": audio.muted,
+        "outputName": output.map(|name| name.chars().take(120).collect::<String>()),
+    })
+}
+
 // This shared shell implementation includes the compositor-facing API. The
 // Windows winit owner calls its own subset and leaves those Linux methods idle.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -1470,14 +1499,11 @@ impl LiveShell {
         {
             let id = &crate::plugin_panel::volume_osd_manifest().id;
             plugin_registry.set_enabled(id, true)?;
-            let projection = crate::plugin_panel::VolumeOsdPluginProjection {
-                label: String::new(),
-                percent: audio.volume_percent.min(100),
-            };
+            let data = serde_json::json!({"audio": audio_plugin_data(&audio, false)});
             match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
                 crate::plugin_panel::volume_osd_manifest(),
                 "main.js",
-                projection.to_json(),
+                data.to_string(),
             ) {
                 Ok(application) => {
                     plugin_registry.mark_running(id)?;
@@ -2542,6 +2568,7 @@ impl LiveShell {
                 let windows = self.external_plugin_windows(&self.plugin_panel_owner);
                 let applications = self.external_plugin_applications(&self.plugin_panel_owner);
                 let notifications = self.external_plugin_notifications(&self.plugin_panel_owner);
+                let audio = self.external_plugin_audio(&self.plugin_panel_owner);
                 let owner = self.plugin_panel_owner.clone();
                 let Some(host) = self.plugin_panel_host.as_mut() else {
                     return Vec::new();
@@ -2551,6 +2578,7 @@ impl LiveShell {
                     ("windows", windows.as_ref()),
                     ("applications", applications.as_ref()),
                     ("notifications", notifications.as_ref()),
+                    ("audio", audio.as_ref()),
                 ]
                 .into_iter()
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
@@ -3544,6 +3572,19 @@ impl LiveShell {
         ))
     }
 
+    fn external_plugin_audio(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::AudioRead)
+            .then(|| self.audio_plugin_data())
+    }
+
+    fn audio_plugin_data(&self) -> serde_json::Value {
+        audio_plugin_data(&self.audio, self.locked)
+    }
+
     fn plugin_slot_projection(&self, target_id: &str) -> Option<serde_json::Value> {
         self.plugin_slot_projection_with_context(target_id, None, None)
     }
@@ -3763,6 +3804,7 @@ impl LiveShell {
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
         let notifications = self.external_plugin_notifications(&key.plugin_id);
+        let audio = self.external_plugin_audio(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
         let result = (|| {
@@ -3778,6 +3820,7 @@ impl LiveShell {
                     ("windows", windows.as_ref()),
                     ("applications", applications.as_ref()),
                     ("notifications", notifications.as_ref()),
+                    ("audio", audio.as_ref()),
                 ]
                 .into_iter()
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
@@ -5012,11 +5055,11 @@ impl LiveShell {
                 self.plugin_notification_host = Some(nickel_ui::UiHost::new(application, 420, 180));
             })
         } else if id == crate::plugin_panel::volume_osd_manifest().id {
-            let projection = self.volume_osd_projection();
+            let data = serde_json::json!({"audio": self.audio_plugin_data()});
             crate::plugin_panel::PluginPanelApplication::bundled_with_data(
                 crate::plugin_panel::volume_osd_manifest(),
                 "main.js",
-                projection.to_json(),
+                data.to_string(),
             )
             .map(|application| {
                 self.plugin_volume_osd_host = Some(nickel_ui::UiHost::new(application, 420, 96));
@@ -9618,36 +9661,21 @@ impl LiveShell {
         }
     }
 
-    fn volume_osd_projection(&self) -> crate::plugin_panel::VolumeOsdPluginProjection {
-        let percent = self.audio.volume_percent.min(100);
-        let mut label = if self.audio.muted {
-            "Muted".to_owned()
-        } else {
-            format!("Volume {percent}%")
-        };
-        let output = if self.locked {
-            Some("Audio output")
-        } else {
-            self.audio
-                .devices
-                .iter()
-                .find(|device| device.is_default)
-                .map(|device| device.name.as_str())
-        };
-        if let Some(output) = output {
-            label.push_str(" · ");
-            label.push_str(output);
-        }
-        crate::plugin_panel::VolumeOsdPluginProjection { label, percent }
-    }
-
     fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let projection = self.volume_osd_projection();
+        let audio = self.audio_plugin_data();
         if let Some(host) = self.plugin_volume_osd_host.as_mut() {
+            let changed = match host.application_mut().sync_host_data_field("audio", &audio) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    self.fail_volume_osd_plugin_runtime(error);
+                    return Vec::new();
+                }
+            };
             let (commands, bytes) = match render_plugin_host(
                 host,
-                Some(projection.to_json()),
+                None,
                 HostBatch {
+                    application_changed: changed,
                     surface_size: Some((width, height)),
                     ..HostBatch::default()
                 },

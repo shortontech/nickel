@@ -737,22 +737,6 @@ pub struct TaskbarPluginProjection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VolumeOsdPluginProjection {
-    pub label: String,
-    pub percent: u8,
-}
-
-impl VolumeOsdPluginProjection {
-    pub(crate) fn to_json(&self) -> String {
-        serde_json::json!({
-            "label": self.label.chars().take(640).collect::<String>(),
-            "percent": self.percent.min(100),
-        })
-        .to_string()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskbarWindowMenuPluginProjection {
     pub root: Vec<(String, Option<&'static str>)>,
     pub workspaces: Vec<(String, Option<&'static str>)>,
@@ -1428,11 +1412,8 @@ impl PluginPanelApplication {
     }
 
     #[cfg(test)]
-    pub(crate) fn volume_osd_with_test_source(
-        source: &str,
-        projection: &VolumeOsdPluginProjection,
-    ) -> Result<Self, String> {
-        Self::new_with_manifest(source, volume_osd_manifest(), Some(projection.to_json()))
+    pub(crate) fn volume_osd_with_test_source(source: &str, data: &Value) -> Result<Self, String> {
+        Self::new_with_manifest(source, volume_osd_manifest(), Some(data.to_string()))
     }
 
     #[cfg(test)]
@@ -1641,7 +1622,7 @@ impl PluginPanelApplication {
         if fields.iter().any(|(field, _)| {
             !matches!(
                 *field,
-                "slots" | "windows" | "applications" | "notifications"
+                "slots" | "windows" | "applications" | "notifications" | "audio"
             )
         }) {
             return Err("unknown host data field".into());
@@ -1661,6 +1642,14 @@ impl PluginPanelApplication {
                 .contains(&PluginCapability::ApplicationsRead)
         {
             return Err("application data requires applications-read".into());
+        }
+        if fields.iter().any(|(field, _)| *field == "audio")
+            && !self
+                .manifest
+                .capabilities
+                .contains(&PluginCapability::AudioRead)
+        {
+            return Err("audio data requires audio-read".into());
         }
         let Some(data) = self.projection_data.as_deref() else {
             return Err("plugin has no external projection".into());
@@ -3206,15 +3195,14 @@ mod tests {
 
     #[test]
     fn bundled_volume_osd_visual_snapshot() {
-        let projection = VolumeOsdPluginProjection {
-            label: "Speakers · 65%".into(),
-            percent: 65,
-        };
+        let projection = serde_json::json!({
+            "audio": {"label": "Speakers · 65%", "percent": 65}
+        });
         let host = nickel_ui::UiHost::new(
             PluginPanelApplication::bundled_with_data(
                 crate::plugin_panel::volume_osd_manifest(),
                 "main.js",
-                projection.to_json(),
+                projection.to_string(),
             )
             .unwrap(),
             420,
@@ -4723,6 +4711,39 @@ mod tests {
         );
         assert!(app.last_error().is_none());
         assert!(format!("{:?}", app.node).contains("After"));
+    }
+
+    #[test]
+    fn audio_host_data_requires_audio_read_and_updates_the_tree() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        let source = "function App() { return h(Window, {id:'main',width:520,height:340}, h(Text, null, nickel.data.audio.percent)); }";
+        let mut app = PluginPanelApplication::new_with_manifest_for_surface(
+            source,
+            &manifest,
+            Some(r#"{"audio":{"percent":10}}"#.into()),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        let next = serde_json::json!({"percent": 65});
+        assert!(app.sync_host_data_field("audio", &next).is_err());
+
+        manifest.capabilities.push(PluginCapability::AudioRead);
+        let mut app = PluginPanelApplication::new_with_manifest_for_surface(
+            source,
+            &manifest,
+            Some(r#"{"audio":{"percent":10}}"#.into()),
+            Some("main"),
+            None,
+        )
+        .unwrap();
+        assert!(app.sync_host_data_field("audio", &next).unwrap());
+        assert!(format!("{:?}", app.node).contains("65"));
     }
 
     #[test]

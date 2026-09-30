@@ -1005,7 +1005,7 @@
         let first_deadline = shell.volume_osd_until.unwrap();
         assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
         shell.volume_osd_scene(320, 88);
-        assert!(shell.volume_osd_projection().label.starts_with("Volume 47%"));
+        assert!(shell.audio_plugin_data()["label"].as_str().unwrap().starts_with("Volume 47%"));
         assert!(
             shell
                 .plugin_volume_osd_host
@@ -1037,7 +1037,7 @@
         });
         assert!(shell.volume_osd_until.unwrap() >= first_deadline);
         shell.volume_osd_scene(320, 88);
-        assert!(shell.volume_osd_projection().label.starts_with("Muted"));
+        assert!(shell.audio_plugin_data()["label"].as_str().unwrap().starts_with("Muted"));
 
         let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
         assert!(outcome.visibility_changed);
@@ -1066,7 +1066,7 @@
             output_name: Some("Private Bluetooth Headset".into()),
         });
         shell.volume_osd_scene(320, 88);
-        assert_eq!(shell.volume_osd_projection().label, "Volume 47% · Audio output");
+        assert_eq!(shell.audio_plugin_data()["label"], "Volume 47% · Audio output");
         assert!(
             !shell
                 .plugin_volume_osd_host

@@ -119,6 +119,74 @@
     }
 
     #[test]
+    fn installed_audio_resource_requires_audio_read_and_redacts_while_locked() {
+        use nickel_core::plugins::{PluginCapability, PluginPackage, PluginPackageDescriptor};
+
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        );
+        let mut package = PluginPackage::load(directory).unwrap();
+        package.source = "function App() { return h(Window, {id:'main',width:520,height:340}, h(Text, null, nickel.data.audio ? 'Volume ' + nickel.data.audio.percent : 'Waiting')); }".into();
+        let id = package.manifest.id.clone();
+        let mut shell = LiveShell::new().unwrap();
+        shell.external_plugin_packages.insert(
+            id.clone(),
+            PluginPackageDescriptor {
+                directory: directory.into(),
+                manifest: package.manifest.clone(),
+                source_digest: package.source_digest(),
+            },
+        );
+        assert!(shell.external_plugin_audio(&id).is_none());
+        shell
+            .external_plugin_packages
+            .get_mut(&id)
+            .unwrap()
+            .manifest
+            .capabilities
+            .push(PluginCapability::AudioRead);
+        package.manifest.capabilities.push(PluginCapability::AudioRead);
+        let surface = &package.manifest.surfaces[0];
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.clone(),
+            surface_id: surface.id.clone(),
+        };
+        let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(
+            &package,
+            &Default::default(),
+            surface,
+        )
+        .unwrap();
+        shell.plugin_panel_extra_hosts.insert(
+            key.clone(),
+            (
+                surface.clone(),
+                nickel_ui::UiHost::new(application, surface.width, surface.height),
+            ),
+        );
+        assert!(shell
+            .plugin_panel_scene(&key, surface.width, surface.height)
+            .is_some());
+        let expected = format!("Volume {}", shell.audio.volume_percent.min(100));
+        assert!(shell
+            .plugin_panel_extra_hosts
+            .get(&key)
+            .unwrap()
+            .1
+            .accessibility_nodes()
+            .iter()
+            .any(|node| node.label.as_deref() == Some(expected.as_str())));
+        let audio = shell.external_plugin_audio(&id).unwrap();
+        assert_eq!(audio["percent"], shell.audio.volume_percent.min(100));
+        shell.locked = true;
+        assert_eq!(
+            shell.external_plugin_audio(&id).unwrap()["outputName"],
+            "Audio output"
+        );
+    }
+
+    #[test]
     fn settings_activation_is_registered_without_an_in_process_window() {
         let mut shell = LiveShell::new().unwrap();
         let id = crate::settings_plugin_report::ID;
@@ -601,11 +669,11 @@
     #[test]
     fn volume_osd_projection_failure_retires_its_overlay() {
         let mut shell = LiveShell::new().unwrap();
-        let mut projection = shell.volume_osd_projection();
-        projection.label = "fixture-label".into();
+        let mut data = serde_json::json!({"audio": shell.audio_plugin_data()});
+        data["audio"]["label"] = "fixture-label".into();
         let application = crate::plugin_panel::PluginPanelApplication::volume_osd_with_test_source(
-            "function App() { if (nickel.data.label !== 'fixture-label') throw Error('volume projection exploded'); return h(Panel, {}, h(Text, {}, 'Volume ready')); }",
-            &projection,
+            "function App() { if (nickel.data.audio.label !== 'fixture-label') throw Error('volume projection exploded'); return h(Panel, {}, h(Text, {}, 'Volume ready')); }",
+            &data,
         )
         .unwrap();
         shell.plugin_volume_osd_host = Some(nickel_ui::UiHost::new(application, 420, 96));
