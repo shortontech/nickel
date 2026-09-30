@@ -5891,9 +5891,14 @@ impl NickelSession {
             .internal_surface_windows
             .iter()
             .filter_map(|(surface, window)| {
-                self.windows
-                    .app_id(*window)
-                    .and_then(|id| self.internal_shell.as_ref()?.plugin_name(id))
+                self.internal_shell
+                    .as_ref()
+                    .and_then(|shell| {
+                        let entry = shell.surfaces().iter().find(|entry| {
+                            self.internal_shell_surfaces.get(&entry.id) == Some(surface)
+                        })?;
+                        shell.plugin_window_title(entry.plugin.as_ref()?)
+                    })
                     .or_else(|| self.internal_ui.title(*surface))
                     .map(|title| (*window, title.to_owned()))
             })
