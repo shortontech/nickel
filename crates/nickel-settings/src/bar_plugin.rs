@@ -1,9 +1,6 @@
 //! JSX Bar settings rendered through the shared native component path.
 
-use nickel_core::{
-    shell_settings::{MAX_CONFIGURED_WORKSPACES, ShellSettings},
-    theme::ThemePalette,
-};
+use nickel_core::shell_settings::{MAX_CONFIGURED_WORKSPACES, ShellSettings};
 use nickel_i18n::Localizer;
 use nickel_plugin_presentation::{
     components::PluginImages,
@@ -72,7 +69,6 @@ impl BarPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-        _palette: ThemePalette,
     ) -> Result<AnyView<SettingsMessage>, String> {
         let (node, stylesheet) = self.page.render(
             data,
@@ -163,6 +159,7 @@ impl SettingsApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nickel_core::theme::ThemePalette;
 
     fn save_host_snapshot(host: &nickel_ui::UiHost<SettingsApp>, name: &str) {
         const WIDTH: u32 = 850;
@@ -182,17 +179,13 @@ mod tests {
     }
 
     #[test]
-    fn shared_bar_page_and_native_reference_render() {
+    fn shared_bar_page_renders() {
         let jsx = nickel_ui::UiHost::new(
             SettingsApp::with_initial_page(crate::SettingsPage::Bar),
             850,
             580,
         );
         save_host_snapshot(&jsx, "settings-bar-shared.png");
-        let mut native = SettingsApp::with_initial_page(crate::SettingsPage::Bar);
-        native.settings_jsx_enabled = false;
-        let native = nickel_ui::UiHost::new(native, 850, 580);
-        save_host_snapshot(&native, "settings-bar-native.png");
     }
 
     #[test]
@@ -204,13 +197,7 @@ mod tests {
             nickel_core::theme::Appearance::default(),
         ));
         let mut page = BarPage::new().unwrap();
-        let _ = page
-            .render(
-                &data,
-                theme,
-                ThemePalette::from_appearance(nickel_core::theme::Appearance::default()),
-            )
-            .unwrap();
+        let _ = page.render(&data, theme).unwrap();
         let action = page.action_for_id("bar-all-displays").unwrap();
         assert_eq!(
             page.dispatch(action, Value::Null, &data).unwrap(),

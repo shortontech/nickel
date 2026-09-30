@@ -73,7 +73,7 @@ use nickel_ui::{
     ReadingDirection, ResponsiveNavigation, ResponsiveNavigationDestination, SelectField,
     SemanticControllerAction, SemanticRole, SemanticSelector, SemanticTheme, SettingsCard,
     SettingsNavigation, SettingsRow, SettingsSearchField, SettingsStatus, SettingsStatusKind, Size,
-    SliderField, Surface, SurfaceRole, Switch, SwitchState, TextAlign, UiHost, UiId, ViewContext,
+    SliderField, Surface, SurfaceRole, Switch, SwitchState, UiHost, UiId, ViewContext,
     search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
@@ -4121,16 +4121,25 @@ mod tests {
     }
 
     #[test]
-    fn failed_jsx_bar_page_keeps_native_controls_available() {
+    fn failed_jsx_bar_page_offers_plugin_recovery_without_native_controls() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Bar);
         app.persistence_enabled = false;
         *app.bar_page.borrow_mut() = Some(Err("JSX failed".into()));
-        let host = UiHost::new(app, 850, 580);
-        assert_eq!(
+        let mut host = UiHost::new(app, 850, 580);
+        assert!(
             host.semantic_targets_for_message(&SettingsMessage::BarPrimaryDisplay)
-                .len(),
-            1
+                .is_empty()
         );
+        let recovery = host
+            .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
+            .into_iter()
+            .next()
+            .expect("Bar recovery opens plugin management");
+        host.perform_semantic_action(
+            recovery.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(host.application().page, SettingsPage::Plugins);
     }
 
     #[test]

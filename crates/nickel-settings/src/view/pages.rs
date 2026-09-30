@@ -1630,101 +1630,40 @@ impl SettingsApp {
         if self.page != SettingsPage::Bar {
             return AnyView::new(Container::new());
         }
-        if !self.settings_jsx_enabled {
-            return AnyView::new(self.native_bar_components());
-        }
-        let data = crate::bar_plugin::projection(
-            &self.localizer,
-            &self.shell_settings,
-            self.displays.len(),
-            self.shell_topology_generation,
-        );
-        let result = self
-            .bar_page
-            .borrow_mut()
-            .get_or_insert_with(|| {
-                self.shared_settings_page(crate::settings_package::Script::Bar)
-                    .and_then(crate::bar_plugin::BarPage::new_with_page)
-            })
-            .as_mut()
-            .map_err(|error| error.clone())
-            .and_then(|page| page.render(&data, self.ui_theme(), self.palette()));
-        result.unwrap_or_else(|_| AnyView::new(self.native_bar_components()))
-    }
-
-    fn native_bar_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
-        let palette = self.palette();
-        let theme = self.ui_theme();
-        let display_count = self.displays.len().max(1);
-        let desktop_choices = (0..self.shell_settings.desktop_count).map(|index| {
-            ui! {
-                <Container width={64.0} height={46.0} background={palette.surface}
-                    border={(if index == self.shell_settings.active_desktop { palette.accent } else { palette.muted }, 2.0)}
-                    padding={Insets { top: 9.0, right: 4.0, bottom: 4.0, left: 4.0 }}>
-                    <Text align={TextAlign::Center} scale={1.0}
-                        color={if index == self.shell_settings.active_desktop { palette.text } else { palette.muted }}>
-                        {format!("{}", index + 1)}
-                    </Text>
-                </Container>
-            }
-        });
-        let bar_display_scope = RadioGroup::new([
-            RadioOption::new(
-                theme,
-                SettingsMessage::BarPrimaryDisplay,
-                self.localizer.text("settings-bar-primary-display"),
-                !self.shell_settings.bar_on_all_displays,
-            ),
-            RadioOption::new(
-                theme,
-                SettingsMessage::BarAllDisplays,
-                self.localizer
-                    .number("settings-bar-all-displays", "count", display_count as i64),
-                self.shell_settings.bar_on_all_displays,
-            ),
-        ])
-        .id("bar-display-scope");
-        let bar_window_scope = RadioGroup::new([
-            RadioOption::new(
-                theme,
-                SettingsMessage::BarDisplayWindows,
-                self.localizer.text("settings-bar-this-display"),
-                !self.shell_settings.all_windows_on_every_bar,
-            ),
-            RadioOption::new(
-                theme,
-                SettingsMessage::BarAllWindows,
-                self.localizer.text("settings-bar-all-windows"),
-                self.shell_settings.all_windows_on_every_bar,
-            ),
-        ])
-        .id("bar-window-scope");
-        let desktop_count = SliderField::new(
-            theme,
-            self.localizer.text("settings-bar-desktops"),
-            "The number of persistent workspaces available to the session.",
-            self.localizer.number(
-                "settings-bar-desktop-count",
-                "count",
-                i64::from(self.shell_settings.desktop_count),
-            ),
-            f32::from(self.shell_settings.desktop_count.saturating_sub(1))
-                / f32::from(nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES - 1),
-            desktop_count_message,
-        )
-        .id("bar-desktop-count");
-        ui! {
-            <Column grow={1.0} padding={Insets {
-                top: 24.0, right: 40.0, bottom: 20.0, left: 20.0,
-            }} gap={14.0}>
-                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-bar-show-on")}</Text>
-                {bar_display_scope}
-                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-bar-window-scope")}</Text>
-                {bar_window_scope}
-                {desktop_count}
-                <Row height={46.0} gap={8.0} children={desktop_choices} />
-            </Column>
-        }
+        let result = if self.settings_jsx_enabled {
+            let data = crate::bar_plugin::projection(
+                &self.localizer,
+                &self.shell_settings,
+                self.displays.len(),
+                self.shell_topology_generation,
+            );
+            self.bar_page
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::Bar)
+                        .and_then(crate::bar_plugin::BarPage::new_with_page)
+                })
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|page| page.render(&data, self.ui_theme()))
+        } else {
+            Err("Settings plugin is disabled".into())
+        };
+        result.unwrap_or_else(|error| {
+            AnyView::new(
+                SettingsCard::titled(
+                    self.ui_theme(),
+                    "Nickel Bar settings are unavailable",
+                    error,
+                )
+                .child(Button::semantic(
+                    self.ui_theme(),
+                    SettingsMessage::Navigate(SettingsPage::Plugins),
+                    "Manage plugins",
+                    ButtonPresentation::Primary,
+                )),
+            )
+        })
     }
 
     fn appearance_frame(
