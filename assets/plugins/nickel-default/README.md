@@ -45,9 +45,8 @@ copied components still read today's bounded slot data until that API lands.
    local named/default exports. This entry avoids re-export-from syntax.
 2. Multiple surface roots and package-owned surface visibility state.
 3. Resolution of public component exports, replacements, and contributions.
-4. The core Settings registry exists. JavaScript registration, reactive reads,
-   live value/change bindings, and cross-provider component resolution remain
-   unconnected to this package.
+4. Public Settings registration and cross-provider callback dispatch are wired.
+   Live foreign value reads and cross-provider custom page components remain.
 5. Unified capability clients behind the grants in `plugin.json`.
 6. Migration of copied legacy requests and `nickel.data` snapshots to those
    clients without changing their public behavior.
@@ -73,3 +72,16 @@ request dispatch, public composition resolution, and Settings bridge still need
 integration. In particular, a single undifferentiated `nickel.data` cannot serve
 all copied components; those reads must become capability snapshots or explicit
 component inputs during cutover.
+
+## Public component lookup
+
+The package host publishes `composition.exports` from the validated manifest.
+`nickel.component("shell.taskbar")` returns that module's actual component
+function. Exported modules share the entry's module cache, hooks, and CSS, even
+when the entry does not import them directly. Missing modules or exports and
+non-function exports reject package startup. The default `Shell` resolves its
+surface components through these contracts.
+
+This lookup currently binds the package's own exports. Applying an inherited
+package's replacements and contributions still requires the composition host;
+lookup alone does not activate third-party shell replacement.

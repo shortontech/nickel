@@ -19,6 +19,7 @@ pub struct JsxModuleGraph {
     entry: String,
     scripts: BTreeMap<String, String>,
     stylesheets: BTreeMap<String, String>,
+    public_exports: BTreeMap<String, (String, String)>,
 }
 
 impl JsxModuleGraph {
@@ -52,9 +53,55 @@ impl JsxModuleGraph {
             entry,
             scripts,
             stylesheets,
+            public_exports: BTreeMap::new(),
         };
         graph.validate_reachable()?;
         Ok(graph)
+    }
+
+    /// Connect public contracts to actual module exports, including modules not
+    /// imported by the entry. These roots share the same module cache and CSS.
+    pub fn with_public_exports(
+        mut self,
+        exports: &BTreeMap<String, String>,
+    ) -> Result<Self, String> {
+        if exports.len() > 128 {
+            return Err("too many public component exports".into());
+        }
+        for (contract, implementation) in exports {
+            if contract.is_empty() || contract.len() > 128 {
+                return Err("invalid public component contract".into());
+            }
+            let (path, name) = implementation
+                .split_once('#')
+                .ok_or("public component requires a module#export reference")?;
+            let path = normalize_path(path)?;
+            let mut chars = name.chars();
+            if !chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+            {
+                return Err("invalid public component export name".into());
+            }
+            self.public_exports
+                .insert(contract.clone(), (path, name.into()));
+        }
+        self.validate_reachable()?;
+        Ok(self)
+    }
+
+    fn visit_roots(
+        &self,
+        visited: &mut BTreeSet<String>,
+        scripts: &mut Vec<String>,
+        css: &mut Vec<String>,
+    ) -> Result<(), String> {
+        self.visit(&self.entry, visited, scripts, css)?;
+        for (path, _) in self.public_exports.values() {
+            self.visit(path, visited, scripts, css)?;
+        }
+        Ok(())
     }
 
     pub fn entry(&self) -> &str {
@@ -65,7 +112,7 @@ impl JsxModuleGraph {
     pub fn stylesheet(&self) -> Result<String, String> {
         let mut visited = BTreeSet::new();
         let mut css = Vec::new();
-        self.visit(&self.entry, &mut visited, &mut Vec::new(), &mut css)?;
+        self.visit_roots(&mut visited, &mut Vec::new(), &mut css)?;
         Ok(css
             .into_iter()
             .filter_map(|path| self.stylesheets.get(&path))
@@ -77,7 +124,7 @@ impl JsxModuleGraph {
     pub(crate) fn compile(&self) -> Result<String, String> {
         let mut visited = BTreeSet::new();
         let mut order = Vec::new();
-        self.visit(&self.entry, &mut visited, &mut order, &mut Vec::new())?;
+        self.visit_roots(&mut visited, &mut order, &mut Vec::new())?;
         let mut output = String::from(
             "const __nickelModules = new Map();\nconst __nickelModuleCache = new Map();\n\
              function __nickelDefineModule(id, factory) { __nickelModules.set(id, factory); }\n\
@@ -97,6 +144,14 @@ impl JsxModuleGraph {
                 transformed
             ));
         }
+        for (contract, (path, name)) in &self.public_exports {
+            output.push_str(&format!(
+                "__nickelPublishComponent({}, __nickelRequireModule({})[{}]);\n",
+                js_string(contract),
+                js_string(path),
+                js_string(name)
+            ));
+        }
         output.push_str(&format!(
             "const __nickelEntryModule = __nickelRequireModule({});\nvar App = __nickelEntryModule.default ?? __nickelEntryModule.App;\nif (typeof App !== 'function') throw Error('entry module must export a default component or named App');\n",
             js_string(&self.entry)
@@ -105,12 +160,7 @@ impl JsxModuleGraph {
     }
 
     fn validate_reachable(&self) -> Result<(), String> {
-        self.visit(
-            &self.entry,
-            &mut BTreeSet::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-        )
+        self.visit_roots(&mut BTreeSet::new(), &mut Vec::new(), &mut Vec::new())
     }
 
     fn visit(
@@ -367,6 +417,49 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn public_component_roots_share_module_identity_and_load_their_css() {
+        let graph = JsxModuleGraph::new("main.js", [
+            ModuleSource { path: "main.js", source: "export function App() { return h(nickel.component('shell.widget'), {}); }" },
+            ModuleSource { path: "widget.js", source: "import './widget.css';\nlet calls = 0;\nexport function Widget() { return h(Text, {}, 'widget ' + ++calls); }" },
+            ModuleSource { path: "widget.css", source: ".widget { padding: 8px; }" },
+        ]).unwrap().with_public_exports(&BTreeMap::from([
+            ("shell.widget".into(), "./widget.js#Widget".into()),
+            ("shell.widget.alias".into(), "./widget.js#Widget".into()),
+        ])).unwrap();
+        assert!(graph.stylesheet().unwrap().contains("padding: 8px"));
+        let mut runtime = JsxRuntime::new_modules(&graph, None).unwrap();
+        assert!(runtime.eval_json::<bool>("JSON.stringify(nickel.component('shell.widget') === nickel.component('shell.widget.alias'))").unwrap());
+        let rendered: serde_json::Value = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(rendered.to_string().contains("widget 1"));
+        assert!(runtime.eval("nickel.component('missing')").is_err());
+    }
+
+    #[test]
+    fn public_component_references_reject_missing_modules_and_non_components() {
+        let graph = JsxModuleGraph::new("main.js", [ModuleSource {
+            path: "main.js", source: "export const label = 'text';\nexport function App() { return h(Text, {}, 'app'); }",
+        }]).unwrap();
+        assert!(
+            graph
+                .clone()
+                .with_public_exports(&BTreeMap::from([(
+                    "shell.bad".into(),
+                    "./missing.js#Widget".into()
+                )]))
+                .is_err()
+        );
+        let graph = graph
+            .with_public_exports(&BTreeMap::from([(
+                "shell.bad".into(),
+                "./main.js#label".into(),
+            )]))
+            .unwrap();
+        assert!(JsxRuntime::new_modules(&graph, None).is_err());
     }
 
     #[test]

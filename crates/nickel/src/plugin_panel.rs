@@ -1112,7 +1112,12 @@ fn package_module_graph(package: &PluginPackage) -> Result<Option<JsxModuleGraph
         path: &package.manifest.entry,
         source: &package.source,
     });
-    JsxModuleGraph::new(&package.manifest.entry, sources).map(Some)
+    let graph = JsxModuleGraph::new(&package.manifest.entry, sources)?;
+    let graph = match &package.manifest.composition {
+        Some(composition) => graph.with_public_exports(&composition.exports)?,
+        None => graph,
+    };
+    Ok(Some(graph))
 }
 
 fn package_runtime(package: &PluginPackage, data: Option<&str>) -> Result<JsxRuntime, String> {

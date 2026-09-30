@@ -1,3 +1,8 @@
+const __nickelPublicComponents = new Map();
+function __nickelPublishComponent(contract, component) {
+    if (typeof component !== 'function') throw TypeError(`public component ${contract} is not a function`);
+    __nickelPublicComponents.set(contract, component);
+}
 
 const Window = 'window';
 const __fragmentChildren = new WeakSet();
@@ -214,6 +219,11 @@ const nickel = Object.freeze({
             __effects.push({type:'applications.movePin',id:__nickelIdentity(id),direction});
         }
     }),
+    component(contract) {
+        const component = __nickelPublicComponents.get(contract);
+        if (!component) throw Error(`unknown public component ${contract}`);
+        return component;
+    },
     wifi: Object.freeze({
         get() { return __nickelResource('wifi', {available:false, reason:'Wi-Fi read capability is unavailable', networks:[], operations:{}}); },
         listNetworks() { return this.get().networks; },
