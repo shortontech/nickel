@@ -4264,6 +4264,53 @@ mod tests {
     }
 
     #[test]
+    fn spacer_css_width_stays_fixed_and_unstyled_spacer_grows() {
+        let host = |spacer_class: &str, stylesheet: &str| {
+            let package = PluginPackage {
+                manifest: manifest().clone(),
+                images: Default::default(),
+                stylesheet: stylesheet.into(),
+                source: format!(
+                    "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%'}}, h(Row, {{className: 'bar'}}, h(Button, {{id: 'left', onClick: () => {{}}}}, 'Left'), h(Spacer, {{className: '{spacer_class}'}}), h(Button, {{id: 'right', onClick: () => {{}}}}, 'Right'))); }}"
+                ),
+            };
+            nickel_ui::UiHost::new(
+                PluginPanelApplication::from_package(&package).unwrap(),
+                300,
+                80,
+            )
+        };
+        let bounds = |host: &nickel_ui::UiHost<PluginPanelApplication>, name: &str| {
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .bounds
+        };
+        let base_css = "row.bar { width: 100%; gap: 0px; } button { width: 40px; height: 20px; }";
+        let fixed = host(
+            "fixed",
+            &format!("{base_css} spacer.fixed {{ width: 24px; }}"),
+        );
+        let left = bounds(&fixed, "Left");
+        let right = bounds(&fixed, "Right");
+        assert!((right.origin.x - left.origin.x - left.size.width - 24.0).abs() < 0.5);
+
+        let spaced = host(
+            "fixed",
+            &format!("{base_css} spacer.fixed {{ width: 24px; margin: 0px 8px; }}"),
+        );
+        let left = bounds(&spaced, "Left");
+        let right = bounds(&spaced, "Right");
+        assert!((right.origin.x - left.origin.x - left.size.width - 40.0).abs() < 0.5);
+
+        let flexible = host("flexible", base_css);
+        let right = bounds(&flexible, "Right");
+        assert!(right.origin.x > 250.0);
+    }
+
+    #[test]
     fn row_and_column_classes_apply_css_flex_alignment() {
         let package = PluginPackage {
             manifest: manifest().clone(),

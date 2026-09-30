@@ -13,6 +13,10 @@ div.taskbar-content {
     height: 100%;
 }
 
+spacer.taskbar-spacer {
+    flex-grow: 1;
+}
+
 button.task-button, button.launcher-button, button.utility-button,
 button.tray-button, button.clock-button {
     height: 42px;

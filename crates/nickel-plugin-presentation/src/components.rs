@@ -2296,7 +2296,17 @@ impl PanelNode {
             }
             Self::Spacer { class_name } => {
                 let style = stylesheet.resolve("spacer", None, class_name.as_deref());
-                AnyView::new(Spacer::flex().grow(style.grow.unwrap_or(1.0)))
+                let grow = style
+                    .grow
+                    .unwrap_or(if style.width.is_some() { 0.0 } else { 1.0 });
+                let mut spacer_style = style.clone();
+                spacer_style.grow = Some(grow);
+                let spacer = apply_container_style(Container::new(), &spacer_style);
+                if let Some(margin) = style.margin {
+                    AnyView::new(Container::new().padding(margin).grow(grow).child(spacer))
+                } else {
+                    AnyView::new(spacer)
+                }
             }
             Self::Slot { id, class_name } => {
                 let style = stylesheet.resolve("slot", Some(id), class_name.as_deref());
