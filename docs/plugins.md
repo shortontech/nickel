@@ -196,55 +196,133 @@ components.
 `Panel` remains as a compatibility helper for older plugins; it composes a
 `FixedWindow`, `Box`, and `Row` and has no separate native renderer. New plugins should
 use `Window` or `FixedWindow` as their surface root.
+### CSS selectors and layout
+
 An optional `"stylesheet": "ui.css"` in `plugin.json` loads a CSS file of at most
-256 KiB. `className` accepts space-separated class names on `Window`,
-`Box`, `Div` (also `<div>`), `Row`, `Column`, `ScrollView`, `Spacer`, `Slot`, `Text`, `Button`,
-`TextField`, and `Slider`. For example, `<Button className="primary" onClick={save}>Save</Button>`
-matches `button.primary { padding: 8px; background: #345678; }`. The supported
-selectors are element names, `.class`, and `#id`, combined without descendant
-selectors. Buttons support `:hover`, `:active`, and `:focus`; text fields
-support `:focus`. These state rules currently set a nontransparent background.
-The focused background uses the declared color exactly. `Button` and
-`TextField` accept `onFocus` and `onBlur` callbacks; moving focus dispatches
-blur before focus, and losing window focus dispatches blur. Rules use source
-order. Supported declarations are `padding`,
-`margin`, `border` (solid only), `border-width`, `border-color`,
-`border-radius`, `font-size`, `line-height` (pixel lengths), `background` or
-`background-color`, `color`, `gap`, `width`, `height`, `min-width`, `max-width`,
-`min-height`, `max-height`, `display`, `flex-direction`, `flex`, `flex-grow`,
-`flex-shrink`, `flex-basis`, `align-items`, `justify-content`, and
-`grid-template-columns`. Generic `<div>` defaults to a vertical block layout;
-`display: flex` defaults to a row and `display: grid` uses Nickel's native grid.
-Grid tracks support pixels, fractions, `auto`, bounded `repeat()`, and `minmax()`.
-Lengths support pixels, percentages, `auto`, `min-content`, and `max-content`
-where Nickel's layout context permits them. Colors accept hex, `rgba()`,
-and `transparent`. Unsupported selectors or declarations fail validation with a
-CSS error. Button and text-field behavior and accessibility remain native;
-their plugin-facing paint comes from CSS. The existing JSX `width` and `height`
-props remain available. `Row` and `Column` use their CSS width, height,
-`align-items`, and `justify-content` when laying out children. Specialized
-widgets still have some legacy sizing behavior while the generic layout path
-expands.
+256 KiB. Modules can also import package CSS. Native components accept
+space-separated `className` values. For example,
+`<Button className="primary" onClick={save}>Save</Button>` matches
+`button.primary { padding: 8px; background: #345678; }`.
 
-When the host supplies a right to left reading direction, `Row`, horizontal
-flex layouts, and grids mirror their visual child order. Text and artwork keep
-their own content direction.
+Selectors support element names, `.class`, `#id`, their combinations, comma
+lists, and descendant chains of up to eight selectors, such as
+`.settings button.primary`. Matching rules apply in source order; Nickel does
+not implement browser selector specificity. `:root` accepts custom property
+definitions only.
 
-Color declarations may use Nickel palette tokens such as
-`var(--nickel-panel)`, `var(--nickel-surface)`, `var(--nickel-text)`,
-`var(--nickel-muted)`, and `var(--nickel-accent)`. The complete token set is
-`background`, `panel`, `surface`, `surface-hover`, `text`, `muted`, `accent`,
-`accent-soft`, `complement`, `raised`, `control`, `border`, `soft-text`,
-`selected`, and `selected-border`, each prefixed with `--nickel-`. Nickel resolves
-these when compiling the stylesheet. A host can refresh the resolved colors
-when its appearance changes; the bundled launcher is wired to do so. Other
-CSS custom properties are not supported yet.
+Supported declarations are `padding`, `margin`, `border` (solid only),
+`border-width`, `border-color`, `border-radius`, `font-size`, `line-height`
+(pixel lengths), `background` or `background-color`, `color`, `gap`, `width`,
+`height`, `min-width`, `max-width`, `min-height`, `max-height`, `display`,
+`flex-direction`, `flex`, `flex-grow`, `flex-shrink`, `flex-basis`, `align-items`,
+`justify-content`, and `grid-template-columns`. Generic `<div>` defaults to a
+vertical block layout; `display: flex` defaults to a row, and `display: grid`
+uses Nickel's native grid. Grid tracks support pixels, fractions, `auto`,
+bounded `repeat()`, and `minmax()`. Lengths support pixels, percentages, `auto`,
+`min-content`, and `max-content` where the native layout context permits them.
+Colors accept hex, `rgba()`, and `transparent`. Unsupported selectors or
+declarations fail validation.
 
-`<Slider value={hue / 359} accessibilityLabel="Hue" onChange={fraction =>
-nickel.request({type: "appearance-hue", fraction})} />` is a native slider with a
-value from 0 to 1. It receives a stable automatic control ID unless `id` is
-provided. CSS `background`, `color`, and `border-color` style its track, fill,
-and thumb; width and spacing use the ordinary CSS declarations.
+The JSX `width` and `height` props remain available. Root component layout uses
+ordinary CSS width, height, percentages, and flex sizing. When the host supplies
+a right to left reading direction, rows, horizontal flex layouts, and grids
+mirror their visual child order. Text and artwork retain their content direction.
+
+### Inherited variables and semantic defaults
+
+Custom properties such as `--card-accent` cascade in source order, inherit from
+ancestors, and can be overridden on a component or native part. `var()` resolves
+against that element's inherited properties before the result is checked as a
+typed color, length, or other supported declaration. Nested fallbacks work:
+`color: var(--label-color, var(--nickel-text));`.
+
+Nickel supplies overridable semantic defaults. Color tokens are `background`,
+`panel`, `surface`, `surface-hover`, `text`, `muted`, `accent`, `accent-soft`,
+`complement`, `raised`, `control`, `border`, `soft-text`, `selected`, and
+`selected-border`, each prefixed with `--nickel-`. Aliases include
+`--nickel-surface-raised` and `--nickel-text-muted`. Metric defaults are
+`--nickel-radius-control: 8px`, `--nickel-radius-card: 12px`,
+`--nickel-spacing-control: 8px`, `--nickel-font-size: 14px`, and
+`--nickel-line-height: 20px`. Host appearance changes refresh palette defaults;
+package overrides remain part of the cascade.
+
+```css
+:root { --nickel-radius-control: 10px; --card-accent: var(--nickel-accent); }
+.settings { --card-accent: #507080; }
+.settings button {
+    background: var(--card-accent);
+    color: var(--button-label, var(--nickel-text));
+    border-radius: var(--nickel-radius-control);
+}
+```
+
+Resolution is bounded: function nesting is limited to eight levels, custom
+property chains to 32 references, and resolved values to 16 KiB. Undefined
+variables without a fallback, cycles, and values invalid for the destination
+property are rejected. This is a typed native styling subset, not a browser CSS
+engine; custom properties do not add arbitrary layout declarations or scripting.
+
+### Interactive paint and native control parts
+
+Buttons, text fields, selects, sliders, switches, checkboxes, color swatches,
+select options, and menu items support `:hover`, `:active`, and `:focus` paint.
+State rules can set `background`/`background-color`, `color`, `border`/`border-color`,
+`border-width`, `border-radius`, `font-size`, and `line-height`, including
+transparent backgrounds. State rules cannot set layout declarations such as
+width, height, padding, margin, or flex. State and ordinary selectors must be in
+separate rules. `Button` and `TextField` also accept `onFocus` and `onBlur`;
+focus changes dispatch blur before focus, and window focus loss dispatches blur.
+
+Native compound controls expose ordinary element selectors for their parts:
+
+| Control | Part selectors |
+| --- | --- |
+| Switch | `switch-track`, `switch-thumb` |
+| Checkbox | `checkbox-box`, `checkbox-mark` |
+| Slider | `slider-track`, `slider-fill`, `slider-thumb` |
+| Select | `select-header`, `option`, `select-indicator` |
+| Progress | `progress-fill` |
+| Color swatch | `color-swatch-fill`, `color-swatch-label` |
+| Menu | `menu`, `menu-item`, `menu-shortcut`, `menu-indicator` |
+| Text field | `text-field-caret`, `text-field-selection`, `text-field-menu`, `text-field-menu-item`, `text-field-menu-shortcut`, `text-field-menu-indicator` |
+
+Parts inherit their owner's classes and custom properties and can match its ID.
+Select options can also have their own IDs.
+Interactive parts use their owning control or menu item's state; decorative
+parts do not become independent focus targets. Progress fill and text field
+caret/selection are ordinary paint parts. State classes such as `.on`, `.mixed`,
+`.disabled`, and `.selected` can style the corresponding native state.
+Compound part geometry uses pixel lengths; root layout retains ordinary layout
+sizing. Select header/option and menu row geometry determines native hit regions
+and accessibility bounds. See the replaceable
+[default control stylesheet](../assets/plugins/nickel-default/src/styles/controls.css)
+for a working set of part rules. Native behavior, focus, and accessibility remain
+host owned.
+
+### Public slider values and appearance changes
+
+A slider supports numeric `min`, `max`, and `step`; callbacks receive the selected
+value in that range. Its default range is 0–1. It receives a stable automatic
+control ID unless `id` is provided. For an appearance editor with
+`appearance-read` and `appearance-control` grants:
+
+```jsx
+function HueControl() {
+    const appearance = nickel.appearance.get();
+    if (!appearance.available) return <Text>Appearance is unavailable.</Text>;
+    const hue = appearance.configured.accent_hue ?? appearance.resolved.hue;
+    return appearance.writable ? <Slider id="appearance-hue"
+        accessibilityLabel="Interface hue" min={0} max={359} step={1} value={hue}
+        onChange={value => nickel.appearance.set({
+            ...appearance.configured, accent_hue: value
+        })} /> : <Text>{"Hue: " + hue + "° · Read only"}</Text>;
+}
+```
+
+`nickel.appearance.set` captures the observed configuration and generation for
+native validation. Slider root and part paint comes from CSS; track/fill/thumb
+rules can independently set their paint and pixel geometry. Their interactive
+paint follows the slider's hover, pressed, and focus state.
 
 `<Window width={520} height={340}>...</Window>` is the JSX
 surface root. `<FixedWindow>` is a JavaScript helper that returns a `Window`
