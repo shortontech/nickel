@@ -5005,11 +5005,19 @@ impl LiveShell {
                 }
             }
         }
-        runtime.borrow_mut().invoke_setting(provider, id, value)?;
-        let effects = runtime.borrow_mut().take_effects()?;
-        crate::plugin_panel::PluginPanelApplication::validate_provider_effects(
-            &manifest, runtime, effects,
-        )
+        runtime.borrow_mut().begin_transaction()?;
+        let result = (|| {
+            runtime.borrow_mut().invoke_setting(provider, id, value)?;
+            let effects = runtime.borrow_mut().take_effects()?;
+            crate::plugin_panel::PluginPanelApplication::validate_provider_effects(
+                &manifest,
+                runtime.clone(),
+                effects,
+                &data,
+            )
+        })();
+        runtime.borrow_mut().finish_transaction(result.is_ok())?;
+        result
     }
 
     fn refresh_package_settings(&mut self) {

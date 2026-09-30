@@ -3239,6 +3239,7 @@ impl PluginPanelApplication {
         manifest: &PluginManifest,
         runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
         effects: Vec<Value>,
+        snapshot: &Value,
     ) -> Result<Vec<PluginEffect>, String> {
         let node = parse_panel_for_manifest(
             &serde_json::json!({"kind":"column","children":[]}),
@@ -3255,7 +3256,7 @@ impl PluginPanelApplication {
             runtime_failure: None,
             expected_surface_id: None,
             runtime_surface_id: String::new(),
-            projection_data: None,
+            projection_data: Some(snapshot.to_string()),
             overlay_open: false,
             dispatch_removed_focus: false,
             images: PluginImages::new(),
@@ -3803,8 +3804,13 @@ mod tests {
             .unwrap();
         let effects = runtime.borrow_mut().take_effects().unwrap();
         assert_eq!(
-            PluginPanelApplication::validate_provider_effects(&manifest, runtime.clone(), effects)
-                .unwrap(),
+            PluginPanelApplication::validate_provider_effects(
+                &manifest,
+                runtime.clone(),
+                effects,
+                &serde_json::json!({})
+            )
+            .unwrap(),
             vec![PluginEffect::ShowLauncher]
         );
         assert_eq!(
@@ -3815,14 +3821,25 @@ mod tests {
             0
         );
         manifest.capabilities.clear();
+        let accepted_revision = runtime.borrow().settings_revision();
+        runtime.borrow_mut().begin_transaction().unwrap();
         runtime
             .borrow_mut()
             .invoke_setting(&manifest.id, "toggle", &Value::Bool(false))
             .unwrap();
         let effects = runtime.borrow_mut().take_effects().unwrap();
         assert!(
-            PluginPanelApplication::validate_provider_effects(&manifest, runtime, effects).is_err()
+            PluginPanelApplication::validate_provider_effects(
+                &manifest,
+                runtime.clone(),
+                effects,
+                &serde_json::json!({})
+            )
+            .is_err()
         );
+        runtime.borrow_mut().finish_transaction(false).unwrap();
+        assert_eq!(runtime.borrow().settings_revision(), accepted_revision);
+        assert!(runtime.borrow_mut().take_effects().unwrap().is_empty());
     }
 
     #[test]
