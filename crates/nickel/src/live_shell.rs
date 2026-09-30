@@ -5848,9 +5848,14 @@ impl LiveShell {
         let Some(grant) = self
             .external_plugin_packages
             .get(&key.plugin_id)
-            .and_then(|package| {
-                package
-                    .manifest
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(&key.plugin_id)
+                    .map(|entry| &entry.manifest)
+            })
+            .and_then(|manifest| {
+                manifest
                     .surfaces
                     .iter()
                     .find(|surface| surface.id == key.surface_id)

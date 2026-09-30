@@ -177,6 +177,27 @@
     }
 
     #[test]
+    fn bundled_panel_reconciles_its_jsx_root_geometry() {
+        let mut shell = LiveShell::new().unwrap();
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/hello-panel/main.js"
+        ))
+        .unwrap()
+        .replace("bottomOffset: 24", "bottomOffset: 12");
+        let application = crate::plugin_panel::PluginPanelApplication::new(&source).unwrap();
+        let grant = crate::plugin_panel::surface();
+        shell.plugin_panel_host = Some(nickel_ui::UiHost::new(
+            application,
+            grant.width,
+            grant.height,
+        ));
+        assert_eq!(shell.plugin_panel_surface.bottom_offset, 24);
+        shell.scene(SurfaceRole::Panel, grant.width, grant.height);
+        assert_eq!(shell.plugin_panel_surface.bottom_offset, 12);
+    }
+
+    #[test]
     fn taskbar_keyed_controller_activates_focused_launcher_button() {
         let mut shell = LiveShell::new().unwrap();
         let key = shell.taskbar_surface_key().unwrap();
