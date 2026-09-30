@@ -13,8 +13,7 @@ use nickel_plugin_presentation::{
     page::{JsxPage, STALE_DATA},
 };
 use nickel_ui::{
-    AnyView, Button, ButtonPresentation, FrameOverlay, OverlayAnchor, OverlayStyle, Popover, Row,
-    SemanticTheme, SettingsCard, SettingsRow, Size, TextField, UiId,
+    AnyView, FrameOverlay, OverlayAnchor, OverlayStyle, Popover, SemanticTheme, Size, UiId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -443,63 +442,15 @@ impl SettingsApp {
             return Vec::new();
         }
         let theme = self.ui_theme();
-        let content = self
+        let Some(content) = self
             .appearance_page
             .borrow()
             .as_ref()
             .and_then(|page| page.as_ref().ok())
             .and_then(|page| page.dialog_view(theme))
-            .unwrap_or_else(|| {
-                AnyView::new(
-                    SettingsCard::titled(
-                        theme,
-                        self.localizer.text("settings-appearance-custom-hue-title"),
-                        self.custom_hue_error.clone().unwrap_or_else(|| {
-                            self.localizer
-                                .text("settings-appearance-custom-hue-description")
-                        }),
-                    )
-                    .child(
-                        SettingsRow::new(
-                            theme,
-                            self.localizer.text("settings-appearance-custom-hue-field"),
-                            "",
-                        )
-                        .trailing(
-                            TextField::on_change_with_placeholder_mapped(
-                                &self.custom_hue_draft,
-                                &self
-                                    .localizer
-                                    .text("settings-appearance-custom-hue-placeholder"),
-                                SettingsMessage::CustomHueDraftChanged,
-                            )
-                            .id("appearance-custom-hue-input"),
-                        ),
-                    )
-                    .child(
-                        Row::new()
-                            .gap(8.0)
-                            .child(
-                                Button::semantic(
-                                    theme,
-                                    SettingsMessage::ApplyCustomHue(self.custom_hue_draft.clone()),
-                                    self.localizer.text("settings-appearance-custom-hue-apply"),
-                                    ButtonPresentation::Primary,
-                                )
-                                .id("appearance-custom-hue-apply"),
-                            )
-                            .child(
-                                Button::semantic(
-                                    theme,
-                                    SettingsMessage::CancelCustomHue,
-                                    self.localizer.text("settings-appearance-custom-hue-cancel"),
-                                    ButtonPresentation::Secondary,
-                                )
-                                .id("appearance-custom-hue-cancel"),
-                            ),
-                    ),
-                )
-            });
+        else {
+            return Vec::new();
+        };
         vec![
             Popover::new(
                 "appearance-custom-hue-dialog",
@@ -543,7 +494,7 @@ mod visual_tests {
     }
 
     #[test]
-    fn jsx_appearance_and_native_reference_render() {
+    fn jsx_appearance_page_renders() {
         let jsx = nickel_ui::UiHost::new(
             SettingsApp::with_initial_page(SettingsPage::Appearance),
             1000,
@@ -558,9 +509,5 @@ mod visual_tests {
                 .is_some_and(Result::is_ok),
             "the reference image must render the JSX Appearance page"
         );
-        let mut native = SettingsApp::with_initial_page(SettingsPage::Appearance);
-        native.settings_jsx_enabled = false;
-        let native = nickel_ui::UiHost::new(native, 1000, 900);
-        save(&native, "settings-appearance-native.png");
     }
 }

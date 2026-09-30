@@ -60,21 +60,20 @@ use nickel_core::{
         OptionalFeatureSettings, codex_policy,
     },
     shell_settings::{AnimationLevel, FileIconPreference, ShellSettings, ThemePreference},
-    theme::{Appearance, ThemeMode, ThemePalette, accent_from_hue},
+    theme::{Appearance, ThemePalette},
     wallpaper_settings::{WallpaperPosition, WallpaperSettings},
 };
 use nickel_i18n::Localizer;
 use nickel_input::{DeviceId, InputEvent, KeyEdge, LogicalKey, NamedKey};
 use nickel_ui::{
     ActionLegend, ActionLegendEntry, AdapterOutcome, AnyView, Application, Button,
-    ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, DragGesture, DragPhase,
-    FrameOverlay, GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality, Insets,
-    NavigationItem, OverlayAnchor, OverlayId, OverlayStyle, PageHeader, Popover, PreviewTile,
-    ReadingDirection, ResponsiveNavigation, ResponsiveNavigationDestination, SelectField,
-    SemanticControllerAction, SemanticRole, SemanticSelector, SemanticTheme, SettingsCard,
-    SettingsNavigation, SettingsRow, SettingsSearchField, SettingsStatus, SettingsStatusKind, Size,
-    SliderField, Surface, SurfaceRole, Switch, SwitchState, UiHost, UiId, ViewContext,
-    search_settings, ui,
+    ButtonPresentation, DragGesture, DragPhase, FrameOverlay, GlobalAction, HostAdapter,
+    HostServices, Image, ImageFit, InputModality, Insets, NavigationItem, OverlayAnchor, OverlayId,
+    OverlayStyle, PageHeader, Popover, ReadingDirection, ResponsiveNavigation,
+    ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
+    SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
+    SettingsSearchField, SettingsStatus, SettingsStatusKind, Size, SliderField, Switch,
+    SwitchState, UiHost, UiId, ViewContext, search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
 
@@ -675,18 +674,6 @@ fn shell_behavior_transaction(
         requested: *requested,
         topology_generation,
     })
-}
-
-fn appearance_hue_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::SetAppearanceHue((fraction.clamp(0.0, 1.0) * 359.0).round() as u16)
-}
-
-fn appearance_intensity_message(fraction: f32) -> SettingsMessage {
-    SettingsMessage::SetAppearanceIntensity((fraction.clamp(0.0, 1.0) * 100.0).round() as u8)
-}
-
-fn reduce_transparency_message(value: bool) -> SettingsMessage {
-    SettingsMessage::SetReduceTransparency(value)
 }
 
 fn sidebar_search_message(value: String) -> SettingsMessage {
@@ -3881,31 +3868,49 @@ mod tests {
     }
 
     #[test]
-    fn failed_appearance_jsx_keeps_native_choices_and_transparency_available() {
+    fn failed_appearance_jsx_offers_plugin_recovery_without_native_controls() {
         let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         *app.appearance_page.borrow_mut() = Some(Err("JSX failed".into()));
-        let tree = app.build_ui(850.0, 900.0);
-        for message in [
-            SettingsMessage::AppearanceLight,
-            SettingsMessage::AppearanceDark,
-            SettingsMessage::AppearanceSystem,
-            SettingsMessage::SetAccentHue(224),
-            SettingsMessage::SetReduceTransparency(true),
-            SettingsMessage::ToggleAnimationSelect,
-            SettingsMessage::ToggleFileIconProviderSelect,
-            SettingsMessage::WallpaperChoose,
-            SettingsMessage::WallpaperRemove,
-            SettingsMessage::AppearanceReset,
-        ] {
-            assert_eq!(tree.semantic_targets_for_message(&message).len(), 1);
-        }
-        assert_eq!(
-            tree.query(&nickel_ui::SemanticSelector::Role(
-                nickel_ui::SemanticRole::Slider
-            ))
-            .len(),
-            2
+        let mut host = UiHost::new(app, 850, 900);
+        assert!(
+            host.semantic_targets_for_message(&SettingsMessage::AppearanceDark)
+                .is_empty()
         );
+        assert!(
+            !host
+                .semantic_nodes()
+                .iter()
+                .any(|node| node.role == Some(nickel_ui::SemanticRole::Slider))
+        );
+        let recovery = host
+            .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
+            .into_iter()
+            .next()
+            .expect("Appearance recovery opens plugin management");
+        host.perform_semantic_action(
+            recovery.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(host.application().page, SettingsPage::Plugins);
+    }
+
+    #[test]
+    fn failed_appearance_jsx_can_close_an_open_color_picker() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        app.custom_hue_open = true;
+        *app.appearance_page.borrow_mut() = Some(Err("JSX failed".into()));
+        let mut host = UiHost::new(app, 850, 900);
+        assert!(host.inspect().open_overlay.is_none());
+        let close = host
+            .semantic_targets_for_message(&SettingsMessage::CancelCustomHue)
+            .into_iter()
+            .next()
+            .expect("Appearance recovery can close the color picker");
+        host.perform_semantic_action(
+            close.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(!host.application().custom_hue_open);
     }
 
     #[test]
@@ -4025,9 +4030,10 @@ mod tests {
     }
 
     #[test]
-    fn custom_hue_dialog_opens_from_jsx_and_applies_validated_input() {
+    fn custom_hue_dialog_rejects_invalid_input_and_applies_correction_in_jsx() {
         let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         let mut host = UiHost::new(app, 850, 900);
+        let initial_hue = host.application().shell_settings.accent_hue;
         let action = appearance_choice_action(host.application(), "appearance-accent-custom");
         let opener = host
             .semantic_targets_for_message(&appearance_message(action))
@@ -4050,9 +4056,9 @@ mod tests {
             .expect("plugin dialog input");
         host.perform_semantic_action(
             input.id,
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text("123".into())),
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text("500".into())),
         );
-        assert_eq!(host.application().custom_hue_draft, "123");
+        assert_eq!(host.application().custom_hue_draft, "500");
         let apply = host
             .semantic_nodes()
             .into_iter()
@@ -4062,53 +4068,29 @@ mod tests {
             apply.id,
             nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
         );
-        assert_eq!(host.application().shell_settings.accent_hue, Some(123));
-        assert!(host.inspect().open_overlay.is_none());
-    }
-
-    #[test]
-    fn custom_hue_native_recovery_rejects_invalid_value_and_dismisses() {
-        let app = SettingsApp::with_initial_page(SettingsPage::Appearance);
-        *app.appearance_page.borrow_mut() = Some(Err("JSX failed".into()));
-        let mut host = UiHost::new(app, 850, 900);
-        let opener = host
-            .semantic_targets_for_message(&SettingsMessage::OpenCustomHue)
-            .into_iter()
-            .next()
-            .expect("native custom accent swatch");
-        host.perform_semantic_action(
-            opener.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-        );
+        assert!(host.application().custom_hue_error.is_some());
+        assert_eq!(host.application().shell_settings.accent_hue, initial_hue);
         assert!(host.inspect().open_overlay.is_some());
         let input = host
             .semantic_nodes()
             .into_iter()
             .find(|node| node.id.as_str().ends_with("appearance-custom-hue-input"))
-            .expect("native recovery input");
+            .expect("plugin dialog input after validation error");
         host.perform_semantic_action(
             input.id,
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text("500".into())),
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text("123".into())),
         );
-        assert_eq!(host.application().custom_hue_draft, "500");
+        assert_eq!(host.application().custom_hue_draft, "123");
         let apply = host
             .semantic_nodes()
             .into_iter()
             .find(|node| node.id.as_str().ends_with("appearance-custom-hue-apply"))
-            .expect("native recovery apply button");
+            .expect("plugin dialog apply button after validation error");
         host.perform_semantic_action(
             apply.id,
             nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
         );
-        assert!(
-            host.application().custom_hue_error.is_some(),
-            "invalid draft after apply: {:?}, overlay: {:?}",
-            host.application().custom_hue_draft,
-            host.inspect().open_overlay
-        );
-        assert!(host.inspect().open_overlay.is_some());
-        host.handle_event(nickel_ui::UiEvent::ControllerBack);
-        assert!(!host.application().custom_hue_open);
+        assert_eq!(host.application().shell_settings.accent_hue, Some(123));
         assert!(host.inspect().open_overlay.is_none());
     }
 

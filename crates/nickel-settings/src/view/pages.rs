@@ -1325,16 +1325,10 @@ impl SettingsApp {
     }
 
     pub(super) fn appearance_components(&self) -> AnyView<SettingsMessage> {
-        let system = nickel_platform::appearance();
-        let appearance = self.shell_settings.resolve_appearance(system);
-        let palette = ThemePalette::from_appearance(appearance);
         let theme = self.ui_theme();
-        let hue = self.shell_settings.displayed_hue(system);
-        let intensity = self.shell_settings.displayed_intensity(system);
-        if self.settings_jsx_enabled {
+        let rendered = if self.settings_jsx_enabled {
             let data = crate::appearance_plugin::projection(self);
-            let plugin_view = self
-                .appearance_page
+            self.appearance_page
                 .borrow_mut()
                 .get_or_insert_with(|| {
                     self.shared_settings_page(crate::settings_package::Script::Appearance)
@@ -1343,355 +1337,28 @@ impl SettingsApp {
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, theme, self.wallpaper_preview.as_ref()))
-                .ok();
-            if let Some(plugin_view) = plugin_view {
-                return self.appearance_frame(theme, plugin_view);
-            }
-        }
-        let preview = |preview_palette: ThemePalette| {
-            Surface::new(theme, SurfaceRole::Raised)
-                .height(82.0)
-                .radius(theme.radii.control)
-                .padding(Insets::all(8.0))
-                .child(ui! {
-                    <Row gap={6.0}>
-                        <Container width={22.0} background={preview_palette.panel} radius={3.0} />
-                        <Column grow={1.0} gap={6.0}>
-                            <Container height={12.0} background={preview_palette.surface_hover} radius={3.0} />
-                            <Container height={28.0} background={preview_palette.background} radius={3.0} />
-                        </Column>
-                    </Row>
-                })
+        } else {
+            Err("Settings plugin is disabled".into())
         };
-        let light_preview = ThemePalette::from_appearance(Appearance {
-            mode: ThemeMode::Light,
-            accent: appearance.accent,
-            intensity: appearance.intensity,
-        });
-        let dark_preview = ThemePalette::from_appearance(Appearance {
-            mode: ThemeMode::Dark,
-            accent: appearance.accent,
-            intensity: appearance.intensity,
-        });
-        let mode_choices = [
-            ChoiceCard::new(
-                theme,
-                SettingsMessage::AppearanceLight,
-                self.localizer.text("settings-appearance-light"),
-                self.shell_settings.theme == ThemePreference::Light,
-                preview(light_preview),
-            )
-            .id("appearance-mode-light"),
-            ChoiceCard::new(
-                theme,
-                SettingsMessage::AppearanceDark,
-                self.localizer.text("settings-appearance-dark"),
-                self.shell_settings.theme == ThemePreference::Dark,
-                preview(dark_preview),
-            )
-            .id("appearance-mode-dark"),
-            ChoiceCard::new(
-                theme,
-                SettingsMessage::AppearanceSystem,
-                self.localizer.text("settings-appearance-automatic"),
-                self.shell_settings.theme == ThemePreference::System,
-                Surface::new(theme, SurfaceRole::Raised)
-                    .height(82.0)
-                    .radius(theme.radii.control)
-                    .padding(Insets::all(8.0))
-                    .child(ui! {
-                        <Row height={66.0} gap={3.0}>
-                            <Container grow={1.0} background={light_preview.background} radius={3.0} />
-                            <Container grow={1.0} background={dark_preview.background} radius={3.0} />
-                        </Row>
-                    }),
-            )
-            .id("appearance-mode-system"),
-        ];
-        let preset_hues = [224_u16, 188, 154, 78, 38, 16, 340, 305];
-        let swatches = preset_hues.into_iter().map(|preset| {
-            let [red, green, blue] = accent_from_hue(preset);
-            ColorSwatch::color(
-                theme,
-                SettingsMessage::SetAccentHue(preset),
-                (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue),
-                hue.abs_diff(preset) < 3,
-            )
-        });
-        let wallpaper_name = self
-            .wallpaper_settings
-            .image
-            .as_deref()
-            .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.localizer.text("settings-wallpaper-none"));
-        let position_options = [
-            ("settings-wallpaper-fill", WallpaperPosition::Fill),
-            ("settings-wallpaper-fit", WallpaperPosition::Fit),
-            ("settings-wallpaper-stretch", WallpaperPosition::Stretch),
-            ("settings-wallpaper-center", WallpaperPosition::Center),
-            ("settings-wallpaper-tile", WallpaperPosition::Tile),
-            ("settings-wallpaper-span", WallpaperPosition::Span),
-        ]
-        .into_iter()
-        .map(|(label, position)| {
-            (
-                self.localizer.text(label),
-                SettingsMessage::WallpaperPosition(position),
-            )
-        });
-        let position_label = self.localizer.text(match self.wallpaper_settings.position {
-            WallpaperPosition::Fill => "settings-wallpaper-fill",
-            WallpaperPosition::Fit => "settings-wallpaper-fit",
-            WallpaperPosition::Stretch => "settings-wallpaper-stretch",
-            WallpaperPosition::Center => "settings-wallpaper-center",
-            WallpaperPosition::Tile => "settings-wallpaper-tile",
-            WallpaperPosition::Span => "settings-wallpaper-span",
-        });
-        let wallpaper_preview = self
-            .wallpaper_preview
-            .as_ref()
-            .map(|image| {
-                PreviewTile::new(
+        let content = rendered.unwrap_or_else(|error| {
+            let mut recovery =
+                SettingsCard::titled(theme, "Appearance settings are unavailable", error);
+            if self.custom_hue_open {
+                recovery = recovery.child(Button::semantic(
                     theme,
-                    Image::new(1, image.clone())
-                        .fit(ImageFit::Cover)
-                        .width(124.0)
-                        .height(96.0),
-                )
-            })
-            .unwrap_or_else(|| {
-                PreviewTile::unavailable(theme, self.localizer.text("settings-wallpaper-none"))
-            })
-            .width(124.0)
-            .height(96.0);
-        let wallpaper_dimensions = self
-            .wallpaper_dimensions
-            .map(|(width, height)| format!("{width} × {height}"));
-        let mode_group = ChoiceCardGroup::new(mode_choices);
-        let swatch_row = ui! {
-            <Row height={44.0} gap={10.0} children={swatches}>
-                {ColorSwatch::custom(theme, SettingsMessage::OpenCustomHue).id("appearance-accent-custom")}
-            </Row>
-        };
-        let native_mode_card = SettingsCard::titled(
-            theme,
-            self.localizer.text("settings-appearance-mode"),
-            self.localizer.text("settings-appearance-mode-description"),
-        )
-        .id("appearance-mode-card")
-        .child(mode_group);
-        let native_accent_card = SettingsCard::titled(
-            theme,
-            self.localizer.text("settings-appearance-accent"),
-            self.localizer
-                .text("settings-appearance-accent-description"),
-        )
-        .id("appearance-accent-card")
-        .child(swatch_row);
-        let native_choices = || {
-            AnyView::new(
-                Column::new()
-                    .gap(10.0)
-                    .child(native_mode_card)
-                    .child(native_accent_card),
-            )
-        };
-        let appearance_choices = native_choices();
-        let wallpaper_card = SettingsCard::titled(
-            theme,
-            self.localizer.text("settings-wallpaper-image"),
-            self.localizer.text("settings-wallpaper-description"),
-        )
-        .id("appearance-wallpaper-card")
-        .child({
-            let choose = Button::semantic(
+                    SettingsMessage::CancelCustomHue,
+                    "Close color picker",
+                    ButtonPresentation::Secondary,
+                ));
+            }
+            AnyView::new(recovery.child(Button::semantic(
                 theme,
-                SettingsMessage::WallpaperChoose,
-                self.localizer.text("settings-wallpaper-choose"),
+                SettingsMessage::Navigate(SettingsPage::Plugins),
+                "Manage plugins",
                 ButtonPresentation::Primary,
-            )
-            .width(168.0);
-            let remove = Button::semantic(
-                theme,
-                SettingsMessage::WallpaperRemove,
-                self.localizer.text("settings-wallpaper-remove"),
-                ButtonPresentation::Secondary,
-            )
-            .width(100.0);
-            ui! {
-            <Row gap={14.0} align_items={nickel_ui::Align::Center}>
-                {wallpaper_preview}
-                <Column grow={1.0} gap={8.0}>
-                    <Text color={palette.text}>{wallpaper_name}</Text>
-                    {wallpaper_dimensions.map(|dimensions| nickel_ui::Text::new(dimensions).color(palette.muted))}
-                    <Row gap={10.0}>
-                        {choose}{remove}
-                    </Row>
-                    {self.wallpaper_status.as_ref().map(|status| SettingsStatus::new(theme, SettingsStatusKind::Error, status.clone()))}
-                </Column>
-            </Row>
-            }
-        })
-        .child(SelectField::new(
-            theme,
-            self.localizer.text("settings-wallpaper-fit-label"),
-            self.localizer.text("settings-wallpaper-fit-description"),
-            SettingsMessage::ToggleWallpaperPositionSelect,
-            position_label,
-            position_options,
-            self.wallpaper_position_select_expanded,
-        ));
-        let native_interface_card = || {
-            let transparency_row = SettingsRow::new(
-                theme,
-                self.localizer.text("settings-reduce-transparency"),
-                self.localizer
-                    .text("settings-reduce-transparency-description"),
-            )
-            .trailing(
-                Switch::new(
-                    self.shell_settings.reduce_transparency,
-                    reduce_transparency_message,
-                    theme,
-                )
-                .id("appearance-transparency"),
-            );
-            let animation_label = self.localizer.text(match self.shell_settings.animations {
-                AnimationLevel::Off => "settings-animations-off",
-                AnimationLevel::Reduced => "settings-animations-reduced",
-                AnimationLevel::Normal => "settings-animations-normal",
-            });
-            let animation_row = SelectField::new(
-                theme,
-                self.localizer.text("settings-animations"),
-                self.localizer.text("settings-animations-description"),
-                SettingsMessage::ToggleAnimationSelect,
-                animation_label,
-                [
-                    (
-                        self.localizer.text("settings-animations-off"),
-                        SettingsMessage::SetAnimationLevel(AnimationLevel::Off),
-                    ),
-                    (
-                        self.localizer.text("settings-animations-reduced"),
-                        SettingsMessage::SetAnimationLevel(AnimationLevel::Reduced),
-                    ),
-                    (
-                        self.localizer.text("settings-animations-normal"),
-                        SettingsMessage::SetAnimationLevel(AnimationLevel::Normal),
-                    ),
-                ],
-                self.animation_select_expanded,
-            )
-            .id("appearance-animations");
-            let file_icon_provider = self.shell_settings.file_icon_provider;
-            let configured_icon_theme = self.shell_settings.file_icon_theme.as_deref();
-            let installed_icon_themes = nickel_platform::installed_icon_themes();
-            let configured_theme_available = configured_icon_theme.is_none_or(|configured| {
-                installed_icon_themes
-                    .iter()
-                    .any(|theme| theme == configured)
-            });
-            let selected_file_artwork = match (file_icon_provider, configured_icon_theme) {
-                (FileIconPreference::Nickel, _) => "Nickel".to_owned(),
-                (FileIconPreference::System, None) => "System".to_owned(),
-                (FileIconPreference::System, Some(theme)) if configured_theme_available => {
-                    format!("System — {theme}")
-                }
-                (FileIconPreference::System, Some(theme)) => {
-                    format!("System — {theme} (unavailable)")
-                }
-            };
-            let mut file_artwork_options = vec![
-                (
-                    "Nickel".to_owned(),
-                    SettingsMessage::SetFileIconProvider(FileIconPreference::Nickel),
-                ),
-                (
-                    "System".to_owned(),
-                    SettingsMessage::SetFileIconProvider(FileIconPreference::System),
-                ),
-            ];
-            file_artwork_options.extend(installed_icon_themes.into_iter().map(|theme| {
-                (
-                    format!("System — {theme}"),
-                    SettingsMessage::SetFileIconTheme(theme),
-                )
-            }));
-            let file_icon_provider_row = SelectField::new(
-                theme,
-                "File artwork",
-                "Choose Nickel artwork or icons supplied by the operating system.",
-                SettingsMessage::ToggleFileIconProviderSelect,
-                selected_file_artwork,
-                file_artwork_options,
-                self.file_icon_provider_select_expanded,
-            )
-            .id("appearance-file-artwork");
-            SettingsCard::titled(
-                theme,
-                self.localizer.text("settings-interface-settings"),
-                "",
-            )
-            .id("appearance-interface-card")
-            .child(
-                SliderField::new(
-                    theme,
-                    self.localizer.text("settings-appearance-starting-hue"),
-                    self.localizer.text("settings-appearance-hue-description"),
-                    self.localizer.number(
-                        "settings-appearance-hue-value",
-                        "degrees",
-                        i64::from(hue),
-                    ),
-                    f32::from(hue) / 359.0,
-                    appearance_hue_message,
-                )
-                .id("appearance-hue"),
-            )
-            .child(
-                SliderField::new(
-                    theme,
-                    self.localizer.text("settings-appearance-color-intensity"),
-                    self.localizer
-                        .text("settings-appearance-intensity-description"),
-                    self.localizer.number(
-                        "settings-appearance-intensity-value",
-                        "percent",
-                        i64::from(intensity),
-                    ),
-                    f32::from(intensity) / 100.0,
-                    appearance_intensity_message,
-                )
-                .id("appearance-intensity"),
-            )
-            .child(transparency_row)
-            .child(animation_row)
-            .child(file_icon_provider_row)
-        };
-        let interface_card = native_interface_card();
-        let reset = Button::semantic(
-            theme,
-            SettingsMessage::AppearanceReset,
-            self.localizer.text("settings-appearance-reset"),
-            ButtonPresentation::Secondary,
-        )
-        .id("appearance-reset")
-        .width(220.0);
-        self.appearance_frame(
-            theme,
-            nickel_ui::Column::new()
-                .gap(10.0)
-                .child(appearance_choices)
-                .child(wallpaper_card)
-                .child(interface_card)
-                .child(
-                    nickel_ui::Row::new()
-                        .justify_content(nickel_ui::Justify::End)
-                        .child(reset),
-                ),
-        )
+            )))
+        });
+        self.appearance_frame(theme, content)
     }
 
     pub(super) fn keyboard_shortcuts_components(&self) -> AnyView<SettingsMessage> {
