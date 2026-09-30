@@ -4097,7 +4097,6 @@ pub fn show_window_system_menu(window: WindowId) -> bool {
     }
 }
 
-
 pub fn launcher_has_foreground_focus() -> bool {
     use std::sync::atomic::Ordering;
 

@@ -1420,7 +1420,6 @@ fn native_keyboard_uses_authority_height_dock_and_output_without_rescaling() {
     assert!(super::internal_keyboard_surface_placement(None, false, 368, &[]).is_none());
 }
 
-
 #[test]
 fn switching_active_output_relocates_one_launcher_to_negative_origin() {
     let right = internal_shell_surface_placement(

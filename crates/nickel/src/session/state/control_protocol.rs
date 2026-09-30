@@ -152,7 +152,6 @@ mod shell_surface_identity_tests {
         assert!(!shell_surface_identity_valid(&identity));
     }
 
-
     #[test]
     fn preview_accepts_only_overlay_plugin_placement() {
         let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
