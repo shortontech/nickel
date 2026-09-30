@@ -356,10 +356,20 @@ fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
         let directory = root.path().join(id);
         std::fs::create_dir(&directory).unwrap();
         std::fs::write(directory.join("plugin.json"),r#"{"api_version":1,"id":"org.example.independent-provider","version":"0.2.0","name":"Independent provider","entry":"main.js","capabilities":["settings-write","windows-focus"],"composition":{"api_version":1,"id":"org.example.independent-provider","version":"0.2.0","contributions":[{"collection":"taskbar.items","id":"item","implementation":"./main.js#Item"},{"collection":"settings.pages","id":"page","implementation":"./main.js#Page"}]}}"#).unwrap();
-        std::fs::write(directory.join("main.js"),"globalThis.starts=(globalThis.starts||0)+1; registerSetting({id:'enabled',group:'Example',label:'Enabled',type:'switch',defaultValue:false,value:()=>false});\nexport function Item(){return h(Button,{onClick:()=>nickel.windows.activate('native-window')},'Independent item');}\nexport function Page(){return h(Text,null,'Independent page');} registerSettingsPage({id:'page',group:'Example',label:'Independent',component:Page});").unwrap();
+        std::fs::write(directory.join("main.js"),"globalThis.starts=(globalThis.starts||0)+1; registerSetting({id:'enabled',group:'Example',label:'Enabled',type:'switch',defaultValue:false,value:()=>false});\nexport function Item(){return h(Button,{onClick:()=>nickel.windows.activate('native-window')},'Independent item');}\nexport function Page(){const [count,setCount]=useState(0);return h(Column,null,h(Text,null,'Provider activations '+count),h(Button,{onClick:()=>{setCount(count+1);nickel.windows.activate('71');}},'Activate provider window'),h(Button,{onClick:()=>{setCount(count+100);nickel.windows.close('71');}},'Denied provider close'));} registerSettingsPage({id:'page',group:'Example',label:'Independent',component:Page});").unwrap();
         let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
         let descriptor = catalog.packages.remove(id).unwrap();
-        let mut shell = LiveShell::new().unwrap();
+        let session = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(session.clone()).unwrap();
+        shell.windows = vec![crate::model::OpenWindow {
+            id: crate::model::WindowId(71),
+            application_id: None,
+            active: true,
+            title: "Provider target".into(),
+            state: crate::model::WindowState::default(),
+        }];
         shell
             .plugin_registry
             .register(descriptor.manifest.clone())
@@ -417,6 +427,110 @@ fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
                 .iter()
                 .any(|page| page.provider_package == id)
         );
+        // Select the registry page through the shipped Settings navigation, not its contribution alias.
+        shell.launch_settings(None);
+        let settings = shell.active_shell_surface_key("settings");
+        shell.plugin_panel_scene(&settings, 1100, 800).unwrap();
+        let selector = |role, name: &str| nickel_ui::SemanticSelector::RoleAndName {
+            role,
+            name: name.into(),
+        };
+        let destination = shell
+            .plugin_panel_host_for(&settings)
+            .unwrap()
+            .query_unique(&selector(nickel_ui::SemanticRole::Button, "Independent"))
+            .unwrap();
+        assert!(shell.plugin_panel_host_ui_for(
+            &settings,
+            nickel_ui::UiEvent::AccessibilityActivate(destination.id),
+            1100,
+            800
+        ));
+        shell.plugin_panel_scene(&settings, 1100, 800).unwrap();
+        let button = shell
+            .plugin_panel_host_for(&settings)
+            .unwrap()
+            .query_unique(&selector(
+                nickel_ui::SemanticRole::Button,
+                "Activate provider window",
+            ))
+            .unwrap();
+        session.take_commands();
+        assert!(shell.plugin_panel_host_ui_for(
+            &settings,
+            nickel_ui::UiEvent::AccessibilityActivate(button.id),
+            1100,
+            800
+        ));
+        assert!(matches!(
+            session.take_commands().as_slice(),
+            [crate::platform::ShellCommand::WindowAction {
+                window: crate::model::WindowId(71),
+                action: crate::platform::WindowAction::Activate
+            }]
+        ));
+        shell.plugin_panel_scene(&settings, 1100, 800).unwrap();
+        // The shell has windows-context, but the source provider has only windows-focus.
+        let context = nickel_core::plugins::PluginCapability::WindowsContext;
+        assert!(
+            shell
+                .plugin_registry
+                .get("nickel-default")
+                .unwrap()
+                .manifest
+                .capabilities
+                .contains(&context)
+        );
+        assert!(
+            !shell
+                .plugin_registry
+                .get(id)
+                .unwrap()
+                .manifest
+                .capabilities
+                .contains(&context)
+        );
+        let denied = shell
+            .plugin_panel_host_for(&settings)
+            .unwrap()
+            .query_unique(&selector(
+                nickel_ui::SemanticRole::Button,
+                "Denied provider close",
+            ))
+            .unwrap();
+        shell.plugin_panel_host_ui_for(
+            &settings,
+            nickel_ui::UiEvent::AccessibilityActivate(denied.id),
+            1100,
+            800,
+        );
+        assert!(session.take_commands().is_empty());
+        assert!(
+            shell
+                .plugin_panel_host_for(&settings)
+                .unwrap()
+                .application()
+                .last_error()
+                .is_some()
+        );
+        shell.plugin_panel_scene(&settings, 1100, 800).unwrap();
+        assert!(
+            shell
+                .plugin_panel_host_for(&settings)
+                .unwrap()
+                .query_unique(&selector(
+                    nickel_ui::SemanticRole::Text,
+                    "Provider activations 1"
+                ))
+                .is_ok()
+        );
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u32>("JSON.stringify(globalThis.starts)")
+                .unwrap(),
+            1
+        );
         let stale = active
             .borrow()
             .contributions("taskbar.items")
@@ -424,6 +538,29 @@ fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
             .find(|reference| reference.owner().id == id)
             .unwrap();
         shell.set_plugin_enabled(id, false).unwrap();
+        shell.plugin_panel_scene(&settings, 1100, 800).unwrap();
+        assert!(
+            shell
+                .package_settings_registry
+                .settings_pages_snapshot()
+                .pages
+                .iter()
+                .all(|page| page.provider_package != id)
+        );
+        let settings_host = shell.plugin_panel_host_for(&settings).unwrap();
+        assert!(
+            settings_host
+                .query_unique(&selector(nickel_ui::SemanticRole::Button, "Independent"))
+                .is_err()
+        );
+        assert!(
+            settings_host
+                .query_unique(&selector(
+                    nickel_ui::SemanticRole::Button,
+                    "Activate provider window"
+                ))
+                .is_err()
+        );
         assert!(active.borrow_mut().mount(&stale).is_err());
         assert!(
             active
@@ -536,8 +673,7 @@ use nickel_ui::{
 use nickel_ui_testkit::{Scenario, Selector};
 
 use super::{
-    HostRuntimeSamples, LiveShell, desktop_label_foreground, initial_wallpaper,
-    panel_tray_icons,
+    HostRuntimeSamples, LiveShell, desktop_label_foreground, initial_wallpaper, panel_tray_icons,
     platform::{
         AudioStatus, BluetoothStatus, GlobalShortcut, NetworkStatus, SecureStorageState,
         SystemStatusUpdate,
