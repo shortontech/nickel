@@ -39,6 +39,14 @@ fn jsx_source(directory: &Path, entry: &str) -> Result<Option<PathBuf>, String> 
 }
 
 fn compile_jsx(directory: &Path, entry: &str, source: &Path) -> Result<String, String> {
+    compile_jsx_modules(directory, entry, source).map(|(source, _)| source)
+}
+
+fn compile_jsx_modules(
+    directory: &Path,
+    entry: &str,
+    source: &Path,
+) -> Result<(String, Vec<nickel_core::plugins::PluginSourceFile>), String> {
     let output = tempfile::tempdir()
         .map_err(|error| format!("could not create JSX build directory: {error}"))?;
     let compiler = directory.join("node_modules/.bin").join(tsc_executable());
@@ -64,7 +72,7 @@ fn compile_jsx(directory: &Path, entry: &str, source: &Path) -> Result<String, S
             "--lib",
             "ES2020",
             "--module",
-            "none",
+            "ES2020",
             "--rootDir",
         ])
         .arg(".")
@@ -85,8 +93,21 @@ fn compile_jsx(directory: &Path, entry: &str, source: &Path) -> Result<String, S
     {
         return Err("compiled JavaScript must be an ordinary file of at most 2 MiB".into());
     }
-    std::fs::read_to_string(&compiled)
-        .map_err(|error| format!("could not read compiled JavaScript: {error}"))
+    let source = std::fs::read_to_string(&compiled)
+        .map_err(|error| format!("could not read compiled JavaScript: {error}"))?;
+    let mut modules = PluginPackage::load_module_sources(directory)?;
+    for compiled in PluginPackage::load_module_sources(output.path())? {
+        if let Some(module) = modules
+            .iter_mut()
+            .find(|module| module.path == compiled.path)
+        {
+            *module = compiled;
+        } else {
+            modules.push(compiled);
+        }
+    }
+    modules.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok((source, modules))
 }
 
 fn tsc_executable() -> &'static str {
@@ -106,9 +127,10 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
         .map_err(|error| format!("plugin.json is not UTF-8: {error}"))?;
     let manifest = PluginManifest::from_json(manifest_source)?;
     if let Some(source) = jsx_source(&directory, &manifest.entry)? {
+        let (source, modules) = compile_jsx_modules(&directory, &manifest.entry, &source)?;
         Ok(PluginPackage {
-            modules: PluginPackage::load_module_sources(&directory)?,
-            source: compile_jsx(&directory, &manifest.entry, &source)?,
+            modules,
+            source,
             stylesheet: PluginPackage::load_stylesheet(&directory, &manifest)?,
             images: PluginPackage::load_images(&directory, &manifest)?,
             manifest,
@@ -275,6 +297,10 @@ mod platform {
                     .hash(&mut hasher);
             }
         }
+        for module in PluginPackage::load_module_sources(directory)? {
+            module.path.hash(&mut hasher);
+            module.source.hash(&mut hasher);
+        }
         Ok(hasher.finish())
     }
 
@@ -291,6 +317,19 @@ mod platform {
             }
             std::fs::write(path, bytes)
                 .map_err(|error| format!("could not stage plugin image: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn stage_modules(package: &PluginPackage, target: &Path) -> Result<(), String> {
+        for module in &package.modules {
+            let path = target.join(&module.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("could not stage module directory: {error}"))?;
+            }
+            std::fs::write(path, &module.source)
+                .map_err(|error| format!("could not stage module: {error}"))?;
         }
         Ok(())
     }
@@ -392,6 +431,7 @@ mod platform {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("could not stage entry directory: {error}"))?;
         }
+        stage_modules(package, &target)?;
         std::fs::write(entry, &package.source)
             .map_err(|error| format!("could not stage JavaScript: {error}"))?;
         stage_stylesheet(package, &target)?;
@@ -637,6 +677,50 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn development_compiles_and_stages_imported_jsx_modules() {
+            if Command::new(tsc_executable())
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let fixture = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/example-window"
+            ));
+            std::fs::copy(
+                fixture.join("plugin.json"),
+                directory.path().join("plugin.json"),
+            )
+            .unwrap();
+            std::fs::copy(fixture.join("ui.css"), directory.path().join("ui.css")).unwrap();
+            std::fs::copy(fixture.join("icon.png"), directory.path().join("icon.png")).unwrap();
+            std::fs::write(directory.path().join("main.jsx"), "import Card from './card.js';\nexport default function App() { return <Window id='main' width={520} height={340}><Card /></Window>; }").unwrap();
+            std::fs::write(
+                directory.path().join("card.jsx"),
+                "export default function Card() { return <Text>Imported card</Text>; }",
+            )
+            .unwrap();
+            let package = load_dev_package(directory.path()).unwrap();
+            assert!(
+                package
+                    .modules
+                    .iter()
+                    .any(|module| module.path == "card.js" && module.source.contains("h(Text"))
+            );
+            let profile = tempfile::tempdir().unwrap();
+            stage(&package, directory.path(), profile.path()).unwrap();
+            let staged = staged_config_directory(profile.path())
+                .join("plugins")
+                .join(&package.manifest.id);
+            let loaded = PluginPackage::load(&staged).unwrap();
+            assert_eq!(loaded.source_digest(), package.source_digest());
+            PluginPanelApplication::validate_package(&loaded).unwrap();
+        }
 
         #[test]
         fn accepts_each_executable_surface_free_extension() {
