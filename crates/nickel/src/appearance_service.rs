@@ -264,6 +264,8 @@ mod tests {
                 Instant::now() + Duration::from_secs(1),
                 || Ok(()),
             )
+            .unwrap()
+            .1
             .unwrap();
         let observed = state
             .snapshot(&PreparedRead::at(path).unwrap(), 43)
