@@ -782,29 +782,37 @@ pub(super) fn apply_transient_state<Message>(
         let transparent_editor = element.text_mapper.is_some()
             && matches!(element.kind, Kind::Text { .. })
             && element.style.background.is_none();
-        let active_focus_tint = if scope_background_active || exact_focus_background.is_some() {
-            None
-        } else {
-            if state.window_focused() && state.navigation().controller_selected() == Some(id) {
-                element
-                    .style
-                    .controller_focus_background_tint
-                    .or(element.style.focus_background_tint)
-                    .or(Some(crate::theme::FALLBACK_CONTROLLER_FOCUS_CUE))
-            } else if state.window_focused()
-                && state.focused() == Some(id)
-                && matches!(
-                    state.input_modality(),
-                    InputModality::Keyboard | InputModality::Accessibility
-                )
-            {
-                element.style.focus_background_tint.or_else(|| {
-                    (!transparent_editor).then_some(crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE)
-                })
-            } else {
-                None
+        let css_dropdown = matches!(
+            element.kind,
+            Kind::Dropdown {
+                presentation: Some(_),
+                ..
             }
-        };
+        );
+        let active_focus_tint =
+            if scope_background_active || exact_focus_background.is_some() || css_dropdown {
+                None
+            } else {
+                if state.window_focused() && state.navigation().controller_selected() == Some(id) {
+                    element
+                        .style
+                        .controller_focus_background_tint
+                        .or(element.style.focus_background_tint)
+                        .or(Some(crate::theme::FALLBACK_CONTROLLER_FOCUS_CUE))
+                } else if state.window_focused()
+                    && state.focused() == Some(id)
+                    && matches!(
+                        state.input_modality(),
+                        InputModality::Keyboard | InputModality::Accessibility
+                    )
+                {
+                    element.style.focus_background_tint.or_else(|| {
+                        (!transparent_editor).then_some(crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE)
+                    })
+                } else {
+                    None
+                }
+            };
         if let Some(tint) = active_focus_tint {
             let transform = |color| {
                 focus_foreground.map_or_else(
@@ -857,16 +865,50 @@ pub(super) fn apply_transient_state<Message>(
                 expanded,
                 options,
                 overlay,
+                presentation,
+                resolved_options,
                 ..
             } => {
                 *expanded = dropdown_open;
-                element.style.height = Length::Px(if *overlay {
-                    30.0
-                } else if *expanded {
-                    42.0 + options.len() as f32 * 36.0
-                } else {
-                    42.0
+                if let Some(parts) = presentation.as_mut() {
+                    let resolved = |mut part: DropdownPartStyle, part_id: &UiId| {
+                        let background = if state.pressed() == Some(part_id) {
+                            part.interaction_backgrounds[1]
+                        } else if state.hovered() == Some(part_id) {
+                            part.interaction_backgrounds[0]
+                        } else if state.window_focused()
+                            && (state.focused() == Some(part_id)
+                                || state.navigation().controller_selected() == Some(part_id))
+                        {
+                            part.interaction_backgrounds[2]
+                        } else {
+                            None
+                        };
+                        part.background = background.or(part.background);
+                        part
+                    };
+                    parts[0] = resolved(parts[0], id);
+                    *resolved_options = (0..options.len())
+                        .map(|index| resolved(parts[1], &id.scoped(format!("option-{index}"))))
+                        .collect();
+                }
+                let height = presentation.as_ref().map(|parts| {
+                    parts[0].height
+                        + if *expanded && !*overlay {
+                            options.len() as f32 * parts[1].height
+                        } else {
+                            0.0
+                        }
                 });
+                element.style.height = Length::Px(height.unwrap_or_else(|| {
+                    if *overlay {
+                        30.0
+                    } else if *expanded {
+                        42.0 + options.len() as f32 * 36.0
+                    } else {
+                        42.0
+                    }
+                }));
             }
             _ => {}
         }

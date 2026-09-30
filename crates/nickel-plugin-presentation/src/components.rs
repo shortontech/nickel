@@ -8,9 +8,9 @@ use std::{
 use nickel_core::plugins::{PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
-    AnyView, Column, ComponentBuilderExt, Container, DragGesture, DropGesture, Dropdown, Grid,
-    Image, ImageFit, Layer, Length, OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Slider,
-    Spacer, Text, TextField as UiTextField, VerticalScroll,
+    AnyView, Column, ComponentBuilderExt, Container, DragGesture, DropGesture, Dropdown,
+    DropdownPartStyle, Grid, Image, ImageFit, Layer, Length, OverlayMenuItem, Point, Row,
+    SemanticRole, Shortcut, Slider, Spacer, Text, TextField as UiTextField, VerticalScroll,
 };
 use serde_json::Value;
 
@@ -407,6 +407,7 @@ pub enum PanelNode {
     },
     Menu {
         id: String,
+        class_name: Option<String>,
         anchor: String,
         point: Option<Point>,
         open: bool,
@@ -421,6 +422,26 @@ pub enum PanelNode {
         shortcut: Option<String>,
         separator_before: bool,
     },
+}
+
+fn dropdown_part(style: &ControlStyle) -> DropdownPartStyle {
+    let pixels = |length| match length {
+        Some(Length::Px(value)) => value,
+        _ => 0.0,
+    };
+    DropdownPartStyle {
+        width: pixels(style.width),
+        height: pixels(style.height),
+        padding: style.padding.unwrap_or_default(),
+        background: style.background.filter(|color| *color != 0),
+        interaction_backgrounds: [None; 3],
+        foreground: style.color.filter(|color| *color != 0),
+        border_color: style.border_color.filter(|color| *color != 0),
+        border_width: style.border_width.unwrap_or(0.0),
+        radius: style.radius.unwrap_or(0.0),
+        font_size: style.font_size.unwrap_or(0.0),
+        line_height: style.line_height.unwrap_or(0.0),
+    }
 }
 
 fn apply_container_style<Message>(
@@ -622,7 +643,8 @@ impl PanelNode {
                 | Self::Spacer { class_name, .. }
                 | Self::Slot { class_name, .. }
                 | Self::TextField { class_name, .. }
-                | Self::Button { class_name, .. } => class_name.as_deref(),
+                | Self::Button { class_name, .. }
+                | Self::Menu { class_name, .. } => class_name.as_deref(),
                 _ => None,
             };
             class_name
@@ -827,6 +849,18 @@ impl PanelNode {
                                 + request.anchor.as_ref().map_or(0, capacity)
                         })
                 }
+                Self::Menu {
+                    id,
+                    class_name,
+                    anchor,
+                    items,
+                    ..
+                } => {
+                    capacity(id)
+                        + capacity(anchor)
+                        + class_name.as_ref().map_or(0, capacity)
+                        + items.iter().map(Self::contribution_bytes).sum::<u64>()
+                }
                 _ => 0,
             }
     }
@@ -878,6 +912,7 @@ impl PanelNode {
                     | "switch"
                     | "color-swatch"
                     | "select"
+                    | "menu"
                     | "button"
                     | "image"
                     | "image-button"
@@ -1744,6 +1779,7 @@ impl PanelNode {
                 }
                 Ok(Self::Menu {
                     id: id.to_owned(),
+                    class_name,
                     anchor: anchor.to_owned(),
                     point: match (value.get("x"), value.get("y")) {
                         (None, None) => None,
@@ -1859,6 +1895,117 @@ impl PanelNode {
             }
             _ => Err(format!("unknown component {kind:?}")),
         }
+    }
+
+    /// Resolve a detached menu through its JSX ancestors so subtree variables
+    /// and descendant selectors survive its native overlay boundary.
+    pub fn style_overlay_menu_for<Message>(
+        &self,
+        id: &str,
+        menu: nickel_ui::OverlayMenu<Message>,
+        stylesheet: &StyleSheet,
+    ) -> nickel_ui::OverlayMenu<Message> {
+        if let Some((node, inherited)) =
+            self.menu_style_context(id, stylesheet, InheritedTextStyle::default())
+        {
+            node.style_overlay_menu_inherited(menu, stylesheet, inherited)
+        } else {
+            menu
+        }
+    }
+
+    fn menu_style_context<'a>(
+        &'a self,
+        requested: &str,
+        stylesheet: &StyleSheet,
+        inherited: InheritedTextStyle,
+    ) -> Option<(&'a Self, InheritedTextStyle)> {
+        if matches!(self, Self::Menu { id, .. } if id == requested) {
+            return Some((self, inherited));
+        }
+        let (kind, id, class_name) = match self {
+            Self::Surface { id, class_name, .. } => {
+                ("window", id.as_deref(), class_name.as_deref())
+            }
+            Self::Div { id, class_name, .. } => ("div", id.as_deref(), class_name.as_deref()),
+            Self::Layer { id, class_name, .. } => ("layer", id.as_deref(), class_name.as_deref()),
+            Self::Box { class_name, .. } => ("box", None, class_name.as_deref()),
+            Self::Row { class_name, .. } => ("row", None, class_name.as_deref()),
+            Self::Column { class_name, .. } => ("column", None, class_name.as_deref()),
+            Self::ScrollView { id, class_name, .. } => {
+                ("scroll-view", Some(id.as_str()), class_name.as_deref())
+            }
+            _ => return None,
+        };
+        let style = inherited.resolve(stylesheet, kind, id, class_name);
+        self.container_children()?.iter().find_map(|child| {
+            child.menu_style_context(requested, stylesheet, inherited.extend(&style))
+        })
+    }
+
+    /// Apply package CSS to native menu placement, paint and item metrics.
+    pub fn style_overlay_menu<Message>(
+        &self,
+        menu: nickel_ui::OverlayMenu<Message>,
+        stylesheet: &StyleSheet,
+    ) -> nickel_ui::OverlayMenu<Message> {
+        self.style_overlay_menu_inherited(menu, stylesheet, InheritedTextStyle::default())
+    }
+
+    fn style_overlay_menu_inherited<Message>(
+        &self,
+        mut menu: nickel_ui::OverlayMenu<Message>,
+        stylesheet: &StyleSheet,
+        inherited: InheritedTextStyle,
+    ) -> nickel_ui::OverlayMenu<Message> {
+        let Self::Menu { id, class_name, .. } = self else {
+            return menu;
+        };
+        let style = inherited.resolve(stylesheet, "menu", Some(id), class_name.as_deref());
+        let inherited = inherited.extend(&style);
+        let item = inherited.apply(inherited.resolve(
+            stylesheet,
+            "menu-item",
+            Some(id),
+            class_name.as_deref(),
+        ));
+        let pixels = |length| match length {
+            Some(Length::Px(value)) => value,
+            _ => 0.0,
+        };
+        menu.width = pixels(style.width);
+        menu.fit_content = false;
+        menu.padding = style.padding.unwrap_or_default();
+        menu.radius = style.radius.unwrap_or(0.0);
+        menu.background = style.background.unwrap_or(0);
+        menu.border = style.border_color.unwrap_or(0);
+        menu.border_width = style.border_width.unwrap_or(0.0);
+        menu.row_height = pixels(item.height);
+        menu.row_gap = style.gap.unwrap_or(0.0);
+        menu.foreground = item.color.unwrap_or(0);
+        menu.text_scale = item.font_size.unwrap_or(0.0) / 7.0;
+        menu.item_padding = item.padding.unwrap_or_default();
+        menu.item_line_height = item.line_height.unwrap_or(0.0);
+        menu.shortcut_scale = 1.0;
+        menu.item_background = item.background;
+        menu.item_border = item.border_color;
+        menu.item_border_width = item.border_width.unwrap_or(0.0);
+        menu.item_radius = item.radius.unwrap_or(0.0);
+        let interaction = |state| {
+            stylesheet.resolve_interaction_background_with_properties(
+                "menu-item",
+                Some(id),
+                class_name.as_deref(),
+                state,
+                &item.custom_properties,
+                &inherited.ancestors,
+            )
+        };
+        menu.item_hover = interaction(crate::css::InteractionState::Hover);
+        menu.item_pressed = interaction(crate::css::InteractionState::Active);
+        menu.item_selected = interaction(crate::css::InteractionState::Focus);
+        menu.direction = stylesheet.reading_direction();
+        menu
     }
 
     pub fn overlay_menu_item(&self) -> Option<OverlayMenuItem<PluginMessage>> {
@@ -2623,6 +2770,44 @@ impl PanelNode {
             } => {
                 let style =
                     inherited.resolve(stylesheet, "select", Some(id), class_name.as_deref());
+                let parts = inherited.extend(&style);
+                let header_style = parts.apply(parts.resolve(
+                    stylesheet,
+                    "select-header",
+                    Some(id),
+                    class_name.as_deref(),
+                ));
+                let option_style = parts.apply(parts.resolve(
+                    stylesheet,
+                    "option",
+                    Some(id),
+                    class_name.as_deref(),
+                ));
+                let indicator_style = parts.apply(parts.resolve(
+                    stylesheet,
+                    "select-indicator",
+                    Some(id),
+                    class_name.as_deref(),
+                ));
+                let with_interactions = |kind: &str, control: &ControlStyle| {
+                    let mut part = dropdown_part(control);
+                    part.interaction_backgrounds = [
+                        crate::css::InteractionState::Hover,
+                        crate::css::InteractionState::Active,
+                        crate::css::InteractionState::Focus,
+                    ]
+                    .map(|state| {
+                        stylesheet.resolve_interaction_background_with_properties(
+                            kind,
+                            Some(id),
+                            class_name.as_deref(),
+                            state,
+                            &control.custom_properties,
+                            &parts.ancestors,
+                        )
+                    });
+                    part
+                };
                 let select = Dropdown::new(
                     Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
                     value,
@@ -2637,12 +2822,12 @@ impl PanelNode {
                 .accessibility_label(label)
                 .overlay(true)
                 .expanded(*open)
-                .colors(
-                    style.background.unwrap_or(0xff30343d),
-                    style.background.unwrap_or(0xff424957),
-                    style.color.unwrap_or(0xfff0f0f0),
+                .parts(
+                    with_interactions("select-header", &header_style),
+                    with_interactions("option", &option_style),
+                    dropdown_part(&indicator_style),
                 );
-                let container = Container::new().width(180.0).child(select);
+                let container = Container::new().child(select);
                 with_margin(
                     AnyView::new(apply_container_style(container, &style)),
                     &style,
@@ -3514,6 +3699,180 @@ fn child_text(children: &[Value]) -> Result<String, String> {
 mod compound_css_tests {
     use super::*;
     use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
+
+    #[test]
+    fn select_has_no_stock_paint_without_stylesheet() {
+        let node = PanelNode::Select {
+            id: "choice".into(),
+            class_name: None,
+            label: "Choice".into(),
+            value: "One".into(),
+            open: false,
+            action: 1,
+            options: vec![("one".into(), "One".into(), 2)],
+        };
+        let frame = UiFrame::layout(
+            node.view(&PluginImages::new(), &StyleSheet::default()),
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+        );
+        assert!(frame.commands().is_empty());
+        assert!(
+            frame
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .any(|node| node.accessibility_label.as_deref() == Some("Choice"))
+        );
+    }
+
+    #[test]
+    fn select_parts_share_css_geometry_with_option_hits_and_accessibility() {
+        let node = PanelNode::Select {
+            id: "choice".into(),
+            class_name: Some("custom".into()),
+            label: "Choice".into(),
+            value: "One".into(),
+            open: true,
+            action: 1,
+            options: vec![
+                ("one".into(), "One".into(), 2),
+                ("two".into(), "Two".into(), 3),
+            ],
+        };
+        let sheet = StyleSheet::compile("select.custom { width: 160px; --ink: #abcdef; }
+            select-header.custom { height: 44px; background: #123456; color: var(--ink); font-size: 21px; padding: 4px; }
+            option.custom { height: 18px; background: #fedcba; color: var(--ink); font-size: 14px; padding: 2px; }
+            select-indicator.custom { width: 20px; color: var(--ink); font-size: 7px; }").unwrap();
+        let frame = UiFrame::layout(
+            Column::new()
+                .align_items(nickel_ui::Align::Start)
+                .child(node.view(&PluginImages::new(), &sheet)),
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+        );
+        let option = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.accessibility_label.as_deref() == Some("Two"))
+            .unwrap();
+        assert_eq!(option.allocated.size.height, 18.0);
+        assert_eq!(option.allocated.origin.y, 62.0);
+        assert_eq!(
+            frame.message_at(Point {
+                x: option.allocated.origin.x + 4.0,
+                y: option.allocated.origin.y + 4.0
+            }),
+            Some(&PluginMessage::Click(3))
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, text, .. } if text == "One" && *color == 0xffabcdef && *scale == 3.0)));
+    }
+
+    #[test]
+    fn select_header_and_option_interaction_paint_use_css() {
+        let node = PanelNode::Select {
+            id: "choice".into(),
+            class_name: None,
+            label: "Choice".into(),
+            value: "One".into(),
+            open: true,
+            action: 1,
+            options: vec![("one".into(), "One".into(), 2)],
+        };
+        let sheet = StyleSheet::compile(
+            "select { width: 160px; }
+            select-header { height: 30px; background: #123456; }
+            select-header:hover { background: #aabbcc; }
+            option { height: 20px; background: #abcdef; }
+            option:hover { background: #fedcba; }",
+        )
+        .unwrap();
+        let root = || {
+            Column::new()
+                .align_items(nickel_ui::Align::Start)
+                .child(node.view(&PluginImages::new(), &sheet))
+        };
+        let mut state = nickel_ui::UiStateStore::default();
+        let mut frame =
+            UiFrame::layout_with_state(root(), Rect::new(0.0, 0.0, 400.0, 200.0), &mut state);
+        let header = Point { x: 20.0, y: 15.0 };
+        frame.handle_event(&mut state, nickel_ui::UiEvent::PointerMoved(header));
+        frame = UiFrame::layout_with_state(root(), Rect::new(0.0, 0.0, 400.0, 200.0), &mut state);
+        assert!(frame.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == 0xffaabbcc)
+        ));
+        frame.handle_event(&mut state, nickel_ui::UiEvent::PointerPressed(header));
+        frame.handle_event(&mut state, nickel_ui::UiEvent::PointerReleased(header));
+        frame = UiFrame::layout_with_state(root(), Rect::new(0.0, 0.0, 400.0, 200.0), &mut state);
+        let option = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.accessibility_label.as_deref() == Some("One"))
+            .unwrap()
+            .allocated;
+        frame.handle_event(
+            &mut state,
+            nickel_ui::UiEvent::PointerMoved(Point {
+                x: option.origin.x + option.size.width / 2.0,
+                y: option.origin.y + option.size.height / 2.0,
+            }),
+        );
+        let frame =
+            UiFrame::layout_with_state(root(), Rect::new(0.0, 0.0, 400.0, 200.0), &mut state);
+        assert!(frame.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == 0xfffedcba)
+        ));
+    }
+
+    #[test]
+    fn css_menu_metrics_and_paint_reach_native_overlay() {
+        let node = PanelNode::parse(&serde_json::json!({"kind": "menu", "id": "actions", "className": "custom", "anchor": "anchor", "open": true, "children": [{"kind": "menu-item", "id": "one", "label": "One", "action": 2, "children": []}]})).unwrap();
+        let sheet = StyleSheet::compile("column.theme { --ink: #abcdef; }
+             menu.custom { width: 150px; padding: 3px; background: #123456; }
+            menu-item.custom { height: 32px; padding: 4px; color: var(--ink); font-size: 14px; background: #fedcba; }
+            menu-item.custom:hover { background: #aabbcc; }").unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let mut frame = UiFrame::layout_with_state(
+            nickel_ui::Button::new(PluginMessage::Click(1), "Anchor").id("anchor"),
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+            &mut state,
+        );
+        let anchor = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::Button))
+            .unwrap()
+            .id
+            .clone();
+        let menu =
+            nickel_ui::OverlayMenu::new("actions", nickel_ui::OverlayAnchor::Node(anchor)).item(
+                nickel_ui::OverlayMenuItem::action("one", "One", PluginMessage::Click(2)),
+            );
+        let root = PanelNode::Column {
+            class_name: Some("theme".into()),
+            children: vec![node],
+        };
+        let menu = root.style_overlay_menu_for("actions", menu, &sheet);
+        assert_eq!(menu.item_hover, Some(0xffaabbcc));
+        frame.present_open_menu(&mut state, menu).unwrap();
+        let item = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.accessibility_label.as_deref() == Some("One"))
+            .unwrap();
+        assert_eq!(item.allocated.size.height, 32.0);
+        assert_eq!(item.allocated.size.width, 144.0);
+        assert_eq!(
+            frame.message_at(Point {
+                x: item.allocated.origin.x + 5.0,
+                y: item.allocated.origin.y + 5.0
+            }),
+            Some(&PluginMessage::Click(2))
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { color, scale, text, .. } if text == "One" && *color == 0xffabcdef && *scale == 2.0)));
+    }
 
     #[test]
     fn slider_parts_compile_into_native_paint_geometry() {

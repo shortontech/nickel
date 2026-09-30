@@ -384,6 +384,7 @@ pub struct OverlayMenu<Message> {
     pub collision: CollisionPolicy,
     pub focus: OverlayFocusPolicy,
     pub width: f32,
+    pub fit_content: bool,
     pub row_height: f32,
     pub row_gap: f32,
     pub padding: Insets,
@@ -399,6 +400,13 @@ pub struct OverlayMenu<Message> {
     pub item_pressed: Option<Color>,
     pub item_selected: Option<Color>,
     pub item_radius: f32,
+    /// Item content metrics; the native legacy defaults are replaceable.
+    pub item_padding: Insets,
+    pub item_line_height: f32,
+    pub shortcut_scale: f32,
+    pub item_background: Option<Color>,
+    pub item_border: Option<Color>,
+    pub item_border_width: f32,
     pub initial_controller_item: Option<UiId>,
     pub direction: ReadingDirection,
 }
@@ -416,6 +424,9 @@ impl<Message> OverlayMenu<Message> {
         items: &[OverlayMenuItem<Message>],
         max_width: f32,
     ) -> f32 {
+        if !self.fit_content {
+            return self.width.min(max_width.max(0.0));
+        }
         let widest = items
             .iter()
             .map(|item| {
@@ -432,7 +443,7 @@ impl<Message> OverlayMenu<Message> {
                 let shortcut = item.shortcut.as_deref().map_or(0.0, |shortcut| {
                     crate::ui::measure_text(
                         shortcut,
-                        self.text_scale * 0.85,
+                        self.text_scale * self.shortcut_scale,
                         false,
                         false,
                         None,
@@ -456,6 +467,7 @@ impl<Message> OverlayMenu<Message> {
             collision: CollisionPolicy::FlipThenClamp,
             focus: OverlayFocusPolicy::FirstItem,
             width: 200.0,
+            fit_content: true,
             row_height: 28.0,
             row_gap: 0.0,
             padding: Insets::all(2.0),
@@ -471,6 +483,12 @@ impl<Message> OverlayMenu<Message> {
             item_pressed: None,
             item_selected: None,
             item_radius: 4.0,
+            item_padding: Insets::all(8.0),
+            item_line_height: 0.0,
+            shortcut_scale: 0.85,
+            item_background: None,
+            item_border: None,
+            item_border_width: 0.0,
             initial_controller_item: None,
             direction: ReadingDirection::LeftToRight,
         }

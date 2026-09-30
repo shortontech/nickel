@@ -1122,6 +1122,8 @@ enum Kind {
         background: Color,
         option_background: Color,
         foreground: Color,
+        presentation: Option<Box<[DropdownPartStyle; 3]>>,
+        resolved_options: Vec<DropdownPartStyle>,
     },
 }
 

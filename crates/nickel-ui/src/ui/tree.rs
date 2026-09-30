@@ -832,51 +832,68 @@ impl<Message: Clone> UiFrame<Message> {
             } else {
                 None
             };
-            if let Some(color) = interaction_color {
+            if let Some(color) = interaction_color
+                .or(menu.item_background)
+                .filter(|color| *color != 0)
+            {
                 self.commands.push(PaintCommand::RoundedFill {
                     rect: item_rect,
                     color,
                     radius: menu.item_radius,
                 });
             }
-            let text_bounds = item_rect.inset(Insets::all(8.0));
-            self.commands.push(PaintCommand::Text {
-                bounds: text_bounds,
-                text: item.label.clone(),
-                scale: menu.text_scale,
-                color: menu.foreground,
-                align: menu.text_align,
-                bold: false,
-                wrap: false,
-            });
-            if let Some(shortcut) = item.shortcut.as_ref() {
-                self.commands.push(PaintCommand::Text {
-                    bounds: text_bounds,
-                    text: shortcut.clone(),
-                    scale: menu.text_scale * 0.85,
-                    color: menu.foreground,
-                    align: TextAlign::End,
-                    bold: false,
-                    wrap: false,
+            if let Some(color) = menu.item_border.filter(|color| *color != 0)
+                && menu.item_border_width > 0.0
+            {
+                self.commands.push(PaintCommand::Stroke {
+                    rect: item_rect,
+                    color,
+                    width: menu.item_border_width,
                 });
             }
-            if !item.children.is_empty() {
+            let mut text_bounds = item_rect.inset(menu.item_padding);
+            if menu.item_line_height > 0.0 {
+                text_bounds.size.height = menu.item_line_height.min(text_bounds.size.height);
+            }
+            if menu.foreground != 0 && menu.text_scale > 0.0 {
                 self.commands.push(PaintCommand::Text {
                     bounds: text_bounds,
-                    text: match menu.direction {
-                        crate::ReadingDirection::LeftToRight => "›",
-                        crate::ReadingDirection::RightToLeft => "‹",
-                    }
-                    .into(),
+                    text: item.label.clone(),
                     scale: menu.text_scale,
                     color: menu.foreground,
-                    align: match menu.direction {
-                        crate::ReadingDirection::LeftToRight => TextAlign::End,
-                        crate::ReadingDirection::RightToLeft => TextAlign::Start,
-                    },
+                    align: menu.text_align,
                     bold: false,
                     wrap: false,
                 });
+                if let Some(shortcut) = item.shortcut.as_ref() {
+                    self.commands.push(PaintCommand::Text {
+                        bounds: text_bounds,
+                        text: shortcut.clone(),
+                        scale: menu.text_scale * menu.shortcut_scale,
+                        color: menu.foreground,
+                        align: TextAlign::End,
+                        bold: false,
+                        wrap: false,
+                    });
+                }
+                if !item.children.is_empty() {
+                    self.commands.push(PaintCommand::Text {
+                        bounds: text_bounds,
+                        text: match menu.direction {
+                            crate::ReadingDirection::LeftToRight => "›",
+                            crate::ReadingDirection::RightToLeft => "‹",
+                        }
+                        .into(),
+                        scale: menu.text_scale,
+                        color: menu.foreground,
+                        align: match menu.direction {
+                            crate::ReadingDirection::LeftToRight => TextAlign::End,
+                            crate::ReadingDirection::RightToLeft => TextAlign::Start,
+                        },
+                        bold: false,
+                        wrap: false,
+                    });
+                }
             }
             let item_index = self.resolved.nodes.len();
             self.resolved.nodes.push(ResolvedNode {
@@ -990,12 +1007,14 @@ impl<Message: Clone> UiFrame<Message> {
             menu.direction,
             1.0,
         );
-        self.commands.push(PaintCommand::RoundedFill {
-            rect: submenu_rect,
-            color: menu.background,
-            radius: menu.radius,
-        });
-        if menu.border_width > 0.0 {
+        if menu.background != 0 {
+            self.commands.push(PaintCommand::RoundedFill {
+                rect: submenu_rect,
+                color: menu.background,
+                radius: menu.radius,
+            });
+        }
+        if menu.border != 0 && menu.border_width > 0.0 {
             self.commands.push(PaintCommand::OverlayStroke {
                 rect: submenu_rect.inset(Insets::all(menu.border_width / 2.0)),
                 color: menu.border,
@@ -1148,12 +1167,14 @@ impl<Message: Clone> UiFrame<Message> {
             menu.direction,
             1.0,
         );
-        self.commands.push(PaintCommand::RoundedFill {
-            rect,
-            color: menu.background,
-            radius: menu.radius,
-        });
-        if menu.border_width > 0.0 {
+        if menu.background != 0 {
+            self.commands.push(PaintCommand::RoundedFill {
+                rect,
+                color: menu.background,
+                radius: menu.radius,
+            });
+        }
+        if menu.border != 0 && menu.border_width > 0.0 {
             self.commands.push(PaintCommand::OverlayStroke {
                 rect: rect.inset(Insets::all(menu.border_width / 2.0)),
                 color: menu.border,

@@ -3169,6 +3169,49 @@ impl<Message> Component<Message> for Slider<Message> {
     }
 }
 
+/// Typed presentation for one native select part. Geometry is shared by paint,
+/// hit testing and accessibility; a CSS compiler can leave every paint absent.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DropdownPartStyle {
+    pub width: f32,
+    pub height: f32,
+    pub padding: Insets,
+    pub background: Option<Color>,
+    /// Hover, pressed and focused backgrounds supplied by CSS.
+    pub interaction_backgrounds: [Option<Color>; 3],
+    pub foreground: Option<Color>,
+    pub border_color: Option<Color>,
+    pub border_width: f32,
+    pub radius: f32,
+    pub font_size: f32,
+    pub line_height: f32,
+}
+
+impl DropdownPartStyle {
+    fn bounded(mut self) -> Self {
+        let bound = |value: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, 4096.0)
+            } else {
+                0.0
+            }
+        };
+        self.width = bound(self.width);
+        self.height = bound(self.height);
+        self.padding = Insets {
+            top: bound(self.padding.top),
+            right: bound(self.padding.right),
+            bottom: bound(self.padding.bottom),
+            left: bound(self.padding.left),
+        };
+        self.border_width = bound(self.border_width);
+        self.radius = bound(self.radius);
+        self.font_size = bound(self.font_size);
+        self.line_height = bound(self.line_height);
+        self
+    }
+}
+
 pub struct Dropdown<Message = String>(Element<Message>);
 
 impl<Message> Dropdown<Message> {
@@ -3193,6 +3236,8 @@ impl<Message> Dropdown<Message> {
                 background: 0x27344c,
                 option_background: 0x34445f,
                 foreground: 0xf4f7ff,
+                presentation: None,
+                resolved_options: Vec::new(),
             },
             style: Style::default(),
             message: Some(toggle_message),
@@ -3216,6 +3261,22 @@ impl<Message> Dropdown<Message> {
         };
         element.style.height = Length::Px(42.0);
         Self(element)
+    }
+
+    /// Replace the native stock appearance with compiler-owned part styles.
+    /// Header and option heights also drive input and overlay placement.
+    pub fn parts(
+        mut self,
+        header: DropdownPartStyle,
+        option: DropdownPartStyle,
+        indicator: DropdownPartStyle,
+    ) -> Self {
+        let parts = [header.bounded(), option.bounded(), indicator.bounded()];
+        self.0.style.height = Length::Px(parts[0].height);
+        if let Kind::Dropdown { presentation, .. } = &mut self.0.kind {
+            *presentation = Some(Box::new(parts));
+        }
+        self
     }
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
@@ -3360,6 +3421,8 @@ impl<Message: Clone> Menu<Message> {
                 background: 0x171b22,
                 option_background: 0x202630,
                 foreground: 0xe8edf4,
+                presentation: None,
+                resolved_options: Vec::new(),
             },
             style: Style::default(),
             message: Some(toggle_message.clone()),

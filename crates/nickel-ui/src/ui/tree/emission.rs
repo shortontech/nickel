@@ -1,5 +1,51 @@
 use super::*;
 
+fn paint_dropdown_part(
+    commands: &mut Vec<PaintCommand>,
+    rect: Rect,
+    style: &DropdownPartStyle,
+    text: &str,
+    align: TextAlign,
+) {
+    if let Some(color) = style.background.filter(|color| *color != 0) {
+        commands.push(if style.radius > 0.0 {
+            PaintCommand::RoundedFill {
+                rect,
+                color,
+                radius: style.radius,
+            }
+        } else {
+            PaintCommand::Fill { rect, color }
+        });
+    }
+    if let Some(color) = style.border_color.filter(|color| *color != 0)
+        && style.border_width > 0.0
+    {
+        commands.push(PaintCommand::Stroke {
+            rect,
+            color,
+            width: style.border_width,
+        });
+    }
+    if let Some(color) = style.foreground.filter(|color| *color != 0)
+        && style.font_size > 0.0
+    {
+        let mut bounds = rect.inset(style.padding);
+        if style.line_height > 0.0 {
+            bounds.size.height = style.line_height.min(bounds.size.height);
+        }
+        commands.push(PaintCommand::Text {
+            bounds,
+            text: text.into(),
+            scale: style.font_size / 7.0,
+            color,
+            align,
+            bold: false,
+            wrap: false,
+        });
+    }
+}
+
 fn custom_paint_bounds(command: &PaintCommand) -> Option<Rect> {
     match command {
         PaintCommand::Fill { rect, .. }
@@ -595,10 +641,16 @@ pub(super) fn emit_element<Message: Clone>(
             background,
             option_background,
             foreground,
+            presentation,
+            resolved_options,
             ..
         } => {
-            let header_height = if *overlay { 30.0 } else { 42.0 };
-            let option_height = if *overlay { 34.0 } else { 36.0 };
+            let header_height = presentation
+                .as_ref()
+                .map_or(if *overlay { 30.0 } else { 42.0 }, |parts| parts[0].height);
+            let option_height = presentation
+                .as_ref()
+                .map_or(if *overlay { 34.0 } else { 36.0 }, |parts| parts[1].height);
             let options_height = option_height * options.len() as f32;
             let options_origin_y = if *overlay
                 && rect.origin.y + header_height + options_height
@@ -610,38 +662,62 @@ pub(super) fn emit_element<Message: Clone>(
                 rect.origin.y + header_height
             };
             let header = Rect::new(rect.origin.x, rect.origin.y, rect.size.width, header_height);
-            tree.commands.push(PaintCommand::Fill {
-                rect: header,
-                color: *background,
-            });
-            tree.commands.push(PaintCommand::Text {
-                bounds: header.inset(Insets {
-                    top: if *overlay { 5.0 } else { 10.0 },
-                    right: 36.0,
-                    bottom: if *overlay { 4.0 } else { 8.0 },
-                    left: 12.0,
-                }),
-                text: selected.clone(),
-                scale: 2.0,
-                color: *foreground,
-                align: TextAlign::Start,
-                bold: false,
-                wrap: false,
-            });
-            tree.commands.push(PaintCommand::Text {
-                bounds: Rect::new(
-                    header.origin.x + header.size.width - 32.0,
-                    header.origin.y + if *overlay { 5.0 } else { 10.0 },
-                    20.0,
-                    22.0,
-                ),
-                text: if *expanded { "▲" } else { "▼" }.into(),
-                scale: 1.0,
-                color: *foreground,
-                align: TextAlign::Center,
-                bold: false,
-                wrap: false,
-            });
+            if let Some(parts) = presentation {
+                paint_dropdown_part(
+                    &mut tree.commands,
+                    header,
+                    &parts[0],
+                    selected,
+                    TextAlign::Start,
+                );
+                let indicator = &parts[2];
+                let indicator_rect = Rect::new(
+                    header.origin.x + header.size.width - indicator.width,
+                    header.origin.y,
+                    indicator.width,
+                    header.size.height,
+                );
+                paint_dropdown_part(
+                    &mut tree.commands,
+                    indicator_rect,
+                    indicator,
+                    if *expanded { "▲" } else { "▼" },
+                    TextAlign::Center,
+                );
+            } else {
+                tree.commands.push(PaintCommand::Fill {
+                    rect: header,
+                    color: *background,
+                });
+                tree.commands.push(PaintCommand::Text {
+                    bounds: header.inset(Insets {
+                        top: if *overlay { 5.0 } else { 10.0 },
+                        right: 36.0,
+                        bottom: if *overlay { 4.0 } else { 8.0 },
+                        left: 12.0,
+                    }),
+                    text: selected.clone(),
+                    scale: 2.0,
+                    color: *foreground,
+                    align: TextAlign::Start,
+                    bold: false,
+                    wrap: false,
+                });
+                tree.commands.push(PaintCommand::Text {
+                    bounds: Rect::new(
+                        header.origin.x + header.size.width - 32.0,
+                        header.origin.y + if *overlay { 5.0 } else { 10.0 },
+                        20.0,
+                        22.0,
+                    ),
+                    text: if *expanded { "▲" } else { "▼" }.into(),
+                    scale: 1.0,
+                    color: *foreground,
+                    align: TextAlign::Center,
+                    bold: false,
+                    wrap: false,
+                });
+            }
             // Keep the typed option topology available while collapsed so the
             // opening transition can select its declared entry target in the
             // same event batch. Hidden options remain absent from hit testing,
@@ -678,24 +754,34 @@ pub(super) fn emit_element<Message: Clone>(
                     } else {
                         &mut tree.commands
                     };
-                    commands.push(PaintCommand::Fill {
-                        rect: option_rect,
-                        color: *option_background,
-                    });
-                    commands.push(PaintCommand::Text {
-                        bounds: option_rect.inset(Insets {
-                            top: 7.0,
-                            right: 12.0,
-                            bottom: 7.0,
-                            left: 12.0,
-                        }),
-                        text: option.clone(),
-                        scale: 2.0,
-                        color: *foreground,
-                        align: TextAlign::Start,
-                        bold: false,
-                        wrap: false,
-                    });
+                    if let Some(parts) = presentation {
+                        paint_dropdown_part(
+                            commands,
+                            option_rect,
+                            resolved_options.get(index).unwrap_or(&parts[1]),
+                            option,
+                            TextAlign::Start,
+                        );
+                    } else {
+                        commands.push(PaintCommand::Fill {
+                            rect: option_rect,
+                            color: *option_background,
+                        });
+                        commands.push(PaintCommand::Text {
+                            bounds: option_rect.inset(Insets {
+                                top: 7.0,
+                                right: 12.0,
+                                bottom: 7.0,
+                                left: 12.0,
+                            }),
+                            text: option.clone(),
+                            scale: 2.0,
+                            color: *foreground,
+                            align: TextAlign::Start,
+                            bold: false,
+                            wrap: false,
+                        });
+                    }
                     let option_id = node.id.scoped(format!("option-{index}"));
                     let message = element.option_messages.get(index).cloned().flatten();
                     let option_node = tree.resolved.nodes.len();
@@ -706,7 +792,11 @@ pub(super) fn emit_element<Message: Clone>(
                         allocated: option_rect,
                         padding_box: option_rect,
                         border_box: option_rect,
-                        content: option_rect.inset(Insets::all(8.0)),
+                        content: option_rect.inset(
+                            presentation
+                                .as_ref()
+                                .map_or(Insets::all(8.0), |parts| parts[1].padding),
+                        ),
                         constraints: Constraints::tight(option_rect.size),
                         preferred: option_rect.size,
                         flex_basis: Length::Auto,

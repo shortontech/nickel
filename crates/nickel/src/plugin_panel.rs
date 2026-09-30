@@ -3517,6 +3517,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                     point,
                     open: true,
                     items,
+                    ..
                 } => {
                     let mut menu = OverlayMenu::new(
                         format!("plugin-menu-{id}"),
@@ -3533,7 +3534,11 @@ impl nickel_ui::Application for PluginPanelApplication {
                             menu = menu.item(item);
                         }
                     }
-                    overlays.push(FrameOverlay::Menu(menu));
+                    overlays.push(FrameOverlay::Menu(self.node.style_overlay_menu_for(
+                        id,
+                        menu,
+                        &self.stylesheet,
+                    )));
                 }
                 _ => {}
             }
