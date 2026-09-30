@@ -912,22 +912,6 @@ impl NickelSession {
             let changed = outcome.host.changed;
             let mut steps = Vec::new();
             for effect in outcome.effects {
-                use super::remote_launcher_favorites::SemanticFavoriteAction;
-                let favorite = match &effect {
-                    crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
-                        crate::live_shell::TaskbarAction::MoveTaskPinLeft(application),
-                        _,
-                    ) => Some(SemanticFavoriteAction::MoveLeft(application.clone())),
-                    crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
-                        crate::live_shell::TaskbarAction::MoveTaskPinRight(application),
-                        _,
-                    ) => Some(SemanticFavoriteAction::MoveRight(application.clone())),
-                    _ => None,
-                };
-                if let Some(action) = favorite {
-                    steps.push(ShellActionStep::Favorite(action));
-                    continue;
-                }
                 let (_, current_output) = self.surface_capture_evidence(&identity)?;
                 let ancestors = self.remote_surface_ancestors(&identity);
                 let resource = ResourceEvidence {

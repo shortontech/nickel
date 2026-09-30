@@ -509,7 +509,10 @@ impl ShellSurface {
 
     pub fn is_taskbar_plugin(&self) -> bool {
         self.role == SurfaceRole::Panel
-            && self.plugin.as_ref() == Some(&crate::plugin_panel::taskbar_surface_key())
+            && self
+                .plugin_surface
+                .as_ref()
+                .is_some_and(|surface| surface.reserve_work_area)
     }
 
     pub fn is_desktop_surface(&self) -> bool {
@@ -592,7 +595,6 @@ pub struct WinitShell {
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
     active_fixed_plugins: HashSet<nickel_core::plugins::PluginSurfaceKey>,
-    taskbar_panel_enabled: bool,
     plugin_panel_enabled: bool,
     plugin_panel_surface: nickel_core::plugins::PluginSurface,
     plugin_panel_owner: String,
@@ -667,7 +669,6 @@ impl WinitShell {
             ]
             .into_iter()
             .collect(),
-            taskbar_panel_enabled: true,
             plugin_panel_enabled: crate::plugin_panel::enabled(),
             plugin_panel_surface: crate::plugin_panel::surface().clone(),
             plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
@@ -799,7 +800,6 @@ impl WinitShell {
                 }
             }
         }
-        let taskbar_key = crate::plugin_panel::taskbar_surface_key();
         let mut panels = self.extra_plugin_panels.clone();
         let primary_key = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: self.plugin_panel_owner.clone(),
@@ -808,26 +808,23 @@ impl WinitShell {
         if self.plugin_panel_enabled {
             panels.insert(primary_key.clone(), self.plugin_panel_surface.clone());
         }
-        if self.taskbar_panel_enabled {
-            panels.insert(
-                taskbar_key.clone(),
-                crate::plugin_panel::taskbar_surface().clone(),
-            );
-        }
+
         let mut desired_panels = desired_plugin_surfaces(&output_names, &panels);
         let taskbar_outputs = panel_outputs(
             &output_names,
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
         );
-        desired_panels
-            .retain(|(output, key)| key != &taskbar_key || taskbar_outputs.contains(output));
+        desired_panels.retain(|(output, key)| {
+            !panels.get(key).is_some_and(|panel| panel.reserve_work_area)
+                || taskbar_outputs.contains(output)
+        });
         let mut panels = panels.into_iter().collect::<Vec<_>>();
         // An owned dialog needs its ordinary panel window created first.
         panels.sort_by_key(|(key, surface)| {
             (
                 surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog,
-                key != &primary_key && key != &taskbar_key,
+                key != &primary_key,
             )
         });
         for (key, panel) in panels {
@@ -867,9 +864,7 @@ impl WinitShell {
                 self.create_surface(role, 0, primary, primary_name)?;
             }
         }
-        if self.taskbar_panel_enabled {
-            self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
-        }
+
         #[cfg(target_os = "windows")]
         self.create_surface(SurfaceRole::OnScreenKeyboard, 0, primary, primary_name)?;
         tracing::info!(
@@ -915,12 +910,7 @@ impl WinitShell {
             surface_id: self.plugin_panel_surface.id.clone(),
         };
         let mut active_panels = self.extra_plugin_panels.clone();
-        if self.taskbar_panel_enabled {
-            active_panels.insert(
-                crate::plugin_panel::taskbar_surface_key(),
-                crate::plugin_panel::taskbar_surface().clone(),
-            );
-        }
+
         if self.plugin_panel_enabled {
             active_panels.insert(
                 primary_plugin_key.clone(),
@@ -930,14 +920,17 @@ impl WinitShell {
         let keyboard_plugin_active =
             active_panels.contains_key(&crate::plugin_panel::on_screen_keyboard_surface_key());
         let mut desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
-        let taskbar_key = crate::plugin_panel::taskbar_surface_key();
         let outputs = panel_outputs(
             &output_names,
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
         );
-        desired_plugin_panels
-            .retain(|(output, key)| key != &taskbar_key || outputs.contains(output));
+        desired_plugin_panels.retain(|(output, key)| {
+            !active_panels
+                .get(key)
+                .is_some_and(|panel| panel.reserve_work_area)
+                || outputs.contains(output)
+        });
         let panel_expected = |surface: &ShellSurface| {
             surface.plugin.as_ref().is_some_and(|key| {
                 desired_plugin_panels.contains(&(surface.output_name.clone(), key.clone()))
@@ -954,7 +947,7 @@ impl WinitShell {
             SurfaceRole::Launcher => launcher_available,
             SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
             SurfaceRole::Screenshot => true,
-            SurfaceRole::WindowContextMenu => self.taskbar_panel_enabled,
+            SurfaceRole::WindowContextMenu => false,
             SurfaceRole::Desktop => desired.contains(&(surface.output_name.clone(), surface.role)),
             SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
                 fixed_plugin_surface_key(surface.role)
@@ -1053,7 +1046,7 @@ impl WinitShell {
         panels.sort_by_key(|(key, surface)| {
             (
                 surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog,
-                key != &primary_plugin_key && key != &taskbar_key,
+                key != &primary_plugin_key,
             )
         });
         for (key, panel) in panels {
@@ -1116,7 +1109,6 @@ impl WinitShell {
             SurfaceRole::Screenshot,
         ] {
             if (role == SurfaceRole::Launcher && launcher_available
-                || role == SurfaceRole::WindowContextMenu && self.taskbar_panel_enabled
                 || role == SurfaceRole::OnScreenKeyboard && !keyboard_plugin_active
                 || role == SurfaceRole::Screenshot
                 || fixed_plugin_surface_key(role)
@@ -1289,24 +1281,11 @@ impl WinitShell {
     pub fn set_plugin_surfaces(
         &mut self,
         active_fixed_plugins: HashSet<nickel_core::plugins::PluginSurfaceKey>,
-        mut panels: Vec<(
+        panels: Vec<(
             nickel_core::plugins::PluginSurfaceKey,
             nickel_core::plugins::PluginSurface,
         )>,
     ) -> Result<bool, String> {
-        let taskbar_key = crate::plugin_panel::taskbar_surface_key();
-        let taskbar_panel_enabled =
-            if let Some(index) = panels.iter().position(|(key, _)| *key == taskbar_key) {
-                let (_, surface) = panels.remove(index);
-                if surface != *crate::plugin_panel::taskbar_surface()
-                    || panels.iter().any(|(key, _)| *key == taskbar_key)
-                {
-                    return Err("bundled taskbar panel declaration changed".into());
-                }
-                true
-            } else {
-                false
-            };
         let mut panels = panels.into_iter();
         let primary = panels.next();
         if primary
@@ -1340,7 +1319,6 @@ impl WinitShell {
             return Err("duplicate plugin panel surface".into());
         }
         if self.active_fixed_plugins == active_fixed_plugins
-            && self.taskbar_panel_enabled == taskbar_panel_enabled
             && self.plugin_panel_enabled == enabled
             && self.plugin_panel_owner == owner
             && self.plugin_panel_surface == surface
@@ -1359,9 +1337,7 @@ impl WinitShell {
             );
         }
         let mut active = extra.clone();
-        if taskbar_panel_enabled {
-            active.insert(taskbar_key, crate::plugin_panel::taskbar_surface().clone());
-        }
+
         if enabled {
             active.insert(
                 nickel_core::plugins::PluginSurfaceKey {
@@ -1458,7 +1434,6 @@ impl WinitShell {
         }
         self.active_fixed_plugins = active_fixed_plugins;
         self.plugin_panel_enabled = enabled;
-        self.taskbar_panel_enabled = taskbar_panel_enabled;
         self.plugin_panel_owner = owner;
         self.plugin_panel_surface = surface;
         self.extra_plugin_panels = extra;
@@ -2723,7 +2698,7 @@ impl WinitShell {
                 }
             });
         let plugin_key = match role {
-            SurfaceRole::Taskbar => Some(crate::plugin_panel::taskbar_surface_key()),
+            SurfaceRole::Taskbar => None,
             SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
             SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),
             SurfaceRole::Panel => Some(plugin.map_or_else(
@@ -3197,9 +3172,7 @@ fn surface_geometry(
             false,
         ),
         SurfaceRole::Taskbar => {
-            let height = crate::plugin_panel::taskbar_surface()
-                .height
-                .min(geometry.height);
+            let height = 0;
             (
                 PANEL_TITLE,
                 geometry.x,
@@ -3792,25 +3765,6 @@ mod tests {
             );
             assert!(desired.contains(&("DP-1".into(), SurfaceRole::Panel)));
             assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
-        }
-    }
-
-    #[test]
-    fn reserved_plugin_panel_uses_full_output_and_configured_edge() {
-        let geometry = DisplayGeometry {
-            x: -1200,
-            y: 100,
-            width: 1200,
-            height: 800,
-            scale: 1.0,
-        };
-        let panel = crate::plugin_panel::taskbar_surface();
-        for (edge, expected_y) in [(PanelEdge::Top, 100), (PanelEdge::Bottom, 844)] {
-            let (title, x, y, width, height, hidden) =
-                super::surface_geometry_for_panel(SurfaceRole::Panel, geometry, edge, panel);
-            assert_eq!(title, super::PANEL_TITLE);
-            assert_eq!((x, y, width, height), (-1200, expected_y, 1200, 56));
-            assert!(!hidden);
         }
     }
 

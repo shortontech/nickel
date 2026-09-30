@@ -12,10 +12,8 @@ use nickel_codex_ui::ChatApplication;
 
 use crate::{
     live_shell::{DesktopApplication, LockApplication},
-    plugin_panel::{
-        PluginImages, PluginPanelApplication, TaskbarPluginItem, TaskbarPluginProjection,
-        TaskbarPluginTrayItem,
-    },
+    platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
+    plugin_panel::{PluginImages, PluginPanelApplication},
     projection_recovery::ProjectionRecoveryApp,
     screenshot::ScreenshotApp,
 };
@@ -42,17 +40,6 @@ const RUNTIME_VARIANTS: &[FixtureVariant] = &[
 const DESKTOP_VARIANTS: &[FixtureVariant] = &[
     variant("solid", "Solid background", 960, 540),
     variant("wallpaper", "Wallpaper", 960, 540),
-];
-const PANEL_VARIANTS: &[FixtureVariant] = &[
-    variant("wide", "Wide", 1200, 56),
-    variant("narrow", "Narrow", 640, 56),
-    variant("fullscreen", "Fullscreen", 960, 56),
-    variant(
-        "status-items",
-        "Tasks, Codex, and notification area",
-        1200,
-        56,
-    ),
 ];
 const LOCK_VARIANTS: &[FixtureVariant] = &[
     variant("empty", "Empty", 960, 540),
@@ -136,14 +123,6 @@ metadata!(
     &["shell", "desktop", "context-interactive"]
 );
 metadata!(
-    PANEL_METADATA,
-    "shell.panel",
-    "Panel",
-    "Production panel application",
-    PANEL_VARIANTS,
-    &["shell", "panel", "controller"]
-);
-metadata!(
     LOCK_METADATA,
     "shell.lock",
     "Lock screen",
@@ -190,7 +169,6 @@ fn palette() -> ThemePalette {
 
 pub struct RuntimeFixture;
 pub struct DesktopFixture;
-pub struct PanelFixture;
 
 pub struct LockFixture;
 pub struct ScreenshotFixture;
@@ -269,88 +247,6 @@ impl Fixture for DesktopFixture {
     }
     fn default_action() -> ActionKind {
         ActionKind::ContextMenu
-    }
-}
-
-impl Fixture for PanelFixture {
-    type App = PluginPanelApplication;
-    fn metadata() -> &'static FixtureMetadata {
-        &PANEL_METADATA
-    }
-    fn create() -> Self::App {
-        Self::create_variant(&PANEL_VARIANTS[0])
-    }
-    fn create_variant(variant: &FixtureVariant) -> Self::App {
-        let populated = variant.id == "status-items";
-        let projection = TaskbarPluginProjection {
-            items: if populated {
-                vec![
-                    TaskbarPluginItem {
-                        index: 0,
-                        id: "fixture.browser".into(),
-                        name: "Fixture Browser".into(),
-                        active: true,
-                        pinned: true,
-                        icon: true,
-                    },
-                    TaskbarPluginItem {
-                        index: 1,
-                        id: "fixture.editor".into(),
-                        name: "Fixture Editor".into(),
-                        active: false,
-                        pinned: false,
-                        icon: true,
-                    },
-                ]
-            } else {
-                Vec::new()
-            },
-            tray: if populated {
-                vec![TaskbarPluginTrayItem {
-                    id: "fixture-notification".into(),
-                    title: "Fixture notification icon".into(),
-                    icon: true,
-                }]
-            } else {
-                Vec::new()
-            },
-            clock: "12:34 PM".into(),
-            keyboard_enabled: populated,
-            codex_available: populated,
-        };
-        let mut app = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::taskbar_manifest(),
-            "main.js",
-            projection.to_json(),
-        )
-        .expect("bundled taskbar fixture must compile");
-        let mut images = PluginImages::new();
-        for (key, id, color) in [
-            ("logo", 2, [120, 90, 220, 255]),
-            ("codex", 0x5000, [90, 190, 230, 255]),
-            ("task:0", 0x6000, [40, 140, 240, 255]),
-            ("task:1", 0x6001, [220, 90, 120, 255]),
-            ("tray:fixture-notification", 0x6002, [80, 210, 140, 255]),
-        ] {
-            images.insert(
-                key.into(),
-                (
-                    id,
-                    Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba(color))),
-                ),
-            );
-        }
-        app.sync_images(images);
-        app
-    }
-    fn surface_size() -> (u32, u32) {
-        (1200, 56)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(
-            SemanticRole::Button,
-            "Open Nickel Start",
-        ))
     }
 }
 
@@ -510,7 +406,6 @@ impl FixtureProvider for ShellFixtureProvider {
     fn register(&self, registry: &mut FixtureRegistry) -> Result<(), RegistryError> {
         registry.register::<RuntimeFixture>()?;
         registry.register::<DesktopFixture>()?;
-        registry.register::<PanelFixture>()?;
         registry.register::<LockFixture>()?;
         registry.register::<ScreenshotFixture>()?;
         registry.register::<WindowPreviewFixture>()?;
@@ -539,7 +434,6 @@ mod tests {
                 "shell.codex-project-menu",
                 "shell.desktop",
                 "shell.lock",
-                "shell.panel",
                 "shell.projection-recovery",
                 "shell.runtime",
                 "shell.screenshot",

@@ -20,7 +20,6 @@ fn registers_every_shell_surface_fixture() {
             "shell.control-center",
             "shell.desktop",
             "shell.lock",
-            "shell.panel",
             "shell.runtime",
             "shell.screenshot",
             "shell.window-preview",
@@ -53,29 +52,6 @@ fn registers_every_shell_surface_fixture() {
                 }));
             }
 
-            if entry.metadata.id == "shell.panel" && variant.id == "status-items" {
-                for label in [
-                    "Codex projects",
-                    "Fixture notification icon",
-                    "Fixture Browser",
-                    "Fixture Editor",
-                ] {
-                    assert!(
-                        session
-                            .accessibility_nodes()
-                            .iter()
-                            .any(|node| node.label.as_deref() == Some(label)),
-                        "populated panel fixture omitted {label}"
-                    );
-                }
-                let semantic_nodes = session.semantic_nodes();
-                let tray = semantic_nodes
-                    .iter()
-                    .find(|node| node.name.as_deref() == Some("Fixture notification icon"))
-                    .expect("populated panel fixture tray target");
-                assert!(tray.actions.contains(&nickel_ui::ActionKind::Activate));
-                assert!(tray.actions.contains(&nickel_ui::ActionKind::ContextMenu));
-            }
             if entry.metadata.id == "shell.screenshot" {
                 let has_activate = session
                     .semantic_nodes()

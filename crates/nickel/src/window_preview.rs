@@ -289,27 +289,6 @@ pub(crate) fn window_menu_max_rows(
         .max(outputs.len().saturating_add(1))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TaskbarPreviewAnchor {
-    output_origin_x: i32,
-    control_bounds: Rect,
-}
-
-impl TaskbarPreviewAnchor {
-    pub fn new(output_origin_x: i32, control_bounds: Rect) -> Self {
-        Self {
-            output_origin_x,
-            control_bounds,
-        }
-    }
-
-    pub fn preview_origin_x(self, preview_width: u32) -> i32 {
-        let control_center = self.control_bounds.origin.x + self.control_bounds.size.width / 2.0;
-        (self.output_origin_x + (control_center - preview_width as f32 / 2.0).round() as i32)
-            .max(self.output_origin_x)
-    }
-}
-
 pub fn preview_dimensions(window_count: usize) -> (u32, u32) {
     let count = window_count.max(1) as f32;
     (
@@ -357,14 +336,6 @@ mod tests {
     fn five_task_switcher_cards_fit_a_1280_pixel_output() {
         let (width, _) = task_switcher_dimensions(5);
         assert!(width <= 1_200);
-    }
-
-    #[test]
-    fn taskbar_preview_anchor_keeps_a_wide_preview_on_the_invoking_output() {
-        let anchor = TaskbarPreviewAnchor::new(1_920, Rect::new(48.0, 0.0, 48.0, 56.0));
-
-        assert_eq!(anchor.preview_origin_x(1_160), 1_920);
-        assert!(anchor.preview_origin_x(80) >= 1_920);
     }
 
     #[test]

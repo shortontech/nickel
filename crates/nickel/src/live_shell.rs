@@ -102,7 +102,7 @@ use nickel_session_protocol::ShellRole;
 #[cfg(any(target_os = "linux", test))]
 use nickel_session_protocol::{
     AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
-    ShellPopoverAnchor, ShellSemanticTarget, WindowMenuTargetAction,
+    ShellPopoverAnchor, ShellSemanticTarget,
 };
 use nickel_ui::InternalSurfaceId;
 use nickel_ui::Rect;
@@ -133,10 +133,9 @@ use crate::{
     session_host::{SessionHost, default_session_host},
     window_preview::{
         ApplicationMenuAction, ApplicationMenuTarget, MENU_WIDTH, MenuAction, PreviewAction,
-        TaskbarPreviewAnchor, application_menu_entries, menu_height, menu_height_for_rows,
-        preview_dimensions, semantic_theme_from_palette, task_switcher_dimensions,
-        validated_application_close_targets, window_menu_action_is_current, window_menu_entries,
-        window_menu_max_rows,
+        application_menu_entries, menu_height, menu_height_for_rows, preview_dimensions,
+        semantic_theme_from_palette, task_switcher_dimensions, validated_application_close_targets,
+        window_menu_action_is_current, window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
 };
@@ -195,18 +194,7 @@ fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) 
     }
 }
 
-const PANEL_ITEM_WIDTH: f32 = 52.0;
-#[cfg(test)]
-const PANEL_CLOCK_WIDTH: f32 = 96.0;
-#[cfg(test)]
-const PANEL_CONTROL_GAP: f32 = 8.0;
-#[cfg(test)]
-const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
-#[cfg(test)]
-const PANEL_CODEX_WIDTH: f32 = 36.0;
-#[cfg(test)]
-const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(300);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -216,15 +204,10 @@ const WALLPAPER_MAX_WIDTH: u32 = 7680;
 const WALLPAPER_MAX_HEIGHT: u32 = 4320;
 const PREVIEW_CACHE_CAPACITY: usize = 32;
 
+#[path = "live_shell/icon_resources.rs"]
+mod icon_resources;
 pub(crate) mod remote_semantics;
-#[path = "live_shell/taskbar.rs"]
-mod taskbar;
-pub use taskbar::TaskbarAction;
-use taskbar::{
-    TaskbarHover, normalize_tray_items, panel_clock_text, panel_tray_icons, tint_panel_icon,
-};
-#[cfg(test)]
-use taskbar::{panel_status_layout, visible_tray_item};
+use icon_resources::{normalize_tray_items, panel_tray_icons, tint_panel_icon};
 
 #[path = "live_shell/keyboard.rs"]
 mod keyboard;
@@ -697,8 +680,6 @@ pub struct LiveShell {
     lock_deadline: Option<Instant>,
     control_visible: bool,
     codex_project_menu_visible: bool,
-    panel_hover: Option<TaskbarHover>,
-    panel_hover_output: Option<String>,
     plugin_registry: nickel_core::plugins::PluginRegistry,
     package_settings_registry: nickel_core::settings_registry::SettingsRegistry,
     package_settings_runtimes: std::collections::BTreeMap<
@@ -736,18 +717,9 @@ pub struct LiveShell {
     >,
     #[cfg(target_os = "windows")]
     pending_plugin_surface_focus: Option<nickel_core::plugins::PluginSurfaceKey>,
-    plugin_taskbar_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     plugin_slot_hosts: std::collections::BTreeMap<String, PluginSlotHost>,
-    plugin_taskbar_hosts:
-        HashMap<Option<String>, nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
-    plugin_taskbar_memory: HashMap<Option<String>, u64>,
-    plugin_taskbar_menu_memory: u64,
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
-    panel_change_token: HostChangeToken,
-    panel_deadline: Option<Instant>,
     clock_deadline: Instant,
-    panel_pet_frame: u8,
-    panel_pet_deadline: Option<Instant>,
     panel_output: Option<String>,
     pending_popover_anchor: Option<PendingPopoverAnchor>,
     all_windows_on_every_bar: bool,
@@ -766,10 +738,7 @@ pub struct LiveShell {
     window_menu_generation: u64,
     window_menu_anchor_x: Option<i32>,
     window_menu_anchor_y: Option<i32>,
-    window_menu_plugin_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     application_menu_target: Option<ApplicationMenuTarget>,
-    application_menu_plugin_host:
-        Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     notification_host: NotificationHost,
     panel_origin_x: i32,
     panel_origin_y: i32,
@@ -932,65 +901,6 @@ fn shortcut_capability_status(
         ShortcutCapability::Unavailable(UnavailableReason::Backend(reason)) => reason.clone(),
     };
     Some(format!("Global shortcuts unavailable: {reason}."))
-}
-
-struct TaskbarProjectionInput<'a> {
-    groups: &'a [crate::launcher::TaskbarApplication],
-    keyboard_enabled: bool,
-    codex_available: bool,
-    panel_icon: &'a Arc<image::RgbaImage>,
-    codex_icon: &'a Arc<image::RgbaImage>,
-    task_icons: &'a [Option<(u16, Arc<image::RgbaImage>)>],
-    tray: &'a [crate::model::TrayItem],
-    tray_icons: &'a [Arc<image::RgbaImage>],
-}
-
-fn taskbar_plugin_data(
-    input: TaskbarProjectionInput<'_>,
-    clock: &str,
-) -> (
-    crate::plugin_panel::TaskbarPluginProjection,
-    crate::plugin_panel::PluginImages,
-) {
-    let mut projection =
-        crate::plugin_panel::TaskbarPluginProjection::from_groups(input.groups, clock);
-    projection.keyboard_enabled = input.keyboard_enabled;
-    projection.codex_available = input.codex_available;
-    let mut images = crate::plugin_panel::PluginImages::new();
-    images.insert("logo".into(), (2, Arc::clone(input.panel_icon)));
-    if input.codex_available {
-        images.insert("codex".into(), (0x5000, Arc::clone(input.codex_icon)));
-    }
-    for item in &mut projection.items {
-        if let Some((image_id, image)) = input.task_icons.get(item.index).and_then(Option::as_ref) {
-            item.icon = true;
-            images.insert(
-                format!("task:{}", item.index),
-                (*image_id, Arc::clone(image)),
-            );
-        }
-    }
-    let mut seen_tray = std::collections::HashSet::new();
-    for (index, item) in input.tray.iter().rev().take(4).rev().enumerate() {
-        if item.id.is_empty() || item.id.len() > 256 || !seen_tray.insert(item.id.clone()) {
-            continue;
-        }
-        let icon = input.tray_icons.get(index);
-        if let Some(icon) = icon {
-            images.insert(
-                format!("tray:{}", item.id),
-                (0x6000 + index as u16, Arc::clone(icon)),
-            );
-        }
-        projection
-            .tray
-            .push(crate::plugin_panel::TaskbarPluginTrayItem {
-                id: item.id.clone(),
-                title: item.title.chars().take(120).collect(),
-                icon: icon.is_some(),
-            });
-    }
-    (projection, images)
 }
 
 struct PluginSlotHost {
@@ -1672,8 +1582,6 @@ impl LiveShell {
             lock_deadline: None,
             control_visible: false,
             codex_project_menu_visible: false,
-            panel_hover: None,
-            panel_hover_output: None,
             plugin_registry,
             package_settings_registry: Default::default(),
             package_settings_runtimes: Default::default(),
@@ -1706,17 +1614,9 @@ impl LiveShell {
             plugin_window_placement_overrides: std::collections::BTreeMap::new(),
             #[cfg(target_os = "windows")]
             pending_plugin_surface_focus: None,
-            plugin_taskbar_host: None,
             plugin_slot_hosts: std::collections::BTreeMap::new(),
-            plugin_taskbar_hosts: HashMap::new(),
-            plugin_taskbar_memory: HashMap::new(),
-            plugin_taskbar_menu_memory: 0,
             panel_projections: HashMap::new(),
-            panel_change_token: HostChangeToken::default(),
-            panel_deadline: None,
             clock_deadline: Instant::now() + crate::clock_capabilities::until_next_minute(),
-            panel_pet_frame: 0,
-            panel_pet_deadline: None,
             panel_output: None,
             pending_popover_anchor: None,
             all_windows_on_every_bar: shell_settings.all_windows_on_every_bar,
@@ -1739,9 +1639,7 @@ impl LiveShell {
             window_menu_generation: 0,
             window_menu_anchor_x: None,
             window_menu_anchor_y: None,
-            window_menu_plugin_host: None,
             application_menu_target: None,
-            application_menu_plugin_host: None,
             notification_host,
             panel_origin_x: 0,
             panel_origin_y: 0,
@@ -2468,15 +2366,8 @@ impl LiveShell {
                         .values()
                         .any(|viewport| viewport.host.remote_access_protected())
             }
-            SurfaceRole::Taskbar => {
-                self.plugin_taskbar_host
-                    .as_ref()
-                    .is_none_or(|host| host.remote_access_protected())
-                    || self
-                        .plugin_taskbar_hosts
-                        .values()
-                        .any(|host| host.remote_access_protected())
-            }
+            SurfaceRole::Taskbar => true,
+
             SurfaceRole::Launcher if self.run_visible => self
                 .run_host_ref()
                 .is_none_or(|host| host.remote_access_protected()),
@@ -2507,15 +2398,7 @@ impl LiveShell {
                         .preview_plugin_host_ref()
                         .is_none_or(|host| host.remote_access_protected())
             }
-            SurfaceRole::WindowContextMenu => {
-                if let Some(host) = self.window_menu_plugin_host.as_ref() {
-                    host.remote_access_protected()
-                } else if let Some(host) = self.application_menu_plugin_host.as_ref() {
-                    host.remote_access_protected()
-                } else {
-                    true
-                }
-            }
+            SurfaceRole::WindowContextMenu => true,
             SurfaceRole::Screenshot => self.screenshot.remote_access_protected(),
             SurfaceRole::OnScreenKeyboard => self.keyboard_host.remote_access_protected(),
             _ => true,
@@ -2538,14 +2421,8 @@ impl LiveShell {
                 .and_then(|output| self.desktop_viewports.get(output))
                 .map(|viewport| viewport.host.layout_snapshot())
                 .or_else(|| Some(self.desktop_host.layout_snapshot())),
-            SurfaceRole::Taskbar => {
-                let host = if output == self.panel_output.as_deref() {
-                    self.plugin_taskbar_host.as_ref()
-                } else {
-                    self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
-                };
-                host.map(|host| host.layout_snapshot())
-            }
+            SurfaceRole::Taskbar => None,
+
             SurfaceRole::Panel => plugin
                 .and_then(|key| self.plugin_panel_host_ref(key))
                 .map(|host| host.layout_snapshot()),
@@ -2564,15 +2441,7 @@ impl LiveShell {
             SurfaceRole::WindowPreview => self
                 .preview_plugin_host_ref()
                 .map(|host| host.layout_snapshot()),
-            SurfaceRole::WindowContextMenu => self
-                .window_menu_plugin_host
-                .as_ref()
-                .map(|host| host.layout_snapshot())
-                .or_else(|| {
-                    self.application_menu_plugin_host
-                        .as_ref()
-                        .map(|host| host.layout_snapshot())
-                }),
+            SurfaceRole::WindowContextMenu => None,
             SurfaceRole::Screenshot => plugin
                 .and_then(|key| self.plugin_surface_hosts.get(key))
                 .map(|(_, host)| host.layout_snapshot())
@@ -2586,7 +2455,7 @@ impl LiveShell {
     pub fn scene(&mut self, role: SurfaceRole, width: u32, height: u32) -> Vec<PaintCommand> {
         let commands = match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
-            SurfaceRole::Taskbar => self.panel_scene(width, height),
+            SurfaceRole::Taskbar => Vec::new(),
             SurfaceRole::Panel => unreachable!("plugin panels render through their surface key"),
             SurfaceRole::Launcher if self.run_visible => self
                 .plugin_panel_scene(&crate::plugin_panel::run_surface_key(), width, height)
@@ -2625,7 +2494,7 @@ impl LiveShell {
                 )
                 .unwrap_or_default(),
             SurfaceRole::WindowPreview => self.window_preview_scene(),
-            SurfaceRole::WindowContextMenu => self.window_menu_scene(),
+            SurfaceRole::WindowContextMenu => Vec::new(),
             SurfaceRole::Lock => self.lock_scene(width, height),
             SurfaceRole::Screenshot => self.screenshot.scene(width, height, self.palette),
             SurfaceRole::OnScreenKeyboard => {
@@ -3103,10 +2972,7 @@ impl LiveShell {
                 self.preview_plugin_host_ref().is_some()
                     && (self.preview_group.is_some() || self.task_switcher_group.is_some())
             }
-            SurfaceRole::WindowContextMenu => {
-                self.plugin_taskbar_host.is_some()
-                    && (self.window_menu.is_some() || self.application_menu_target.is_some())
-            }
+            SurfaceRole::WindowContextMenu => false,
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::Lock => self.locked,
             SurfaceRole::Screenshot => self.screenshot.visible(),
@@ -5419,9 +5285,7 @@ impl LiveShell {
                 } else if let Some(host) = self.plugin_slot_hosts.get_mut(id) {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     host.application = application;
-                    if host.contract == nickel_core::plugins::PluginSlotContract::Action {
-                        self.clear_application_menu_plugin_host();
-                    }
+                    if host.contract == nickel_core::plugins::PluginSlotContract::Action {}
                 }
             }
             if let Some(bytes) = extension_bytes {
@@ -5488,7 +5352,6 @@ impl LiveShell {
             .remove(id)
             .is_some_and(|host| host.contract == nickel_core::plugins::PluginSlotContract::Action)
         {
-            self.clear_application_menu_plugin_host();
         }
         self.plugin_surface_hosts
             .retain(|key, _| key.plugin_id != id);
@@ -5508,40 +5371,6 @@ impl LiveShell {
             self.plugin_activation_generation.wrapping_add(1).max(1);
         self.maybe_publish_plugin_status();
         true
-    }
-
-    fn retire_taskbar_plugin_state(&mut self) {
-        if self.window_menu.is_some() || self.application_menu_target.is_some() {
-            self.dismiss_window_menu();
-        }
-        self.plugin_taskbar_host = None;
-        self.plugin_taskbar_hosts.clear();
-        self.plugin_taskbar_memory.clear();
-        self.plugin_taskbar_menu_memory = 0;
-        self.panel_pet_deadline = None;
-        self.panel_deadline = None;
-        self.clear_application_menu_plugin_host();
-        self.clear_window_menu_plugin_host();
-    }
-
-    fn clear_application_menu_plugin_host(&mut self) {
-        if let Some(host) = self.application_menu_plugin_host.take() {
-            let _ = host.application().retire_surface();
-        }
-    }
-
-    fn clear_window_menu_plugin_host(&mut self) {
-        if let Some(host) = self.window_menu_plugin_host.take() {
-            let _ = host.application().retire_surface();
-        }
-    }
-
-    fn fail_taskbar_plugin_runtime(&mut self, error: String) {
-        self.fail_bundled_plugin_runtime(
-            &crate::plugin_panel::taskbar_manifest().id,
-            error,
-            Self::retire_taskbar_plugin_state,
-        );
     }
 
     /// Fail one first-party runtime, retire its owned state, then publish one
@@ -5899,9 +5728,7 @@ impl LiveShell {
             self.application_search.retire(id);
             if self.plugin_slot_hosts.remove(id).is_some_and(|host| {
                 host.contract == nickel_core::plugins::PluginSlotContract::Action
-            }) {
-                self.clear_application_menu_plugin_host();
-            }
+            }) {}
             self.plugin_surface_hosts
                 .retain(|key, _| key.plugin_id != id);
             self.plugin_panel_memory
@@ -5945,9 +5772,7 @@ impl LiveShell {
                     application,
                 },
             );
-            if contract == nickel_core::plugins::PluginSlotContract::Action {
-                self.clear_application_menu_plugin_host();
-            }
+            if contract == nickel_core::plugins::PluginSlotContract::Action {}
             Ok(())
         } else if let Some(external_panel) = external_panel {
             external_panel.map(|(runtime, panels)| {
@@ -6121,20 +5946,6 @@ impl LiveShell {
         push("on-screen-keyboard", Some(self.keyboard_deadline));
         push("clock", Some(self.clock_deadline));
         push("launcher-preferences", self.launcher_preference_deadline);
-        push(
-            "panel",
-            self.plugin_taskbar_hosts
-                .values()
-                .filter_map(|host| host.next_deadline())
-                .chain(
-                    self.plugin_taskbar_host
-                        .as_ref()
-                        .and_then(|host| host.next_deadline()),
-                )
-                .chain(self.panel_deadline)
-                .chain(self.panel_pet_deadline)
-                .min(),
-        );
         push("lock", self.lock_deadline);
         push(
             "control",
@@ -6173,7 +5984,7 @@ impl LiveShell {
         };
         match role {
             SurfaceRole::Desktop => Some(self.desktop_change_token),
-            SurfaceRole::Taskbar => Some(self.panel_change_token),
+            SurfaceRole::Taskbar => None,
             SurfaceRole::Panel => self
                 .primary_panel_host_ref()
                 .map(|host| host_token(host.inspect())),
@@ -6210,15 +6021,7 @@ impl LiveShell {
             SurfaceRole::WindowPreview => self
                 .preview_plugin_active()
                 .then(|| host_token(self.preview_plugin_host_ref().unwrap().inspect())),
-            SurfaceRole::WindowContextMenu => self
-                .window_menu_plugin_host
-                .as_ref()
-                .map(|host| host_token(host.inspect()))
-                .or_else(|| {
-                    self.application_menu_plugin_host
-                        .as_ref()
-                        .map(|host| host_token(host.inspect()))
-                }),
+            SurfaceRole::WindowContextMenu => None,
             SurfaceRole::Screenshot => Some(self.screenshot.change_token()),
             SurfaceRole::OnScreenKeyboard => Some(host_token(self.keyboard_host.inspect())),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => None,
@@ -6371,21 +6174,6 @@ impl LiveShell {
         }
         if desktop_changed {
             changed.push(SurfaceRole::Desktop);
-        }
-        let plugin_clock_due = self.plugin_taskbar_host.is_some()
-            && self.panel_deadline.is_some_and(|deadline| now >= deadline);
-        if plugin_clock_due {
-            self.panel_deadline = Some(now + taskbar::duration_until_next_minute());
-            changed.push(SurfaceRole::Taskbar);
-        }
-        if self.plugin_taskbar_host.is_some()
-            && self
-                .panel_pet_deadline
-                .is_some_and(|deadline| now >= deadline)
-        {
-            self.panel_pet_frame = (self.panel_pet_frame + 1) % 4;
-            self.panel_pet_deadline = Some(now + Duration::from_millis(360));
-            changed.push(SurfaceRole::Taskbar);
         }
         if self.lock_deadline.is_some_and(|deadline| now >= deadline) {
             let outcome = self.lock_host.step(HostBatch {
@@ -6603,11 +6391,6 @@ impl LiveShell {
         });
         self.apply_notification_effects();
         outcome.changed
-    }
-
-    pub(crate) fn panel_host_ui(&mut self, event: UiEvent, width: u32) -> bool {
-        self.step_taskbar_plugin(vec![HostEvent::Ui(event)], width)
-            .is_some_and(|outcome| outcome.changed)
     }
 
     fn primary_panel_key(&self) -> nickel_core::plugins::PluginSurfaceKey {
@@ -7050,11 +6833,11 @@ impl LiveShell {
                     changed = true;
                 }
                 crate::plugin_panel::PluginEffect::ToggleLauncher => {
-                    self.apply_panel_action(TaskbarAction::Launcher);
+                    self.request_launcher_toggle();
                     changed = true;
                 }
                 crate::plugin_panel::PluginEffect::ToggleControlCenter => {
-                    self.apply_panel_action(TaskbarAction::Control);
+                    self.set_control_visible(!self.default_shell_surface_visible("quick-settings"));
                     changed = true;
                 }
                 crate::plugin_panel::PluginEffect::ShowControlCenter => {
@@ -7254,13 +7037,13 @@ impl LiveShell {
 
                 crate::plugin_panel::PluginEffect::ActivateTrayItem { id } => {
                     if self.tray.iter().take(128).any(|item| item.id == id) {
-                        self.apply_panel_action(TaskbarAction::Tray(id));
+                        self.tray_feed.activate(&id);
                         changed = true;
                     }
                 }
                 crate::plugin_panel::PluginEffect::ContextTrayItem { id } => {
                     if self.tray.iter().take(128).any(|item| item.id == id) {
-                        self.apply_panel_action(TaskbarAction::TrayContext(id));
+                        self.tray_feed.context_menu(&id);
                         changed = true;
                     }
                 }
@@ -7766,7 +7549,7 @@ impl LiveShell {
         height: u32,
     ) -> bool {
         match role {
-            SurfaceRole::Taskbar => self.panel_host_ui(event, width),
+            SurfaceRole::Taskbar => false,
             // Plugin panels always carry a surface key and use
             // `plugin_panel_host_ui_for` at the compositor boundary.
             SurfaceRole::Panel => false,
@@ -7814,22 +7597,7 @@ impl LiveShell {
                         .preview_plugin_event(HostEvent::Ui(event), (width, height), None)
                         .changed
             }
-            SurfaceRole::WindowContextMenu => {
-                if !self.surface_visible(SurfaceRole::WindowContextMenu) {
-                    return false;
-                }
-                if matches!(
-                    event,
-                    UiEvent::KeyboardNavigateBack | UiEvent::ControllerBack
-                ) {
-                    return self.window_menu_host_key(Some(KeyCode::Escape));
-                }
-                if self.application_menu_target.is_some() {
-                    self.application_menu_plugin_event(HostEvent::Ui(event), width, height, None)
-                } else {
-                    self.window_menu_plugin_event(HostEvent::Ui(event), width, height, None)
-                }
-            }
+            SurfaceRole::WindowContextMenu => false,
             SurfaceRole::Lock => {
                 if !self.locked {
                     return false;
@@ -7911,13 +7679,7 @@ impl LiveShell {
                     outcome.changed
                 }
             }
-            SurfaceRole::WindowContextMenu => {
-                if shortcut == Shortcut::Escape {
-                    self.window_menu_host_key(Some(KeyCode::Escape))
-                } else {
-                    self.window_menu_host_event(HostEvent::Shortcut(shortcut), width, height)
-                }
-            }
+            SurfaceRole::WindowContextMenu => false,
             SurfaceRole::Lock if self.locked => {
                 let outcome = self.lock_host.step(HostBatch {
                     surface_size: Some((width, height)),
@@ -7932,166 +7694,19 @@ impl LiveShell {
         }
     }
 
-    fn apply_panel_action(&mut self, action: TaskbarAction) {
-        let anchored_role = match &action {
-            TaskbarAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),
-            TaskbarAction::Control => Some((ShellRole::ControlCenter, "panel-control")),
-            _ => None,
-        };
-        if anchored_role.is_some() {
-            self.pending_popover_anchor = None;
-        }
-        let plugin_control = match action {
-            TaskbarAction::Control => Some("taskbar-control"),
-            TaskbarAction::Codex => Some("taskbar-codex"),
-            _ => None,
-        };
-        let anchor_bounds = self
-            .plugin_taskbar_host
-            .as_ref()
-            .and_then(|host| plugin_control.and_then(|id| taskbar_plugin_control_bounds(host, id)));
-        if let Some((role, control)) = anchored_role
-            && let (Some(output), Some(bounds)) = (self.panel_output.clone(), anchor_bounds)
-        {
-            self.pending_popover_anchor = Some(PendingPopoverAnchor {
-                role,
-                control: plugin_control.unwrap_or(control).to_owned(),
-                output,
-                bounds,
-            });
-        }
-        match action {
-            TaskbarAction::Launcher => {
-                self.set_launcher_visible(!self.default_shell_surface_visible("launcher"))
-            }
-            TaskbarAction::OnScreenKeyboard => {
-                self.set_keyboard_visible(!self.keyboard_visible);
-            }
-            TaskbarAction::Task(index) => {
-                let groups = self.panel_groups();
-                if let Some(window) = groups.get(index).and_then(|group| group.windows.last()) {
-                    let _ = self.send_session_command(
-                        "activate-window",
-                        ShellCommand::WindowAction {
-                            window: window.id,
-                            action: WindowAction::Activate,
-                        },
-                    );
-                    self.close_window_preview();
-                } else if let Some(application_id) = groups
-                    .get(index)
-                    .filter(|group| group.available)
-                    .and_then(|group| group.application_id.as_ref())
-                {
-                    self.launch_application_by_id(application_id.as_str());
-                }
-            }
-            TaskbarAction::TaskContext(index) => {
-                let groups = self.panel_groups();
-                let Some(group) = groups.get(index) else {
-                    return;
-                };
-                let target = ApplicationMenuTarget::capture(&group.window_group());
-                let pinned = target
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-                if application_menu_entries(&target, pinned).is_empty() {
-                    return;
-                }
-                self.close_window_preview();
-                self.window_menu_generation = self.window_menu_generation.saturating_add(1);
-                self.application_menu_target = Some(target);
-                self.clear_application_menu_plugin_host();
-                self.plugin_taskbar_menu_memory = 0;
-                let x = self
-                    .plugin_taskbar_host
-                    .as_ref()
-                    .and_then(|host| {
-                        taskbar_plugin_control_bounds(host, &format!("taskbar-item-{index}"))
-                            .map(|bounds| bounds.origin.x.round() as i32)
-                    })
-                    .unwrap_or((PANEL_ITEM_WIDTH * (index + 1) as f32).round() as i32);
-                self.window_menu_anchor_x = Some(self.panel_origin_x + x);
-                self.window_menu_anchor_y = Some(self.panel_origin_y);
-                let _ = self.send_session_command(
-                    "show-context-menu",
-                    ShellCommand::ShowContextMenu {
-                        x: self.panel_origin_x + x,
-                        y: self.panel_origin_y,
-                        width: MENU_WIDTH as i32,
-                        height: self.window_context_menu_height(),
-                    },
-                );
-                #[cfg(target_os = "linux")]
-                let _ =
-                    self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
-            }
-            TaskbarAction::MoveTaskPinLeft(id) => {
-                if self.launcher.move_pin(&id, -1) {
-                    self.persist_launcher_preferences();
-                }
-            }
-            TaskbarAction::MoveTaskPinRight(id) => {
-                if self.launcher.move_pin(&id, 1) {
-                    self.persist_launcher_preferences();
-                }
-            }
-            // Drag gestures are reduced by `TaskbarApplication` into a typed move action.
-            TaskbarAction::Codex => {
-                if !self.launcher.codex_available()
-                    || !self
-                        .plugin_surface_matches(&crate::plugin_panel::codex_projects_surface_key())
-                {
-                    self.codex_project_menu_visible = false;
-                    return;
-                }
-                if self.launcher_visible {
-                    self.set_launcher_visible(false);
-                }
-                self.codex_project_menu_visible = !self.codex_project_menu_visible;
-            }
-            TaskbarAction::Tray(id) => self.tray_feed.activate(&id),
-            TaskbarAction::TrayContext(id) => self.tray_feed.context_menu(&id),
-            TaskbarAction::Control => {
-                if self.launcher_visible {
-                    self.set_launcher_visible(false);
-                }
-                if !self.control_visible {
-                    if let Some(taskbar) = self.plugin_taskbar_host.as_ref() {
-                        let _ = self
-                            .control_host
-                            .adopt_input_modality(taskbar.inspect().modality);
-                    }
-                }
-                self.set_control_visible(!self.default_shell_surface_visible("quick-settings"));
-            }
-        }
-    }
-
     #[cfg(any(target_os = "linux", test))]
     fn semantic_panel_output(&self, requested: Option<&String>) -> Option<String> {
-        requested
-            .cloned()
-            .or_else(|| self.panel_output.clone())
-            .or_else(|| {
-                self.plugin_taskbar_hosts
-                    .keys()
-                    .filter_map(Clone::clone)
-                    .min()
-            })
+        requested.cloned().or_else(|| self.panel_output.clone())
     }
 
     #[cfg(any(target_os = "linux", test))]
     fn semantic_panel_host(
         &self,
-        output: &Option<String>,
+        _output: &Option<String>,
     ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        if output == &self.panel_output {
-            self.plugin_taskbar_host.as_ref()
-        } else {
-            self.plugin_taskbar_hosts.get(output)
-        }
+        self.taskbar_surface_key()
+            .as_ref()
+            .and_then(|key| self.plugin_panel_host_ref(key))
     }
 
     /// Resolves a test/accessibility semantic target from the same live group
@@ -8181,48 +7796,7 @@ impl LiveShell {
                     interaction: PointerInteraction::LeftClick,
                 })
             }
-            ShellSemanticTarget::PanelApplication {
-                application_id,
-                output,
-                interaction,
-            } => {
-                let output = self.semantic_panel_output(output.as_ref());
-                let plugin_host = self.semantic_panel_host(&output)?;
-                let windows = self
-                    .windows
-                    .iter()
-                    .filter(|window| {
-                        window_belongs_to_panel(
-                            self.all_windows_on_every_bar,
-                            output.as_deref(),
-                            window.state.output.as_deref(),
-                        )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let groups = self.launcher.taskbar_applications(&windows);
-                let index = groups.iter().take(12).position(|group| {
-                    group
-                        .application_id
-                        .as_ref()
-                        .is_some_and(|id| id.as_str() == application_id)
-                })?;
-                if !plugin_host
-                    .application()
-                    .rendered_taskbar_item_matches(index, application_id)
-                {
-                    return None;
-                }
-                let bounds =
-                    taskbar_plugin_control_bounds(plugin_host, &format!("taskbar-item-{index}"))?;
-                Some(ResolvedShellTarget {
-                    role: ShellRole::Panel,
-                    output,
-                    x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
-                    y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
-                    interaction: *interaction,
-                })
-            }
+
             ShellSemanticTarget::PanelControlCenter { output } => {
                 let output = self.semantic_panel_output(output.as_ref());
                 let plugin_host = self.semantic_panel_host(&output)?;
@@ -8285,44 +7859,10 @@ impl LiveShell {
                     },
                 })
             }
-            ShellSemanticTarget::WindowMenu { window, action } => {
-                let window = crate::model::WindowId(window.0);
-                let menu_action = match action {
-                    WindowMenuTargetAction::Close => MenuAction::Close(window),
-                    WindowMenuTargetAction::MaximizeRestore => MenuAction::MaximizeRestore(window),
-                    WindowMenuTargetAction::Minimize => MenuAction::Minimize(window),
-                };
-                let host = self.window_menu_plugin_host.as_ref()?;
-                let snapshot = self.window_menu_snapshot.as_ref()?;
-                if snapshot.id != window {
-                    return None;
-                }
-                let outputs = self.window_feed.outputs();
-                let entries = window_menu_entries(snapshot, &self.workspaces, &outputs);
-                let index = entries
-                    .iter()
-                    .position(|(_, entry)| entry == &menu_action)?;
-                let id = format!("window-menu-action-{index}");
-                let bounds = host
-                    .semantic_nodes()
-                    .into_iter()
-                    .find(|node| {
-                        node.id.as_str() == id || node.id.as_str().ends_with(&format!("/{id}"))
-                    })?
-                    .bounds;
-                let point = Point {
-                    x: bounds.origin.x + bounds.size.width / 2.0,
-                    y: bounds.origin.y + bounds.size.height / 2.0,
-                };
-                Some(ResolvedShellTarget {
-                    role: ShellRole::ContextMenu,
-                    output: None,
-                    x: point.x.round() as i32,
-                    y: point.y.round() as i32,
-                    interaction: PointerInteraction::LeftClick,
-                })
-            }
-            ShellSemanticTarget::Screenshot { .. } => None,
+
+            ShellSemanticTarget::PanelApplication { .. }
+            | ShellSemanticTarget::WindowMenu { .. }
+            | ShellSemanticTarget::Screenshot { .. } => None,
         }
     }
 
@@ -8332,50 +7872,6 @@ impl LiveShell {
         action: nickel_session_protocol::ScreenshotTargetAction,
     ) -> bool {
         self.screenshot.perform_semantic_action(action)
-    }
-
-    fn sync_panel_hover_from_host(&mut self) -> bool {
-        let hovered = self
-            .plugin_taskbar_host
-            .as_ref()
-            .and_then(|host| host.inspect().pointer_hover)
-            .and_then(|id| {
-                let id = id.as_str().rsplit('/').next()?;
-                if id == "taskbar-launcher" {
-                    Some(TaskbarHover::Launcher)
-                } else if id == "taskbar-control" {
-                    Some(TaskbarHover::Control)
-                } else if let Some(tray_id) = id.strip_prefix("taskbar-tray-") {
-                    self.tray
-                        .iter()
-                        .rev()
-                        .take(4)
-                        .rev()
-                        .position(|item| item.id == tray_id)
-                        .map(TaskbarHover::Tray)
-                } else {
-                    id.strip_prefix("taskbar-item-")
-                        .and_then(|index| index.parse().ok())
-                        .map(TaskbarHover::Task)
-                }
-            });
-        let changed = hovered != self.panel_hover;
-        self.panel_hover = hovered;
-        self.panel_hover_output.clone_from(&self.panel_output);
-        if let Some(TaskbarHover::Task(index)) = hovered {
-            if self.preview_group != Some(index)
-                && self.preview_pending.map(|(pending, _)| pending) != Some(index)
-            {
-                self.preview_pending = Some((index, Instant::now() + PREVIEW_HOVER_DELAY));
-            }
-            self.preview_leave_deadline = None;
-        } else {
-            self.preview_pending = None;
-            if self.preview_group.is_some() && !self.preview_pointer_inside {
-                self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
-            }
-        }
-        changed
     }
 
     pub fn set_panel_origin_x(&mut self, origin_x: i32) {
@@ -8392,22 +7888,6 @@ impl LiveShell {
 
     fn switch_panel_output(&mut self, output: Option<String>) {
         self.panel_output = output;
-    }
-
-    /// Render a concrete output without transferring popover/input ownership.
-    pub fn panel_scene_for_output(
-        &mut self,
-        output: Option<&str>,
-        width: u32,
-        height: u32,
-    ) -> Vec<PaintCommand> {
-        let input_output = self.panel_output.clone();
-        let input_change_token = self.panel_change_token;
-        self.switch_panel_output(output.map(str::to_owned));
-        let scene = self.panel_scene(width, height);
-        self.switch_panel_output(input_output);
-        self.panel_change_token = input_change_token;
-        scene
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -8470,23 +7950,7 @@ impl LiveShell {
         self.window_feed.primary_output()
     }
 
-    pub fn panel_pointer_left(&mut self) -> bool {
-        if self.panel_hover.is_none() || self.panel_hover_output != self.panel_output {
-            return false;
-        }
-        self.panel_hover = None;
-        self.panel_hover_output = None;
-        self.preview_pending = None;
-        if self.preview_group.is_some() && !self.preview_pointer_inside {
-            self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
-        }
-        true
-    }
-
     pub fn preview_controller(&mut self, action: ControllerAction) -> bool {
-        if self.window_menu.is_some() || self.application_menu_target.is_some() {
-            return self.window_menu_host_controller(action);
-        }
         if self.task_switcher_group.is_some() && self.preview_plugin_active() {
             use nickel_core::hotkeys::HotkeyAction;
             return match action {
@@ -8660,9 +8124,6 @@ impl LiveShell {
                 self.send_window_action(window, WindowAction::Close);
             }
             PreviewAction::OpenMenu(window) => {
-                if self.plugin_taskbar_host.is_none() {
-                    return;
-                }
                 let x = self
                     .preview_group
                     .and_then(|index| {
@@ -8675,8 +8136,7 @@ impl LiveShell {
                     })
                     .unwrap_or(self.panel_origin_x);
                 self.application_menu_target = None;
-                self.clear_application_menu_plugin_host();
-                self.plugin_taskbar_menu_memory = 0;
+
                 self.window_menu_generation = self.window_menu_generation.saturating_add(1);
                 self.window_menu = Some(window);
                 self.window_menu_snapshot = self
@@ -8684,7 +8144,7 @@ impl LiveShell {
                     .iter()
                     .find(|candidate| candidate.id == window)
                     .cloned();
-                self.clear_window_menu_plugin_host();
+
                 self.window_menu_anchor_x = Some(x);
                 self.window_menu_anchor_y = Some(self.panel_origin_y);
                 let _ = self.send_session_command(
@@ -8704,9 +8164,6 @@ impl LiveShell {
     }
 
     pub fn preview_key(&mut self, key: Option<KeyCode>) -> bool {
-        if self.window_menu.is_some() || self.application_menu_target.is_some() {
-            return self.window_menu_host_key(key);
-        }
         if self.task_switcher_group.is_some() && self.preview_plugin_active() {
             use nickel_core::hotkeys::HotkeyAction;
             return match key {
@@ -8875,183 +8332,6 @@ impl LiveShell {
         }
     }
 
-    fn application_menu_plugin_event(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> bool {
-        if self.application_menu_plugin_host.is_none() {
-            let _ = self.application_menu_scene();
-        }
-        let Some(host) = self.application_menu_plugin_host.as_mut() else {
-            return false;
-        };
-        let outcome = match step_plugin_host(
-            host,
-            None,
-            HostBatch {
-                surface_size: Some((width, height)),
-                events: vec![event],
-                normalized_authorities: authority.into_iter().collect(),
-                ..HostBatch::default()
-            },
-        ) {
-            Ok((outcome, _)) => outcome,
-            Err(error) => {
-                self.fail_taskbar_plugin_runtime(error);
-                return true;
-            }
-        };
-        let effects = host.application_mut().take_effects();
-        let requested = !effects.is_empty();
-        let changed = outcome.changed | self.apply_plugin_effects(effects);
-        if requested {
-            self.close_window_preview();
-        }
-        changed
-    }
-
-    fn window_menu_plugin_event(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> bool {
-        if self.window_menu_plugin_host.is_none() {
-            let _ = self.window_menu_scene();
-        }
-        let Some(host) = self.window_menu_plugin_host.as_mut() else {
-            return false;
-        };
-        let outcome = match step_plugin_host(
-            host,
-            None,
-            HostBatch {
-                surface_size: Some((width, height)),
-                events: vec![event],
-                normalized_authorities: authority.into_iter().collect(),
-                ..HostBatch::default()
-            },
-        ) {
-            Ok((outcome, _)) => outcome,
-            Err(error) => {
-                self.fail_taskbar_plugin_runtime(error);
-                return true;
-            }
-        };
-        let effects = host.application_mut().take_effects();
-        outcome.changed | self.apply_plugin_effects(effects)
-    }
-
-    pub fn window_menu_host_input(
-        &mut self,
-        input: nickel_input::InputEvent,
-        width: u32,
-        height: u32,
-    ) -> bool {
-        if !self.surface_visible(SurfaceRole::WindowContextMenu) {
-            return false;
-        }
-        let recipient = if self.application_menu_target.is_some() {
-            if self.application_menu_plugin_host.is_none() {
-                let _ = self.application_menu_scene();
-            }
-            self.application_menu_plugin_host
-                .as_ref()
-                .map(|host| host.inspect())
-        } else {
-            if self.window_menu_plugin_host.is_none() {
-                let _ = self.window_menu_scene();
-            }
-            self.window_menu_plugin_host
-                .as_ref()
-                .map(|host| host.inspect())
-        };
-        let Some(recipient) = recipient else {
-            return false;
-        };
-        let (event, authority) =
-            internal_normalized_ingress(input, None, "window-menu", recipient, None);
-        self.window_menu_host_event_authorized(event, width, height, Some(authority))
-    }
-
-    pub(crate) fn window_menu_host_event(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-    ) -> bool {
-        self.window_menu_host_event_authorized(event, width, height, None)
-    }
-
-    pub(crate) fn window_menu_host_event_authorized(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> bool {
-        if !self.surface_visible(SurfaceRole::WindowContextMenu) {
-            return false;
-        }
-        if self.application_menu_target.is_some() {
-            self.application_menu_plugin_event(event, width, height, authority)
-        } else {
-            self.window_menu_plugin_event(event, width, height, authority)
-        }
-    }
-
-    pub fn window_menu_host_key(&mut self, key: Option<KeyCode>) -> bool {
-        if !self.surface_visible(SurfaceRole::WindowContextMenu) {
-            return false;
-        }
-        let event = match key {
-            Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
-            Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
-                HostEvent::Controller(ControllerAction::Up)
-            }
-            Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
-                HostEvent::Controller(ControllerAction::Down)
-            }
-            Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
-                HostEvent::Controller(ControllerAction::Confirm)
-            }
-            _ => return false,
-        };
-        let width = MENU_WIDTH.ceil() as u32;
-        let height = self.window_context_menu_height().max(1) as u32;
-        let changed = if self.application_menu_target.is_some() {
-            self.application_menu_plugin_event(event, width, height, None)
-        } else {
-            self.window_menu_plugin_event(event, width, height, None)
-        };
-        if key == Some(KeyCode::Escape) {
-            self.dismiss_window_menu();
-        }
-        changed
-    }
-
-    pub fn window_menu_host_controller(&mut self, action: ControllerAction) -> bool {
-        if !self.surface_visible(SurfaceRole::WindowContextMenu) {
-            return false;
-        }
-        let event = HostEvent::Controller(action);
-        let width = MENU_WIDTH.ceil() as u32;
-        let height = self.window_context_menu_height().max(1) as u32;
-        let changed = if self.application_menu_target.is_some() {
-            self.application_menu_plugin_event(event, width, height, None)
-        } else {
-            self.window_menu_plugin_event(event, width, height, None)
-        };
-        if action == ControllerAction::Cancel {
-            self.dismiss_window_menu();
-        }
-        changed
-    }
-
     pub fn sync_transient_overlays(&mut self) {
         if let Some(group) = &self.task_switcher_group {
             let windows = group
@@ -9105,35 +8385,10 @@ impl LiveShell {
                 }
             }
         }
-        if self.window_menu.is_some() || self.application_menu_target.is_some() {
-            let x = self.window_menu_anchor_x.unwrap_or(self.panel_origin_x);
-            let y = self.window_menu_anchor_y.unwrap_or(self.panel_origin_y);
-            let _ = self.send_session_command(
-                "show-context-menu",
-                ShellCommand::ShowContextMenu {
-                    x,
-                    y,
-                    width: MENU_WIDTH as i32,
-                    height: self.window_context_menu_height(),
-                },
-            );
-        }
     }
 
-    fn preview_origin_x(&self, index: usize, width: u32) -> i32 {
-        let control_bounds = self
-            .plugin_taskbar_host
-            .as_ref()
-            .and_then(|host| taskbar_plugin_control_bounds(host, &format!("taskbar-item-{index}")))
-            .unwrap_or_else(|| {
-                Rect::new(
-                    PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
-                    0.0,
-                    PANEL_ITEM_WIDTH,
-                    PANEL_ITEM_WIDTH,
-                )
-            });
-        TaskbarPreviewAnchor::new(self.panel_origin_x, control_bounds).preview_origin_x(width)
+    fn preview_origin_x(&self, _index: usize, width: u32) -> i32 {
+        self.panel_origin_x - (width / 2) as i32
     }
 
     fn window_context_menu_height(&self) -> i32 {
@@ -9143,17 +8398,7 @@ impl LiveShell {
                 .as_ref()
                 .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
             let rows = application_menu_entries(target, pinned).len();
-            return if self.plugin_taskbar_host.is_some() {
-                let actions = self.slot_actions_for_item(
-                    &crate::plugin_panel::taskbar_manifest().id,
-                    "task-action",
-                    target.application_id.as_ref().map(|id| id.as_str()),
-                    4,
-                );
-                16 + 48 * (rows + actions.len()) as i32
-            } else {
-                menu_height_for_rows(rows) as i32
-            };
+            return menu_height_for_rows(rows) as i32;
         }
         let Some(window) = self.window_menu_snapshot.as_ref().or_else(|| {
             self.window_menu
@@ -9163,11 +8408,7 @@ impl LiveShell {
         };
         let outputs = self.window_feed.outputs();
         let rows = window_menu_max_rows(window, &self.workspaces, &outputs);
-        if self.plugin_taskbar_host.is_some() {
-            16 + 48 * rows.min(32) as i32
-        } else {
-            menu_height_for_rows(rows) as i32
-        }
+        menu_height_for_rows(rows) as i32
     }
 
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
@@ -9205,10 +8446,8 @@ impl LiveShell {
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
         self.window_menu_anchor_y = None;
-        self.clear_window_menu_plugin_host();
+
         self.application_menu_target = None;
-        self.clear_application_menu_plugin_host();
-        self.plugin_taskbar_menu_memory = 0;
     }
 
     #[cfg(target_os = "linux")]
@@ -9279,13 +8518,9 @@ impl LiveShell {
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
         self.window_menu_anchor_y = None;
-        self.clear_window_menu_plugin_host();
+
         self.application_menu_target = None;
-        self.clear_application_menu_plugin_host();
-        self.plugin_taskbar_menu_memory = 0;
-        if self.plugin_taskbar_host.is_some() {
-            self.record_taskbar_memory();
-        }
+
         let _ =
             self.send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
         let _ = self.send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
@@ -9675,22 +8910,6 @@ impl LiveShell {
                 .values()
                 .any(|(_, host)| host.pointer_interaction_active())
             || self.lock_host.pointer_interaction_active()
-            || self
-                .plugin_taskbar_host
-                .as_ref()
-                .is_some_and(|host| host.pointer_interaction_active())
-            || self
-                .plugin_taskbar_hosts
-                .values()
-                .any(|host| host.pointer_interaction_active())
-            || self
-                .window_menu_plugin_host
-                .as_ref()
-                .is_some_and(|host| host.pointer_interaction_active())
-            || self
-                .application_menu_plugin_host
-                .as_ref()
-                .is_some_and(|host| host.pointer_interaction_active())
             || self.notification_host.pointer_interaction_active()
             || self.control_host.pointer_interaction_active()
             || self
@@ -10361,9 +9580,6 @@ impl LiveShell {
     }
 
     pub(crate) fn open_window_menu_at(&mut self, id: u64, x: i32, y: i32) -> bool {
-        if self.plugin_taskbar_host.is_none() {
-            return false;
-        }
         let Some(snapshot) = self
             .windows
             .iter()
@@ -10375,7 +9591,7 @@ impl LiveShell {
         self.window_menu_generation = self.window_menu_generation.saturating_add(1);
         self.window_menu = Some(snapshot.id);
         self.window_menu_snapshot = Some(snapshot);
-        self.clear_window_menu_plugin_host();
+
         self.window_menu_anchor_x = Some(x);
         self.window_menu_anchor_y = Some(y);
         let sent = self.send_session_command(
@@ -11275,7 +10491,7 @@ impl LiveShell {
         match action {
             PreviewAction::Activate(_) => current.state.capabilities.activate,
             PreviewAction::Close(_) => current.state.capabilities.close,
-            PreviewAction::OpenMenu(_) => self.plugin_taskbar_host.is_some(),
+            PreviewAction::OpenMenu(_) => true,
         }
     }
 
@@ -11468,145 +10684,12 @@ impl LiveShell {
         outcome
     }
 
-    fn record_taskbar_memory(&mut self) {
-        let retained_frames = self
-            .plugin_taskbar_memory
-            .values()
-            .copied()
-            .fold(self.plugin_taskbar_menu_memory, u64::saturating_add);
-        let mut seen_images = std::collections::HashSet::new();
-        let retained_images = self
-            .plugin_taskbar_host
-            .iter()
-            .chain(self.plugin_taskbar_hosts.values())
-            .flat_map(|host| host.application().retained_image_allocations())
-            .filter(|(address, _)| seen_images.insert(*address))
-            .map(|(_, bytes)| bytes)
-            .fold(0_u64, u64::saturating_add);
-        let _ = self.plugin_registry.record_memory(
-            &crate::plugin_panel::taskbar_manifest().id,
-            nickel_core::plugins::PluginMemory {
-                native_ui_bytes: Some(retained_frames.saturating_add(retained_images)),
-                ..nickel_core::plugins::PluginMemory::default()
-            },
-        );
-        self.maybe_publish_plugin_status();
-    }
-
-    fn window_menu_scene(&mut self) -> Vec<PaintCommand> {
-        Vec::new()
-    }
-
-    fn application_menu_scene(&mut self) -> Vec<PaintCommand> {
-        Vec::new()
-    }
-
     pub fn set_global_shortcut_capability(
         &mut self,
         capability: &nickel_input::global::ShortcutCapability,
     ) {
         self.shortcut_capability_observed = true;
         self.shortcut_capability_status = shortcut_capability_status(capability);
-    }
-
-    fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        self.step_taskbar_plugin_batch(
-            HostBatch {
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            },
-            width,
-            height,
-        );
-        self.plugin_taskbar_host
-            .as_ref()
-            .map(|host| host.commands().to_vec())
-            .unwrap_or_default()
-    }
-
-    fn step_taskbar_plugin(
-        &mut self,
-        events: Vec<HostEvent>,
-        width: u32,
-    ) -> Option<nickel_ui::HostEventOutcome> {
-        self.step_taskbar_plugin_batch(
-            HostBatch {
-                events,
-                ..HostBatch::default()
-            },
-            width,
-            crate::plugin_panel::taskbar_surface().height,
-        )
-    }
-
-    fn step_taskbar_plugin_batch(
-        &mut self,
-        mut batch: HostBatch,
-        width: u32,
-        height: u32,
-    ) -> Option<nickel_ui::HostEventOutcome> {
-        let pointer_moved = batch.events.iter().any(|event| match event {
-            HostEvent::Ui(UiEvent::PointerMoved(_)) => true,
-            HostEvent::Normalized { input, .. } => matches!(
-                input,
-                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion { .. })
-            ),
-            HostEvent::NormalizedIngress(envelope) => matches!(
-                &envelope.input,
-                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion { .. })
-            ),
-            _ => false,
-        });
-        let (clock, _) = panel_clock_text();
-        let (data, images) = self.taskbar_plugin_render_data(&clock);
-        let host = self.plugin_taskbar_host.as_mut()?;
-        let image_changed = host.application_mut().sync_images(images);
-        batch.application_changed |= image_changed;
-        batch.surface_size = Some((width, height));
-        let (mut outcome, _) = match step_plugin_host(host, Some(data), batch) {
-            Ok(result) => result,
-            Err(error) => {
-                self.fail_taskbar_plugin_runtime(error);
-                return None;
-            }
-        };
-        let effects = host.application_mut().take_effects();
-        if self.plugin_taskbar_memory.len() >= 32
-            && !self.plugin_taskbar_memory.contains_key(&self.panel_output)
-        {
-            self.plugin_taskbar_memory.clear();
-        }
-        self.plugin_taskbar_memory.insert(
-            self.panel_output.clone(),
-            outcome.telemetry.retained_frame_bytes as u64,
-        );
-        self.record_taskbar_memory();
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome
-            .next_deadline
-            .or_else(|| Some(Instant::now() + taskbar::duration_until_next_minute()));
-        let pets_visible = self.windows.iter().any(|window| {
-            window
-                .application_id
-                .as_ref()
-                .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-        }) || self
-            .launcher
-            .preferences()
-            .favorites()
-            .iter()
-            .any(|id| id.starts_with("io.nickel.codex.project."));
-        if pets_visible {
-            self.panel_pet_deadline
-                .get_or_insert_with(|| Instant::now() + Duration::from_millis(360));
-        } else {
-            self.panel_pet_deadline = None;
-        }
-        if pointer_moved {
-            outcome.changed |= self.sync_panel_hover_from_host();
-        }
-        outcome.changed |= self.apply_plugin_effects(effects);
-        Some(outcome)
     }
 
     fn panel_groups(&mut self) -> Arc<Vec<crate::launcher::TaskbarApplication>> {
@@ -11647,8 +10730,6 @@ impl LiveShell {
         &mut self,
         outputs: &[crate::internal_shell::InternalOutput],
     ) {
-        let previous_host_count = self.plugin_taskbar_hosts.len();
-        let previous_memory_count = self.plugin_taskbar_memory.len();
         if self
             .panel_output
             .as_ref()
@@ -11661,135 +10742,6 @@ impl LiveShell {
                 .as_ref()
                 .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
         });
-        self.plugin_taskbar_hosts.retain(|output, host| {
-            let keep = output
-                .as_ref()
-                .is_none_or(|name| outputs.iter().any(|output| &output.name == name));
-            if !keep {
-                let _ = host.application().retire_surface();
-            }
-            keep
-        });
-        self.plugin_taskbar_memory.retain(|output, _| {
-            output
-                .as_ref()
-                .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
-        });
-        if self.plugin_taskbar_host.is_some()
-            && (self.plugin_taskbar_hosts.len() != previous_host_count
-                || self.plugin_taskbar_memory.len() != previous_memory_count)
-        {
-            self.record_taskbar_memory();
-        }
-    }
-
-    fn resolve_task_icons(
-        &mut self,
-        groups: &[crate::launcher::TaskbarApplication],
-        pet_frame: u8,
-    ) -> Vec<Option<(u16, Arc<image::RgbaImage>)>> {
-        groups
-            .iter()
-            .take(12)
-            .map(|group| {
-                // Project identity takes precedence over the generic Codex icon and
-                // is shared by every window in the same project group.
-                if let Some(pet) = group
-                    .application_id
-                    .as_ref()
-                    .and_then(|id| crate::icons::codex_pet(id.as_str(), pet_frame))
-                {
-                    return Some(pet);
-                }
-                group
-                    .application_id
-                    .as_ref()
-                    .and_then(|id| self.launcher.application(id))
-                    .and_then(|application| self.launcher_icons.resolve(application))
-                    .or_else(|| {
-                        group
-                            .application_id
-                            .as_ref()
-                            .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-                            .then(|| (0x3002, Arc::clone(&self.codex_icon)))
-                    })
-                    .or_else(|| {
-                        group
-                            .application_id
-                            .as_ref()
-                            .and_then(|id| crate::icons::nickel_application(id.as_str()))
-                    })
-                    .or_else(|| crate::icons::nickel_application(&group.application_name))
-                    .or_else(|| {
-                        group.windows.first().and_then(|window| {
-                            self.window_icons.get(&window.id).cloned().map(|icon| {
-                                self.launcher_icons.resolve_window_icon(window.id, icon)
-                            })
-                        })
-                    })
-            })
-            .collect()
-    }
-
-    fn taskbar_plugin_projection(
-        &mut self,
-        clock: &str,
-    ) -> (
-        crate::plugin_panel::TaskbarPluginProjection,
-        crate::plugin_panel::PluginImages,
-    ) {
-        let groups = self.panel_groups();
-        let pet_frame = self.panel_pet_frame;
-        let task_icons = self.resolve_task_icons(groups.as_ref(), pet_frame);
-        taskbar_plugin_data(
-            TaskbarProjectionInput {
-                groups: groups.as_ref(),
-                keyboard_enabled: self.keyboard_enabled,
-                codex_available: self.launcher.codex_available(),
-                panel_icon: &self.panel_icon,
-                codex_icon: &self.codex_icon,
-                task_icons: &task_icons,
-                tray: &self.tray,
-                tray_icons: &self.tray_icons,
-            },
-            clock,
-        )
-    }
-
-    fn taskbar_plugin_render_data(
-        &mut self,
-        clock: &str,
-    ) -> (String, crate::plugin_panel::PluginImages) {
-        let (projection, images) = self.taskbar_plugin_projection(clock);
-        let mut data: serde_json::Value =
-            serde_json::from_str(&projection.to_json()).expect("taskbar projection produces JSON");
-        let visible_items = projection
-            .items
-            .iter()
-            .map(|item| item.id.clone())
-            .collect::<HashSet<_>>();
-        data["slots"] = self
-            .plugin_slot_projection_with_context(
-                &crate::plugin_panel::taskbar_manifest().id,
-                None,
-                Some(&visible_items),
-            )
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(key) = self.taskbar_surface_key() {
-            if let Some(snapshot) = self.plugin_preferences(&key.plugin_id) {
-                data["preferences"] = snapshot;
-            }
-            if let Some(snapshot) = self.plugin_session(&key.plugin_id) {
-                data["session"] = snapshot;
-            }
-            if let Some(snapshot) = self.plugin_appearance(&key.plugin_id, false) {
-                data["appearance"] = snapshot;
-            }
-            if let Some(snapshot) = self.plugin_appearance(&key.plugin_id, true) {
-                data["wallpaper"] = snapshot;
-            }
-        }
-        (data.to_string(), images)
     }
 }
 

@@ -93,24 +93,15 @@ impl LiveShell {
     pub(crate) fn bounded_plugin_panel_semantics(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-        output: Option<&str>,
+        _output: Option<&str>,
     ) -> Result<Projection, String> {
-        if self.taskbar_surface_key().as_ref() != Some(key) {
-            return Err("plugin surface has no remote semantic contract".into());
+        let host = self
+            .plugin_panel_host_ref(key)
+            .ok_or("plugin surface is unavailable")?;
+        if self.locked || host.remote_access_protected() {
+            return Err("plugin surface is protected".into());
         }
-        if self.locked || self.surface_remote_access_protected(SurfaceRole::Taskbar) {
-            return Err("shell surface is hidden or protected".into());
-        }
-        let host = if output == self.panel_output.as_deref() {
-            self.plugin_taskbar_host.as_ref()
-        } else {
-            self.plugin_taskbar_hosts.get(&output.map(str::to_owned))
-        }
-        .ok_or("panel plugin viewport is unavailable")?;
-        plugin_projection(host, |leaf, action| {
-            matches!(action, nickel_ui::ActionKind::Activate)
-                && matches!(leaf, "taskbar-launcher" | "taskbar-control")
-        })
+        Ok(observe_only(plugin_projection(host, |_, _| false)?))
     }
 
     pub(crate) fn bounded_shell_semantics(
@@ -139,10 +130,7 @@ impl LiveShell {
                         .map_err(|_| "shell semantics are protected or exceed budget".into())
                 }
             }
-            SurfaceRole::Taskbar => self.bounded_plugin_panel_semantics(
-                &crate::plugin_panel::taskbar_surface_key(),
-                output,
-            ),
+            SurfaceRole::Taskbar => Err("historical native taskbar surface is unavailable".into()),
             SurfaceRole::Launcher if self.run_visible => {
                 if let Some(host) = self.run_host_ref() {
                     plugin_projection(host, |leaf, action| {
@@ -196,15 +184,7 @@ impl LiveShell {
                     Err("Window preview plugin is unavailable".into())
                 }
             }
-            SurfaceRole::WindowContextMenu => {
-                if let Some(host) = self.window_menu_plugin_host.as_ref() {
-                    Ok(observe_only(plugin_projection(host, |_, _| false)?))
-                } else if let Some(host) = self.application_menu_plugin_host.as_ref() {
-                    Ok(observe_only(plugin_projection(host, |_, _| false)?))
-                } else {
-                    Err("Taskbar menu plugin is unavailable".into())
-                }
-            }
+            SurfaceRole::WindowContextMenu => Err("Legacy menu surface is unavailable".into()),
             SurfaceRole::Screenshot => Ok(observe_only((
                 self.screenshot.change_token().semantic_generation,
                 self.screenshot
@@ -225,7 +205,6 @@ impl LiveShell {
 // the Linux compositor owns their guarded application.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) enum RemoteShellEffect {
-    Panel(TaskbarAction, Option<String>),
     Control(ControlAction),
 }
 
@@ -275,51 +254,8 @@ impl LiveShell {
         action: nickel_ui::SemanticAction,
         clipboard_limit: usize,
     ) -> Result<RemoteShellOutcome, String> {
-        let (current_generation, nodes) = self.bounded_plugin_panel_semantics(key, output)?;
-        if current_generation != generation {
-            return Err("stale semantic tree".into());
-        }
-        let kind = match &action {
-            nickel_ui::SemanticAction::Invoke(kind) => *kind,
-            nickel_ui::SemanticAction::SetValue(_) => nickel_ui::ActionKind::SetValue,
-        };
-        if nodes
-            .get(node)
-            .is_none_or(|target| !target.actions.contains(&kind))
-        {
-            return Err("semantic action has no guarded production disposition".into());
-        }
-        if self.pointer_interaction_active() {
-            return Err("local surface input is held".into());
-        }
-        let previous = self.panel_output.clone();
-        let token = self.panel_change_token;
-        self.switch_panel_output(output.map(str::to_owned));
-        let result: Result<_, String> = (|| {
-            let plugin = self
-                .plugin_taskbar_host
-                .as_mut()
-                .ok_or("panel plugin viewport is unavailable")?;
-            let outcome = mutate(plugin, generation, node, action, clipboard_limit)?;
-            let requested = plugin.application_mut().take_effects();
-            let panel_action = match requested.as_slice() {
-                [crate::plugin_panel::PluginEffect::ToggleLauncher] => TaskbarAction::Launcher,
-                [crate::plugin_panel::PluginEffect::ToggleControlCenter] => TaskbarAction::Control,
-                _ => return Err("taskbar plugin requested an unguarded effect".into()),
-            };
-            Ok((outcome, panel_action))
-        })();
-        self.switch_panel_output(previous);
-        self.panel_change_token = token;
-        let (host, panel_action) = result?;
-        self.host_runtime_samples.record(host.telemetry);
-        Ok(RemoteShellOutcome {
-            host,
-            effects: vec![RemoteShellEffect::Panel(
-                panel_action,
-                output.map(str::to_owned),
-            )],
-        })
+        let _ = (key, output, generation, node, action, clipboard_limit);
+        Err("plugin semantic mutation is unavailable".into())
     }
 
     pub(crate) fn perform_bounded_shell_action(
@@ -332,14 +268,7 @@ impl LiveShell {
         clipboard_limit: usize,
     ) -> Result<RemoteShellOutcome, String> {
         if role == SurfaceRole::Taskbar {
-            return self.perform_bounded_plugin_panel_action(
-                &crate::plugin_panel::taskbar_surface_key(),
-                output,
-                generation,
-                node,
-                action,
-                clipboard_limit,
-            );
+            return Err("historical native taskbar surface is unavailable".into());
         }
         if self.bounded_shell_semantics(role, output)?.0 != generation {
             return Err("stale semantic tree".into());
@@ -420,24 +349,6 @@ impl LiveShell {
         effect: &RemoteShellEffect,
     ) -> Result<Option<Application>, String> {
         let selected = match effect {
-            RemoteShellEffect::Panel(TaskbarAction::Task(index), output) => {
-                let previous = self.panel_output.clone();
-                let token = self.panel_change_token;
-                self.switch_panel_output(output.clone());
-                let groups = self.panel_groups();
-                self.switch_panel_output(previous);
-                self.panel_change_token = token;
-                let group = groups.get(*index).ok_or("panel application has retired")?;
-                if !group.windows.is_empty() {
-                    return Ok(None);
-                }
-                Some(group.application_id.as_ref().and_then(|id| {
-                    self.launcher
-                        .applications()
-                        .find(|app| app.id() == id.as_str())
-                        .cloned()
-                }))
-            }
             _ => None,
         };
         match selected {
@@ -458,22 +369,6 @@ impl LiveShell {
         ));
         self.session_host = staged.clone();
         let result: Result<(), String> = match effect {
-            RemoteShellEffect::Panel(
-                action @ (TaskbarAction::Launcher | TaskbarAction::Control),
-                output,
-            ) => {
-                let previous = self.panel_output.clone();
-                let token = self.panel_change_token;
-                self.switch_panel_output(output);
-                self.apply_panel_action(action);
-                self.switch_panel_output(previous);
-                self.panel_change_token = token;
-                Ok(())
-            }
-            RemoteShellEffect::Panel(action, output) => {
-                drop((action, output));
-                Err("panel native effect requires guarded delivery".into())
-            }
             RemoteShellEffect::Control(action) => {
                 drop(action);
                 Err("control native effect requires guarded delivery".into())

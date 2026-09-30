@@ -342,7 +342,6 @@ impl InternalShellCoordinator {
                 SurfaceRole::Notification,
                 SurfaceRole::VolumeOsd,
                 SurfaceRole::WindowPreview,
-                SurfaceRole::WindowContextMenu,
                 SurfaceRole::Screenshot,
                 SurfaceRole::OnScreenKeyboard,
             ] {
@@ -1073,11 +1072,9 @@ impl InternalShellCoordinator {
             };
             if let Some(action) = controller_action {
                 match entry.role {
-                    SurfaceRole::Panel if taskbar_surface => dependent_roles.extend([
-                        SurfaceRole::Taskbar,
-                        SurfaceRole::WindowPreview,
-                        SurfaceRole::WindowContextMenu,
-                    ]),
+                    SurfaceRole::Panel if taskbar_surface => {
+                        dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview])
+                    }
                     SurfaceRole::ControlCenter => dependent_roles.extend([
                         SurfaceRole::Taskbar,
                         SurfaceRole::VolumeOsd,
@@ -1085,9 +1082,7 @@ impl InternalShellCoordinator {
                     ]),
                     SurfaceRole::WindowPreview => dependent_roles
                         .extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu]),
-                    SurfaceRole::WindowContextMenu => {
-                        dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview])
-                    }
+
                     _ => {}
                 }
                 changed |= if desktop_surface {
@@ -1110,9 +1105,8 @@ impl InternalShellCoordinator {
                                 .control_controller(action, entry.size.0, entry.size.1)
                         }
                         SurfaceRole::WindowPreview => self.shell.preview_controller(action),
-                        SurfaceRole::WindowContextMenu => {
-                            self.shell.window_menu_host_controller(action)
-                        }
+
+                        SurfaceRole::WindowContextMenu => false,
                         SurfaceRole::Notification => self.shell.notification_controller(action),
                         SurfaceRole::Desktop => false,
                         SurfaceRole::Screenshot => self.shell.screenshot_controller(action),
@@ -1237,15 +1231,7 @@ impl InternalShellCoordinator {
                             .preview_host_event_authorized(event, normalized_authority)
                             .changed;
                     }
-                    SurfaceRole::WindowContextMenu => {
-                        dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview]);
-                        changed |= self.shell.window_menu_host_event_authorized(
-                            event,
-                            entry.size.0,
-                            entry.size.1,
-                            normalized_authority,
-                        );
-                    }
+
                     SurfaceRole::Notification => {
                         changed |= self.shell.notification_host_event_authorized(
                             event,
@@ -1289,11 +1275,9 @@ impl InternalShellCoordinator {
                     | nickel_ui::UiEvent::KeyboardNavigateBack
             );
             match entry.role {
-                SurfaceRole::Panel if taskbar_surface && action => dependent_roles.extend([
-                    SurfaceRole::Taskbar,
-                    SurfaceRole::WindowPreview,
-                    SurfaceRole::WindowContextMenu,
-                ]),
+                SurfaceRole::Panel if taskbar_surface && action => {
+                    dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview])
+                }
                 SurfaceRole::ControlCenter => dependent_roles.extend([
                     SurfaceRole::Taskbar,
                     SurfaceRole::VolumeOsd,
@@ -1302,9 +1286,7 @@ impl InternalShellCoordinator {
                 SurfaceRole::WindowPreview => {
                     dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu])
                 }
-                SurfaceRole::WindowContextMenu => {
-                    dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview])
-                }
+
                 SurfaceRole::Launcher if action => dependent_roles.push(SurfaceRole::Taskbar),
                 _ => {}
             }
@@ -2424,106 +2406,6 @@ mod tests {
     }
 
     #[test]
-    fn disabling_top_taskbar_releases_desktop_work_area() {
-        let mut coordinator = InternalShellCoordinator::new(Arc::new(TestHost), PanelEdge::Top)
-            .expect("headless shell coordinator");
-        let output = InternalOutput {
-            x: 0,
-            y: 100,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        };
-        coordinator.set_outputs(&[output.clone()]);
-        assert_eq!(
-            coordinator
-                .shell
-                .desktop_output_projection("nested")
-                .unwrap()
-                .0
-                .y,
-            100.0 + PANEL_HEIGHT as f32
-        );
-        let desktop = coordinator
-            .surface(SurfaceRole::Desktop, Some("nested"))
-            .unwrap()
-            .id;
-        assert!(coordinator.select_desktop_viewport(desktop).is_some());
-
-        coordinator
-            .shell
-            .set_plugin_enabled(&crate::plugin_panel::taskbar_manifest().id, false)
-            .unwrap();
-        coordinator.set_outputs(&[output]);
-        assert_eq!(
-            coordinator
-                .shell
-                .desktop_output_projection("nested")
-                .unwrap()
-                .0
-                .y,
-            100.0
-        );
-        assert!(coordinator.select_desktop_viewport(desktop).is_some());
-    }
-
-    #[test]
-    fn taskbar_plugin_identity_retires_and_returns_with_its_surface() {
-        let mut coordinator = coordinator();
-        let output = InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        };
-        let plugin_id = crate::plugin_panel::taskbar_manifest().id.clone();
-        coordinator.set_outputs(&[output.clone()]);
-        let key = coordinator
-            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
-            .unwrap()
-            .plugin
-            .clone()
-            .unwrap();
-        let original_id = coordinator.plugin_surface(&key, "nested").unwrap().id;
-        let menu_id = coordinator
-            .surface(SurfaceRole::WindowContextMenu, None)
-            .unwrap()
-            .id;
-
-        coordinator
-            .shell_mut()
-            .set_plugin_enabled(&plugin_id, false)
-            .unwrap();
-        coordinator.set_outputs(&[output.clone()]);
-        assert!(coordinator.plugin_surface(&key, "nested").is_none());
-        assert!(coordinator.scene(original_id).is_none());
-        assert!(
-            coordinator
-                .surface(SurfaceRole::WindowContextMenu, None)
-                .is_none()
-        );
-
-        coordinator
-            .shell_mut()
-            .set_plugin_enabled(&plugin_id, true)
-            .unwrap();
-        coordinator.set_outputs(&[output]);
-        let restored = coordinator.plugin_surface(&key, "nested").unwrap();
-        assert_ne!(restored.id, original_id);
-        assert!(coordinator.visible(restored.id));
-        assert_ne!(
-            coordinator
-                .surface(SurfaceRole::WindowContextMenu, None)
-                .unwrap()
-                .id,
-            menu_id
-        );
-    }
-
-    #[test]
     fn native_desktop_surface_is_stable_across_output_reconciliation() {
         let mut coordinator = coordinator();
         let output = InternalOutput {
@@ -2588,189 +2470,6 @@ mod tests {
             coordinator.set_outputs(&[output.clone()]);
             assert_ne!(coordinator.surface(role, None).unwrap().id, initial);
         }
-    }
-
-    #[test]
-    fn primary_only_panel_policy_reconciles_two_outputs_without_removing_desktops() {
-        let mut coordinator = coordinator();
-        coordinator.set_bar_on_all_displays(false);
-        coordinator.set_outputs(&[
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "primary".into(),
-                width: 1920,
-                height: 1080,
-                scale: 1.5,
-            },
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "secondary".into(),
-                width: 1280,
-                height: 720,
-                scale: 1.0,
-            },
-        ]);
-
-        assert!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "primary")
-                .is_some()
-        );
-        assert!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "secondary")
-                .is_none()
-        );
-        let names = ["primary".to_owned(), "secondary".to_owned()];
-        assert_eq!(
-            coordinator.expected_reserved_panel_instances(&names).len(),
-            1
-        );
-        assert!(
-            coordinator
-                .surface(SurfaceRole::Desktop, Some("primary"))
-                .is_some()
-        );
-        assert!(
-            coordinator
-                .surface(SurfaceRole::Desktop, Some("secondary"))
-                .is_some()
-        );
-
-        assert!(coordinator.set_bar_on_all_displays(true));
-        assert_eq!(
-            coordinator.expected_reserved_panel_instances(&names).len(),
-            2
-        );
-        coordinator.set_outputs(&[
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "primary".into(),
-                width: 1920,
-                height: 1080,
-                scale: 1.5,
-            },
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "secondary".into(),
-                width: 1280,
-                height: 720,
-                scale: 1.0,
-            },
-        ]);
-        assert!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "secondary")
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn topology_reconciliation_preserves_surfaces_for_unchanged_outputs() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "left".into(),
-                width: 1280,
-                height: 720,
-                scale: 1.0,
-            },
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "right".into(),
-                width: 1920,
-                height: 1080,
-                scale: 1.0,
-            },
-        ]);
-        let left_panel = coordinator
-            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "left")
-            .unwrap()
-            .id;
-        let right_desktop = coordinator
-            .surface(SurfaceRole::Desktop, Some("right"))
-            .unwrap()
-            .id;
-        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-
-        coordinator.set_outputs(&[
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "right".into(),
-                width: 1600,
-                height: 900,
-                scale: 1.0,
-            },
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "new".into(),
-                width: 1024,
-                height: 768,
-                scale: 1.0,
-            },
-        ]);
-
-        assert!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "left")
-                .is_none()
-        );
-        assert_eq!(
-            coordinator
-                .surface(SurfaceRole::Desktop, Some("right"))
-                .unwrap()
-                .id,
-            right_desktop
-        );
-        assert_eq!(
-            coordinator.surface(SurfaceRole::Launcher, None).unwrap().id,
-            launcher
-        );
-        assert_eq!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "right")
-                .unwrap()
-                .size,
-            (1600, PANEL_HEIGHT)
-        );
-        assert!(
-            !coordinator
-                .surfaces()
-                .iter()
-                .any(|surface| surface.id == left_panel)
-        );
-    }
-
-    #[test]
-    fn scenes_are_rendered_from_reusable_shell_state() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let panel = coordinator
-            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
-            .unwrap()
-            .id;
-        assert!(!coordinator.scene(panel).unwrap().is_empty());
-        assert!(
-            coordinator
-                .shell_mut()
-                .surface_visible(SurfaceRole::Taskbar)
-        );
     }
 
     #[test]
@@ -3034,247 +2733,6 @@ mod tests {
                 .taskbar_has_application("org.kde.konsole")
         );
         assert!(!coordinator.apply_session_snapshot(snapshot));
-    }
-
-    #[test]
-    fn local_panel_hover_and_launcher_typing_preserve_unrelated_scene_generations() {
-        let mut coordinator = coordinator();
-        coordinator.bar_on_all_displays = true;
-        coordinator.set_outputs(&[
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "left".into(),
-                width: 1000,
-                height: 800,
-                scale: 1.0,
-            },
-            InternalOutput {
-                x: 0,
-                y: 0,
-                name: "right".into(),
-                width: 1000,
-                height: 800,
-                scale: 1.0,
-            },
-        ]);
-        coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
-            windows: vec![nickel_session_protocol::WindowSnapshot {
-                id: nickel_session_protocol::WindowId(991),
-                application_id: "io.nickel.codex.audit".into(),
-                title: "Audit task".into(),
-                active: true,
-                minimized: false,
-                maximized: false,
-                fullscreen: false,
-                geometry: None,
-                workspace: nickel_session_protocol::WorkspaceId(1),
-            }],
-            ..Default::default()
-        });
-        let desktop = coordinator
-            .surface(SurfaceRole::Desktop, Some("left"))
-            .unwrap()
-            .id;
-        let left_panel = coordinator
-            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "left")
-            .unwrap()
-            .id;
-        let right_panel = coordinator
-            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "right")
-            .unwrap()
-            .id;
-        for id in [desktop, right_panel, left_panel] {
-            coordinator.scene(id);
-        }
-        let target = coordinator
-            .shell
-            .resolve_semantic_target(
-                &nickel_session_protocol::ShellSemanticTarget::PanelApplication {
-                    application_id: "io.nickel.codex.audit".into(),
-                    output: Some("left".into()),
-                    interaction: nickel_session_protocol::PointerInteraction::Hover,
-                },
-            )
-            .unwrap();
-        coordinator.set_panel_context("left", (0, 0));
-        let changes = coordinator.step_slot_changes(
-            left_panel,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(
-                    nickel_ui::Point {
-                        x: target.x as f32,
-                        y: target.y as f32,
-                    },
-                ))],
-                ..Default::default()
-            },
-        );
-        assert_eq!(changes, vec![left_panel]);
-        for id in changes {
-            coordinator.scene(id);
-        }
-        assert_eq!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "right")
-                .unwrap()
-                .scene_generation,
-            1
-        );
-        assert_eq!(
-            coordinator
-                .surface(SurfaceRole::Desktop, Some("left"))
-                .unwrap()
-                .scene_generation,
-            1
-        );
-        coordinator.toggle_launcher();
-        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-        coordinator.scene(launcher);
-        let changes = coordinator.step_slot_changes(
-            launcher,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextInput(
-                    "terminal".into(),
-                ))],
-                ..Default::default()
-            },
-        );
-        assert_eq!(changes, vec![launcher]);
-        for id in changes {
-            coordinator.scene(id);
-        }
-        coordinator.step_slot_changes(
-            launcher,
-            HostBatch {
-                clipboard_text_limit: Some(8),
-                events: vec![
-                    nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextSelectAll),
-                    nickel_ui::HostEvent::Normalized {
-                        input: nickel_input::InputEvent::Key(nickel_input::KeyEvent {
-                            device: nickel_input::DeviceId(1),
-                            order: nickel_input::EventOrder(9),
-                            physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyC),
-                            logical: nickel_input::LogicalKey::Character("c".into()),
-                            location: nickel_input::KeyLocation::Standard,
-                            edge: nickel_input::KeyEdge::Pressed,
-                            repeat: false,
-                            modifiers: nickel_input::ModifierState::from_sides([
-                                nickel_input::Modifier::ControlLeft,
-                            ]),
-                        }),
-                        clipboard_text: None,
-                    },
-                ],
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            coordinator.take_clipboard_result(),
-            Some(Ok("terminal".into()))
-        );
-        coordinator.step_slot_changes(
-            launcher,
-            HostBatch {
-                clipboard_text_limit: Some(4),
-                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextCut)],
-                ..Default::default()
-            },
-        );
-        assert!(matches!(coordinator.take_clipboard_result(), Some(Err(_))));
-        coordinator.step_slot_changes(
-            launcher,
-            HostBatch {
-                clipboard_text_limit: Some(8),
-                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextCut)],
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            coordinator.take_clipboard_result(),
-            Some(Ok("terminal".into())),
-            "rejected semantic Cut must preserve the selected text for the accepted Cut"
-        );
-        coordinator.step_slot_changes(
-            launcher,
-            HostBatch {
-                clipboard_text_limit: Some(8),
-                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextInput(
-                    "terminal".into(),
-                ))],
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            coordinator
-                .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "left")
-                .unwrap()
-                .scene_generation,
-            2
-        );
-        assert_eq!(
-            coordinator
-                .surface(SurfaceRole::Desktop, Some("left"))
-                .unwrap()
-                .scene_generation,
-            1
-        );
-        assert!(
-            coordinator
-                .surface(SurfaceRole::Launcher, None)
-                .unwrap()
-                .commands_copied
-                > 0
-        );
-        // Exercise the production deadline-to-surface mapping separately from
-        // native desktop directory/icon polls, whose independent 250 ms
-        // deadlines can legitimately request a desktop repaint.
-        let visibility = coordinator
-            .entries
-            .iter()
-            .map(|surface| coordinator.visible(surface.id))
-            .collect::<Vec<_>>();
-        let changes = coordinator.deadline_changes(
-            &crate::live_shell::ShellDeadlineOutcome {
-                redraw: vec![SurfaceRole::Taskbar],
-                visibility_changed: true,
-                ..Default::default()
-            },
-            &visibility,
-        );
-        assert_eq!(changes, vec![left_panel, right_panel]);
-    }
-
-    #[test]
-    fn panel_semantic_click_opens_the_internal_launcher() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let panel = coordinator
-            .plugin_surface(&crate::plugin_panel::taskbar_surface_key(), "nested")
-            .unwrap()
-            .id;
-        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-        for event in [
-            nickel_ui::UiEvent::PointerPressed(nickel_ui::Point { x: 20.0, y: 28.0 }),
-            nickel_ui::UiEvent::PointerReleased(nickel_ui::Point { x: 20.0, y: 28.0 }),
-        ] {
-            coordinator.step_slot(
-                panel,
-                HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(event)],
-                    ..Default::default()
-                },
-            );
-        }
-        assert!(coordinator.visible(launcher));
-        assert!(!coordinator.scene(launcher).unwrap().is_empty());
     }
 
     #[test]

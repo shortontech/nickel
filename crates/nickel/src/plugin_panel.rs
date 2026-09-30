@@ -3,7 +3,6 @@
 
 use std::{
     borrow::Cow,
-    collections::HashSet,
     sync::{Arc, OnceLock},
 };
 
@@ -41,7 +40,6 @@ use nickel_codex_ui::{ProjectMenuProjection, ProjectMenuRevision};
 use nickel_core::display_projection::ProjectionMode;
 use nickel_plugin_presentation::css::StyleSheet;
 
-use crate::launcher::TaskbarApplication;
 use crate::window_preview::PreviewAction;
 
 pub fn manifest() -> &'static PluginManifest {
@@ -67,30 +65,6 @@ pub fn surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     nickel_core::plugins::PluginSurfaceKey {
         plugin_id: manifest().id.clone(),
         surface_id: surface().id.clone(),
-    }
-}
-
-pub fn taskbar_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!("../../../assets/plugins/taskbar/plugin.json"))
-            .expect("bundled taskbar plugin manifest must be valid")
-    })
-}
-
-pub fn taskbar_surface() -> &'static PluginSurface {
-    taskbar_manifest()
-        .surfaces
-        .iter()
-        .find(|surface| surface.reserve_work_area)
-        .expect("bundled taskbar needs a work-area panel")
-}
-
-pub fn taskbar_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    let manifest = taskbar_manifest();
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: manifest.id.clone(),
-        surface_id: taskbar_surface().id.clone(),
     }
 }
 
@@ -253,10 +227,6 @@ fn bundled_stylesheet(
 }
 
 pub fn run_enabled() -> bool {
-    true
-}
-
-pub fn taskbar_enabled() -> bool {
     true
 }
 
@@ -531,118 +501,6 @@ fn preview_request(effect: &Value) -> Result<(PreviewAction, PluginCapability), 
         )),
         _ => Err("unknown preview action".into()),
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskbarPluginItem {
-    pub index: usize,
-    pub id: String,
-    pub name: String,
-    pub active: bool,
-    pub pinned: bool,
-    pub icon: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskbarPluginTrayItem {
-    pub id: String,
-    pub title: String,
-    pub icon: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskbarPluginProjection {
-    pub items: Vec<TaskbarPluginItem>,
-    pub tray: Vec<TaskbarPluginTrayItem>,
-    pub clock: String,
-    pub keyboard_enabled: bool,
-    pub codex_available: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskbarWindowMenuPluginProjection {
-    pub root: Vec<(String, Option<&'static str>)>,
-    pub workspaces: Vec<(String, Option<&'static str>)>,
-    pub displays: Vec<(String, Option<&'static str>)>,
-}
-
-impl TaskbarWindowMenuPluginProjection {
-    pub(crate) fn to_json(&self) -> String {
-        let entries = |items: &Vec<(String, Option<&'static str>)>| {
-            items
-                .iter()
-                .take(32)
-                .map(|(label, navigate)| {
-                    serde_json::json!({
-                        "label": label.chars().take(120).collect::<String>(),
-                        "navigate": navigate,
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        serde_json::json!({
-            "root": entries(&self.root),
-            "workspaces": entries(&self.workspaces),
-            "displays": entries(&self.displays),
-        })
-        .to_string()
-    }
-}
-
-impl TaskbarPluginProjection {
-    pub fn from_groups(groups: &[TaskbarApplication], clock: &str) -> Self {
-        let mut seen = HashSet::new();
-        Self {
-            items: groups
-                .iter()
-                .take(12)
-                .enumerate()
-                .filter_map(|(index, group)| {
-                    let id = taskbar_item_id(group);
-                    if id.is_empty() || id.len() > 256 || !seen.insert(id.clone()) {
-                        return None;
-                    }
-                    Some(TaskbarPluginItem {
-                        index,
-                        id,
-                        name: group.application_name.chars().take(120).collect(),
-                        active: group.active(),
-                        pinned: group.pinned,
-                        icon: false,
-                    })
-                })
-                .collect(),
-            tray: Vec::new(),
-            clock: clock.to_owned(),
-            keyboard_enabled: false,
-            codex_available: false,
-        }
-    }
-
-    pub(crate) fn to_json(&self) -> String {
-        serde_json::json!({"items": self.items.iter().map(|item| serde_json::json!({
-            "index": item.index, "id": item.id, "name": item.name,
-            "active": item.active, "pinned": item.pinned, "icon": item.icon,
-        })).collect::<Vec<_>>(),
-        "tray": self.tray.iter().map(|item| serde_json::json!({
-            "id": item.id, "title": item.title, "icon": item.icon,
-        })).collect::<Vec<_>>(),
-        "clock": self.clock, "keyboardEnabled": self.keyboard_enabled,
-        "codexAvailable": self.codex_available})
-        .to_string()
-    }
-}
-
-pub fn taskbar_item_id(group: &TaskbarApplication) -> String {
-    group.application_id.as_ref().map_or_else(
-        || {
-            group.windows.last().map_or_else(
-                || format!("unidentified:{}", group.application_name),
-                |window| format!("window:{}", window.id.0),
-            )
-        },
-        |id| id.as_str().to_owned(),
-    )
 }
 
 /// A package may supply synthetic data for each surface's initial validation tree.
@@ -1232,14 +1090,6 @@ impl PluginPanelApplication {
             PluginSlotContract::Action => self.action_contributions().map(|_| ()),
             PluginSlotContract::Section => self.section_contributions().map(|_| ()),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn taskbar_with_test_source(
-        source: &str,
-        projection: &TaskbarPluginProjection,
-    ) -> Result<Self, String> {
-        Self::new_with_manifest(source, taskbar_manifest(), Some(projection.to_json()))
     }
 
     #[cfg(test)]
@@ -4163,12 +4013,16 @@ mod tests {
         assert!(view.children[1].action.is_none());
     }
 
+    fn fixed_window_test_manifest() -> PluginManifest {
+        PluginManifest::from_json(r#"{"api_version":1,"id":"org.example.fixed-window","name":"Fixed Window","author":"Test","version":"0.1.0","entry":"main.js","surfaces":[{"id":"main","kind":"panel","width":1920,"height":56,"output":"all","reserve_work_area":true}],"capabilities":["launcher-show"]}"#).unwrap()
+    }
+
     #[test]
     fn output_copies_share_one_runtime_with_independent_hook_state() {
         let source = "function App() { const [count, setCount] = useState(0); return h(FixedWindow, {width: '100%', height: 56, output: 'all', edge: 'bottom', reserveWorkArea: true}, h(Button, {id: 'advance', onClick: () => setCount(count + 1)}, `${nickel.data.label}:${count}`)); }";
         let mut left = PluginPanelApplication::new_with_manifest_for_surface_and_scope(
             source,
-            taskbar_manifest(),
+            &fixed_window_test_manifest(),
             Some(serde_json::json!({"label": "left"}).to_string()),
             None,
             None,
@@ -4177,7 +4031,7 @@ mod tests {
         .unwrap();
         let mut right = PluginPanelApplication::new_with_manifest_for_surface_and_scope(
             source,
-            taskbar_manifest(),
+            &fixed_window_test_manifest(),
             Some(serde_json::json!({"label": "right"}).to_string()),
             None,
             Some(left.shared_runtime()),
@@ -4197,72 +4051,6 @@ mod tests {
         left.retire_surface().unwrap();
         right.update(right.button_message("advance").unwrap());
         assert!(format!("{:?}", right.node).contains("right refreshed:1"));
-    }
-
-    #[test]
-    fn bundled_taskbar_visual_snapshot() {
-        let projection = TaskbarPluginProjection {
-            items: ["Files", "Browser", "Editor"]
-                .into_iter()
-                .enumerate()
-                .map(|(index, name)| TaskbarPluginItem {
-                    index,
-                    id: name.to_lowercase(),
-                    name: name.into(),
-                    active: index == 1,
-                    pinned: true,
-                    icon: false,
-                })
-                .collect(),
-            tray: vec![TaskbarPluginTrayItem {
-                id: "network".into(),
-                title: "Network".into(),
-                icon: false,
-            }],
-            clock: "12:45".into(),
-            keyboard_enabled: true,
-            codex_available: true,
-        };
-        let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::taskbar_manifest(),
-                "main.js",
-                projection.to_json(),
-            )
-            .unwrap(),
-            960,
-            56,
-        );
-        let editor = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Editor".into(),
-            })
-            .unwrap();
-        let keyboard = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "On-screen keyboard".into(),
-            })
-            .unwrap();
-        assert!(
-            keyboard.bounds.origin.x > editor.bounds.origin.x + editor.bounds.size.width + 100.0
-        );
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(960, 56, 1.0);
-        host.render_software(&mut renderer);
-        let clear_area = renderer.pixels()[(2 * 960 + 600) as usize];
-        assert!(
-            (1..255).contains(&clear_area.a),
-            "taskbar background lost its CSS alpha: {clear_area:?}"
-        );
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(960, 56, |x, y| {
-            let pixel = renderer.pixels()[(y * 960 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/taskbar-shared.png");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image.save(output).unwrap();
     }
 
     #[test]
@@ -5268,7 +5056,7 @@ mod tests {
 
     #[test]
     fn fixed_window_jsx_helper_uses_one_manifest_checked_window_root() {
-        let mut granted = taskbar_manifest().clone();
+        let mut granted = fixed_window_test_manifest();
         granted.id = "org.example.fixed-window".into();
         let source = "function App() { return h(FixedWindow, {id: 'main', width: '100%', height: 56, output: 'all', edge: 'bottom', reserveWorkArea: true, className: 'bar'}, h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open')); }";
         let mut package = PluginPackage {

@@ -176,13 +176,12 @@ mod platform {
     };
     use nickel_shell::plugin_panel::{
         PluginPanelApplication, codex_projects_manifest, manifest, on_screen_keyboard_manifest,
-        run_manifest, taskbar_manifest, volume_osd_manifest, window_preview_manifest,
+        run_manifest, volume_osd_manifest, window_preview_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
         [
             manifest(),
-            taskbar_manifest(),
             run_manifest(),
             codex_projects_manifest(),
             on_screen_keyboard_manifest(),
@@ -1096,72 +1095,6 @@ mod platform {
                 assert!(activation.approval_current(&staged.manifest, &staged.source_digest()));
                 assert!(activation.desired_enabled(&staged.manifest.id, false));
             }
-        }
-
-        #[test]
-        fn stages_and_watches_bundled_auxiliary_jsx() {
-            if Command::new(tsc_executable())
-                .arg("--version")
-                .output()
-                .is_err()
-            {
-                return;
-            }
-            let source = tempfile::tempdir().unwrap();
-            let taskbar = Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/taskbar"
-            ));
-            for name in ["plugin.json", "main.js", "ui.css"] {
-                std::fs::copy(taskbar.join(name), source.path().join(name)).unwrap();
-            }
-            std::fs::write(source.path().join("menu.js"), "stale menu").unwrap();
-            std::fs::write(
-                source.path().join("menu.jsx"),
-                "function App() { return <FixedWindow width=\"100%\" height=\"100%\"><Text>Fresh menu</Text></FixedWindow>; }",
-            )
-            .unwrap();
-            let package = load_dev_package(source.path()).unwrap();
-            let profile = tempfile::tempdir().unwrap();
-            stage(&package, source.path(), profile.path()).unwrap();
-            let staged = profile
-                .path()
-                .join("bundled-source/org.nickel.taskbar/menu.js");
-            let compiled = std::fs::read_to_string(staged).unwrap();
-            assert!(compiled.contains("Fresh menu"));
-            assert!(!compiled.contains("stale menu"));
-            let before = source_fingerprint(source.path(), "main.js").unwrap();
-            std::fs::write(
-                source.path().join("menu.jsx"),
-                "function App() { return <FixedWindow width=\"100%\" height=\"100%\"><Text>Updated menu</Text></FixedWindow>; }",
-            )
-            .unwrap();
-            assert_ne!(
-                source_fingerprint(source.path(), "main.js").unwrap(),
-                before
-            );
-        }
-
-        #[test]
-        fn reload_fingerprint_tracks_bundled_sibling_javascript() {
-            let directory = tempfile::tempdir().unwrap();
-            let root = Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/taskbar"
-            ));
-            std::fs::copy(
-                root.join("plugin.json"),
-                directory.path().join("plugin.json"),
-            )
-            .unwrap();
-            std::fs::copy(root.join("main.js"), directory.path().join("main.js")).unwrap();
-            std::fs::write(directory.path().join("menu.js"), "first").unwrap();
-            let first = source_fingerprint(directory.path(), "main.js").unwrap();
-            std::fs::write(directory.path().join("menu.js"), "second").unwrap();
-            assert_ne!(
-                first,
-                source_fingerprint(directory.path(), "main.js").unwrap()
-            );
         }
 
         #[test]

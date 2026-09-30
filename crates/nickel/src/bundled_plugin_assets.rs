@@ -6,18 +6,6 @@ pub(crate) fn resolve(
     entry: &str,
 ) -> Result<(&'static str, &'static str), String> {
     let assets = match (plugin_id, entry) {
-        ("org.nickel.taskbar", "main.js") => (
-            include_str!("../../../assets/plugins/taskbar/main.js"),
-            include_str!("../../../assets/plugins/taskbar/ui.css"),
-        ),
-        ("org.nickel.taskbar", "menu.js") => (
-            include_str!("../../../assets/plugins/taskbar/menu.js"),
-            include_str!("../../../assets/plugins/taskbar/ui.css"),
-        ),
-        ("org.nickel.taskbar", "window-menu.js") => (
-            include_str!("../../../assets/plugins/taskbar/window-menu.js"),
-            include_str!("../../../assets/plugins/taskbar/ui.css"),
-        ),
         ("org.nickel.volume-osd", "main.js") => (
             include_str!("../../../assets/plugins/volume-osd/main.js"),
             include_str!("../../../assets/plugins/volume-osd/ui.css"),

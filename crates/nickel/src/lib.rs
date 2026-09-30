@@ -1966,17 +1966,6 @@ fn handle_shell_input(
         }
         return Ok(());
     }
-    if role == SurfaceRole::WindowContextMenu {
-        let (width, height) = shell
-            .surface(surface)
-            .map(|entry| entry.window().size())
-            .unwrap_or_default();
-        if state.window_menu_host_input(event, width, height) {
-            sync_visibility(shell, state);
-            render_role(shell, state, role)?;
-        }
-        return Ok(());
-    }
     if role == SurfaceRole::WindowPreview {
         let outcome = state.preview_host_input(event);
         for failure in &outcome.failures {
@@ -2325,7 +2314,7 @@ fn handle_controller_action(
         SurfaceRole::Lock => state.lock_host_controller(action),
         SurfaceRole::ControlCenter => state.control_controller(action, width, height),
         SurfaceRole::WindowPreview => state.preview_controller(action),
-        SurfaceRole::WindowContextMenu => state.window_menu_host_controller(action),
+        SurfaceRole::WindowContextMenu => false,
         SurfaceRole::Notification => state.notification_controller(action),
         SurfaceRole::Desktop => false,
         SurfaceRole::Launcher => unreachable!("launcher controller input is handled semantically"),
@@ -3018,9 +3007,6 @@ pub fn run() -> Result<(), String> {
                     .map(|entry| entry.output_name().to_owned())
                 {
                     state.set_panel_output(output);
-                }
-                if state.panel_pointer_left() {
-                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                 }
             }
             Some(ShellEvent::PointerEntered {
@@ -3819,7 +3805,6 @@ mod tests {
         for direct_dispatch in [
             "control_controller(action, width, height)",
             "preview_controller(action)",
-            "window_menu_host_controller(action)",
             "notification_controller(action)",
             "plugin_panel_host_controller_for(&key, action, width, height)",
             "screenshot_controller(action)",
