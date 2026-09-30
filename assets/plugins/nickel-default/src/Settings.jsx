@@ -1,6 +1,7 @@
 // @jsx h
 import "./styles/settings.css";
 import { SettingsCollection } from "./SettingsCollection.js";
+import { SettingShortcut } from "./SettingShortcut.js";
 
 function settingValue(setting) {
     const value = typeof setting.value === "function" ? setting.value() : setting.value;
@@ -57,6 +58,9 @@ export function SettingControl(props) {
                     change(next);
                 }
             }} />;
+    }
+    if (setting.type === "shortcut") {
+        return <SettingShortcut setting={setting} value={value} controlId={controlId} onChange={change} />;
     }
     if (setting.type === "action") {
         return <Button id={controlId} onClick={() => change(null)}>{setting.actionLabel || setting.label}</Button>;
