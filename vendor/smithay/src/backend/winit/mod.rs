@@ -682,10 +682,17 @@ impl EventSource for WinitEventLoop {
     const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
 
     fn before_sleep(&mut self) -> calloop::Result<Option<(calloop::Readiness, calloop::Token)>> {
-        // Do not pump winit from this lifecycle hook. The registered winit FD wakes calloop and
-        // `process_events` drains it; pumping here can enter the host presentation path before
-        // calloop dispatches other already-readable sources, indefinitely starving compositor
-        // control and protocol sockets.
+        // Winit can buffer a host frame callback or redraw after its FD was drained. Without
+        // one nonblocking pump before sleeping, a coalesced redraw has no new FD edge and an
+        // asynchronous compositor capture can remain pending indefinitely. Stage events here;
+        // compositor input and rendering callbacks still run only in normal source dispatch.
+        // Drain the staged batch before pumping again, so a producer cannot accumulate an
+        // unbounded backlog while other compositor sources await their turn.
+        if self.pending_events.is_empty() {
+            let mut pending_events = Vec::new();
+            self.dispatch_new_events(|event| pending_events.push(event));
+            self.pending_events = pending_events;
+        }
         if self.pending_events.is_empty() {
             Ok(None)
         } else {
