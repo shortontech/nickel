@@ -904,11 +904,11 @@ fn launcher_plugin_images(
     images
 }
 
-fn render_plugin_host(
+fn step_plugin_host(
     host: &mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
     data: Option<String>,
     mut batch: HostBatch,
-) -> Result<(Vec<PaintCommand>, u64), String> {
+) -> Result<(nickel_ui::HostEventOutcome, u64), String> {
     if let Some(data) = data {
         batch.application_changed |= host.application_mut().sync_serialized_data(data)?;
     }
@@ -916,11 +916,18 @@ fn render_plugin_host(
     if let Some(error) = host.application_mut().take_runtime_failure() {
         return Err(error);
     }
-    Ok((
-        host.commands().to_vec(),
-        (outcome.telemetry.retained_frame_bytes as u64)
-            .saturating_add(host.application().retained_image_bytes()),
-    ))
+    let retained_bytes = (outcome.telemetry.retained_frame_bytes as u64)
+        .saturating_add(host.application().retained_image_bytes());
+    Ok((outcome, retained_bytes))
+}
+
+fn render_plugin_host(
+    host: &mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    data: Option<String>,
+    batch: HostBatch,
+) -> Result<(Vec<PaintCommand>, u64), String> {
+    let (_, retained_bytes) = step_plugin_host(host, data, batch)?;
+    Ok((host.commands().to_vec(), retained_bytes))
 }
 
 // This shared shell implementation includes the compositor-facing API. The
@@ -9868,30 +9875,23 @@ impl LiveShell {
 
     fn step_notification_plugin(
         &mut self,
-        mut batch: HostBatch,
+        batch: HostBatch,
     ) -> Option<nickel_ui::HostEventOutcome> {
         let projection = self.notification_plugin_projection();
         let host = self.plugin_notification_host.as_mut()?;
-        batch.application_changed |= match host
-            .application_mut()
-            .sync_serialized_data(projection.to_json())
-        {
-            Ok(changed) => changed,
-            Err(error) => {
-                self.fail_notification_plugin_runtime(error);
-                return None;
-            }
-        };
-        let mut outcome = host.step(batch);
+        let (mut outcome, retained_bytes) =
+            match step_plugin_host(host, Some(projection.to_json()), batch) {
+                Ok(result) => result,
+                Err(error) => {
+                    self.fail_notification_plugin_runtime(error);
+                    return None;
+                }
+            };
         let effects = host.application_mut().take_effects();
-        if let Some(error) = host.application_mut().take_runtime_failure() {
-            self.fail_notification_plugin_runtime(error);
-            return None;
-        }
         let _ = self.plugin_registry.record_memory(
             &crate::plugin_panel::notification_manifest().id,
             nickel_core::plugins::PluginMemory {
-                native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
+                native_ui_bytes: Some(retained_bytes),
                 ..nickel_core::plugins::PluginMemory::default()
             },
         );
@@ -10978,23 +10978,16 @@ impl LiveShell {
         let (data, images) = self.taskbar_plugin_render_data(&clock);
         let host = self.plugin_taskbar_host.as_mut()?;
         let image_changed = host.application_mut().sync_images(images);
-        let projection_changed = match host.application_mut().sync_serialized_data(data) {
-            Ok(changed) => changed,
+        batch.application_changed |= image_changed;
+        batch.surface_size = Some((width, height));
+        let (mut outcome, _) = match step_plugin_host(host, Some(data), batch) {
+            Ok(result) => result,
             Err(error) => {
                 self.fail_taskbar_plugin_runtime(error);
                 return None;
             }
         };
-        let host = self.plugin_taskbar_host.as_mut()?;
-        batch.application_changed |= image_changed || projection_changed;
-        batch.surface_size = Some((width, height));
-        let mut outcome = host.step(batch);
-        let application = host.application_mut();
-        let effects = application.take_effects();
-        if let Some(error) = application.take_runtime_failure() {
-            self.fail_taskbar_plugin_runtime(error);
-            return None;
-        }
+        let effects = host.application_mut().take_effects();
         if self.plugin_taskbar_memory.len() >= 32
             && !self.plugin_taskbar_memory.contains_key(&self.panel_output)
         {
