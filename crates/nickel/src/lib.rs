@@ -1,8 +1,7 @@
-mod audio_capabilities;
 pub mod appearance_capabilities;
-pub mod run_capabilities;
 pub mod appearance_service;
 pub mod application_scale_capability;
+mod audio_capabilities;
 mod display_capabilities;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod remote_default_associations;
@@ -14,6 +13,7 @@ mod remote_policy;
 mod remote_preferred_applications;
 mod remote_surface_authority;
 mod remote_terminal_launch_policy;
+pub mod run_capabilities;
 mod session_capabilities;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
@@ -4040,4 +4040,5 @@ mod tests {
     }
 }
 
+pub mod keyboard_capabilities;
 mod window_preview_capabilities;

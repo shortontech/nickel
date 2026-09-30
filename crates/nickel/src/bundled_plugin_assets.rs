@@ -6,9 +6,9 @@ pub(crate) fn resolve(
     entry: &str,
 ) -> Result<(&'static str, &'static str), String> {
     let assets = match (plugin_id, entry) {
-        ("org.nickel.on-screen-keyboard", "main.js") => (
-            include_str!("../../../assets/plugins/on-screen-keyboard/main.js"),
-            include_str!("../../../assets/plugins/on-screen-keyboard/ui.css"),
+        ("org.nickel.hello-panel", "main.js") => (
+            include_str!("../../../assets/plugins/hello-panel/main.js"),
+            include_str!("../../../assets/plugins/hello-panel/ui.css"),
         ),
         _ => {
             return Err(format!(

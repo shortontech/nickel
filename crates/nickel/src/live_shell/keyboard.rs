@@ -6,14 +6,18 @@ use nickel_session_protocol::OnScreenKeyboardInput;
 use nickel_ui::on_screen_keyboard::KeyboardEffect;
 
 impl LiveShell {
-    pub(super) fn keyboard_plugin_data(&self) -> serde_json::Value {
+    pub(crate) fn keyboard_placement_preferences(&self) -> (bool, u32) {
+        (self.keyboard_dock_top, self.keyboard_height)
+    }
+    pub(super) fn keyboard_service_snapshot(&self) -> serde_json::Value {
         let rows = if self.keyboard_visible {
             self.keyboard_host.application().display_rows(true)
         } else {
             Vec::new()
         };
         serde_json::json!({
-            "generation": self.keyboard_plugin_generation,
+            "available": self.keyboard_enabled && self.keyboard_visible && !self.locked && self.active_shell_declares("keyboard"),
+            "generation": self.keyboard_service_generation,
             "height": self.keyboard_height,
             "dockTop": self.keyboard_dock_top,
             "recipientAvailable": self.keyboard_recipient.as_ref().is_some_and(|snapshot| snapshot.has_recipient()),
@@ -28,17 +32,14 @@ impl LiveShell {
     ) -> bool {
         use crate::plugin_panel::PluginEffect;
         use nickel_ui::on_screen_keyboard::KeyboardMessage;
-        let generation = match &effect {
-            PluginEffect::KeyboardKey { generation, .. }
-            | PluginEffect::KeyboardHide { generation }
-            | PluginEffect::KeyboardDock { generation }
-            | PluginEffect::KeyboardHold { generation }
-            | PluginEffect::KeyboardResize { generation, .. } => *generation,
-            _ => return false,
+        let PluginEffect::Keyboard { plugin_id, effect } = effect else {
+            return false;
         };
-        if generation != self.keyboard_plugin_generation
-            || !self.keyboard_visible
-            || !self.plugin_surface_matches(&crate::plugin_panel::on_screen_keyboard_surface_key())
+        if !self.public_native_granted(
+            &plugin_id,
+            nickel_core::plugins::PluginCapability::OnScreenKeyboardInput,
+        ) || effect.validate(&self.keyboard_service_snapshot()).is_err()
+            || !self.plugin_surface_matches(&self.active_shell_surface_key("keyboard"))
         {
             return false;
         }
@@ -47,36 +48,36 @@ impl LiveShell {
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.has_recipient() && snapshot.epoch == *epoch)
         });
-        match effect {
-            PluginEffect::KeyboardKey { id, .. } => {
+        match effect.operation.as_str() {
+            "keyboard.press" => {
                 if valid_epoch.is_none()
                     || !self
                         .keyboard_host
                         .application_mut()
-                        .press_display_key(true, &id)
+                        .press_display_key(true, effect.id.as_deref().unwrap_or(""))
                 {
                     return false;
                 }
             }
-            PluginEffect::KeyboardHide { .. } => self
+            "keyboard.hide" => self
                 .keyboard_host
                 .application_mut()
                 .update(KeyboardMessage::Hide),
-            PluginEffect::KeyboardDock { .. } => self
+            "keyboard.toggleDock" => self
                 .keyboard_host
                 .application_mut()
                 .update(KeyboardMessage::ToggleDock),
-            PluginEffect::KeyboardHold { .. } => self
+            "keyboard.holdModifiers" => self
                 .keyboard_host
                 .application_mut()
                 .update(KeyboardMessage::PersistentModifiers),
-            PluginEffect::KeyboardResize { delta, .. } => self
+            "keyboard.resize" => self
                 .keyboard_host
                 .application_mut()
-                .update(KeyboardMessage::ResizeBy(delta)),
-            _ => unreachable!(),
+                .update(KeyboardMessage::ResizeBy(effect.delta.unwrap_or(0))),
+            _ => return false,
         }
-        self.keyboard_plugin_generation = self.keyboard_plugin_generation.saturating_add(1);
+        self.keyboard_service_generation = self.keyboard_service_generation.saturating_add(1);
         self.keyboard_step(
             HostBatch {
                 application_changed: true,
@@ -185,7 +186,14 @@ impl LiveShell {
             if self.locked && self.keyboard_visible {
                 self.set_keyboard_visible(false);
             }
+            if snapshot.visible && (!self.active_shell_declares("keyboard") || self.locked) {
+                self.set_keyboard_visible(false);
+                snapshot.visible = false;
+            }
             self.keyboard_visible = snapshot.visible;
+            if self.active_shell_declares("keyboard") {
+                self.set_default_shell_surface_visible("keyboard", self.keyboard_visible);
+            }
             self.keyboard_dock_top = snapshot.dock_top;
             self.keyboard_height = snapshot.height;
             self.keyboard_host
@@ -204,7 +212,8 @@ impl LiveShell {
             }
             let changed = previous.as_ref() != Some(&snapshot);
             if changed {
-                self.keyboard_plugin_generation = self.keyboard_plugin_generation.saturating_add(1);
+                self.keyboard_service_generation =
+                    self.keyboard_service_generation.saturating_add(1);
             }
             let auto_show = enabled && !self.keyboard_visible && snapshot.auto_show_requested;
             self.keyboard_recipient = Some(snapshot);
@@ -230,7 +239,8 @@ impl LiveShell {
                     .recipient_changed(snapshot.has_recipient());
             }
             if changed {
-                self.keyboard_plugin_generation = self.keyboard_plugin_generation.saturating_add(1);
+                self.keyboard_service_generation =
+                    self.keyboard_service_generation.saturating_add(1);
             }
             self.keyboard_recipient = Some(snapshot);
             changed
@@ -238,7 +248,10 @@ impl LiveShell {
     }
 
     pub fn set_keyboard_visible(&mut self, visible: bool) -> bool {
-        let visible = visible && self.keyboard_enabled && !self.locked;
+        let visible = visible
+            && self.keyboard_enabled
+            && !self.locked
+            && self.active_shell_declares("keyboard");
         let visibility_changed = self.keyboard_visible != visible;
         #[cfg(target_os = "linux")]
         if self
@@ -258,11 +271,14 @@ impl LiveShell {
             return false;
         }
         self.keyboard_visible = visible;
+        if self.active_shell_declares("keyboard") {
+            self.set_default_shell_surface_visible("keyboard", visible);
+        }
         if !visible {
             self.keyboard_resize = None;
         }
         if visibility_changed {
-            self.keyboard_plugin_generation = self.keyboard_plugin_generation.saturating_add(1);
+            self.keyboard_service_generation = self.keyboard_service_generation.saturating_add(1);
             self.keyboard_gesture_leases.clear();
             self.keyboard_host
                 .application_mut()
@@ -641,12 +657,17 @@ mod windows_tests {
         shell.set_keyboard_visible(true);
         assert!(shell.native_surface_visible(
             SurfaceRole::Panel,
-            Some(&crate::plugin_panel::on_screen_keyboard_surface_key())
+            Some(&shell.active_shell_surface_key("keyboard"))
         ));
         assert!(!shell.surface_visible(SurfaceRole::OnScreenKeyboard));
-        let effect = crate::plugin_panel::PluginEffect::KeyboardKey {
-            id: "osk-char-97".into(),
-            generation: shell.keyboard_plugin_generation,
+        let effect = crate::plugin_panel::PluginEffect::Keyboard {
+            plugin_id: "nickel-default".into(),
+            effect: crate::keyboard_capabilities::KeyboardRequest {
+                operation: "keyboard.press".into(),
+                id: Some("osk-char-97".into()),
+                generation: shell.keyboard_service_generation,
+                delta: None,
+            },
         };
         assert!(shell.apply_keyboard_plugin_effect(effect.clone(), Some(19)));
         assert_eq!(
@@ -655,9 +676,14 @@ mod windows_tests {
         );
         host.snapshot.lock().unwrap().epoch = 20;
         shell.refresh_keyboard();
-        let stale = crate::plugin_panel::PluginEffect::KeyboardKey {
-            id: "osk-char-97".into(),
-            generation: shell.keyboard_plugin_generation,
+        let stale = crate::plugin_panel::PluginEffect::Keyboard {
+            plugin_id: "nickel-default".into(),
+            effect: crate::keyboard_capabilities::KeyboardRequest {
+                operation: "keyboard.press".into(),
+                id: Some("osk-char-97".into()),
+                generation: shell.keyboard_service_generation,
+                delta: None,
+            },
         };
         assert!(!shell.apply_keyboard_plugin_effect(stale, Some(19)));
         assert_eq!(host.inputs.lock().unwrap().len(), 1);
@@ -675,6 +701,17 @@ mod tests {
     struct Host(Mutex<Vec<(u64, OnScreenKeyboardInput)>>);
     impl crate::session_host::SessionHost for Host {
         fn dispatch(&self, _: platform::ShellCommand) -> Result<(), platform::SessionRequestError> {
+            Ok(())
+        }
+        fn configure_keyboard(
+            &self,
+            _: bool,
+            _: bool,
+            _: u64,
+            _: bool,
+            _: bool,
+            _: u32,
+        ) -> Result<(), platform::SessionRequestError> {
             Ok(())
         }
         fn keyboard_input(
@@ -753,7 +790,17 @@ mod tests {
         let host = Arc::new(Host::default());
         let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
         shell.keyboard_enabled = true;
-        shell.keyboard_visible = true;
+        assert!(
+            shell.active_shell_declares("keyboard"),
+            "{:?}",
+            shell.plugin_registry.get("nickel-default")
+        );
+        assert!(shell.set_keyboard_visible(true));
+        assert!(
+            shell.plugin_surface_matches(&shell.active_shell_surface_key("keyboard")),
+            "{:?}",
+            shell.show_plugin_window("nickel-default", "keyboard")
+        );
         shell.keyboard_recipient = Some(OnScreenKeyboardSnapshot {
             epoch: 19,
             generation: 1,
@@ -783,17 +830,27 @@ mod tests {
         let pressed_epoch = shell.keyboard_gesture_epoch(&input(KeyEdge::Released));
         assert_eq!(pressed_epoch, Some(19));
         assert!(!shell.apply_keyboard_plugin_effect(
-            crate::plugin_panel::PluginEffect::KeyboardKey {
-                id: "osk-char-97".into(),
-                generation: shell.keyboard_plugin_generation,
+            crate::plugin_panel::PluginEffect::Keyboard {
+                plugin_id: "nickel-default".into(),
+                effect: crate::keyboard_capabilities::KeyboardRequest {
+                    operation: "keyboard.press".into(),
+                    id: Some("osk-char-97".into()),
+                    generation: shell.keyboard_service_generation,
+                    delta: None
+                }
             },
             pressed_epoch,
         ));
         assert!(host.0.lock().unwrap().is_empty());
         assert!(shell.apply_keyboard_plugin_effect(
-            crate::plugin_panel::PluginEffect::KeyboardKey {
-                id: "osk-char-97".into(),
-                generation: shell.keyboard_plugin_generation,
+            crate::plugin_panel::PluginEffect::Keyboard {
+                plugin_id: "nickel-default".into(),
+                effect: crate::keyboard_capabilities::KeyboardRequest {
+                    operation: "keyboard.press".into(),
+                    id: Some("osk-char-97".into()),
+                    generation: shell.keyboard_service_generation,
+                    delta: None
+                }
             },
             Some(20),
         ));
@@ -801,5 +858,23 @@ mod tests {
             *host.0.lock().unwrap(),
             vec![(20, OnScreenKeyboardInput::Text { text: "a".into() })]
         );
+        let current = crate::plugin_panel::PluginEffect::Keyboard {
+            plugin_id: "nickel-default".into(),
+            effect: crate::keyboard_capabilities::KeyboardRequest {
+                operation: "keyboard.press".into(),
+                id: Some("osk-char-97".into()),
+                generation: shell.keyboard_service_generation,
+                delta: None,
+            },
+        };
+        shell.locked = true;
+        assert!(!shell.apply_keyboard_plugin_effect(current.clone(), Some(20)));
+        shell.locked = false;
+        shell
+            .plugin_registry
+            .set_enabled("nickel-default", false)
+            .unwrap();
+        assert!(!shell.apply_keyboard_plugin_effect(current, Some(20)));
+        assert_eq!(host.0.lock().unwrap().len(), 1);
     }
 }

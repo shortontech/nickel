@@ -342,12 +342,7 @@ impl InternalShellCoordinator {
                 {
                     continue;
                 }
-                if role == SurfaceRole::OnScreenKeyboard
-                    && cfg!(target_os = "linux")
-                    && self.shell.plugin_surface_matches(
-                        &crate::plugin_panel::on_screen_keyboard_surface_key(),
-                    )
-                {
+                if role == SurfaceRole::OnScreenKeyboard {
                     continue;
                 }
                 let plugin = match role {
@@ -650,7 +645,7 @@ impl InternalShellCoordinator {
                     == Some(&self.shell.active_shell_surface_key("quick-settings")))
             || (roles.contains(&SurfaceRole::OnScreenKeyboard)
                 && surface.plugin.as_ref()
-                    == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()))
+                    == Some(&self.shell.active_shell_surface_key("keyboard")))
     }
 
     pub fn visible(&self, id: InternalSurfaceId) -> bool {
@@ -1022,8 +1017,7 @@ impl InternalShellCoordinator {
         }
         let mut dependent_roles = Vec::new();
         if (entry.role == SurfaceRole::OnScreenKeyboard
-            || entry.plugin.as_ref()
-                == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()))
+            || entry.plugin.as_ref() == Some(&self.shell.active_shell_surface_key("keyboard")))
             && batch.window_focused == Some(false)
         {
             changed |= self.shell.keyboard_host_input(
@@ -1327,6 +1321,10 @@ impl InternalShellCoordinator {
 
     pub(crate) fn can_show_launcher(&self) -> bool {
         self.shell.can_show_launcher()
+    }
+
+    pub(crate) fn keyboard_placement_preferences(&self) -> (bool, u32) {
+        self.shell.keyboard_placement_preferences()
     }
 
     pub(crate) fn active_shell_surface_key(
@@ -1973,173 +1971,6 @@ mod tests {
         ));
     }
 
-    struct StorageHost(Arc<AtomicU8>);
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn native_keyboard_normalized_gesture_uses_press_epoch_and_blur_cancels_release() {
-        use nickel_input::{
-            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
-        };
-        use nickel_session_protocol::{
-            OnScreenKeyboardInput, OnScreenKeyboardSnapshot, ShellSemanticTarget, WindowId,
-        };
-        struct KeyboardHost(std::sync::Mutex<Vec<(u64, OnScreenKeyboardInput)>>);
-        impl SessionHost for KeyboardHost {
-            fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
-                Ok(())
-            }
-            fn keyboard_snapshot(&self) -> Result<OnScreenKeyboardSnapshot, SessionRequestError> {
-                Ok(OnScreenKeyboardSnapshot {
-                    enabled: true,
-                    visible: true,
-                    epoch: 19,
-                    generation: 1,
-                    recipient: Some(WindowId(7)),
-                    ..Default::default()
-                })
-            }
-            fn configure_keyboard(
-                &self,
-                _: bool,
-                _: bool,
-                _: u64,
-                _: bool,
-                _: bool,
-                _: u32,
-            ) -> Result<(), SessionRequestError> {
-                Ok(())
-            }
-            fn keyboard_input(
-                &self,
-                epoch: u64,
-                input: OnScreenKeyboardInput,
-            ) -> Result<(), SessionRequestError> {
-                self.0.lock().unwrap().push((epoch, input));
-                Ok(())
-            }
-        }
-        let host = Arc::new(KeyboardHost(std::sync::Mutex::new(Vec::new())));
-        let mut coordinator =
-            InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
-        coordinator
-            .shell
-            .set_plugin_enabled(
-                &crate::plugin_panel::on_screen_keyboard_manifest().id,
-                false,
-            )
-            .unwrap();
-        coordinator.set_outputs(&[InternalOutput {
-            name: "test".into(),
-            x: 0,
-            y: 0,
-            width: 1280,
-            height: 1104,
-            scale: 1.0,
-        }]);
-        coordinator.poll(Instant::now());
-        let id = coordinator
-            .surface(SurfaceRole::OnScreenKeyboard, None)
-            .unwrap()
-            .id;
-        // The session supplies authority geometry before rendering. Resolve a
-        // production key after resize so both its hit target and input dispatch
-        // use the new dimensions, not the output-derived default role height.
-        assert!(coordinator.set_surface_size(id, (1280, 280)));
-        assert!(!coordinator.set_surface_size(id, (1280, 280)));
-        assert_eq!(
-            coordinator.surfaces.get(id).unwrap().logical_size(),
-            (1280, 280)
-        );
-        coordinator.scene(id);
-        let target = coordinator
-            .shell
-            .resolve_semantic_target(&ShellSemanticTarget::OnScreenKeyboard {
-                key: "osk-char-97".into(),
-            })
-            .unwrap();
-        let event = |edge| HostBatch {
-            events: vec![nickel_ui::HostEvent::Normalized {
-                input: InputEvent::Pointer(PointerEvent::Button {
-                    device: DeviceId(1),
-                    order: EventOrder(1),
-                    button: PointerButton::Primary,
-                    edge,
-                    position: Some(nickel_input::Point {
-                        x: f64::from(target.x),
-                        y: f64::from(target.y),
-                    }),
-                }),
-                clipboard_text: None,
-            }],
-            ..Default::default()
-        };
-        coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
-        coordinator.step_slot_changes(id, event(KeyEdge::Released));
-        assert_eq!(
-            *host.0.lock().unwrap(),
-            vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
-        );
-        coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
-        coordinator.step_slot_changes(
-            id,
-            HostBatch {
-                window_focused: Some(false),
-                ..Default::default()
-            },
-        );
-        coordinator.step_slot_changes(id, event(KeyEdge::Released));
-        assert_eq!(host.0.lock().unwrap().len(), 1);
-        let touch = |started| HostBatch {
-            events: vec![nickel_ui::HostEvent::Normalized {
-                input: InputEvent::Touch(if started {
-                    nickel_input::TouchEvent::Started {
-                        device: DeviceId(2),
-                        contact: nickel_input::TouchId(1),
-                        order: EventOrder(2),
-                        position: nickel_input::Point {
-                            x: f64::from(target.x),
-                            y: f64::from(target.y),
-                        },
-                    }
-                } else {
-                    nickel_input::TouchEvent::Ended {
-                        device: DeviceId(2),
-                        contact: nickel_input::TouchId(1),
-                        order: EventOrder(3),
-                        position: nickel_input::Point {
-                            x: f64::from(target.x),
-                            y: f64::from(target.y),
-                        },
-                    }
-                }),
-                clipboard_text: None,
-            }],
-            ..Default::default()
-        };
-        coordinator.step_slot_changes(id, touch(true));
-        coordinator.step_slot_changes(id, touch(false));
-        assert_eq!(host.0.lock().unwrap().len(), 2);
-        assert_eq!(host.0.lock().unwrap()[1].0, 19);
-        coordinator.step_slot_changes(id, touch(true));
-        coordinator.step_slot_changes(
-            id,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Normalized {
-                    input: InputEvent::Touch(nickel_input::TouchEvent::Cancelled {
-                        device: DeviceId(2),
-                        contact: nickel_input::TouchId(1),
-                        order: EventOrder(4),
-                    }),
-                    clipboard_text: None,
-                }],
-                ..Default::default()
-            },
-        );
-        coordinator.step_slot_changes(id, touch(false));
-        assert_eq!(host.0.lock().unwrap().len(), 2);
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn jsx_keyboard_click_delivers_to_the_press_time_recipient() {
@@ -2191,16 +2022,18 @@ mod tests {
         });
         let mut coordinator =
             InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
-        coordinator.set_outputs(&[InternalOutput {
+        let output = InternalOutput {
             name: "test".into(),
             x: 0,
             y: 0,
             width: 1280,
             height: 800,
             scale: 1.0,
-        }]);
+        };
+        coordinator.set_outputs(std::slice::from_ref(&output));
         coordinator.poll(Instant::now());
-        let key = crate::plugin_panel::on_screen_keyboard_surface_key();
+        coordinator.set_outputs(std::slice::from_ref(&output));
+        let key = coordinator.shell.active_shell_surface_key("keyboard");
         assert!(
             coordinator
                 .surface(SurfaceRole::OnScreenKeyboard, None)
@@ -2245,42 +2078,9 @@ mod tests {
         coordinator.poll(Instant::now());
         coordinator.step_slot_changes(id, event(KeyEdge::Released));
         assert_eq!(host.inputs.lock().unwrap().len(), 1);
-
-        coordinator
-            .shell
-            .set_plugin_enabled(
-                &crate::plugin_panel::on_screen_keyboard_manifest().id,
-                false,
-            )
-            .unwrap();
-        let output = InternalOutput {
-            name: "test".into(),
-            x: 0,
-            y: 0,
-            width: 1280,
-            height: 800,
-            scale: 1.0,
-        };
-        coordinator.set_outputs(&[output.clone()]);
-        assert!(coordinator.plugin_surface(&key, "test").is_none());
-        assert!(
-            coordinator
-                .surface(SurfaceRole::OnScreenKeyboard, None)
-                .is_some()
-        );
-        coordinator
-            .shell
-            .set_plugin_enabled(&crate::plugin_panel::on_screen_keyboard_manifest().id, true)
-            .unwrap();
-        coordinator.set_outputs(&[output]);
-        assert!(coordinator.plugin_surface(&key, "test").is_some());
-        assert!(
-            coordinator
-                .surface(SurfaceRole::OnScreenKeyboard, None)
-                .is_none()
-        );
     }
 
+    struct StorageHost(Arc<AtomicU8>);
     impl SessionHost for StorageHost {
         fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {
             Ok(())

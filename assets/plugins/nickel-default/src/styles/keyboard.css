@@ -1,6 +1,6 @@
 window.keyboard-window {
-    background: #242931f1;
-    border: 1px solid #596274;
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
     border-radius: 12px;
     padding: 10px;
 }
@@ -12,7 +12,7 @@ column.keyboard-content {
     gap: 8px;
 }
 
-row {
+row.keyboard-toolbar, row.keyboard-key-row, row.keyboard-footer {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -22,19 +22,19 @@ row.keyboard-key-row {
     width: 100%;
 }
 
-text {
-    color: #f3f5f8;
+window.keyboard-window text {
+    color: var(--nickel-text);
     font-size: 14px;
     line-height: 20px;
 }
 
-button {
+window.keyboard-window button {
     min-height: 39px;
     padding: 6px;
-    background: #353c4b;
-    border: 1px solid #596274;
+    background: var(--nickel-surface-raised);
+    border: 1px solid var(--nickel-border);
     border-radius: 6px;
-    color: #f3f5f8;
+    color: var(--nickel-text);
     font-size: 14px;
 }
 

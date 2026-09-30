@@ -7336,6 +7336,7 @@ impl NickelSession {
                     | crate::winit_shell::SurfaceRole::Screenshot
             ) || surface.plugin.as_ref()
                 == Some(&shell.active_shell_surface_key("quick-settings"))
+                || surface.plugin.as_ref() == Some(&shell.active_shell_surface_key("keyboard"))
             {
                 surface.size = (placement.geometry.2, placement.geometry.3);
                 resized = shell.set_surface_size(surface.id, surface.size);
@@ -15967,6 +15968,18 @@ fn adjust_internal_plugin_surface_placement(
     shell: &crate::internal_shell::InternalShellCoordinator,
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
 ) {
+    if *key == shell.active_shell_surface_key("keyboard") {
+        let (dock_top, height) = shell.keyboard_placement_preferences();
+        if let Some(keyboard) = internal_keyboard_surface_placement(
+            placement.output.as_deref(),
+            dock_top,
+            height,
+            outputs,
+        ) {
+            *placement = keyboard;
+        }
+        return;
+    }
     if shell.plugin_panel_reserves_work_area(key) {
         let offset = placement
             .output
@@ -15988,9 +16001,6 @@ fn adjust_internal_plugin_surface_placement(
         (offset_x, offset_y),
         outputs,
     );
-    if *key == crate::plugin_panel::on_screen_keyboard_surface_key() {
-        placement.role = crate::session::InternalSurfaceRole::OnScreenKeyboard;
-    }
 }
 
 fn place_reserved_plugin_panel(

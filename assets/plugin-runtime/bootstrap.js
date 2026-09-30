@@ -326,7 +326,13 @@ const nickel = Object.freeze({
         toggle() { __effects.push({type:'projects.toggle'}); }
     }),
     keyboard: Object.freeze({
-        toggle() { __effects.push({type:'keyboard.toggle'}); }
+        get() { return __nickelResource('keyboard', {available:false,generation:0,rows:[],recipientAvailable:false,operations:{}}); },
+        toggle() { __effects.push({type:'keyboard.toggle'}); },
+        press(id) { if(typeof id !== 'string' || !id || id.length > 64) throw TypeError('invalid keyboard key'); __effects.push({type:'keyboard.press',id,generation:this.get().generation}); },
+        hide() { __effects.push({type:'keyboard.hide',generation:this.get().generation}); },
+        toggleDock() { __effects.push({type:'keyboard.toggleDock',generation:this.get().generation}); },
+        holdModifiers() { __effects.push({type:'keyboard.holdModifiers',generation:this.get().generation}); },
+        resize(delta) { if(delta !== -32 && delta !== 32) throw TypeError('invalid keyboard resize'); __effects.push({type:'keyboard.resize',delta,generation:this.get().generation}); }
     }),
     clock: Object.freeze({
         get() { return __nickelResource('clock', {unixMilliseconds:Date.now(),utcOffsetMinutes:0}); }

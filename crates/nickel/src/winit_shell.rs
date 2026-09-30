@@ -871,8 +871,6 @@ impl WinitShell {
             }
         }
 
-        #[cfg(target_os = "windows")]
-        self.create_surface(SurfaceRole::OnScreenKeyboard, 0, primary, primary_name)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -924,8 +922,6 @@ impl WinitShell {
                 self.plugin_panel_surface.clone(),
             );
         }
-        let keyboard_plugin_active =
-            active_panels.contains_key(&crate::plugin_panel::on_screen_keyboard_surface_key());
         let mut desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
         let outputs = panel_outputs(
             &output_names,
@@ -952,7 +948,7 @@ impl WinitShell {
         let launcher_available = launcher_plugin_surface_available(&self.active_fixed_plugins);
         self.surfaces.retain(|surface| match surface.role {
             SurfaceRole::Launcher => launcher_available,
-            SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
+            SurfaceRole::OnScreenKeyboard => false,
             SurfaceRole::Screenshot => true,
             SurfaceRole::WindowContextMenu | SurfaceRole::VolumeOsd => false,
             SurfaceRole::Desktop => desired.contains(&(surface.output_name.clone(), surface.role)),
@@ -1111,11 +1107,9 @@ impl WinitShell {
             SurfaceRole::Launcher,
             SurfaceRole::WindowPreview,
             SurfaceRole::WindowContextMenu,
-            SurfaceRole::OnScreenKeyboard,
             SurfaceRole::Screenshot,
         ] {
             if (role == SurfaceRole::Launcher && launcher_available
-                || role == SurfaceRole::OnScreenKeyboard && !keyboard_plugin_active
                 || role == SurfaceRole::Screenshot
                 || fixed_plugin_surface_key(role, &self.active_fixed_plugins)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))

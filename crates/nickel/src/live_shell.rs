@@ -759,7 +759,7 @@ pub struct LiveShell {
     requested_codex_project: Option<String>,
     screenshot: ScreenshotTool,
     keyboard_host: nickel_ui::UiHost<nickel_ui::on_screen_keyboard::KeyboardApp>,
-    keyboard_plugin_generation: u64,
+    keyboard_service_generation: u64,
     keyboard_visible: bool,
     keyboard_enabled: bool,
     #[cfg(target_os = "windows")]
@@ -1224,7 +1224,6 @@ impl LiveShell {
         let launcher_icons = LauncherIconCache::new();
         let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
         plugin_registry.register(crate::plugin_panel::manifest().clone())?;
-        plugin_registry.register(crate::plugin_panel::on_screen_keyboard_manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
         #[cfg(not(test))]
@@ -1489,7 +1488,7 @@ impl LiveShell {
                 1280,
                 nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
             ),
-            keyboard_plugin_generation: 1,
+            keyboard_service_generation: 1,
             keyboard_visible: false,
             keyboard_enabled,
             #[cfg(target_os = "windows")]
@@ -1506,15 +1505,6 @@ impl LiveShell {
         };
         if plugin_activation.desired_enabled("nickel-default", true) || safe_mode {
             shell.set_plugin_enabled("nickel-default", true)?;
-        }
-        if plugin_activation
-            .desired_enabled(&crate::plugin_panel::on_screen_keyboard_manifest().id, true)
-        {
-            let data = shell.keyboard_plugin_data();
-            shell.start_initial_bundled_surface(
-                crate::plugin_panel::on_screen_keyboard_manifest(),
-                data.to_string(),
-            )?;
         }
         #[cfg(not(test))]
         for id in shell
@@ -2737,12 +2727,7 @@ impl LiveShell {
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::Lock => self.locked,
             SurfaceRole::Screenshot => self.screenshot.visible(),
-            SurfaceRole::OnScreenKeyboard => {
-                self.keyboard_visible
-                    && !self.plugin_surface_matches(
-                        &crate::plugin_panel::on_screen_keyboard_surface_key(),
-                    )
-            }
+            SurfaceRole::OnScreenKeyboard => false,
             SurfaceRole::CodexChat => true,
             #[cfg(target_os = "windows")]
             SurfaceRole::TrustedControl => false,
@@ -2754,11 +2739,11 @@ impl LiveShell {
         role: SurfaceRole,
         key: Option<&nickel_core::plugins::PluginSurfaceKey>,
     ) -> bool {
-        if key == Some(&crate::plugin_panel::on_screen_keyboard_surface_key()) {
+        if key == Some(&self.active_shell_surface_key("keyboard")) {
             return role == SurfaceRole::Panel
                 && self.keyboard_visible
                 && self.keyboard_enabled
-                && self.plugin_surface_matches(&crate::plugin_panel::on_screen_keyboard_surface_key());
+                && self.plugin_surface_matches(&self.active_shell_surface_key("keyboard"));
         }
         if role == SurfaceRole::CodexProjectMenu {
             return self.codex_project_menu_visible
@@ -2881,6 +2866,10 @@ impl LiveShell {
         }
         if old != id {
             self.retire_preview_plugin_state();
+            self.keyboard_gesture_leases.clear();
+            self.keyboard_host
+                .application_mut()
+                .recipient_changed(false);
             for (key, (_, host)) in &self.plugin_surface_hosts {
                 if key.plugin_id == old
                     && let Err(error) = host.application().retire_surface()
@@ -2892,6 +2881,13 @@ impl LiveShell {
                 .retain(|key, _| key.plugin_id != old);
             self.plugin_window_placement_overrides
                 .retain(|key, _| key.plugin_id != old);
+        }
+        if self.keyboard_visible {
+            if self.active_shell_declares("keyboard") {
+                self.set_default_shell_surface_visible("keyboard", true);
+            } else {
+                self.set_keyboard_visible(false);
+            }
         }
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
@@ -3033,10 +3029,6 @@ impl LiveShell {
     )> {
         let mut panels = Vec::new();
         panels.extend(self.plugin_panels());
-        let keyboard_key = crate::plugin_panel::on_screen_keyboard_surface_key();
-        if let Some((surface, _)) = self.plugin_surface_hosts.get(&keyboard_key) {
-            panels.push((keyboard_key, surface.clone()));
-        }
 
         panels
     }
@@ -3067,10 +3059,19 @@ impl LiveShell {
             .into_iter()
             .find(|(candidate, _)| candidate == key)
             .map(|(_, surface)| {
+                let anchor = if *key == self.active_shell_surface_key("keyboard") {
+                    if self.keyboard_dock_top {
+                        nickel_core::plugins::PluginSurfaceAnchor::TopLeft
+                    } else {
+                        nickel_core::plugins::PluginSurfaceAnchor::BottomLeft
+                    }
+                } else {
+                    surface.anchor
+                };
                 (
                     surface.kind,
                     surface.bottom_offset,
-                    surface.anchor,
+                    anchor,
                     surface.offset_x,
                     surface.offset_y,
                 )
@@ -3686,6 +3687,23 @@ impl LiveShell {
             .then(|| crate::audio_capabilities::snapshot(&self.audio, self.locked))
     }
 
+    fn plugin_keyboard_snapshot(&self, id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(id)
+            .map(|package| &package.manifest)
+            .or_else(|| self.plugin_registry.get(id).map(|entry| &entry.manifest))?;
+        manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::OnScreenKeyboardRead)
+            .then(|| {
+                let mut snapshot = self.keyboard_service_snapshot();
+                let granted = self.public_native_granted(id, nickel_core::plugins::PluginCapability::OnScreenKeyboardInput) && snapshot["available"] == true;
+                snapshot["operations"] = serde_json::json!({"press":granted && snapshot["recipientAvailable"] == true,"hide":granted,"toggleDock":granted,"holdModifiers":granted,"resize":granted});
+                snapshot
+            })
+    }
+
     fn plugin_workspace_snapshot(&self, id: &str) -> Option<serde_json::Value> {
         let manifest = self
             .external_plugin_packages
@@ -3839,6 +3857,7 @@ impl LiveShell {
             ("wifi", self.plugin_connectivity(id, true)),
             ("bluetooth", self.plugin_connectivity(id, false)),
             ("displays", self.plugin_displays(id)),
+            ("keyboard", self.plugin_keyboard_snapshot(id)),
             ("workspaces", self.plugin_workspace_snapshot(id)),
             ("desktop", self.plugin_desktop_snapshot(id)),
         ]
@@ -3897,19 +3916,14 @@ impl LiveShell {
         let displays = self.plugin_displays(&key.plugin_id);
         let workspaces = self.plugin_workspace_snapshot(&key.plugin_id);
         let desktop = self.plugin_desktop_snapshot(&key.plugin_id);
-        let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
-            .then(|| self.keyboard_plugin_data());
+        let keyboard_data = self.plugin_keyboard_snapshot(&key.plugin_id);
         let result = (|| {
             let host = self.plugin_panel_host_for(key)?;
             let projected = (|| -> Result<bool, String> {
                 application_images.extend(preview_images);
-                let keyboard_changed = keyboard_data
-                    .as_ref()
-                    .map(|data| host.application_mut().sync_data(data))
-                    .transpose()?
-                    .unwrap_or(false);
                 let fields = [
                     ("clock", Some(&clock)),
+                    ("keyboard", keyboard_data.as_ref()),
                     ("windows", windows.as_ref()),
                     ("windowMenu", window_menu.as_ref()),
                     ("windowDestinations", window_destinations.as_ref()),
@@ -3949,10 +3963,7 @@ impl LiveShell {
                     } else {
                         false
                     };
-                Ok(keyboard_changed
-                    || resource_changed
-                    || dependency_changed
-                    || application_images_changed)
+                Ok(resource_changed || dependency_changed || application_images_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
@@ -4832,6 +4843,9 @@ impl LiveShell {
 
     /// Retire a failed installed runtime while preserving its desired activation.
     fn fail_installed_plugin_runtime(&mut self, id: &str, error: String) -> bool {
+        if self.is_shell_package(id) {
+            self.cancel_keyboard_gestures();
+        }
         if !self.external_plugin_packages.contains_key(id)
             || !self
                 .plugin_registry
@@ -4887,18 +4901,15 @@ impl LiveShell {
     }
 
     fn retire_extra_panel_plugin_state(&mut self, id: &str) {
+        if self.is_shell_package(id) {
+            self.cancel_keyboard_gestures();
+        }
         self.plugin_surface_hosts
             .retain(|key, _| key.plugin_id != id);
         self.plugin_panel_memory
             .retain(|key, _| key.plugin_id != id);
         self.plugin_window_placement_overrides
             .retain(|key, _| key.plugin_id != id);
-    }
-
-    fn retire_keyboard_plugin_state(&mut self) {
-        self.retire_extra_panel_plugin_state(
-            &crate::plugin_panel::on_screen_keyboard_manifest().id,
-        );
     }
 
     fn retire_development_panel_plugin_state(&mut self) {
@@ -4912,8 +4923,6 @@ impl LiveShell {
     fn fail_plugin_panel_runtime(&mut self, id: &str, error: String) -> bool {
         let retire = if id == crate::plugin_panel::manifest().id {
             Self::retire_development_panel_plugin_state as fn(&mut Self)
-        } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
-            Self::retire_keyboard_plugin_state
         } else {
             return self.fail_installed_plugin_runtime(id, error);
         };
@@ -5260,6 +5269,9 @@ impl LiveShell {
                 .map_err(|error| format!("could not save plugin activation: {error}"))?;
         }
         self.plugin_registry.set_enabled(id, enabled)?;
+        if !enabled && self.is_shell_package(id) {
+            self.cancel_keyboard_gestures();
+        }
         if !enabled {
             self.retire_installed_composition_owner(id);
         }
@@ -5281,8 +5293,6 @@ impl LiveShell {
                 .retain(|key, _| key.plugin_id != id);
             if id == self.primary_panel_key.plugin_id {
                 self.primary_panel_key = crate::plugin_panel::surface_key();
-            } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
-                self.retire_keyboard_plugin_state();
             }
             if let Err(error) = self.reconcile_installed_contributors() {
                 tracing::warn!(%error,"contributor retirement refresh failed");
@@ -5323,13 +5333,6 @@ impl LiveShell {
                     (surface, host),
                 );
             })
-        } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
-            let data = self.keyboard_plugin_data();
-            self.install_bundled_surface(
-                crate::plugin_panel::on_screen_keyboard_manifest(),
-                data.to_string(),
-                crate::plugin_panel::PluginImages::new(),
-            )
         } else {
             Err(format!("plugin {id:?} has no runtime host"))
         };
@@ -5990,12 +5993,12 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
-        if *key == crate::plugin_panel::on_screen_keyboard_surface_key()
+        if *key == self.active_shell_surface_key("keyboard")
             && !self.native_surface_visible(SurfaceRole::Panel, Some(key))
         {
             return false;
         }
-        let keyboard_epoch = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
+        let keyboard_epoch = (*key == self.active_shell_surface_key("keyboard"))
             .then(|| self.keyboard_gesture_epoch(&input))
             .flatten();
 
@@ -6024,12 +6027,10 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
-        if *key == crate::plugin_panel::on_screen_keyboard_surface_key()
-            && action == ControllerAction::Cancel
-        {
+        if *key == self.active_shell_surface_key("keyboard") && action == ControllerAction::Cancel {
             return self.set_keyboard_visible(false);
         }
-        let keyboard_epoch = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
+        let keyboard_epoch = (*key == self.active_shell_surface_key("keyboard"))
             .then(|| {
                 self.keyboard_recipient
                     .as_ref()
@@ -6056,7 +6057,7 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
-        let keyboard_epoch = (*key == crate::plugin_panel::on_screen_keyboard_surface_key()
+        let keyboard_epoch = (*key == self.active_shell_surface_key("keyboard")
             && matches!(&event, UiEvent::AccessibilityActivate(_)))
         .then(|| {
             self.keyboard_recipient
@@ -6148,11 +6149,7 @@ impl LiveShell {
                         changed |= self.revert_plugin_display_layout(Some(&plugin_id));
                     }
                 }
-                effect @ (crate::plugin_panel::PluginEffect::KeyboardKey { .. }
-                | crate::plugin_panel::PluginEffect::KeyboardHide { .. }
-                | crate::plugin_panel::PluginEffect::KeyboardDock { .. }
-                | crate::plugin_panel::PluginEffect::KeyboardHold { .. }
-                | crate::plugin_panel::PluginEffect::KeyboardResize { .. }) => {
+                effect @ crate::plugin_panel::PluginEffect::Keyboard { .. } => {
                     changed |= self.apply_keyboard_plugin_effect(effect, keyboard_epoch);
                 }
                 crate::plugin_panel::PluginEffect::ShowLauncher => {
@@ -7084,7 +7081,7 @@ impl LiveShell {
     ) -> Option<ResolvedShellTarget> {
         match target {
             ShellSemanticTarget::OnScreenKeyboard { key } => {
-                let plugin_key = crate::plugin_panel::on_screen_keyboard_surface_key();
+                let plugin_key = self.active_shell_surface_key("keyboard");
                 if self.keyboard_visible
                     && self.plugin_surface_matches(&plugin_key)
                     && let Some((_, host)) = self.plugin_surface_hosts.get(&plugin_key)

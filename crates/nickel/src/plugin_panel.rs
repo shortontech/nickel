@@ -64,23 +64,6 @@ pub fn surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     }
 }
 
-pub fn on_screen_keyboard_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!(
-            "../../../assets/plugins/on-screen-keyboard/plugin.json"
-        ))
-        .expect("bundled keyboard plugin manifest must be valid")
-    })
-}
-
-pub fn on_screen_keyboard_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: on_screen_keyboard_manifest().id.clone(),
-        surface_id: on_screen_keyboard_manifest().surfaces[0].id.clone(),
-    }
-}
-
 fn bundled_source(
     manifest: &PluginManifest,
     entry: &str,
@@ -303,22 +286,9 @@ pub enum PluginEffect {
     ToggleOnScreenKeyboard {
         plugin_id: String,
     },
-    KeyboardKey {
-        id: String,
-        generation: u64,
-    },
-    KeyboardHide {
-        generation: u64,
-    },
-    KeyboardDock {
-        generation: u64,
-    },
-    KeyboardHold {
-        generation: u64,
-    },
-    KeyboardResize {
-        delta: i32,
-        generation: u64,
+    Keyboard {
+        plugin_id: String,
+        effect: crate::keyboard_capabilities::KeyboardRequest,
     },
     ProjectsVisibility {
         plugin_id: String,
@@ -938,18 +908,6 @@ impl PluginPanelApplication {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn on_screen_keyboard_with_test_source(
-        source: &str,
-        data: &Value,
-    ) -> Result<Self, String> {
-        Self::new_with_manifest(
-            source,
-            on_screen_keyboard_manifest(),
-            Some(data.to_string()),
-        )
-    }
-
     /// Refresh the plugin's host-owned data using the same render transaction
     /// regardless of which surface or first-party plugin consumes it.
     pub fn sync_data(&mut self, data: &Value) -> Result<bool, String> {
@@ -1198,6 +1156,7 @@ impl PluginPanelApplication {
                     | "features"
                     | "shortcuts"
                     | "notifications"
+                    | "keyboard"
                     | "workspaces"
                     | "desktop"
                     | "audio"
@@ -1267,6 +1226,7 @@ impl PluginPanelApplication {
             return Err("application data requires applications-read".into());
         }
         for (field, capability) in [
+            ("keyboard", PluginCapability::OnScreenKeyboardRead),
             ("workspaces", PluginCapability::WorkspacesRead),
             ("desktop", PluginCapability::DesktopControl),
         ] {
@@ -2393,93 +2353,37 @@ impl PluginPanelApplication {
                                 revision: revision.unwrap().into(),
                             });
                         }
-                        _ if effect_manifest
-                            .capabilities
-                            .contains(&PluginCapability::OnScreenKeyboardInput)
-                            && matches!(
-                                effect.get("type").and_then(Value::as_str),
-                                Some(
-                                    "keyboard-key"
-                                        | "keyboard-hide"
-                                        | "keyboard-dock"
-                                        | "keyboard-hold"
-                                        | "keyboard-resize"
-                                )
-                            ) =>
+                        _ if effect
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| kind.starts_with("keyboard.")) =>
                         {
-                            let projected = self
-                                .projection_data
-                                .as_deref()
-                                .and_then(|data| serde_json::from_str::<Value>(data).ok());
-                            let generation = effect.get("generation").and_then(Value::as_u64);
-                            if generation.is_none()
-                                || generation
-                                    != projected.as_ref().and_then(|data| {
-                                        data.get("generation").and_then(Value::as_u64)
-                                    })
-                            {
-                                self.last_error = Some("keyboard request is stale".into());
-                                return;
-                            }
-                            let generation = generation.unwrap();
-                            match effect.get("type").and_then(Value::as_str) {
-                                Some("keyboard-key") => {
-                                    let id = effect.get("id").and_then(Value::as_str);
-                                    let displayed = id.is_some_and(|id| {
-                                        id.len() <= 64
-                                            && projected.as_ref().is_some_and(|data| {
-                                                data.get("rows")
-                                                    .and_then(Value::as_array)
-                                                    .is_some_and(|rows| {
-                                                        rows.iter().any(|row| {
-                                                            row.as_array().is_some_and(|keys| {
-                                                                keys.iter().any(|key| {
-                                                                    key.get("id")
-                                                                        .and_then(Value::as_str)
-                                                                        == Some(id)
-                                                                        && key
-                                                                            .get("enabled")
-                                                                            .and_then(
-                                                                                Value::as_bool,
-                                                                            )
-                                                                            == Some(true)
-                                                                })
-                                                            })
-                                                        })
-                                                    })
-                                            })
-                                    });
-                                    if !displayed {
-                                        self.last_error =
-                                            Some("keyboard key is unavailable".into());
-                                        return;
-                                    }
-                                    approved.push(PluginEffect::KeyboardKey {
-                                        id: id.unwrap().to_owned(),
-                                        generation,
-                                    });
+                            let parsed = (|| -> Result<_, String> {
+                                if !effect_manifest
+                                    .capabilities
+                                    .contains(&PluginCapability::OnScreenKeyboardInput)
+                                {
+                                    return Err("keyboard input is not granted".into());
                                 }
-                                Some("keyboard-hide") => {
-                                    approved.push(PluginEffect::KeyboardHide { generation });
+                                let request =
+                                    crate::keyboard_capabilities::KeyboardRequest::parse(&effect)?;
+                                let data = self
+                                    .projection_data
+                                    .as_deref()
+                                    .and_then(|data| serde_json::from_str::<Value>(data).ok())
+                                    .ok_or("keyboard observation unavailable")?;
+                                request.validate(&data["keyboard"])?;
+                                Ok(request)
+                            })();
+                            match parsed {
+                                Ok(effect) => approved.push(PluginEffect::Keyboard {
+                                    plugin_id: effect_manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
                                 }
-                                Some("keyboard-dock") => {
-                                    approved.push(PluginEffect::KeyboardDock { generation });
-                                }
-                                Some("keyboard-hold") => {
-                                    approved.push(PluginEffect::KeyboardHold { generation });
-                                }
-                                Some("keyboard-resize") => {
-                                    let delta = effect.get("delta").and_then(Value::as_i64);
-                                    if !matches!(delta, Some(-32 | 32)) {
-                                        self.last_error = Some("keyboard resize is invalid".into());
-                                        return;
-                                    }
-                                    approved.push(PluginEffect::KeyboardResize {
-                                        delta: delta.unwrap() as i32,
-                                        generation,
-                                    });
-                                }
-                                _ => unreachable!(),
                             }
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
@@ -3770,52 +3674,6 @@ mod tests {
         left.retire_surface().unwrap();
         right.update(right.button_message("advance").unwrap());
         assert!(format!("{:?}", right.node).contains("right refreshed:1"));
-    }
-
-    #[test]
-    fn bundled_keyboard_uses_shared_window_and_keeps_key_actions() {
-        let package = PluginPackage::load(format!(
-            "{}/../../assets/plugins/on-screen-keyboard",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
-        let data = validation_surface_projection(&package, &package.manifest.surfaces[0]).unwrap();
-        let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::on_screen_keyboard_manifest(),
-                "main.js",
-                data.to_string(),
-            )
-            .unwrap(),
-            1056,
-            368,
-        );
-        assert!(matches!(
-            host.application().node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        for name in ["Hold modifiers", "Hide", "Smaller"] {
-            assert!(
-                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: SemanticRole::Button,
-                    name: name.into(),
-                })
-                .is_ok()
-            );
-        }
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(1056, 368, 1.0);
-        host.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(1056, 368, |x, y| {
-            let pixel = renderer.pixels()[(y * 1056 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/keyboard-shared.png");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image.save(output).unwrap();
     }
 
     #[test]
@@ -5667,41 +5525,6 @@ mod tests {
     }
 
     #[test]
-    fn external_keyboard_action_uses_capability_and_current_projection() {
-        let mut manifest = PluginPackage::load(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/plugins/example-window"
-        ))
-        .unwrap()
-        .manifest;
-        manifest.capabilities.clear();
-        let source = "function App() { return h(Window, {width: 320, height: 180, onEscape: () => nickel.request({type: 'keyboard-hide', generation: 7})}); }";
-        let data = Some(r#"{"generation":7,"rows":[]}"#.to_owned());
-        let mut denied =
-            PluginPanelApplication::new_with_manifest(source, &manifest, data.clone()).unwrap();
-        denied.shortcut_outcome(Shortcut::Escape);
-        assert!(denied.take_effects().is_empty());
-        assert!(denied.last_error().is_some());
-
-        manifest
-            .capabilities
-            .push(PluginCapability::OnScreenKeyboardInput);
-        let mut granted =
-            PluginPanelApplication::new_with_manifest(source, &manifest, data).unwrap();
-        granted.shortcut_outcome(Shortcut::Escape);
-        assert_eq!(
-            granted.take_effects(),
-            vec![PluginEffect::KeyboardHide { generation: 7 }]
-        );
-        granted
-            .sync_data(&serde_json::json!({"generation": 8, "rows": []}))
-            .unwrap();
-        granted.shortcut_outcome(Shortcut::Escape);
-        assert!(granted.take_effects().is_empty());
-        assert_eq!(granted.last_error(), Some("keyboard request is stale"));
-    }
-
-    #[test]
     fn one_ui_transition_dispatches_all_jsx_handlers_before_rerendering() {
         let mut manifest = PluginPackage::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -6772,71 +6595,6 @@ mod tests {
         assert!(x(&rtl, "Row first") > x(&rtl, "Row second"));
         assert!(x(&ltr, "Grid first") < x(&ltr, "Grid second"));
         assert!(x(&rtl, "Grid first") > x(&rtl, "Grid second"));
-    }
-
-    #[test]
-    fn bundled_keyboard_renders_host_keys_and_emits_typed_effects() {
-        use nickel_core::on_screen_keyboard::{
-            KeyboardPanel, VirtualModifiers, keyboard_display_rows,
-        };
-        let rows = keyboard_display_rows(
-            KeyboardPanel::Letters,
-            VirtualModifiers::default(),
-            false,
-            true,
-        );
-        let data = serde_json::json!({
-            "generation": 7,
-            "height": 368,
-            "dockTop": false,
-            "recipientAvailable": true,
-            "rows": rows,
-        });
-        let mut plugin = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::on_screen_keyboard_manifest(),
-            "main.js",
-            data.to_string(),
-        )
-        .unwrap();
-        let message = plugin.button_message("osk-char-113").unwrap();
-        plugin.update(message);
-        assert_eq!(
-            plugin.take_effects(),
-            vec![PluginEffect::KeyboardKey {
-                id: "osk-char-113".into(),
-                generation: 7,
-            }]
-        );
-        assert!(plugin.last_error().is_none());
-        assert_eq!(
-            plugin.shortcut_outcome(Shortcut::Escape).disposition,
-            nickel_ui::EventDisposition::Handled
-        );
-        assert_eq!(
-            plugin.take_effects(),
-            vec![PluginEffect::KeyboardHide { generation: 7 }]
-        );
-        let disabled = serde_json::json!({
-            "generation": 8,
-            "height": 368,
-            "dockTop": false,
-            "recipientAvailable": false,
-            "rows": keyboard_display_rows(
-                KeyboardPanel::Letters,
-                VirtualModifiers::default(),
-                false,
-                false,
-            ),
-        });
-        assert!(plugin.sync_data(&disabled).unwrap());
-        let message = plugin.button_message("osk-char-113").unwrap();
-        plugin.update(message);
-        assert!(plugin.take_effects().is_empty());
-        plugin.shortcut_outcome(Shortcut::Escape);
-        assert_eq!(
-            plugin.take_effects(),
-            vec![PluginEffect::KeyboardHide { generation: 8 }]
-        );
     }
 
     #[test]

@@ -762,10 +762,10 @@ impl NickelSession {
         let surface = (target.role == nickel_session_protocol::ShellRole::OnScreenKeyboard)
             .then(|| {
                 surfaces.iter().find(|surface| {
-                    surface.plugin.as_ref().is_some_and(|plugin| {
-                        plugin.plugin_id == "org.nickel.on-screen-keyboard"
-                            && plugin.surface_id == "main"
-                    })
+                    surface
+                        .plugin
+                        .as_ref()
+                        .is_some_and(|plugin| plugin.surface_id == "keyboard")
                 })
             })
             .flatten()

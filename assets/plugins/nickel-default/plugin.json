@@ -35,7 +35,8 @@
       "shell.windowMenu": "./src/WindowMenu.js#WindowMenu",
       "shell.volumeOSD": "./src/VolumeOSD.js#VolumeOSD",
       "shell.window-preview": "./src/Preview.js#Preview",
-      "shell.run": "./src/Run.js#Run"
+      "shell.run": "./src/Run.js#Run",
+      "shell.keyboard": "./src/OnScreenKeyboard.js#OnScreenKeyboard"
     }
   },
   "capabilities": [
@@ -66,8 +67,6 @@
     "preferences-control",
     "preferences-read",
     "projects-menu-show",
-    "projects-open",
-    "projects-read",
     "session-control",
     "session-logout-request",
     "settings-read",
@@ -84,7 +83,9 @@
     "windows-read",
     "workspaces-read",
     "workspaces-switch",
-    "run-command"
+    "run-command",
+    "on-screen-keyboard-read",
+    "on-screen-keyboard-input"
   ],
   "surfaces": [
     {
@@ -156,6 +157,15 @@
       "kind": "window",
       "width": 620,
       "height": 180,
+      "initially_open": false
+    },
+    {
+      "id": "keyboard",
+      "kind": "overlay",
+      "width": 1056,
+      "height": 640,
+      "anchor": "bottom-left",
+      "passive": true,
       "initially_open": false
     }
   ]

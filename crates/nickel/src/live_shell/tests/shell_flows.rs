@@ -173,33 +173,6 @@
 
 
 
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn keyboard_plugin_owns_ordinary_presentation_and_retires_to_host_fallback() {
-        let mut shell = LiveShell::new().unwrap();
-        let id = &crate::plugin_panel::on_screen_keyboard_manifest().id;
-        let key = crate::plugin_panel::on_screen_keyboard_surface_key();
-        assert!(shell.plugin_surface_matches(&key));
-        assert!(shell.shell_panel_surfaces().iter().any(|(surface, _)| surface == &key));
-        assert!(shell.plugin_panels().iter().all(|(surface, _)| surface != &key));
-        assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
-        shell.keyboard_enabled = true;
-        shell.keyboard_visible = true;
-        assert!(shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
-        assert!(!shell.native_surface_visible(SurfaceRole::OnScreenKeyboard, None));
-        assert!(shell
-            .plugin_surface_scene_for_output(&key, Some("primary"), 1056, 368)
-            .is_some_and(|scene| !scene.is_empty()));
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(!shell.plugin_surface_matches(&key));
-        assert!(!shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
-        assert!(shell.native_surface_visible(SurfaceRole::OnScreenKeyboard, None));
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_surface_matches(&key));
-        assert!(shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
-    }
-
     #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
         use nickel_input::global::{ShortcutCapability, UnavailableReason};

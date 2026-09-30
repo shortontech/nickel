@@ -174,14 +174,10 @@ mod platform {
         MAX_PLUGIN_ENTRY_BYTES, PluginActivationSettings, PluginManifest, PluginPackage,
         PluginSurfaceKind,
     };
-    use nickel_shell::plugin_panel::{
-        PluginPanelApplication, manifest, on_screen_keyboard_manifest,
-    };
+    use nickel_shell::plugin_panel::{PluginPanelApplication, manifest};
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
-        [manifest(), on_screen_keyboard_manifest()]
-            .into_iter()
-            .find(|manifest| manifest.id == id)
+        [manifest()].into_iter().find(|manifest| manifest.id == id)
     }
 
     fn staged_config_directory(root: &Path) -> PathBuf {
@@ -823,6 +819,120 @@ mod platform {
         }
 
         #[test]
+        fn ordinary_keyboard_module_uses_public_generation_bound_native_requests() {
+            use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource};
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::create_dir(directory.path().join("styles")).unwrap();
+            std::fs::write(
+                directory.path().join("OnScreenKeyboard.jsx"),
+                include_str!("../../../../assets/plugins/nickel-default/src/OnScreenKeyboard.jsx"),
+            )
+            .unwrap();
+            std::fs::write(
+                directory.path().join("styles/keyboard.css"),
+                include_str!("../../../../assets/plugins/nickel-default/src/styles/keyboard.css"),
+            )
+            .unwrap();
+            std::fs::write(directory.path().join("main.jsx"),"import {OnScreenKeyboard} from './OnScreenKeyboard.js'; export default OnScreenKeyboard;").unwrap();
+            let (source, modules) = super::super::compile_jsx_modules(
+                directory.path(),
+                "main.js",
+                Path::new("main.jsx"),
+            )
+            .unwrap();
+            let graph = JsxModuleGraph::new(
+                "main.js",
+                modules.iter().map(|module| ModuleSource {
+                    path: &module.path,
+                    source: &module.source,
+                }),
+            )
+            .unwrap();
+            drop(graph);
+            let snapshot = serde_json::json!({"available":true,"generation":7,"height":368,"recipientAvailable":true,"operations":{"press":true,"hide":true,"toggleDock":true,"holdModifiers":true,"resize":true},"rows":[[{"id":"key-a","label":"A","quarters":4,"enabled":true}]]});
+            let mut manifest = PluginManifest::from_json(include_str!(
+                "../../../../assets/plugins/example-window/plugin.json"
+            ))
+            .unwrap();
+            manifest.surfaces[0].id = "keyboard".into();
+            manifest.surfaces[0].width = 1056;
+            manifest.surfaces[0].height = 640;
+            manifest.surfaces[0].anchor = nickel_core::plugins::PluginSurfaceAnchor::BottomLeft;
+            manifest.surfaces[0].kind = PluginSurfaceKind::Overlay;
+            manifest.surfaces[0].passive = true;
+            manifest.capabilities.extend([
+                nickel_core::plugins::PluginCapability::OnScreenKeyboardRead,
+                nickel_core::plugins::PluginCapability::OnScreenKeyboardInput,
+            ]);
+            let package = PluginPackage {
+                manifest,
+                source,
+                modules,
+                stylesheet: String::new(),
+                images: Default::default(),
+            };
+            let mut app = PluginPanelApplication::from_package(&package).unwrap();
+            app.sync_data(&serde_json::json!({"keyboard":snapshot}))
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(app, 1056, 368);
+            fn invoke(host: &mut nickel_ui::UiHost<PluginPanelApplication>, label: &str) {
+                let target = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: nickel_ui::SemanticRole::Button,
+                        name: label.into(),
+                    })
+                    .unwrap();
+                host.perform_semantic_action(
+                    target.id,
+                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                );
+            }
+            invoke(&mut host, "A");
+            assert!(
+                matches!(host.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Keyboard {effect,..}] if effect.operation == "keyboard.press" && effect.id.as_deref() == Some("key-a") && effect.generation == 7)
+            );
+            invoke(&mut host, "Move up");
+            assert!(
+                matches!(host.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Keyboard {effect,..}] if effect.operation == "keyboard.toggleDock")
+            );
+            let mut expanded = snapshot.clone();
+            expanded["height"] = 640.into();
+            expanded["dockTop"] = true.into();
+            expanded["generation"] = 8.into();
+            let mut resized = PluginPanelApplication::from_package(&package).unwrap();
+            resized
+                .sync_data(&serde_json::json!({"keyboard":expanded}))
+                .unwrap();
+            let mut resized = nickel_ui::UiHost::new(resized, 1056, 640);
+            invoke(&mut resized, "Move down");
+            assert!(
+                matches!(resized.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Keyboard{effect,..}] if effect.operation == "keyboard.toggleDock" && effect.generation == 8)
+            );
+            invoke(&mut resized, "Smaller");
+            assert!(
+                matches!(resized.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Keyboard{effect,..}] if effect.operation == "keyboard.resize" && effect.delta == Some(-32) && effect.generation == 8)
+            );
+            let mut ungranted = package.clone();
+            ungranted.manifest.capabilities.retain(|cap| {
+                *cap != nickel_core::plugins::PluginCapability::OnScreenKeyboardInput
+            });
+            let mut denied = PluginPanelApplication::from_package(&ungranted).unwrap();
+            denied
+                .sync_data(&serde_json::json!({"keyboard":snapshot}))
+                .unwrap();
+            let mut denied = nickel_ui::UiHost::new(denied, 1056, 368);
+            invoke(&mut denied, "A");
+            assert!(denied.application_mut().take_effects().is_empty());
+            assert!(
+                denied
+                    .application()
+                    .last_error()
+                    .unwrap()
+                    .contains("not granted")
+            );
+        }
+
+        #[test]
         fn quick_settings_uses_public_revision_bound_workspace_and_display_clients() {
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
                 use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
@@ -984,13 +1094,13 @@ mod platform {
         }
 
         #[test]
-        fn keyboard_uses_the_bundled_dev_path() {
+        fn hello_panel_uses_the_bundled_dev_path() {
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/on-screen-keyboard"
+                "/../../assets/plugins/hello-panel"
             ));
             let package = load_dev_package(root).unwrap();
-            assert_eq!(package.manifest.id, "org.nickel.on-screen-keyboard");
+            assert_eq!(package.manifest.id, "org.nickel.hello-panel");
             assert_eq!(package.manifest.surfaces.len(), 1);
         }
 
@@ -999,12 +1109,12 @@ mod platform {
             let directory = tempfile::tempdir().unwrap();
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/on-screen-keyboard"
+                "/../../assets/plugins/hello-panel"
             ));
             let manifest = std::fs::read_to_string(root.join("plugin.json")).unwrap();
             std::fs::write(
                 directory.path().join("plugin.json"),
-                manifest.replace("Nickel On-Screen Keyboard", "Renamed Keyboard"),
+                manifest.replace("Hello Panel", "Renamed Panel"),
             )
             .unwrap();
             std::fs::copy(root.join("main.js"), directory.path().join("main.js")).unwrap();
