@@ -1,0 +1,33 @@
+window.notification-window {
+    background: #2b303cf2;
+    border: 1px solid #657188;
+    border-radius: 12px;
+}
+
+div.notification-content {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    padding: 12px;
+    gap: 8px;
+}
+
+window.notification-window text {
+    color: #f3f5f8;
+    font-size: 14px;
+    line-height: 18px;
+}
+
+window.notification-window row {
+    gap: 8px;
+}
+
+window.notification-window button {
+    padding: 6px 10px;
+    background: #353c4b;
+    border: 1px solid #596274;
+    border-radius: 8px;
+    color: #f3f5f8;
+    font-size: 14px;
+}

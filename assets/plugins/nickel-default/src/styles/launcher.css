@@ -1,0 +1,158 @@
+window.launcher-window {
+    width: 620px;
+    height: 548px;
+    background: var(--nickel-panel);
+    border: 1px solid var(--nickel-border);
+    border-radius: 10px;
+}
+
+div.launcher-content {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    width: 100%;
+    height: 100%;
+    padding: 12px;
+    gap: 8px;
+}
+
+window.launcher-window text {
+    height: 28px;
+    color: var(--nickel-text);
+    font-size: 14px;
+}
+
+text.launcher-section {
+    height: 20px;
+    color: var(--nickel-soft-text);
+    font-size: 12px;
+}
+
+text.launcher-status {
+    color: var(--nickel-complement);
+    font-size: 13px;
+}
+
+window.launcher-window text-field {
+    height: 46px;
+    flex-shrink: 0;
+    padding: 8px 12px;
+    background: var(--nickel-control);
+    border: 1px solid var(--nickel-border);
+    border-radius: 8px;
+    color: var(--nickel-text);
+    font-size: 15px;
+}
+
+scroll-view.launcher-scroll {
+    width: 100%;
+    gap: 6px;
+}
+
+row.launcher-app-row {
+    width: 100%;
+    gap: 8px;
+}
+
+div.launcher-app-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    width: 100%;
+}
+
+div.launcher-app-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-height: 88px;
+    padding: 4px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+}
+
+text.launcher-app-name {
+    height: 20px;
+    font-size: 12px;
+}
+
+button.launcher-icon-button {
+    width: 48px;
+    height: 48px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font-size: 20px;
+}
+
+row.launcher-tabs {
+    width: 100%;
+    gap: 4px;
+}
+
+row.launcher-footer {
+    width: 100%;
+    height: 48px;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+column.launcher-projects {
+    gap: 4px;
+}
+
+window.launcher-window row {
+    gap: 8px;
+}
+
+window.launcher-window button {
+    height: 42px;
+    padding: 6px 10px;
+    background: var(--nickel-control);
+    border: 1px solid var(--nickel-border);
+    border-radius: 8px;
+    color: var(--nickel-text);
+    font-size: 14px;
+}
+
+button.launcher-app-button {
+    flex-grow: 1;
+    min-width: 180px;
+    background: var(--nickel-raised);
+    border: 1px solid transparent;
+}
+
+button.launcher-pin-button {
+    width: 72px;
+    flex-shrink: 0;
+    background: var(--nickel-raised);
+    border: 1px solid transparent;
+}
+
+button.launcher-tab {
+    height: 30px;
+    padding: 4px 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--nickel-soft-text);
+    font-size: 12px;
+}
+
+button.launcher-tab.selected {
+    color: var(--nickel-text);
+    border-color: var(--nickel-border);
+}
+
+button.launcher-footer-button {
+    width: 86px;
+    height: 40px;
+}
+
+button.launcher-account-button {
+    flex-grow: 1;
+    height: 40px;
+    background: transparent;
+    border: 1px solid transparent;
+}

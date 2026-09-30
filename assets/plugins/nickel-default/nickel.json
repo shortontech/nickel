@@ -1,0 +1,48 @@
+{
+  "api_version": 2,
+  "id": "nickel-default",
+  "name": "Nickel Default Shell",
+  "author": "Nickel",
+  "version": "0.2.0",
+  "entry": "src/Shell.jsx",
+  "capabilities": [
+    "applications.read",
+    "applications.launch",
+    "applications.pin",
+    "audio.read",
+    "audio.control",
+    "bluetooth.read",
+    "bluetooth.control",
+    "displays.read",
+    "displays.control",
+    "network.read",
+    "network.control",
+    "notifications.read",
+    "notifications.act",
+    "session.control",
+    "settings.read",
+    "settings.write",
+    "systemTray.read",
+    "systemTray.activate",
+    "windows.read",
+    "windows.manage",
+    "workspaces.read",
+    "workspaces.manage"
+  ],
+  "exports": {
+    "shell": "./src/Shell.jsx#Shell",
+    "shell.taskbar": "./src/Taskbar.jsx#Taskbar",
+    "shell.launcher": "./src/Launcher.jsx#Launcher",
+    "shell.quickSettings": "./src/QuickSettings.jsx#QuickSettings",
+    "shell.notifications": "./src/Notifications.jsx#Notifications",
+    "shell.settings": "./src/Settings.jsx#Settings",
+    "shell.settings.navigation": "./src/Settings.jsx#SettingsNavigation",
+    "shell.settings.controls": "./src/Settings.jsx#SettingControl"
+  },
+  "mount_points": {
+    "taskbar.items": "shell.taskbar",
+    "launcher.providers": "shell.launcher",
+    "notifications": "shell.notifications",
+    "settings.pages": "shell.settings"
+  }
+}
